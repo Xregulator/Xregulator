@@ -43,8 +43,8 @@ struct FrontPoint { float x[NAXIS]; float ex[2]; float y; uint32_t nSamp; uint32
 
 // Steadiness detector — sliding-window form. An axis is "steady NOW" iff the max−min of that axis
 // over the trailing steadySec window is ≤ tol. That's the textbook sliding-window-min/max problem,
-// solved per axis with a pair of monotonic deques (O(1) amortized; no per-tick rescan, no O(N) spike
-// — the old reseed-scan stall is gone). A brief excursion only widens the window range while it sits
+// solved per axis with a pair of monotonic deques (O(1) amortized; no per-tick rescan, no O(N)
+// spike). A brief excursion only widens the window range while it sits
 // inside the window, then ages out — it never zeroes accumulated dwell, so a disqualifying sample
 // does NOT discard the prior in-band history. A point emits, at most once per EP_EMIT_PERIOD_MS,
 // while EVERY axis (and the optional output band) is steady AND data has spanned its dwell since the
@@ -540,7 +540,7 @@ static int altFrontEmitCount = 0;        // episode points emitted (whether or n
 float altRpmSec       = 3.0f;    // RPM steady time (s)
 float altDutySec      = 3.0f;    // field-duty % steady time (s)
 float altVbusSec      = 3.0f;    // bus-voltage steady time (s)
-float altThermDegF    = 2.0f;    // temperature deviation bound (°F) — tightened from 5 °F (record only at thermal equilibrium)
+float altThermDegF    = 2.0f;    // temperature deviation bound (°F) — record only at thermal equilibrium
 float altThermSec     = 80.0f;   // STEADY_TEMP_SEC — FULL-steady temp dwell (s). Feeds the surface + trend + orange ring.
 // SESSION-steady temp dwell is DERIVED as half of altThermSec (see altSessTempDwell()) — no separate
 // knob, so the session gate auto-tracks whenever the full dwell above is changed.
@@ -640,7 +640,7 @@ static void altTrendAdd(float perfFrac) {
   // flush (altHealthSave → altPersistTrendBucket, Phase 2 after the field cuts) and on Reset. Every
   // shutdown goes through field-off while the device is still powered, so that one write always lands —
   // no per-tick NVS churn needed.
-  // (no verdict here — healthy/drifting editorializing removed; trends are read from the plots)
+  // (deliberately no healthy/drifting verdict here — trends are read from the plots)
 }
 // Persist the in-progress bucket to NVS (4 scalars). The committed buckets live in /alttrend.bin; this
 // covers ONLY the partial current bucket so a reboot mid-bucket keeps its accumulated samples.
@@ -822,7 +822,7 @@ static void altProcessEmits() {
 
     // (1) TREND FEED — every FULL-steady run is graded against the ACTIVE surface (My History or Uploaded)
     // and fed to the engine-hours trend, throttled to one sample per altTrendFeedSec. This is the trend's
-    // ONLY source (reverted 2026-06-24 from the 1 Hz live feed): the spec wants the trend built purely from
+    // ONLY source: the spec wants the trend built purely from
     // full steady runs. MEASURED runs only (session plot: green dot + orange ring) — Estimated grades
     // lean on interpolation and would blur the trend; No-reference/risky-fit runs feed nothing.
     {
@@ -900,7 +900,7 @@ static float alf_hiField()   { return altHiFieldAlert ? 1.0f : 0.0f; }    // hig
 static float alf_sim()       { return (altSimMode >= 0.5f) ? 1.0f : 0.0f; }
 static float alf_syncAgo()   { if (lastAltHealthSyncEpoch <= 0 || !timeIsSynced) return -1.0f;
                                time_t n = time(NULL); return (n > (time_t)lastAltHealthSyncEpoch) ? (float)(n - (time_t)lastAltHealthSyncEpoch) : 0.0f; }
-// fold timing moved to the Function Timing table (ft_altHealth / ft_altFold rows) — not in this live stream
+// fold timing lives in the Function Timing table (ft_altHealth / ft_altFold rows) — not in this live stream
 static AltLiveField ALT_LIVE[] = {
   {"valid", alf_valid}, {"rpm", alf_rpm}, {"exc", alf_exc}, {"amps", alf_amps},
   {"pred", alf_pred}, {"pct", alf_pct}, {"worstPct", alf_worst}, {"overallPct", alf_overall},
@@ -1361,7 +1361,7 @@ void altHealth_tick(uint32_t nowMs) {
     altRefOk = (altState == FRONT_MEASURED || altState == FRONT_ESTIMATED);
     altLive_pct = (altRefOk && pred > 0.1f) ? (altLive_amps / pred * 100.0f) : 0.0f;
     // Session stats = the SESSION-PLOTTED points: session-steady (lighter gate) AND graded. The trend is
-    // NO LONGER fed here — it is built purely from FULL-steady runs in altProcessEmits (spec §2).
+    // NOT fed here — it is built purely from FULL-steady runs in altProcessEmits (spec §2).
     if (altSessSteady && altRefOk && altLive_pct > 0.0f) {
       altSessSum += altLive_pct; altSessN++;
       int bin = (int)(altLive_pct * 0.5f);    // 2%-wide histogram bins, 0..120%
@@ -1541,7 +1541,7 @@ static float perfSeaState(uint32_t nowMs) {
   return (var > 0) ? (float)sqrt(var) : 0.0f;
 }
 
-// FIXME (sail/motor steady-state — dedicated rework needed, deferred 2026-06-17): the timescales
+// FIXME (sail/motor steady-state — dedicated rework needed): the timescales
 // here are TOTALLY INADEQUATE for boat-speed/polar work and must be redone in a focused session.
 //  - Dwells (AWS/AWA/RPM/headwind 3 s, sea 5 s) are far too short: a displacement hull takes tens of
 //    seconds to minutes to settle to its polar speed after conditions change, so a 3 s "steady" window
@@ -1745,8 +1745,6 @@ static void perfSimTick(uint32_t nowMs) {
   perfSimStw = v; perfSimSog = v;                            // no current; SOG == STW
 }
 
-// (perfProcessSample removed — the fold (perfFold_tick) reads the latest axis values directly.)
-
 // ---- live telemetry registry (PILOT: single source of truth for payload + schema) ----
 // One {name, getter} table builds BOTH the PerfLive payload AND the /perfschema field list,
 // so the firmware↔dashboard field contract cannot desync (no hand-kept parallel JS array,
@@ -1764,7 +1762,7 @@ static float plf_coverage() { return perfCoveragePct(); }
 static float plf_ptCount()  { return (float)sailFront.count; }
 static float plf_source()   { return (float)sailFront.source; }    // 0 LEARNED, 1 FIXED
 static float plf_paused()   { return (perfPaused >= 0.5f) ? 1.0f : 0.0f; }
-// fold timing moved to the Function Timing table (ft_boatPerf row) — not in this live stream
+// fold timing lives in the Function Timing table (ft_boatPerf row) — not in this live stream
 static float plf_sim()      { return (perfSimMode >= 0.5f) ? 1.0f : 0.0f; }
 static float plf_syncAgo()  { if (lastBoatPerfSyncEpoch <= 0 || !timeIsSynced) return -1.0f;
                               time_t n = time(NULL); return (n > (time_t)lastBoatPerfSyncEpoch) ? (float)(n - (time_t)lastBoatPerfSyncEpoch) : 0.0f; }
@@ -1844,7 +1842,7 @@ static void boatPerfLoad() {
 // /perfcurve.csv — held best-ever fronts as the BEFRONT1 artifact pair (SAIL block then MOTOR block).
 // Streamed row-by-row: logical lines are SAIL header, sail rows, MOTOR header, motor rows — so two
 // 4096-cap fronts never concatenate into one huge heap String. Same constant-RAM chunker as the alt
-// senders. Output matches the old perfFrontBlock(0)+perfFrontBlock(1) build (sail x0=2dp, motor x0=0dp).
+// senders. Sail x0 is 2dp, motor x0 is 0dp.
 void perfCurveCsvSend(AsyncWebServerRequest *request) {
   struct St { int sc, mc, ssrc, msrc, idx; bool done; char line[96]; int len, pos; };
   St st; st.sc = sailFrontBuf ? sailFront.count : 0; st.mc = motorFrontBuf ? motorFront.count : 0;
@@ -2277,7 +2275,7 @@ void cvLog_tick(uint32_t nowMs) {
   if (g_fastOvClampActive) e.flags |= (1 << 0);
   if (pidLog_voltageLoopRanThisTick) e.flags |= (1 << 1);
   if (voltageControlActive) e.flags |= (1 << 2);
-  // bit 3 reserved (was softClamp — old soft-cap removed)
+  // bit 3 assigned below (iExcess BULK sub-mode)
   if (g_fastOvHardActive) e.flags |= (1 << 4);
 
   e.awState = g_awState;
@@ -2648,12 +2646,9 @@ static uint32_t  ina2mStart = 0;
 
 static uint64_t  inaAtSum   = 0;
 static uint32_t  inaAtCount = 0;
-// inaAtWorst removed — write directly to the public ina_worst_at instead.
-// Live dashboard was showing ina_worst_at=0 while ina_over2x_at=420 and
-// ina_avg_at=5.19 — logically impossible if both updates run through the
-// same code path. Cold reading of the function shows no obvious cause,
-// so the intermediate is eliminated and the published variable becomes
-// the single source of truth. Same treatment applied to ina_worst_2m.
+// Deliberately no inaAtWorst intermediate — worst writes directly to the public ina_worst_at.
+// An intermediate once produced ina_worst_at=0 alongside nonzero over2x/avg (cause never found),
+// so the published variable is the single source of truth. Same for ina_worst_2m.
 static uint32_t  inaAtOver2x = 0;
 static uint32_t  inaPrevRead = 0;
 
@@ -2700,15 +2695,15 @@ void recordINA228Interval(uint32_t now) {
   uint16_t iv = (diff > 65535u) ? 65535u : (uint16_t)diff;
   ina_last_ms = iv;
 
-  // All-time accumulators (avg + over2x via running mean as before).
+  // All-time accumulators (avg + over2x via running mean).
   // Worst is written DIRECTLY to the published variable — no intermediate.
   inaAtCount++;
   inaAtSum += iv;
   if (iv > ina_worst_at) ina_worst_at = iv;
-  // Also write the "2m" worst directly. With this in place ina_worst_2m
-  // becomes "max iv since last fast-mode rising edge" rather than a strict
-  // 2m rolling window. The bucket-based avg + over2x for 2m still work
-  // and remain rolling. Tooltips should say "since fast-mode start" for these.
+  // The "2m" worst is also written directly, so ina_worst_2m means
+  // "max iv since last fast-mode rising edge" rather than a strict
+  // 2m rolling window. The bucket-based avg + over2x for 2m
+  // remain rolling. Tooltips should say "since fast-mode start" for these.
   if (iv > ina_worst_2m) ina_worst_2m = iv;
   bool isOver2x = false;
   if (inaAtCount > 1) {
@@ -2765,7 +2760,7 @@ void recordINA228Interval(uint32_t now) {
   ina_avg_10s    = (n10 > 0) ? (float)sum10 / (float)n10 : 0.0f;
   ina_over2x_10s = (o10 > 65535u) ? 65535u : (uint16_t)o10;  // per-sample count over the 10s window
 
-  // Publish 2m stats. ina_worst_2m is now updated DIRECTLY on every sample
+  // Publish 2m stats. ina_worst_2m is updated DIRECTLY on every sample
   // (above), so this block does NOT touch it — only avg + over2x come from
   // the bucket ring.
   uint32_t n2m = 0;
@@ -3924,7 +3919,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
 
 
 // ============================================================
-// SMALL SHARED HELPERS moved out of Xregulator.ino (prototypes stay there).
+// SMALL SHARED HELPERS (prototypes live in Xregulator.ino).
 // ============================================================
 
 // Preload a gzipped web asset from LittleFS into PSRAM so the dashboard serves from RAM.

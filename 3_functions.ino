@@ -58,14 +58,12 @@ enum Csv1Index {
   CSV1_mExcessEmaPeak,   // iExcess: per-CSV1-frame peak averaged excess (A ×10) — live sparkline
   CSV1_iExcessThreshMin, // iExcess: per-CSV1-frame min fire threshold E (A ×10) — live sparkline
   CSV1_protEventMask,    // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
-  CSV1_Bcur_filtered,    // EMA-filtered battery current (Bcur_filtered, OutputPIDFilterTC) — Current plot, off by default
 
-  CSV1_FIELD_COUNT  // = 42
+  CSV1_FIELD_COUNT  // = 41
 };
 
 enum Csv2Index {
   // DiagStream: slower-changing telemetry, diagnostics, computed values — sent every 5s
-  // Fields 0-229: from original CSV2 (settings removed, duplicates removed)
   CSV2_IBVMax,
   CSV2_MeasuredAmpsMax,
   CSV2_RPMMax,
@@ -104,8 +102,8 @@ enum Csv2Index {
   CSV2_reserved_NMEA2KData,        // moved to CSV3
   CSV2_AlarmLatchState,
   CSV2_ResetAlarmLatch,
-  CSV2_reserved_ResetLearningTable,    // was ResetLearningTable echo — action-only, global removed
-  CSV2_reserved_ClearOverheatHistory,  // was ClearOverheatHistory echo — action-only, global removed
+  CSV2_reserved_ResetLearningTable,    // dead slot — command is action-only, no echo
+  CSV2_reserved_ClearOverheatHistory,  // dead slot — command is action-only, no echo
   CSV2_DynamicShuntGainFactor,
   CSV2_DynamicAltCurrentZero,
   CSV2_InsulationLifePercent,
@@ -233,14 +231,14 @@ enum Csv2Index {
   CSV2_innerTermD,
   CSV2_outerTermP,
   CSV2_outerTermI,
-  CSV2_outerTermLookahead,  // look-ahead share of outerTermP (A ×100); repurposed in place from always-zero outerTermD
+  CSV2_outerTermLookahead,  // look-ahead share of outerTermP (A ×100)
   CSV2_thermalSlopeFPerSec,
   CSV2_chargeStageDisplay,
   CSV2_voltageControlActive,
   CSV2_voltageError,
   CSV2_cv_I,
   CSV2_inIdleStage,
-  CSV2_altBaselineFrozen,    // v2: 1 = a cloud-fitted curve is held (else awaiting first fit)
+  CSV2_altBaselineFrozen,    // 1 = a cloud-fitted curve is held (else awaiting first fit)
   CSV2_ft_rai_total_win,
   CSV2_ft_rai_total_ses,
   CSV2_ft_rai_ina228_win,
@@ -251,7 +249,7 @@ enum Csv2Index {
   CSV2_ft_rai_bmp_state_ses,
   CSV2_ft_rai_imu_win,
   CSV2_ft_rai_imu_ses,
-  CSV2_reserved_cv_D,  // 194 reserved — was cv_D (D term removed)
+  CSV2_reserved_cv_D,  // dead slot — CV loop has no D term
   CSV2_tempReadFailCount,
   CSV2_tempCrcFailCount,
   CSV2_tempCrcRecoveredCount,
@@ -278,10 +276,10 @@ enum Csv2Index {
   CSV2_imu_heading_swing_120s,
   CSV2_dBcur_dt,
   CSV2_loadDumpActive,
-  CSV2_reserved_thermalTestPhase,  // dead slot — thermal step-test removed (2026-06-23), sends 0
+  CSV2_reserved_thermalTestPhase,  // dead slot, sends 0
   CSV2_ft_updateAccelMetrics_win,
   CSV2_ft_updateAccelMetrics_ses,
-  // Fields 230-322: diagnostics moved from CSV1
+  // Diagnostics block
   CSV2_WifiStrength,
   CSV2_SendWifiTime,
   CSV2_AnalogReadTime,
@@ -360,7 +358,7 @@ enum Csv2Index {
   CSV2_ft_bhFlushCapNVS_ses,
   CSV2_ft_kneeLearnService_win,
   CSV2_ft_kneeLearnService_ses,
-  // Fields 323-401: firmware-computed values moved from CSV3
+  // Firmware-computed values block
   CSV2_currentRPMTableIndex,
   CSV2_pidInitialized,
   CSV2_pidSetpoint,
@@ -370,7 +368,7 @@ enum Csv2Index {
   CSV2_finalLearningTarget,
   CSV2_overheatingPenaltyTimer,
   CSV2_overheatingPenaltyAmps,
-  CSV2_reserved_averageTableValue,  // dead table removed — dead slot, sends 0
+  CSV2_reserved_averageTableValue,  // dead slot, sends 0
   CSV2_timeSinceLastOverheat,
   CSV2_socInfoAvailable,
   CSV2_overheatCount0,
@@ -447,7 +445,7 @@ enum Csv2Index {
   CSV2_systemIDQuietPP_2,
   CSV2_systemIDAbortReason,       // FieldEventReason code if protection aborted last test; 0=no abort
   CSV2_systemIDAbortPhase,        // phase 1-9 at moment of protection abort; 0=no abort
-  // CV voltage-loop firing-interval ladder (vl_*), CH1/pf-style stats (replaced the old 2-row voltLoop watermarks)
+  // CV voltage-loop firing-interval ladder (vl_*), CH1/pf-style stats
   CSV2_vl_last_ms,
   CSV2_vl_avg_10s,
   CSV2_vl_worst_10s,
@@ -488,7 +486,7 @@ enum Csv2Index {
   CSV2_wmIgn_VMGman_lo,   CSV2_wmIgn_VMGman_hi,    // VMG manual session min/max (knots ×10)
   CSV2_wmIgn_VMGup_lo,    CSV2_wmIgn_VMGup_hi,     // VMG upwind session min/max (knots ×10)
 
-  // Alternator (charging-system) health summary (v2 — values repurposed; slots unchanged)
+  // Alternator (charging-system) health summary
   CSV2_altHealthPct,        // worst-region performance % ×10
   CSV2_altHealthStatus,     // 0 insufficient/awaiting fit, 1 healthy, 2 drifting
   CSV2_altCoveragePct,      // record-book fill % ×10
@@ -527,13 +525,13 @@ enum Csv2Index {
   // at top of pass); splits control-path stalls from intentional field-off background work
   CSV2_loopFieldOnWin_ms,        // worst field-ON loop pass, rolling 5s (ms ×1)
   CSV2_loopFieldOnSes_ms,        // worst field-ON loop pass since Reset Peak Values (ms ×1)
-  // +4: thermal tuning plot live-stream fields (replaces the old /thermallog.bin pull)
+  // Thermal tuning plot live-stream fields
   CSV2_tempFiltered,             // IIR-filtered alt temp (°F ×100); distinct from raw AlternatorTemperatureF, used as PID base
   CSV2_outerImpliedPenalty,      // voltage cap expressed as a downstream amps penalty (A ×100); Plot 2 "Implied Penalty"
   CSV2_thermalFlags,             // state-strip bitfield: bit0 tempPIDActive, bit4 AUTO, bit5 shutdown
   CSV2_thermalAntiWindupLatch,   // 1 = CV-bleed anti-windup fired since last CSV2 send (latched; JS draws red ticks)
 
-  // +10: Inner Current PID firing interval (field-on-gated), CH1-style stats (avg ×100)
+  // Inner Current PID firing interval (field-on-gated), CH1-style stats (avg ×100)
   CSV2_pf_last_ms,
   CSV2_pf_avg_10s,
   CSV2_pf_worst_10s,
@@ -545,18 +543,18 @@ enum Csv2Index {
   CSV2_pf_worst_at,
   CSV2_pf_over2x_at,
 
-  // +4: I2C bus-health — bus-only timing isolates a true bus stall from loop preemption
+  // I2C bus-health — bus-only timing isolates a true bus stall from loop preemption
   CSV2_inaBusReadWorstUs,    // worst µs in the two INA228 Wire reads (vs whole-block ft_rai_ina228)
   CSV2_inaBusSlowCount,      // INA228 bus reads > 15 ms since reset
   CSV2_ina228ErrorCount,     // INA228 reads dropped (sanity fail / exception)
   CSV2_imuFifoFetchWorstUs,  // worst µs in Get_FIFO_Sample
   CSV2_imuFifoWorstSamples,  // sample count of that worst fetch — small count + big µs = stall/preemption, not transfer size
 
-  // +2: long-term-ring flash-flush timer (field-off 15-min dump; was untimed = invisible loop spikes)
+  // Long-term-ring flash-flush timer (field-off 15-min dump)
   CSV2_dumpLongTermRing_win,  // worst µs of the flush, rolling 5s window
   CSV2_dumpLongTermRing_ses,  // worst µs of the flush since last Reset Peak Values
 
-  // +10: fast alternator-current channel (GPIO3) — timers, status, detector, session worsts
+  // Fast alternator-current channel (GPIO3) — timers, status, detector, session worsts
   CSV2_fastAltDrain_win,    // worst µs of the bounded DMA drain, rolling 5s window
   CSV2_fastAltDrain_ses,    // ...since last Reset Peak Values
   CSV2_faMatrixFlush_win,   // worst µs of the disturbance-matrix/flipbook flash flush, rolling 5s window
@@ -594,12 +592,12 @@ enum Csv2Index {
   CSV2_ripCmdExc10sMax,     // setpointLimited travel − amplitude limit (A ×100)
   CSV2_ripAltExc10sMax,     // alternator half-window mean-shift − stationarity limit (A ×100)
   CSV2_ripBattExc10sMax,    // battery half-window mean-shift − stationarity limit (A ×100)
-  CSV2_ripRpmShift10sMax,   // RPM half-window mean-shift − stationarity limit, 10s peak (RPM ×10); <=0 = passing (replaced the edge-margin trough 2026-07-01)
+  CSV2_ripRpmShift10sMax,   // RPM half-window mean-shift − stationarity limit, 10s peak (RPM ×10); <=0 = passing
   CSV2_ripAltAdmitCount,    // windows that passed ALL alt-fold gates (lifetime; UI diffs frames for rate)
   CSV2_ripBattAdmitCount,   // same for the battery detector
 
   // Lifetime nav/sailing records (so the Lifetime Statistics panel can show + individually reset
-  // them). Persisted in NVS + uploaded to the leaderboards; previously had no live readout.
+  // them). Persisted in NVS + uploaded to the leaderboards.
   CSV2_LongestTripAT,       // longest single trip, nm ×10
   CSV2_Max24hrDistAT,       // max 24-hour distance, nm ×10
   CSV2_DeepestAnchorAT,     // deepest anchorage, ft ×10
@@ -638,14 +636,12 @@ enum Csv2Index {
 
   CSV2_cvTempDerateScale, // live battery-temp gain derate multiplier on the active CV gains; ×1000
 
-  CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543; +3 ripple-capture gate excess readouts (2026-07-01) = 547; +3 ripple-capture rpm-margin readout + 2 admit counters (2026-07-01) = 550; −1 cvBattCurrentActive (battery-current CV revert 2026-07-02)
+  CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
 
 enum Csv4Index {
   // NavStream: live nav / wind / solar / fuel readouts — sent every 500 ms (2 Hz).
-  // Sits between CSV1 (10 Hz control-loop) and CSV2 (5 s status). These were on the 5 s
-  // CSV2 cadence and looked frozen; the dial/compass/speed/solar/fuel gauges need ~2 Hz.
-  // Same scaling each field used in its old CSV2 SafeInt(...) slot — only the channel changed.
+  // Sits between CSV1 (10 Hz control-loop) and CSV2 (5 s status); the dial/compass/speed/solar/fuel gauges need ~2 Hz.
   CSV4_HeadingNMEA,             // heading (deg, int)
   CSV4_SOGNMEA,                 // speed over ground (knots ×100)
   CSV4_COGNMEA,                 // course over ground (deg, int)
@@ -668,7 +664,6 @@ enum Csv4Index {
 
 enum Csv3Index {
   // SettingsStream: user-configurable settings — sent on change (settingsDirty) or every 60s fallback
-  // Fields 0-208: settings kept from original CSV3
   CSV3_TemperatureLimitF,
   CSV3_BulkVoltage,
   CSV3_wavePeriod,
@@ -690,7 +685,7 @@ enum Csv3Index {
   CSV3_bmsLogicLevelOff,
   CSV3_RPMScalingFactor,
   CSV3_MaximumAllowedBatteryAmps,
-  CSV3_reserved_BatteryVoltageSource,  // obsolete setting removed — dead slot, sends 0
+  CSV3_reserved_BatteryVoltageSource,  // dead slot, sends 0
   CSV3_AlternatorNominalAmps,
   CSV3_LearningUpStep,
   CSV3_LearningDownStep,
@@ -710,7 +705,7 @@ enum Csv3Index {
   CSV3_LearningMemoryDuration,
   CSV3_EnableAmbientCorrection,
   CSV3_TuningMode,
-  CSV3_reserved_rpmCurrentTable_0,  // dead table removed — dead slot, sends 0
+  CSV3_reserved_rpmCurrentTable_0,  // dead slots (0-9), send 0
   CSV3_reserved_rpmCurrentTable_1,
   CSV3_reserved_rpmCurrentTable_2,
   CSV3_reserved_rpmCurrentTable_3,
@@ -773,7 +768,7 @@ enum Csv3Index {
   CSV3_fuelTableGPH_8,
   CSV3_fuelTableGPH_9,
   CSV3_stateRevision,
-  CSV3_reserved_SetpointRampRate,  // obsolete setting removed — dead slot, sends 0
+  CSV3_reserved_SetpointRampRate,  // dead slot, sends 0
   CSV3_DutyRampRate,
   CSV3_SettleTimeBeforeCut,
   CSV3_TempWarnExcess,
@@ -820,12 +815,12 @@ enum Csv3Index {
   CSV3_MinFloatTime,
   CSV3_SOC_BlockRebulk_percent,
   CSV3_SOC_AllowRebulk_percent,
-  CSV3_reserved_accelEnabled,  // RESERVED — was accelEnabled; accelerometer now always-on, no UI toggle
+  CSV3_reserved_accelEnabled,  // dead slot — accelerometer is always-on, no UI toggle
   CSV3_DutySlowRampRate,
   CSV3_ShutdownPhase2HoldMs,
   CSV3_TempPIDKp,
   CSV3_TempPIDKi,
-  CSV3_ThermalLookaheadSec,          // (was TempPIDMarginF — same conceptual slot)
+  CSV3_ThermalLookaheadSec,
   CSV3_TempPIDIntervalMs,
   CSV3_TempPIDFilterAlpha,
   CSV3_VoltageKi,
@@ -839,28 +834,28 @@ enum Csv3Index {
   CSV3_rpmCapPowerTable_7,
   CSV3_rpmCapPowerTable_8,
   CSV3_rpmCapPowerTable_9,
-  CSV3_reserved_VoltageTrimLimit,  // obsolete setting removed — dead slot, sends 0
+  CSV3_reserved_VoltageTrimLimit,  // dead slot, sends 0
   CSV3_InputFilterTC,
   CSV3_SystemIDStepAmplitude,
   CSV3_HardOCTripAmps,
   CSV3_HardOCDebounceMs,
-  CSV3_IExcessFrac,    // was CSV3_IExcessK — CV threshold fraction (×1000)
-  CSV3_IExcessFloorA,  // was CSV3_IExcessN — threshold floor (A ×10)
+  CSV3_IExcessFrac,    // CV threshold fraction (×1000)
+  CSV3_IExcessFloorA,  // threshold floor (A ×10)
   CSV3_IExcessKBleed,
   CSV3_IgnoreRPM,
   CSV3_MinRPMForField,
   CSV3_AwBleedRate,
-  CSV3_reserved_AwRecoverRate,  // RESERVED — was AwRecoverRate; hardcoded to 0.1 in firmware. Free slot for future use.
+  CSV3_reserved_AwRecoverRate,  // dead slot — rate is hardcoded to 0.1 in firmware; free for future use
   CSV3_KHard,
   CSV3_ReseedFrac,
   CSV3_AwSeedProtectMs,
-  CSV3_reserved_VoltageKd,  // 187 reserved — was VoltageKd; D term removed
+  CSV3_reserved_VoltageKd,  // dead slot — voltage loop has no D term
   CSV3_displayTempUnit,
   CSV3_WarmupRampRate,
   CSV3_OvGroup1Enable,
   CSV3_OvGroup2Enable,
-  CSV3_IExcessCeilA,   // was CSV3_IExcessSigSrc — threshold ceiling (A ×10)
-  CSV3_IExcessTau,     // was CSV3_IExcessMA_N — EMA time constant (ms, raw int)
+  CSV3_IExcessCeilA,   // threshold ceiling (A ×10)
+  CSV3_IExcessTau,     // EMA time constant (ms, raw int)
   CSV3_OutputPIDSigSrc,
   CSV3_TdPred,          // %.3f
   CSV3_OvMeasMarginV,   // %.3f
@@ -868,13 +863,12 @@ enum Csv3Index {
   CSV3_OutputPIDMA_N,
   CSV3_OutputPIDFilterTC,
   CSV3_VoltageFilterTC,
-  CSV3_reserved_ProtectionProxGateV,  // 202 reserved — variable removed 2026-05-22
+  CSV3_reserved_ProtectionProxGateV,  // dead slot
   CSV3_SlopeBleedThresh,
   CSV3_SlopeBleedK,
   CSV3_DvdtTC,
   CSV3_SlopeBleedProxV,
   CSV3_StartupRiseRate,
-  // Fields 209-265: settings moved from CSV2
   CSV3_absorptionCompleteTime,
   CSV3_OnOff,
   CSV3_ManualFieldToggle,
@@ -898,7 +892,7 @@ enum Csv3Index {
   CSV3_ManualLifePercentage,
   CSV3_UVThresholdHigh,
   CSV3_weatherModeEnabled,
-  CSV3_reserved_SENSOR_UPLOAD_INTERVAL,  // RESERVED — was SENSOR_UPLOAD_INTERVAL; now firmware-only constant (edit + reflash)
+  CSV3_reserved_SENSOR_UPLOAD_INTERVAL,  // dead slot — SENSOR_UPLOAD_INTERVAL is a firmware-only constant (edit + reflash)
   CSV3_imuEnabled,
   CSV3_AbsorptionVoltage,
   CSV3_AbsorptionTimeoutMs,
@@ -908,10 +902,10 @@ enum Csv3Index {
   CSV3_TargetVoltageSetpoint,
   CSV3_RebulkCurrent_A,
   CSV3_UseFloat,
-  CSV3_IExcessFracBulk,  // was CSV3_IExcessKBulk — BULK threshold fraction (×1000)
-  CSV3_IExcessRelFrac,   // was CSV3_IExcessNBulk — release hysteresis fraction (×1000)
-  CSV3_systemIDPlantTauMs,   // fitted plant time constant (ms), persisted (was reserved altSpare2)
-  CSV3_altSpare3,   // reserved (was degradationThreshold)
+  CSV3_IExcessFracBulk,  // BULK threshold fraction (×1000)
+  CSV3_IExcessRelFrac,   // release hysteresis fraction (×1000)
+  CSV3_systemIDPlantTauMs,   // fitted plant time constant (ms), persisted
+  CSV3_altSpare3,   // reserved
   CSV3_TempAlarmLow,
   CSV3_LoadDumpDtThresh,
   CSV3_LoadDumpDtThresh1,
@@ -920,7 +914,7 @@ enum Csv3Index {
   CSV3_cvWavePeriodSec,
   CSV3_cvKOvershoot,
   CSV3_cvConsecutiveReads,
-  // 8 dead slots — thermal step-test removed (2026-06-23); kept to preserve CSV3 indices, all send 0
+  // 8 dead slots — kept to preserve CSV3 indices, all send 0
   CSV3_reserved_thermal0,
   CSV3_reserved_thermal1,
   CSV3_reserved_thermal2,
@@ -929,7 +923,6 @@ enum Csv3Index {
   CSV3_reserved_thermal5,
   CSV3_reserved_thermal6,
   CSV3_reserved_thermal7,
-  // Fields 266-275: settings moved from CSV1
   CSV3_webgaugesinterval,
   CSV3_plotTimeWindow,
   CSV3_Ymin1,
@@ -941,19 +934,19 @@ enum Csv3Index {
   CSV3_Ymin4,
   CSV3_Ymax4,
   CSV3_LoadDumpDtThresh3,
-  CSV3_reserved_VMGUseTrueWind,   // dead slot — Target-mode toggle removed; kept to preserve CSV3 indices, sends 0
-  CSV3_hardwarePresent,  // moved from CSV2
+  CSV3_reserved_VMGUseTrueWind,   // dead slot, sends 0
+  CSV3_hardwarePresent,
   CSV3_testProtectionsEnabled,  // runtime flag — not persisted, resets true (enabled) on boot
-  CSV3_IExcessArmMarginV,       // %.3f — iExcess voltage gate (decoupled from OvMeasMarginV 2026-05-23)
+  CSV3_IExcessArmMarginV,       // %.3f — iExcess voltage gate, independent of OvMeasMarginV
   CSV3_FastSetpointRiseRate,    // ×100, 1 decimal — multiplier on setpoint rise slew during post-protection recovery
   CSV3_FastSetpointRiseWindowMs, // raw ms — hard upper bound on fast-rise window
   CSV3_FastSetpointRiseHeadroomV, // ×100, 2 decimal — V below target at which fast-rise gate stays open
-  CSV3_SolarWatts,              // moved from CSV2
-  CSV3_performanceRatio,        // moved from CSV2 (×100, 2 decimal)
-  CSV3_VeData,                  // moved from CSV2 (0/1)
-  CSV3_NMEA0183Data,            // moved from CSV2 (0/1)
-  CSV3_NMEA2KData,              // moved from CSV2 (0/1)
-  CSV3_timeAxisModeChanging,    // moved from CSV2 (0/1)
+  CSV3_SolarWatts,
+  CSV3_performanceRatio,        // ×100, 2 decimal
+  CSV3_VeData,                  // 0/1
+  CSV3_NMEA0183Data,            // 0/1
+  CSV3_NMEA2KData,              // 0/1
+  CSV3_timeAxisModeChanging,    // 0/1
   CSV3_gpsTimeSourceMode,       // 0=auto, 1=NMEA-forced, 2=Phone-forced, 3=NTP-time-forced
   // Fast alt-current diagnostic knobs (Pattern B echo)
   CSV3_faEnabled,               // 0/1 — global ON/OFF
@@ -966,7 +959,7 @@ enum Csv3Index {
   CSV3_faAttenDownAmps,         // A ×10
   CSV3_faPeakMinA,              // A ×100
   CSV3_wifiNapEnabled,          // 0/1 — WiFi Napping standby toggle (Client only)
-  CSV3_imuHeelOffset,           // captured rest heel offset (deg ×100) — moved from CSV2 for fast Level Zero echo
+  CSV3_imuHeelOffset,           // captured rest heel offset (deg ×100); on CSV3 so the Level Zero echo is fast
   CSV3_imuPitchOffset,          // captured rest pitch offset (deg ×100)
   CSV3_systemIDTestType,        // 0=step, 1=sine sweep (Plant Delay test type)
   CSV3_systemIDSineFreqStart,   // Hz ×10
@@ -986,14 +979,14 @@ enum Csv3Index {
   CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
   CSV3_coldChargeLockoutEnable, // cold-charge lockout master on/off (1=on)
   CSV3_cvGainMode,              // CV gain mode: 0=Manual, 1=Auto (lambda-based)
-  CSV3_EXTRA1,                  // reserved placeholder (was cvLambdaMult; λ tuning retired 2026-06-25) — sends 0
+  CSV3_EXTRA1,                  // reserved placeholder — sends 0
   CSV3_cvPlantK,                // measured plant gain K (V/A); ×10000
   CSV3_cvPlantTau,              // measured rise time tau (s); ×100
   CSV3_cvPlantL,                // measured dead time L (s); ×100
   CSV3_cvComputedKp,            // Auto-computed Kp (12V-equiv); ×100
   CSV3_cvComputedKi,            // Auto-computed Ki (12V-equiv); ×100
-  CSV3_cvCrossover,             // CV crossover ω_c (rad/s); ×100  (§F.3 rename, was cvOmega)
-  CSV3_cvPiZero,                // CV PI integral zero ρ (rad/s); ×100  (§F.3 rename, was cvKiRatio)
+  CSV3_cvCrossover,             // CV crossover ω_c (rad/s); ×100
+  CSV3_cvPiZero,                // CV PI integral zero ρ (rad/s); ×100
   CSV3_vTgtRampUp,              // CV voltage-target ramp UP rate (V/s); ×1000
   CSV3_vTgtRampDn,              // CV voltage-target ramp DOWN rate (V/s); ×1000
   CSV3_vTgtRampEnable,          // CV voltage-target slew master switch (0/1)
@@ -1012,7 +1005,7 @@ enum Csv3Index {
   CSV3_ripDriftPct,             // command-travel gate slope (% of mean, ×10) — command gate only since §11
   CSV3_SocAlarmLow,             // low-SoC alarm threshold (%, integer); 0 = disabled
 
-  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26; +1 (IExcessCeilABatt) CC/CV iExcess symmetry 2026-06-30; −2 (cvFloorK1/ccFloorK1 removed) ripple re-arch 2026-07-01; +4 (ripRpmMargin/ripWinMs/ripDriftFloorA/ripDriftPct) capture-gate knobs 2026-07-01 = 339; −1 (ripRpmMargin retired, §11 stationarity) 2026-07-01 = 338; −3 (cvCurrentSrc/IExcessFloorABatt/IExcessCeilABatt) +1 (BattCurrentLimitA) battery-current CV revert 2026-07-02 = 336; +1 (SocAlarmLow) low-SoC alarm 2026-07-02 = 337
+  CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
 
 
@@ -1095,7 +1088,7 @@ void loadAPCredentials(bool forceDefaults = false) {
   Serial.println("Loaded AP credentials: " + esp32_ap_ssid + " / [" + String(esp32_ap_password.length()) + " chars]");
 }
 
-void setupWiFi() {  // Function to set up WiFi with new GPIO-based mode selection
+void setupWiFi() {
   Serial.println("\n=== WiFi Setup Starting ===");
 
   // Configuration Options Summary - GPIO Boot Mode Selection
@@ -1145,7 +1138,6 @@ void setupWiFi() {  // Function to set up WiFi with new GPIO-based mode selectio
     setupAccessPoint();
     currentMode = MODE_AP;
     CloudFeatures = 0;
-    // Serve full alternator interface (operational AP mode)
     if (webFS.exists("/index.html.gz")) {
       Serial.println("Serving full alternator interface in AP mode");
       setupServer();
@@ -1266,9 +1258,9 @@ bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout
 
   if (WiFi.status() == WL_CONNECTED) {
 
-    Serial.println("WiFi connection successful!");                         // PRESERVES: Your success message
-    Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());  // PRESERVES: Your IP logging
-    Serial.printf("Signal strength: %d dBm\n", WiFi.RSSI());               // PRESERVES: Your signal logging
+    Serial.println("WiFi connection successful!");
+    Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("Signal strength: %d dBm\n", WiFi.RSSI());
 
     // mDNS setup — start once and never MDNS.end() on reconnect: ESP32 core 3.3.8's mdns
     // teardown null-derefs the netif (LoadProhibited crash on wake/reconnect). mDNS stays bound
@@ -1284,8 +1276,8 @@ bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout
 
   } else {
 
-    Serial.printf("WiFi connection failed after %lu ms\n", timeout);  // PRESERVES: Your failure message style
-    Serial.printf("Final status: %d\n", WiFi.status());               // PRESERVES: Your debug info
+    Serial.printf("WiFi connection failed after %lu ms\n", timeout);
+    Serial.printf("Final status: %d\n", WiFi.status());
     return false;
   }
 }
@@ -1358,7 +1350,7 @@ void setupAccessPoint() {
     Serial.println("DNS server start result: " + String(dnsStarted));
     Serial.println("DNS server started for captive portal");
 
-    // **FIX: Start mDNS in AP mode too (best-effort for alternator.local)**
+    // Start mDNS in AP mode too (best-effort for alternator.local).
     // No MDNS.end() — core 3.3.8 mdns teardown null-derefs the netif (see client path); start once.
     static bool apMdnsStarted = false;
     if (!apMdnsStarted && MDNS.begin("alternator")) {
@@ -1373,7 +1365,6 @@ void setupAccessPoint() {
   } else {
     Serial.println("=== ACCESS POINT FAILED TO START ===");
     Serial.println("This is a critical error!");
-    // Try with default settings as fallback
     Serial.println("Trying with default settings as fallback...");
     WiFi.softAP("ALTERNATOR_WIFI", "alternator123");
   }
@@ -1521,7 +1512,6 @@ void setupWiFiConfigServer() {
     ESP.restart();
   });
 
-  // Enhanced 404 handler
   server.onNotFound([](AsyncWebServerRequest *request) {
     if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
       request->redirect("http://" + WiFi.softAPIP().toString() + "/");
@@ -1535,10 +1525,9 @@ void setupWiFiConfigServer() {
   Serial.println("=== WIFI CONFIG SERVER SETUP COMPLETE ===");
 }
 
-// F-RES-01/F-RES-02 fix (2026-05-24). Replaces HTTPClient in the 4 cloud-POST handlers
-// (/checkRegistration /registerProfile /updateProfile /deleteAllData). Reasons documented
-// in private_refs "what fixed your crash.md": HTTPClient::getString() hangs on TLS, and
-// http.begin(url) with no WiFiClientSecure has undefined behavior on https URLs. Pattern
+// Raw WiFiClientSecure POST for the 4 cloud-POST handlers (/checkRegistration /registerProfile
+// /updateProfile /deleteAllData). Deliberately NOT HTTPClient: HTTPClient::getString() hangs on
+// TLS, and http.begin(url) with no WiFiClientSecure has undefined behavior on https URLs. Pattern
 // mirrors executeUploadPayload() in 2_functions.ino. Returns HTTP status code (e.g. 200,
 // 401) on success, or a negative sentinel on transport failure:
 //   -1 = low heap, -2 = connect fail, -3 = handshake/global timeout, -4 = send fail,
@@ -1548,11 +1537,10 @@ int doCloudPOST(const char *endpointPath, const char *payload,
                 char *responseBuf, size_t responseBufSize) {
   if (responseBuf && responseBufSize > 0) responseBuf[0] = '\0';
 
-  // Hard floor only — setInsecure() TLS footprint is ~5-10 KB; matches the
-  // (zero) pre-check in executeUploadPayload (which also uses setInsecure).
-  // The original 40 KB threshold was sized for setCACert and tripped right
-  // after a sensor upload finished (heap not fully reclaimed yet). If we hit
-  // a real OOM, client.connect() will return false → -2 with diagnostic.
+  // Hard floor only — setInsecure() TLS footprint is ~5-10 KB. Do not raise it:
+  // a 40 KB threshold (sized for setCACert) tripped right after sensor uploads
+  // while heap wasn't reclaimed yet. A real OOM makes client.connect() return
+  // false → -2 with diagnostic.
   if (ESP.getMaxAllocHeap() < 15000) {
     Serial.printf("doCloudPOST(%s): heap critically low (max alloc %u), aborting\n",
                   endpointPath, ESP.getMaxAllocHeap());
@@ -1560,12 +1548,10 @@ int doCloudPOST(const char *endpointPath, const char *payload,
   }
 
   WiFiClientSecure client;
-  // Match executeUploadPayload (2_functions.ino) which uses setInsecure(). The original
-  // doCloudPOST attempt used setCACert(server_root_ca) but that's our Let's Encrypt ISRG
-  // Root X1 — Supabase fronts behind Cloudflare and presents a different chain, so cert
-  // verification failed with mbedTLS -0x2700 (X509 verify failed) and connect() returned
-  // false in ~770 ms. Moving to setCACert across all cloud calls is bug scan F-RES-09
-  // (Optional, explicitly deferred — marine threat model is trusted owner-WiFi).
+  // Match executeUploadPayload (2_functions.ino) which uses setInsecure(). setCACert(server_root_ca)
+  // does NOT work here: that cert is our Let's Encrypt ISRG Root X1, but Supabase fronts behind
+  // Cloudflare and presents a different chain, so verification fails (mbedTLS -0x2700) and
+  // connect() returns false. Deliberate — marine threat model is trusted owner-WiFi.
   client.setInsecure();
   // setTimeout omitted: Stream::setTimeout is ms (not seconds as some docs claim) and
   // our read loops use available()+read() polling with explicit millis() deadlines,
@@ -1793,7 +1779,7 @@ void setupServer() {
               return written;
             }
             if (state.row == 0) {
-              // Header row — tempRaw and gains removed
+              // Header row
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
                 "ts_ms,tempFilt_F,tempProj_F,nominalTarget_A,"
@@ -1803,10 +1789,10 @@ void setupServer() {
                 "outerP,outerI,lookahead,impliedPenalty,antiWindupFired,thermalSlope_F_sec,"
                 "freezeWhy,penaltyRaw_A,iCeil_A\n");
             } else if (state.row == 1) {
-              // Constants row — written once, Python detects via "CONST" in ts_ms field
-              // limit/warn/crit added so the plotter can draw the limit + warning-trip
-              // (limit+warn) + critical-trip (limit+crit) reference lines. nominalTarget
-              // column already carries the live regulation setpoint in °F.
+              // Constants row — written once, Python detects via "CONST" in ts_ms field.
+              // limit/warn/crit let the plotter draw the limit + warning-trip (limit+warn) +
+              // critical-trip (limit+crit) reference lines. nominalTarget column carries the
+              // live regulation setpoint in °F.
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
                 "CONST,kp=%.6g,ki=%.6g,lookahead=%.1f,limit=%.1f,warn=%.1f,crit=%.1f,kidownfrac=%.3g,slopewin=%.1f\n",
@@ -2031,7 +2017,6 @@ void setupServer() {
             } else {
               int dataRow = state.row - 2;
               if (dataRow >= state.count) {
-                // Signal end-of-stream
                 pidLogPaused = false;
                 state.done = true;
                 return written;
@@ -2656,7 +2641,7 @@ void setupServer() {
     uint32_t entrySize = (uint32_t)sizeof(CvLogEntry);
     float kp = (float)VoltageKp_active;  // gains ACTUALLY in effect (Manual or Auto-λ, 12V-block normalized) — not the raw manual VoltageKp, which the loop ignores in Auto mode / on 24-48V
     float ki = (float)VoltageKi_active;
-    float kd = 0.0f;  // reserved — was VoltageKd; D term removed; 0 preserves binary header layout
+    float kd = 0.0f;  // voltage loop has no D term; 0 preserves binary header layout
     uint32_t interval = (uint32_t)VoltageLoopInterval;
 
     float sbThresh = SlopeBleedThresh;
@@ -2935,25 +2920,6 @@ void setupServer() {
     pendingSaveVesselInfo = true;
     request->send(200, "application/json", "{\"success\":true}");
   });
-  // ============================================================
-  // REFACTORED /get HANDLER
-  // Replace the existing server.on("/get", ...) block in
-  // 2_aimportantfunctions.ino with this entire block.
-  //
-  // Change summary:
-  //   - Every `else if (request->hasParam(...))` in the parameter
-  //     processing section is now a standalone `if (...)`, so ALL
-  //     matching parameters in a single request are processed.
-  //   - The early-exit special cases (UpdateToVersion, OnOff=0
-  //     safety, password gate) are structurally unchanged.
-  //   - The RPM/fuel table loops are unchanged.
-  //   - Parameters that were previously unreachable when
-  //     fuelTableUpdated==true (AlternatorNominalAmps onward) are
-  //     now independent if-blocks, fixing that latent bug.
-  //   - All file writes, variable assignments, and side-effect
-  //     calls (SetTunings, etc.) are identical to the original.
-  // ============================================================
-
   server.on("/get", HTTP_GET, [](AsyncWebServerRequest *request) {
     bool foundParameter = false;
     bool nvsPersistNow = false;   // set by discrete reset/set handlers that write saveNVSDataFull()-owned vars; forces ONE immediate persist at the end so a reboot before the next field-off edge can't revert the action
@@ -3083,10 +3049,6 @@ void setupServer() {
       return;
     }
 
-    // ---------------------------------------------------------------
-    // All parameters below are processed independently — every
-    // matching param in the request is handled, not just the first.
-    // ---------------------------------------------------------------
     else if (request->hasParam("InputFilterTC")) {
       foundParameter = true;
       inputMessage = request->getParam("InputFilterTC")->value();
@@ -4121,7 +4083,7 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("FLOAT_DURATION")->value();
       float hours = inputMessage.toFloat();
-      int seconds = (int)(hours * 3600.0f);  // FIXED: fractional hours preserved
+      int seconds = (int)(hours * 3600.0f);  // fractional hours preserved
       FLOAT_DURATION = seconds;
       settingWrite(NK_FLOAT_DURATION, String(seconds).c_str());
     }
@@ -4137,7 +4099,7 @@ void setupServer() {
       RebulkCurrent_A = inputMessage.toFloat();
       settingWrite(NK_RebulkCurrent_A, String(RebulkCurrent_A).c_str());
     }
-    // VMGUseTrueWind (Target-mode toggle) removed — both VMGs (manual + upwind) are now always computed.
+    // No VMGUseTrueWind param — both VMGs (manual + upwind) are always computed.
     if (request->hasParam("gpsTimeSourceMode")) {
       foundParameter = true;
       inputMessage = request->getParam("gpsTimeSourceMode")->value();
@@ -5027,8 +4989,8 @@ void setupServer() {
       recomputeCvGains();
       queueConsoleMessageF("CV gain mode: %s", cvGainMode ? "AUTO (lambda-based)" : "MANUAL");
     }
-    // cvLambdaMult handler removed 2026-06-25 — λ tuning retired; the Response Speed slider now drives cvCrossover.
-    if (request->hasParam("cvCrossover")) {  // CV crossover ω_c (rad/s) — exact magnitude formula, §F.3 (was cvOmega)
+    // No cvLambdaMult handler — the Response Speed slider drives cvCrossover.
+    if (request->hasParam("cvCrossover")) {  // CV crossover ω_c (rad/s) — exact magnitude formula, §F.3
       foundParameter = true;
       cvCrossover = clamp_f(request->getParam("cvCrossover")->value().toFloat(), 0.05f, 0.80f);  // 0.80 ≈ 5 s, fast end of the seconds control
       settingWrite(NK_cvCrossover, String(cvCrossover, 3).c_str());
@@ -5045,7 +5007,7 @@ void setupServer() {
       recomputeCvGains();
       queueConsoleMessageF("CV response time: %.0f s (crossover %.2f rad/s)", 4.0f / cvCrossover, cvCrossover);
     }
-    if (request->hasParam("cvPiZero")) {  // CV PI integral zero ρ (rad/s) — Ki = ρ·Kp (§F.3 rename, was cvKiRatio)
+    if (request->hasParam("cvPiZero")) {  // CV PI integral zero ρ (rad/s) — Ki = ρ·Kp (§F.3)
       foundParameter = true;
       cvPiZero = clamp_f(request->getParam("cvPiZero")->value().toFloat(), 0.2f, 1.5f);
       settingWrite(NK_cvPiZero, String(cvPiZero, 3).c_str());
@@ -5152,8 +5114,7 @@ void setupServer() {
       settingWrite(NK_cvPlantL, String(cvPlantL, 3).c_str());
       recomputeCvGains();
     }
-    // VoltageKd server handler removed — D term removed.
-    // ProtectionProxGateV /get handler removed 2026-05-22 — variable removed entirely.
+    // No VoltageKd handler — voltage loop has no D term.
     if (request->hasParam("SlopeBleedThresh")) {
       foundParameter = true;
       inputMessage = request->getParam("SlopeBleedThresh")->value();
@@ -5472,7 +5433,7 @@ void setupServer() {
       queueConsoleMessageF("AW bleed rate set to: %.1f A/s", AwBleedRate);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
-    // AwRecoverRate handler removed — hardcoded in firmware (0.1f), no longer user-adjustable
+    // No AwRecoverRate handler — hardcoded in firmware (0.1f)
     if (request->hasParam("FastSetpointRiseRate")) {
       foundParameter = true;
       inputMessage = request->getParam("FastSetpointRiseRate")->value();
@@ -5696,10 +5657,9 @@ void setupServer() {
       ft_zeroLogService.worstSession = 0;
       ft_bhFlushCapNVS.worstSession = 0;
       ft_kneeLearnService.worstSession = 0;
-      // NOTE: the ripple analyzer's per-session worsts (faSesPkpkWorstA / faSesPeakWorstA /
-      // faSesPeakWorstHz) used to be cleared here too. They now persist across reboot and are
-      // cleared only by the ripple panel's own reset (ResetRipplePeaks handler below), so a
-      // diagnostics "Reset Peak Values" press no longer wipes the ripple worsts.
+      // Deliberately NOT cleared here: the ripple analyzer's per-session worsts (faSesPkpkWorstA /
+      // faSesPeakWorstA / faSesPeakWorstHz) persist across reboot and are cleared only by the
+      // ripple panel's own reset (ResetRipplePeaks handler).
       ft_uploadBufferedRecords.worstSession = 0;
       ft_buildConfigPayload.worstSession = 0;
       ft_UpdateBatterySOC.worstSession = 0;
@@ -5774,9 +5734,8 @@ void setupServer() {
       pfBkt1sCurrent = { 0, 0, 0, 0 };
       pfBkt1sStart = millis();
       pfHasPrev = false;
-      // INA228 interval stats — clears all windows AND all-time accumulators
-      // (without this, ina_worst_at/ina_worst_2m survived the reset and the
-      // dashboard kept showing stale 149 ms NVS-stall spikes forever).
+      // INA228 interval stats — must clear all windows AND all-time accumulators,
+      // else stale ina_worst_at/ina_worst_2m spikes survive the reset.
       resetINA228AllStats();
       // CV voltage-loop firing-interval ladder — clears all windows AND all-time accumulators
       vlAtWorst = 0;
@@ -5800,11 +5759,9 @@ void setupServer() {
       vlBkt1sCurrent = { 0, 0, 0, 0 };
       vlBkt1sStart = millis();
       vlHasPrev = false;
-      // NOTE: the lifetime nav/sailing records (Longest Single Trip, Max 24-hour Distance,
-      // Deepest Anchorage, Best Upwind VMG, Longest Gale Duration) used to be wiped here too.
-      // They are NOW reset individually from the Lifetime Statistics panel (ResetLongestTrip /
-      // ResetMax24hrDist / ResetDeepestAnchor / ResetBestUpwindVMG / ResetLongestGale handlers
-      // below) — a diagnostics "Reset Peak Values" press must never nuke leaderboard records.
+      // Deliberately NOT cleared here: the lifetime nav/sailing records reset individually from
+      // the Lifetime Statistics panel (ResetLongestTrip / ResetMax24hrDist / ResetDeepestAnchor /
+      // ResetBestUpwindVMG / ResetLongestGale) — "Reset Peak Values" must never nuke leaderboard records.
       // 80MHz low-power loop instrumentation — clear session worst + near-miss counters
       loopWorst80Ses = 0;
       loopOver80ImuLimitCount = 0;
@@ -6156,7 +6113,6 @@ void setupServer() {
     }
 
     // Validate token with Supabase (send only token, not device_uid)
-    // F-RES-01/F-RES-02: switched from HTTPClient to doCloudPOST() raw WiFiClientSecure.
     DynamicJsonDocument payloadDoc(256);
     payloadDoc["token"] = authToken;
     String payload;
@@ -6245,7 +6201,7 @@ void setupServer() {
     doc["token"] = authToken;
 
     String response;
-    serializeJson(doc, response);  // Keep as-is, String works fine
+    serializeJson(doc, response);
     request->send(200, "application/json", response);
   });
   // Cloud Features
@@ -6290,7 +6246,6 @@ void setupServer() {
     Serial.printf("Max alloc internal: %u\n", ESP.getMaxAllocHeap());
     Serial.printf("Free PSRAM: %u\n", ESP.getFreePsram());
 
-    // F-RES-01/F-RES-02: doCloudPOST() = raw WiFiClientSecure + setCACert + bounded read.
     char responseBuf[2048];
     int httpCode = doCloudPOST("/functions/v1/register-device", payload.c_str(),
                                responseBuf, sizeof(responseBuf));
@@ -6383,7 +6338,6 @@ void setupServer() {
     Serial.println("=== UPDATE PROFILE REQUEST ===");
     Serial.println("Device UID: " + deviceUID);
 
-    // F-RES-01/F-RES-02: doCloudPOST() = raw WiFiClientSecure + setCACert + bounded read.
     char responseBuf[2048];
     int httpCode = doCloudPOST("/functions/v1/update-profile", payload.c_str(),
                                responseBuf, sizeof(responseBuf));
@@ -6423,7 +6377,6 @@ void setupServer() {
 
     Serial.println("=== DELETE ALL DATA REQUEST ===");
 
-    // F-RES-01/F-RES-02: doCloudPOST() = raw WiFiClientSecure + setCACert + bounded read.
     char responseBuf[1024];
     int httpCode = doCloudPOST("/functions/v1/delete-user-data", payload.c_str(),
                                responseBuf, sizeof(responseBuf));
@@ -6961,7 +6914,7 @@ void setupServer() {
     request->send(200, "text/plain", "OK");
   });
 
-  // Cloud Features debug (raw NVS, no Preferences, still untested)
+  // Cloud Features debug (raw NVS, no Preferences)
   server.on("/debugToken", HTTP_GET, [](AsyncWebServerRequest *request) {
     char storedToken[256] = "";
     bool haveStored = false;
@@ -7054,7 +7007,7 @@ void enterLowPowerStandby() {
   // WiFi-off standby always stays 80MHz. Guarded so the PLL isn't reconfigured every loop pass.
   uint32_t targetMhz = (wifiNapActive && events.count() > 0) ? 240 : 80;
   if (getCpuFrequencyMhz() != targetMhz) {
-    setCpuFrequencyMhz(targetMhz);   // THIS MUST BE DONE AFTER SUSPENDING TASKS
+    setCpuFrequencyMhz(targetMhz);   // THIS MUST BE DONE AFTER THE WIFI OP
   }
 }
 void checkWiFiConnection() {
@@ -7098,9 +7051,9 @@ void checkWiFiConnection() {
 
   // === END THROTTLE ===
 
-  if (cachedWiFiStatus == WL_CONNECTED) {  // ← Use cached
+  if (cachedWiFiStatus == WL_CONNECTED) {
     // Update signal strength while connected
-    wifiRecon.lastSignalStrength = cachedWiFiRSSI;  // ← Use cached
+    wifiRecon.lastSignalStrength = cachedWiFiRSSI;
 
     // Reset reconnection state on successful connection
     if (wifiRecon.attemptCount > 0) {
@@ -7115,7 +7068,7 @@ void checkWiFiConnection() {
 
   // WiFi is disconnected - check if we should give up temporarily
   if (wifiRecon.giveUpMode) {
-    if (now - wifiRecon.lastAttempt < 300000) return;  // ← Use now instead of millis()
+    if (now - wifiRecon.lastAttempt < 300000) return;
     Serial.println("WiFi: Exiting give-up mode, attempting fresh reconnection burst");
     wifiRecon.giveUpMode = false;
     wifiRecon.attemptCount = 0;
@@ -7124,13 +7077,13 @@ void checkWiFiConnection() {
 
   // Signal strength awareness
   if (wifiRecon.lastSignalStrength != -999 && wifiRecon.lastSignalStrength < wifiRecon.minSignalThreshold) {
-    if (now - wifiRecon.lastAttempt < 60000) return;  // ← Use now
+    if (now - wifiRecon.lastAttempt < 60000) return;
     Serial.printf("WiFi: Poor signal (%d dBm), using extended retry interval\n", wifiRecon.lastSignalStrength);
   } else {
-    if (now - wifiRecon.lastAttempt < wifiRecon.currentInterval) return;  // ← Use now
+    if (now - wifiRecon.lastAttempt < wifiRecon.currentInterval) return;
   }
 
-  wifiRecon.lastAttempt = now;  // ← Use now
+  wifiRecon.lastAttempt = now;
   wifiRecon.attemptCount++;
 
   Serial.printf("WiFi reconnection attempt #%d (interval: %lums, last signal: %d dBm)\n",
@@ -7252,7 +7205,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: Bcur_filtered
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -7296,8 +7249,7 @@ void SendWifiData() {
                                SafeInt(g_iExcessThreshold, 10), // CSV1_iExcessThreshold — fire threshold E (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_mExcessEmaPeak : g_mExcessEma, 10),       // CSV1_mExcessEmaPeak (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_iExcessThreshWinMin : g_iExcessThreshold, 10), // CSV1_iExcessThreshMin (A ×10)
-                               SafeInt(protMask),               // CSV1_protEventMask — protection-event bits this frame
-                               SafeInt(Bcur_filtered, 100)      // CSV1_Bcur_filtered — EMA battery current (off by default)
+                               SafeInt(protMask)                // CSV1_protEventMask — protection-event bits this frame
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
@@ -7399,8 +7351,7 @@ void SendWifiData() {
                                "%d,%d,%u,%u,%d,%d,%d,%d,%d,"
                                // -9 %d: COG/SOG/AWS/AWA/TWS/TWA/Leeway/VMGNMEA + HeadingNMEA moved to CSV4
                                "%d,"
-                               // -10 %d (2026-06-18): Control Accuracy Scores v2 removed 16 windowed
-                               // live-score fields and added 6 (net -10) — one 10-specifier row dropped here.
+                               // -10 %d: one 10-specifier row dropped here (Control Accuracy Scores v2 net change)
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -7529,8 +7480,8 @@ void SendWifiData() {
                                0,                                                // reserved — moved to CSV3 (NMEA2KData)
                                SafeInt(alarmLatch ? 1 : 0),
                                SafeInt(ResetAlarmLatch),
-                               0,  // CSV2_reserved_ResetLearningTable — action-only, echo global removed
-                               0,  // CSV2_reserved_ClearOverheatHistory — action-only, echo global removed
+                               0,  // CSV2_reserved_ResetLearningTable — action-only, no echo
+                               0,  // CSV2_reserved_ClearOverheatHistory — action-only, no echo
                                SafeInt(DynamicShuntGainFactor, 1000),
                                SafeInt(DynamicAltCurrentZero, 1000),
                                SafeInt(InsulationLifePercent, 100),
@@ -7683,7 +7634,7 @@ void SendWifiData() {
                                SafeInt(ft_rai_bmp_state.worstSession),
                                SafeInt(ft_rai_imu.worstWindow),
                                SafeInt(ft_rai_imu.worstSession),
-                               0,                                                 // 194 reserved — was cv_D (D term removed)
+                               0,                                                 // CSV2_reserved_cv_D — dead slot (no D term)
                                SafeInt(tempReadFailCount),
                                SafeInt(tempCrcFailCount),
                                SafeInt(tempCrcRecoveredCount),
@@ -7710,7 +7661,7 @@ void SendWifiData() {
                                SafeInt(imu_heading_swing_120s, 10),              // ×10, 1dp degrees; -10 = no compass data
                                SafeInt(g_dBcur_dt, 10),                          // ×10, 1dp A/s battery current rate of change
                                (int)g_loadDumpActive,                            // 1 if load dump feedforward is active
-                               0,                                                // CSV2_reserved_thermalTestPhase (dead slot — thermal step-test removed)
+                               0,                                                // CSV2_reserved_thermalTestPhase (dead slot)
                                SafeInt(ft_updateAccelMetrics.worstWindow),
                                SafeInt(ft_updateAccelMetrics.worstSession),
                                // from CSV1
@@ -7801,7 +7752,7 @@ void SendWifiData() {
                                SafeInt(finalLearningTarget, 100),
                                SafeInt(overheatingPenaltyTimer / 1000),
                                SafeInt(overheatingPenaltyAmps, 100),
-                               0,  // reserved — was averageTableValue (dead table removed); sends 0
+                               0,  // CSV2_reserved_averageTableValue — dead slot, sends 0
                                SafeInt(timeSinceLastOverheat / 1000),
                                SafeInt(socInfoAvailable),
                                SafeInt(overheatCount[0]),
@@ -8076,9 +8027,9 @@ void SendWifiData() {
                                "%d,%d,"  // 2 added: SetpointBigStepThresh, SetpointBigStepRiseRate
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"  // 2 removed: LearningUpwardEnabled, LearningDownwardEnabled
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // 1 removed: EnableNeighborLearning
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -8096,7 +8047,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,"  // 4 removed: LearningPaused, ShowLearningDebugMessages, LearningDryRunMode, LearningMode
+                               "%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -8115,7 +8066,7 @@ void SendWifiData() {
                                "%d,"  // MinChargeTempF
                                "%d,"  // coldChargeLockoutEnable
                                "%d,"  // cvGainMode
-                               "%d,"  // CSV3_EXTRA1 (reserved placeholder, was cvLambdaMult)
+                               "%d,"  // CSV3_EXTRA1 (reserved placeholder)
                                "%d,"  // cvPlantK
                                "%d,"  // cvPlantTau
                                "%d,"  // cvPlantL
@@ -8162,7 +8113,7 @@ void SendWifiData() {
                                SafeInt(bmsLogicLevelOff),
                                SafeInt(RPMScalingFactor),
                                SafeInt(MaximumAllowedBatteryAmps),
-                               0,  // CSV3_reserved_BatteryVoltageSource — obsolete setting removed
+                               0,  // CSV3_reserved_BatteryVoltageSource — dead slot
                                SafeInt(AlternatorNominalAmps),
                                SafeInt(LearningUpStep, 100),
                                SafeInt(LearningDownStep, 100),
@@ -8182,16 +8133,16 @@ void SendWifiData() {
                                SafeInt(LearningMemoryDuration / 86400000),
                                SafeInt(EnableAmbientCorrection),
                                SafeInt(TuningMode),
-                               0,  // reserved — was rpmCurrentTable[0] (dead table removed); sends 0
-                               0,  // reserved — was rpmCurrentTable[1]
-                               0,  // reserved — was rpmCurrentTable[2]
-                               0,  // reserved — was rpmCurrentTable[3]
-                               0,  // reserved — was rpmCurrentTable[4]
-                               0,  // reserved — was rpmCurrentTable[5]
-                               0,  // reserved — was rpmCurrentTable[6]
-                               0,  // reserved — was rpmCurrentTable[7]
-                               0,  // reserved — was rpmCurrentTable[8]
-                               0,  // reserved — was rpmCurrentTable[9]
+                               0,  // CSV3_reserved_rpmCurrentTable_0..9 — dead slots, send 0
+                               0,  // CSV3_reserved_rpmCurrentTable_1
+                               0,  // CSV3_reserved_rpmCurrentTable_2
+                               0,  // CSV3_reserved_rpmCurrentTable_3
+                               0,  // CSV3_reserved_rpmCurrentTable_4
+                               0,  // CSV3_reserved_rpmCurrentTable_5
+                               0,  // CSV3_reserved_rpmCurrentTable_6
+                               0,  // CSV3_reserved_rpmCurrentTable_7
+                               0,  // CSV3_reserved_rpmCurrentTable_8
+                               0,  // CSV3_reserved_rpmCurrentTable_9
                                SafeInt(ShuntResistanceMicroOhm),
                                SafeInt(InvertAltAmps),
                                SafeInt(InvertBattAmps),
@@ -8245,7 +8196,7 @@ void SendWifiData() {
                                SafeInt(fuelTableGPH[8], 100),
                                SafeInt(fuelTableGPH[9], 100),
                                SafeInt(stateRevision),
-                               0,  // CSV3_reserved_SetpointRampRate — obsolete setting removed
+                               0,  // CSV3_reserved_SetpointRampRate — dead slot
                                SafeInt(DutyRampRate, 100),
                                SafeInt(SettleTimeBeforeCut),
                                SafeInt(TempWarnExcess, 100),
@@ -8292,7 +8243,7 @@ void SendWifiData() {
                                SafeInt(MinFloatTime),
                                SafeInt(SOC_BlockRebulk_percent),
                                SafeInt(SOC_AllowRebulk_percent),
-                               0,                                                 // RESERVED — was accelEnabled (always-on, UI toggle removed)
+                               0,                                                 // CSV3_reserved_accelEnabled — dead slot (accelerometer always-on)
                                SafeInt(DutySlowRampRate, 100),
                                SafeInt(ShutdownPhase2HoldMs),
                                SafeInt(TempPIDKp, 1000),
@@ -8311,7 +8262,7 @@ void SendWifiData() {
                                (int)rpmCapPowerTable[7],
                                (int)rpmCapPowerTable[8],
                                (int)rpmCapPowerTable[9],
-                               0,  // CSV3_reserved_VoltageTrimLimit — obsolete setting removed
+                               0,  // CSV3_reserved_VoltageTrimLimit — dead slot
                                (int)InputFilterTC,
                                SafeInt(SystemIDStepAmplitude, 10),               // ×10, 1 decimal
                                SafeInt(HardOCTripAmps, 10),                      // ×10, 1 decimal
@@ -8322,11 +8273,11 @@ void SendWifiData() {
                                SafeInt(IgnoreRPM),
                                SafeInt(MinRPMForField),
                                SafeInt(AwBleedRate, 10),                         // ×10, 1 decimal
-                               0,                                                 // RESERVED — was AwRecoverRate (hardcoded to 0.1 in firmware; free slot for future use)
+                               0,                                                 // CSV3_reserved_AwRecoverRate — rate hardcoded to 0.1 in firmware
                                SafeInt(KHard, 10),                               // ×10, 1 decimal
                                SafeInt(ReseedFrac, 100),                         // ×100, 2 decimal (shared recovery seed fraction)
                                (int)AwSeedProtectMs,
-                               0,                                                 // 187 reserved — was VoltageKd (D term removed)
+                               0,                                                 // CSV3_reserved_VoltageKd — dead slot (no D term)
                                SafeInt(displayTempUnit),
                                SafeInt(WarmupRampRate, 10),                      // ×10, 1 decimal
                                (int)OvGroup1Enable,
@@ -8340,10 +8291,10 @@ void SendWifiData() {
                                OutputPIDMA_N,
                                (int)OutputPIDFilterTC,
                                (int)VoltageFilterTC,
-                               0,                                                // 202 reserved — ProtectionProxGateV removed
+                               0,                                                // CSV3_reserved_ProtectionProxGateV — dead slot
                                SafeInt(SlopeBleedThresh, 100),
                                (int)SlopeBleedK,
-                               SafeInt(DvdtTC, 10),                              // ×10, 1 decimal (ms; was DvdtAlpha ×1000)
+                               SafeInt(DvdtTC, 10),                              // ×10, 1 decimal (ms)
                                SafeInt(SlopeBleedProxV, 100),                    // ×100, 2 decimals
                                SafeInt(StartupRiseRate, 100),                    // ×100, 2 decimals
                                // from CSV2 (settings)
@@ -8370,7 +8321,7 @@ void SendWifiData() {
                                SafeInt(ManualLifePercentage),
                                SafeInt(UVThresholdHigh, 100),
                                SafeInt(weatherModeEnabled),
-                               0,                                                 // RESERVED — was SENSOR_UPLOAD_INTERVAL (firmware-only constant)
+                               0,                                                 // CSV3_reserved_SENSOR_UPLOAD_INTERVAL — firmware-only constant
                                SafeInt(imuEnabled ? 1 : 0),
                                SafeInt(AbsorptionVoltage * 100),
                                SafeInt(AbsorptionTimeoutMs),
@@ -8392,7 +8343,7 @@ void SendWifiData() {
                                (int)cvWavePeriodSec,
                                SafeInt(cvKOvershoot, 10),                        // ×10, 1dp
                                (int)cvConsecutiveReads,
-                               // 8 dead slots — thermal step-test removed (2026-06-23), all send 0
+                               // 8 dead slots (CSV3_reserved_thermal0..7), all send 0
                                0, 0, 0, 0, 0, 0, 0, 0,
                                // from CSV1 (settings)
                                SafeInt(webgaugesinterval),
@@ -8406,7 +8357,7 @@ void SendWifiData() {
                                SafeInt(Ymin4),
                                SafeInt(Ymax4),
                                SafeInt(LoadDumpDtThresh3),                       // A/s tier-3 threshold (3 consecutive)
-                               SafeInt(0),                                      // reserved (was VMGUseTrueWind; toggle removed)
+                               SafeInt(0),                                      // CSV3_reserved_VMGUseTrueWind — dead slot
                                SafeInt(hardwarePresent),                         // moved from CSV2
                                (int)testProtectionsEnabled,                     // 0/1 — runtime flag, not persisted
                                IExcessArmMarginV,                               // %.3f — iExcess voltage gate margin
@@ -8451,7 +8402,7 @@ void SendWifiData() {
                                SafeInt(MinChargeTempF),                         // CSV3_MinChargeTempF (cold-charge lockout board-temp floor, °F)
                                (int)coldChargeLockoutEnable,                    // CSV3_coldChargeLockoutEnable (cold-charge lockout master on/off)
                                (int)cvGainMode,                                 // CSV3_cvGainMode (0=Manual, 1=Auto λ-based)
-                               0,                                              // CSV3_EXTRA1 (reserved placeholder, was cvLambdaMult)
+                               0,                                              // CSV3_EXTRA1 (reserved placeholder)
                                SafeInt(cvPlantK, 10000),                        // CSV3_cvPlantK (measured plant gain V/A, ×10000)
                                SafeInt(cvPlantTau, 100),                        // CSV3_cvPlantTau (measured rise time s, ×100)
                                SafeInt(cvPlantL, 100),                          // CSV3_cvPlantL (measured dead time s, ×100)
@@ -8601,7 +8552,6 @@ void saveAuthToken(String token) {
   authToken = token;
   isRegistered = true;
 
-  // REPLACE "Auth token saved: " + token WITH THIS:
   Serial.println("\n========================================");
   Serial.println("REGISTRATION SUCCESSFUL");
   Serial.println("========================================");
@@ -8705,7 +8655,7 @@ void saveVesselInfoToFile() {
   }
   xSemaphoreGive(fsMutex);
 
-  // Mirror duplicated fields into their standalone LittleFS files so the next
+  // Mirror duplicated fields into their standalone settings keys so the next
   // boot's standalone-load doesn't overwrite the vesselData values in RAM.
   // The reverse direction (standalone /get handlers → vessel_info.json) is
   // handled by updateVesselInfoField().

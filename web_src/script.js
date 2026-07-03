@@ -134,7 +134,6 @@ function updateAllTempUnitLabels() {
     const lbl = tempUnitLabel();
     document.querySelectorAll('.temp-unit-label').forEach(el => { el.textContent = lbl; });
     document.querySelectorAll('.temp-rate-label').forEach(el => { el.textContent = lbl + '/s'; });
-    // Update toggle button states
     const fBtn = document.getElementById('tempUnitF_btn');
     const cBtn = document.getElementById('tempUnitC_btn');
     if (fBtn && cBtn) {                              // segmented-control active pill
@@ -147,7 +146,6 @@ function updateAllTempUnitLabels() {
 function setTempUnit(unit) {
     displayTempUnit = unit;
     updateAllTempUnitLabels();
-    // Persist to device via GET
     const pw = document.querySelector('.password_field');
     const pwVal = pw ? pw.value : '';
     const url = `/get?displayTempUnit=${unit}&password=${encodeURIComponent(pwVal)}`;
@@ -237,13 +235,12 @@ const CSV1_FIELDS = [
     "voltageTarget",
     "Icv",
     "WaterDepth_ft",
-    "Ignition",   // moved from CSV2 so the banner IGN indicator tracks at ~10 Hz
+    "Ignition",   // rides CSV1 so the banner IGN indicator tracks at ~10 Hz
     "mExcessEma",        // iExcess detector: averaged current excess over command (A ×10) — tuning trace
     "iExcessThreshold",  // iExcess detector: fire threshold E (A ×10) — tuning trace
     "mExcessEmaPeak",    // iExcess: per-frame peak averaged excess (A ×10) — live sparkline
     "iExcessThreshMin",  // iExcess: per-frame min fire threshold E (A ×10) — live sparkline
     "protEventMask",     // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
-    "Bcur_filtered",     // EMA-filtered battery current — Current plot, off by default
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -471,7 +468,7 @@ const CSV2_FIELDS = [
     "imu_heading_swing_120s",
     "dBcur_dt",
     "loadDumpActive",
-    "reserved_thermalTestPhase",   // dead slot — thermal step-test removed (2026-06-23)
+    "reserved_thermalTestPhase",   // dead slot — thermal step-test removed
     "ft_updateAccelMetrics_win",
     "ft_updateAccelMetrics_ses",
     "WifiStrength",
@@ -485,7 +482,7 @@ const CSV2_FIELDS = [
     "currentPartitionType",
     "fastOvCurrentCap",
     "fastOvClampCount",
-    "fastOvHardCount",                     // 240 (was 243 before fastOvSoftCount removal)
+    "fastOvHardCount",                     // 240
     "ch1_last_ms",
     "ch1_avg_10s",
     "ch1_worst_10s",
@@ -793,8 +790,7 @@ const CSV2_FIELDS = [
 ];
 
 // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). Sits between CSV1 (10 Hz)
-// and CSV2 (5 s). These rode the slow CSV2 cadence before and looked frozen on the dial/helm.
-// Order MUST match the firmware Csv4Index enum in 3_functions.ino.
+// and CSV2 (5 s). Order MUST match the firmware Csv4Index enum in 3_functions.ino.
 const CSV4_FIELDS = [
     "HeadingNMEA",                // heading (deg, int)
     "SOGNMEA",                    // speed over ground (knots ×100)
@@ -870,14 +866,12 @@ function gateReadoutOnCsv2(data) {
     gateColor('faAmpsDriftFloorA_live', drPass);
     gateColor('faAmpsDriftPct_live', drPass);
     // Ripple-capture gates: same excess convention (<=0 = that gate passed every window in the last 10s).
-    // The RPM row joined this convention with the §11 stationarity gate (was an edge-margin trough with
-    // its own set-margin compare — the knob is retired, the firmware streams shift − limit directly).
+    // RPM row included — the firmware streams shift − limit directly.
     for (const [f, id, s] of [['ripCmdExc10sMax', 'ripCmdGate_live', 100], ['ripAltExc10sMax', 'ripAltGate_live', 100], ['ripBattExc10sMax', 'ripBattGate_live', 100], ['ripRpmShift10sMax', 'ripRpmGate_live', 10]]) {
         const v = Number(data[f]);
         gateColor(id, (!isFinite(v) || v <= ROLL_EMPTY_SENTINEL) ? null : (v / s) <= 0);
     }
-    // (Capture-throughput counters still ride CSV2 as ripAltAdmitCount/ripBattAdmitCount but have no UI
-    // row anymore — the "Capture throughput" display was removed 2026-07-02 as developer-only noise.)
+    // (ripAltAdmitCount/ripBattAdmitCount still ride CSV2 but have no UI row.)
 }
 // iExcessLive: G3 (alternator) detector strip. Firmware ships one peak/threshold pair;
 // threshMin ≤ 0 = disarmed.
@@ -1188,7 +1182,7 @@ function updateAltHealth() {
                                      .filter(Boolean).join(' · ');
   setSeg(['alt-src-hist','alt-src-file'], altLive.source>=1?1:0);
   setSeg(['alt-learn-on','alt-learn-off'], altLive.paused>=1?1:0);
-  setSeg(['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator now lives in Setup (segmented, mirrors Vessel Performance)
+  setSeg(['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator segmented toggle in Setup (mirrors Vessel Performance)
 }
 
 // Simulator Off(0)/On(1) — segmented toggle in Setup, parallels Vessel Performance's perfSimMode.
@@ -1720,8 +1714,7 @@ function buildAltSessPlot(){
   // unchecked = pin to whatever is currently shown.
   el.style.position = 'relative';
 
-  // On-plot legend (top-left, inside the plot area — mirrors the auto checkbox top-right). Replaces
-  // the old "steady-state capture" dot that was masquerading as a legend above the chart.
+  // On-plot legend (top-left, inside the plot area — mirrors the auto checkbox top-right).
   const exLeg = el.querySelector('.altsess-legend'); if (exLeg) exLeg.remove();
   const leg = document.createElement('div');
   leg.className = 'altsess-legend';
@@ -1887,7 +1880,7 @@ function renderPerf(){
   }
   const sea=L.pitchStd||0;
   setTxt('perf-sea-val', sea.toFixed(1)+'°'); setTxt('perf-sea-sub', seaWord(sea));
-  // steady-state is now shown by the "now" dot itself (solid = banking data, hollow = not steady) — see drawPerfPlot/drawMotorPlot
+  // steady-state is shown by the "now" dot itself (solid = banking data, hollow = not steady) — see drawPerfPlot/drawMotorPlot
   // Learning switch (Live Data) + simulator/reference segmented toggles (Setup → Vessel Performance).
   // All driven by perfLive, which always carries paused+sim+source.
   const paused=perfLive.paused===1;
@@ -2282,7 +2275,7 @@ const CSV3_FIELDS = [
     "MinFloatTime",
     "SOC_BlockRebulk_percent",
     "SOC_AllowRebulk_percent",
-    "reserved_accelEnabled",  // RESERVED — was accelEnabled; accelerometer now always-on, no UI toggle
+    "reserved_accelEnabled",  // RESERVED — accelerometer is always-on, no UI toggle
     "DutySlowRampRate",
     "ShutdownPhase2HoldMs",
     "TempPIDKp",
@@ -2313,13 +2306,13 @@ const CSV3_FIELDS = [
     "MinRPMForField",
     "AwBleedRate",
     "reserved_AwRecoverRate",          // RESERVED — was AwRecoverRate (hardcoded to 0.1 in firmware; free slot for future use)
-    "KHard",                           // 183 (was 184; 183 reserved — was KSoft)
-    "ReseedFrac",                      // shared across all four protections (was IExcessReseedFrac)
+    "KHard",                           // 183
+    "ReseedFrac",                      // shared across all four protections
     "AwSeedProtectMs",
-    "reserved187",                     // 187 reserved — was VoltageKd (D term removed)
+    "reserved187",                     // 187 reserved
     "displayTempUnit",
-    "WarmupRampRate",                  // 189 (shifted -1 from prev)
-    "OvGroup1Enable",                  // 190 (was 191; 190 reserved — was OvLayer1Enable)
+    "WarmupRampRate",                  // 189
+    "OvGroup1Enable",                  // 190
     "OvGroup2Enable",
     "IExcessCeilA",
     "IExcessTau",
@@ -2330,7 +2323,7 @@ const CSV3_FIELDS = [
     "OutputPIDMA_N",
     "OutputPIDFilterTC",
     "VoltageFilterTC",
-    "reserved_ProtectionProxGateV",    // 202 reserved — variable removed 2026-05-22
+    "reserved_ProtectionProxGateV",    // 202 reserved — dead slot
     "SlopeBleedThresh",
     "SlopeBleedK",
     "DvdtTC",
@@ -2359,7 +2352,7 @@ const CSV3_FIELDS = [
     "ManualLifePercentage",
     "UVThresholdHigh",
     "weatherModeEnabled",
-    "reserved_SENSOR_UPLOAD_INTERVAL",  // RESERVED — was SENSOR_UPLOAD_INTERVAL; now firmware-only constant (edit + reflash)
+    "reserved_SENSOR_UPLOAD_INTERVAL",  // RESERVED — interval is a firmware-only constant (edit + reflash)
     "imuEnabled",
     "AbsorptionVoltage",
     "AbsorptionTimeoutMs",
@@ -2381,7 +2374,7 @@ const CSV3_FIELDS = [
     "cvWavePeriodSec",
     "cvKOvershoot",
     "cvConsecutiveReads",
-    "reserved_thermal0",   // 8 dead slots — thermal step-test removed (2026-06-23)
+    "reserved_thermal0",   // 8 dead slots — thermal step-test removed
     "reserved_thermal1",
     "reserved_thermal2",
     "reserved_thermal3",
@@ -2445,14 +2438,14 @@ const CSV3_FIELDS = [
     "MinChargeTempF",                // cold-charge lockout board-temp floor (°F)
     "coldChargeLockoutEnable",       // cold-charge lockout master on/off (1=on)
     "cvGainMode",                    // CV gain mode: 0=Manual, 1=Auto (lambda-based)
-    "EXTRA1",                        // reserved placeholder (was cvLambdaMult; λ tuning retired 2026-06-25)
+    "EXTRA1",                        // reserved placeholder
     "cvPlantK",                      // measured plant gain K (V/A); ×10000
     "cvPlantTau",                    // measured rise time tau (s); ×100
     "cvPlantL",                      // measured dead time L (s); ×100
     "cvComputedKp",                  // Auto-computed Kp (12V-equiv); ×100
     "cvComputedKi",                  // Auto-computed Ki (12V-equiv); ×100
-    "cvCrossover",                   // CV crossover ω_c (rad/s); ×100  (§F.3 rename, was cvOmega)
-    "cvPiZero",                      // CV PI integral zero ρ (rad/s); ×100  (§F.3 rename, was cvKiRatio)
+    "cvCrossover",                   // CV crossover ω_c (rad/s); ×100
+    "cvPiZero",                      // CV PI integral zero ρ (rad/s); ×100
     "vTgtRampUp",                    // CV voltage-target ramp UP rate (V/s); ×1000
     "vTgtRampDn",                    // CV voltage-target ramp DOWN rate (V/s); ×1000
     "vTgtRampEnable",                // CV voltage-target slew master switch (0/1)
@@ -2602,9 +2595,8 @@ if (typeof window.gpsManualOverride === 'undefined') {
     window.gpsManualOverride = false;
 }
 
-function buildURL(path) {// Helper function to build absolute URLs
+function buildURL(path) {
 
-    // Ensure path starts with /
     if (!path.startsWith('/')) {
         path = '/' + path;
     }
@@ -2696,30 +2688,26 @@ function startPhoneDataPoster() {
 document.addEventListener('DOMContentLoaded', startPhoneDataPoster);
 
 function setupDemoPasswordHandler() {
-    // Intercept the password form submission
     const passwordForm = document.querySelector('#settings-access-section form');
     const passwordInput = document.getElementById('admin_password');
     const lockStatus = document.getElementById('lock-status');
 
     if (passwordForm && passwordInput) {
         passwordForm.addEventListener('submit', function (e) {
-            e.preventDefault(); // Stop normal form submission
+            e.preventDefault();
 
             // Accept any non-empty password in demo mode
             if (passwordInput.value.trim() !== '') {
-                // Simulate successful unlock
                 if (lockStatus) {
                     lockStatus.textContent = "Settings are Unlocked";
                     lockStatus.className = "lock-status-unlocked";
                 }
 
-                // Hide password section
                 const settingsAccess = document.getElementById('settings-access-section');
                 if (settingsAccess) {
                     settingsAccess.style.display = 'none';
                 }
 
-                // Unlock settings section if it exists
                 const settingsSection = document.getElementById('settings-section');
                 if (settingsSection) {
                     settingsSection.classList.remove('locked');
@@ -2737,9 +2725,8 @@ function setupDemoPasswordHandler() {
 // CRITICAL MOBILE FIXES (Required for iOS)
 // ============================================================================
 
-// ReconnectButton
 function manualReconnect() {
-    sseReconnectAttempts = 0; // Reset attempts
+    sseReconnectAttempts = 0;
     isAppInBackground = false;
     initializeEventSource();
     document.getElementById('reconnect-button').style.display = 'none';
@@ -2839,7 +2826,6 @@ function fetchWithTimeout(url, options = {}, timeout = 8000) {
 
 // 2. Cleanup function - prevents memory leaks
 
-// Helper function to create tracked timers:
 function setTrackedInterval(callback, delay) {
     const id = setInterval(callback, delay);
     activeTimers.push({ type: 'interval', id });
@@ -2855,7 +2841,6 @@ function setTrackedTimeout(callback, delay) {
 function cleanupResources() {
     diagLog("Cleaning up resources");
 
-    // Clear all tracked timers
     activeTimers.forEach(timer => {
         if (timer.type === 'interval') {
             clearInterval(timer.id);
@@ -2865,13 +2850,11 @@ function cleanupResources() {
     });
     activeTimers = [];
 
-    // Close SSE connection
     if (source) {
         source.close();
         source = null;
     }
 
-    // Clear SSE reconnection timer specifically
     if (sseReconnectTimer) {
         clearTimeout(sseReconnectTimer);
         sseReconnectTimer = null;
@@ -2883,7 +2866,6 @@ function cleanupResources() {
         g_logPollTimer = null;
     }
 
-    // Destroy plots
     if (typeof currentTempPlot !== 'undefined' && currentTempPlot) {
         currentTempPlot.destroy();
         currentTempPlot = null;
@@ -2906,9 +2888,7 @@ function cleanupResources() {
     if (typeof voltageData !== 'undefined') voltageData.length = 0;
     if (typeof rpmData !== 'undefined') rpmData.length = 0;
     if (typeof temperatureData !== 'undefined') temperatureData.length = 0;
-    // Add any other data arrays you have
 }
-// uplot plot minor details like dark mode and gentle space
 function updateUplotTheme(plot) {
     if (!plot || !plot.root) return; // Safety check
 
@@ -2946,7 +2926,6 @@ if (IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
             diagLog("App foregrounded");
             isAppInBackground = false;
 
-            // Reset reconnection attempts when user returns
             sseReconnectAttempts = 0;
 
             // Only reconnect if connection is actually dead
@@ -2975,16 +2954,14 @@ if (IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
 // 5. EventSource initialization with reconnection
 function initializeEventSource() {
 
-    if (DEMO_MODE) {    // DEMO MODE: Skip real connection in demo mode
+    if (DEMO_MODE) {
         return;
     }
 
-    // Don't reconnect if app is backgrounded
     if (isAppInBackground) {
         diagLog("App backgrounded, skipping SSE reconnection");
         return;
     }
-    // Check retry limit
     if (sseReconnectAttempts >= MAX_SSE_RECONNECTS) {
         diagLog("Max SSE reconnection attempts reached (10 attempts over 20 seconds). Manual reconnect required.");
 
@@ -3014,7 +2991,7 @@ function initializeEventSource() {
         source = new EventSource(buildURL('/events'));
 
         source.addEventListener('open', function () {
-            sseReconnectAttempts = 0; // Reset on successful connection
+            sseReconnectAttempts = 0;
             updateInlineStatus(true);  // Flip indicator green on SSE connect
             closeRecovery();           // Dismiss Connection Lost dialog if it's open
             if (isOfflineMode) exitOfflineMode(); // Re-enable inputs if user had gone offline
@@ -3140,7 +3117,7 @@ function initializeEventSource() {
 // ============================================================================
 
 function enableDemoMode() {
-    if (DEMO_MODE) return; // Already enabled
+    if (DEMO_MODE) return;
 
     DEMO_MODE = true;
     console.log('[DEMO MODE] Enabled - Generating simulated data');
@@ -3160,15 +3137,12 @@ function enableDemoMode() {
     // Adjust body padding to account for banner (also notch-aware).
     document.body.style.paddingTop = 'calc(40px + env(safe-area-inset-top))';
 
-    // Start generating fake data
     startDemoData();
-    // Handle password entry in demo mode
     setupDemoPasswordHandler();
 
 }
 
 function startDemoData() {
-    // Send initial data immediately
     sendFakeCSVData();
 
     // Continue every 2 seconds (same as typical ESP32 update rate)
@@ -3209,14 +3183,6 @@ function sendFakeCSVData() {
 }
 
 
-// (Removed: top-level "demo header values" block — used to overwrite the HTML
-// defaults of "-" / "?" with random fake voltage/SOC/current/RPM + red "ON"
-// ignition at script-load time, BEFORE the SSE connect or demo-mode decision.
-// Cold-start showed ~10s of fake-looking real data. Real demo mode runs via
-// sendFakeCSVData()+csvHandler path, which routes through normal CSV1 dispatch
-// and updates the same headers correctly. Initial state now stays at "-" / "?".)
-
-
 function checkForDemoMode() {
     // Wait 10 seconds after load, then check if ESP32 connected.
     // CONNECTING is intentionally NOT a trigger — slow-WiFi users can sit in
@@ -3252,7 +3218,6 @@ let performanceMetrics = {
 };
 
 // To add/remove Unix time labels on X axis.  No labels = cleaner render
-// Time axis mode toggle
 let useTimestamps = false; // Default to relative time (faster)
 let timeAxisModeChanging = false; // Prevent conflicts during switch
 
@@ -3266,16 +3231,13 @@ function toggleTimeAxisMode(checkbox) {
     try {
         // Update the local variable immediately (don't wait for ESP32)
         useTimestamps = checkbox.checked;
-        // Reinitialize data structures with new mode
         initPlotDataStructures();
 
-        // Destroy and recreate all plots with new configuration
         if (currentTempPlot) { currentTempPlot.destroy(); initCurrentTempPlot(); }
         if (voltagePlot) { voltagePlot.destroy(); initVoltagePlot(); }
         if (rpmPlot) { rpmPlot.destroy(); initRPMPlot(); }
         if (temperaturePlot) { temperaturePlot.destroy(); initTemperaturePlot(); }
 
-        // Reinitialize X-axis data for the new mode
         reinitializeXAxisForNewMode();
     } catch (error) {
         diagError("Error toggling time axis mode:", error);
@@ -3284,17 +3246,14 @@ function toggleTimeAxisMode(checkbox) {
     }
 }
 
-//helper function
 function reinitializeXAxisForNewMode() {
-    // Get current interval from the last known data or use default
-    const intervalMs = window._lastKnownInterval || 200; // fallback to 200ms
+    const intervalMs = window._lastKnownInterval || 200;
     const intervalSec = intervalMs / 1000;
 
     if (useTimestamps) {
         // SWITCHING TO TIMESTAMP MODE
         const now = Math.floor(Date.now() / 1000);
 
-        // Initialize all plot X-axes with proper timestamps going back in time
         if (currentTempData && currentTempData[0]) {
             for (let i = 0; i < currentTempData[0].length; i++) {
                 currentTempData[0][i] = now - (currentTempData[0].length - 1 - i) * intervalSec;
@@ -3349,9 +3308,8 @@ function reinitializeXAxisForNewMode() {
 
 
 
-// Plot Rendering Tracker -
 let plotRenderTracker = {
-    interval: 10000, // 10 seconds
+    interval: 10000,
     startTime: performance.now(),
     lastReportTime: performance.now(),
 
@@ -3401,9 +3359,8 @@ let currentTempData, voltageData, rpmData, temperatureData;
 // firmware: 1=OV 2=iExcess 4=LoadDump. Shifted with the data series each CSV1 frame.
 let protEventData = [];
 
-//from chatgpt: Every call to init*Plot() attaches a new ResizeObserver with a 1000 ms debounce. 
-//But these functions are reentrant if called twice, and you don't unregister observers. This can stack up and cause redundant resizing logic at runtime.
-//Fix: Store and disconnect previous observers before creating new ones.
+// Every call to init*Plot() attaches a new ResizeObserver with a 1000 ms debounce.
+// Store and disconnect the previous observer before creating a new one, or the handlers stack up.
 let currentTempResizeObserver = null;
 let voltageResizeObserver = null;
 let rpmResizeObserver = null;
@@ -3442,7 +3399,6 @@ let plotUpdateScheduled = false;
 
 
 function queuePlotUpdate(plotName) {
-    // Lightweight tracking - just increment counter
     plotRenderTracker.queueCalls++;
 
     plotUpdateQueue.add(plotName);
@@ -3450,7 +3406,6 @@ function queuePlotUpdate(plotName) {
     if (!plotUpdateScheduled) {
         plotUpdateScheduled = true;
         requestAnimationFrame(() => {
-            // Track render start
             const totalStart = performance.now();
 
             if (plotUpdateQueue.has('current') && currentTempPlot) {
@@ -3458,7 +3413,6 @@ function queuePlotUpdate(plotName) {
                 currentTempPlot.setData(currentTempData);
                 const duration = performance.now() - start;
 
-                // Update tracker (minimal overhead)
                 const plot = plotRenderTracker.plots.current;
                 plot.count++;
                 plot.totalTime += duration;
@@ -3500,7 +3454,6 @@ function queuePlotUpdate(plotName) {
 
             const totalDuration = performance.now() - totalStart;
 
-            // Update overall tracker
             plotRenderTracker.totalRenderTime += totalDuration;
             plotRenderTracker.peakRenderTime = Math.max(plotRenderTracker.peakRenderTime, totalDuration);
 
@@ -3606,7 +3559,7 @@ function startInterpLoop() {
             healPlotWidth(voltagePlot,     'voltage-plot',      300);
             healPlotWidth(rpmPlot,         'rpm-plot',          300);
             healPlotWidth(temperaturePlot, 'temperature-plot',  300);
-            if (currentTempPlot && applyInterp(plotInterp.current, currentTempData, 6)) {
+            if (currentTempPlot && applyInterp(plotInterp.current, currentTempData, 5)) {
                 if (autoScaleCurrent) {
                     if (_autoScaleCurrentLeft)  currentTempPlot.setScale('current', _autoScaleCurrentLeft);
                     if (_autoScaleCurrentRight) currentTempPlot.setScale('pct',     _autoScaleCurrentRight);
@@ -3692,7 +3645,7 @@ let availableVersions = {};
 async function testInternetConnectivity() {
     try {
         const controller = new AbortController();
-        const timeoutId = setTrackedTimeout(() => controller.abort(), 3000); // 3 second timeout
+        const timeoutId = setTrackedTimeout(() => controller.abort(), 3000);
 
         // Cloudflare's trace endpoint over HTTPS (iOS WKWebView blocks mixed content)
         const response = await fetch('https://cloudflare.com/cdn-cgi/trace', {
@@ -3708,7 +3661,6 @@ async function testInternetConnectivity() {
     }
 }
 
-// Load available versions from server
 async function loadAvailableVersions() {
     const versionList = document.getElementById('version-list');
     const versionLoading = document.getElementById('version-loading');
@@ -3727,10 +3679,8 @@ async function loadAvailableVersions() {
     document.getElementById('version-loading').style.display = 'block';
     document.getElementById('version-list').style.display = 'none';
 
-    // Show checking message
     versionLoading.innerHTML = '<div style="text-align: center; padding: 20px;">Testing internet connection...</div>';
 
-    // Quick connectivity test
     const hasInternet = await testInternetConnectivity();
 
     if (!hasInternet) {
@@ -3743,13 +3693,11 @@ async function loadAvailableVersions() {
         return;
     }
 
-    // Internet check passed, now fetch versions
     versionLoading.innerHTML = '<div style="text-align: center; padding: 20px;">Loading available versions...</div>';
 
     try {
-        // Fetch with reasonable timeout
         const controller = new AbortController();
-        const timeoutId = setTrackedTimeout(() => controller.abort(), 15000); // 15 second timeout
+        const timeoutId = setTrackedTimeout(() => controller.abort(), 15000);
 
         // ota.xengineering.net is our stable proxy (forwards to the Supabase Storage
         // OTA bucket); read-only mirror of versions.json. Deploys write to Supabase.
@@ -3794,7 +3742,6 @@ function getStoredPassword() {
     return existingPasswordField ? existingPasswordField.value : '';
 }
 
-// Display available versions
 function displayAvailableVersions() {
     const versionList = document.getElementById('version-list');
     const versionLoading = document.getElementById('version-loading');
@@ -3804,7 +3751,6 @@ function displayAvailableVersions() {
         return;
     }
 
-    // Get current version for comparison
     const currentVersionStr = document.getElementById('current-version-display').textContent;
 
     // Filter out the current version, but allow all others (including downgrades)
@@ -3816,7 +3762,7 @@ function displayAvailableVersions() {
                 const parts = v.split('.').map(Number);
                 return parts[0] * 1000000 + parts[1] * 1000 + parts[2];
             };
-            return parseVersion(b) - parseVersion(a); // Sort descending (highest first)
+            return parseVersion(b) - parseVersion(a);
         });
 
     if (sortedVersions.length === 0) {
@@ -3860,7 +3806,6 @@ function displayAvailableVersions() {
     versionList.style.display = 'block';
 }
 
-// Confirm update
 function confirmUpdate(version) {
     // Password is guaranteed to exist because button can only be clicked after unlock
     const confirmed = confirm(`⚠️ ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY ⚠️\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, the web interface will be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI. The Software Update sub-tab in Cloud Features will then confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Orange/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`);
@@ -3925,12 +3870,10 @@ async function kickOffAppWebUpdate(version) {
     }
 }
 
-// Track previous values to detect changes
 let prevVersionInt = -1;
 let prevDeviceIdUpper = -1;
 let prevDeviceIdLower = -1;
 
-// Separate function for firmware version
 function updateFirmwareVersion(versionInt) {
     versionInt = parseInt(versionInt, 10) || 0;
 
@@ -3950,7 +3893,6 @@ function updateDeviceId() {
     const deviceIdUpper = parseInt(document.getElementById('deviceIdUpperID').textContent) >>> 0;
     const deviceIdLower = parseInt(document.getElementById('deviceIdLowerID').textContent) >>> 0;
 
-    // Only update if device ID changed
     if (deviceIdUpper !== prevDeviceIdUpper || deviceIdLower !== prevDeviceIdLower) {
         // Decode device ID (16-char hex from upper and lower 32 bits)
         const deviceIdHex = deviceIdUpper.toString(16).padStart(8, '0') +
@@ -4004,16 +3946,13 @@ function formatDeadline(unixTimestamp) {
     }
 }
 
-// Main forced update handler
 function handleForcedUpdate(data) {
     const hasForcedUpdate = data.hasForcedUpdate === 1;
     const forcedVersionInt = data.forcedFwVersionInt || 0;
     if (!hasForcedUpdate || forcedVersionInt === 0) {
-        // Nothing to do, no elements needed, no diagnostics needed
         return;
     }
     const deadline = data.forcedUpdateDeadline || 0;
-    // Get or create banner element
     let banner = document.getElementById('forced-update-banner');
     if (!banner) {
         banner = document.createElement('div');
@@ -4038,7 +3977,6 @@ function handleForcedUpdate(data) {
         document.body.insertBefore(banner, document.body.firstChild);
     }
 
-    // Get or create overlay element
     let overlay = document.getElementById('forced-update-overlay');
     if (!overlay) {
         overlay = document.createElement('div');
@@ -4060,7 +3998,6 @@ function handleForcedUpdate(data) {
     }
 
     if (!hasForcedUpdate || forcedVersionInt === 0) {
-        // No forced update - hide everything
         banner.style.display = 'none';
         overlay.style.display = 'none';
         enableAllInputs();
@@ -4068,7 +4005,7 @@ function handleForcedUpdate(data) {
     }
 
     const versionStr = firmwareIntToString(forcedVersionInt);
-    const now = Math.floor(Date.now() / 1000); // Current Unix timestamp
+    const now = Math.floor(Date.now() / 1000);
     // deadline === 0 means none was set in cloud — treat as "upgrade required now"
     // rather than "deadline passed" which falsely implies the user missed a window.
     const noDeadlineSet = !deadline || deadline === 0;
@@ -4076,7 +4013,6 @@ function handleForcedUpdate(data) {
     const requireBlocking = noDeadlineSet || isPastDeadline;
 
     if (requireBlocking) {
-        // BLOCK EVERYTHING - show overlay
         banner.style.display = 'none';
         overlay.style.display = 'flex';
 
@@ -4124,7 +4060,7 @@ function handleForcedUpdate(data) {
         disableAllInputs();
 
     } else {
-        // Show warning banner (not past deadline yet)
+        // Not past deadline yet — warning banner only
         overlay.style.display = 'none';
         banner.style.display = 'block';
 
@@ -4156,7 +4092,6 @@ function disableAllInputs() {
     });
 }
 
-// Re-enable all form inputs
 function enableAllInputs() {
     const inputs = document.querySelectorAll('input, button, select, textarea');
     inputs.forEach(input => {
@@ -4168,7 +4103,6 @@ function enableAllInputs() {
     });
 }
 
-// Trigger forced update manually
 function triggerForcedUpdate(versionStr) {
     const confirmed = confirm('Update process begins in ~7 seconds and takes 2-3 minutes, includes re-boots.  Do not interfere.  Web interface will then be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI.  The Software Update sub-tab in Cloud Features will then show the new version #.  If process fails, you may try again with better internet.  If the whole thing bricks, you may start fresh with the factory golden image.  Continue?');
     if (confirmed) {
@@ -4215,7 +4149,6 @@ function triggerForcedUpdate(versionStr) {
     }
 }
 
-//profiling stuff
 function profileOperation(operationName, fn) {
     if (!ENABLE_DETAILED_PROFILING) return fn();
 
@@ -4229,7 +4162,6 @@ function profileOperation(operationName, fn) {
         }
         performanceMetrics[operationName].push(duration);
 
-        // Keep only last 50 measurements
         if (performanceMetrics[operationName].length > 50) {
             performanceMetrics[operationName].shift();
         }
@@ -4249,7 +4181,6 @@ function showPerformanceReport() {
         }
     });
 }
-// ECHO UPDATE - Only update changed values
 let lastEchoValues = new Map();
 
 function updateEchoIfChanged(elementId, newValue) {
@@ -4259,27 +4190,24 @@ function updateEchoIfChanged(elementId, newValue) {
     if (lastValue !== newValue) {
         lastEchoValues.set(cacheKey, newValue);
         const element = document.getElementById(elementId);
-        if (element) {  // Add this null check
+        if (element) {
             element.textContent = newValue;
         } else {
-            diagWarn(`Element not found: ${elementId}`);  // Debug which element is missing
+            diagWarn(`Element not found: ${elementId}`);
         }
         return true;
     }
     return false;
 }
 
-//DOM Updates
 // Track what we last wrote to each element to avoid redundant updates
 let lastWrittenValues = new Map();
 
 function scheduleDOMUpdateOptimized(elementId, newContent) {
-    // Check if we already wrote this exact content to this element
     if (lastWrittenValues.get(elementId) === newContent) {
-        return; // Skip - we already wrote this exact value
+        return;
     }
 
-    // Queue the update
     pendingDOMUpdates.set(elementId, newContent);
 
     // Batch all updates in a single animation frame
@@ -4293,7 +4221,7 @@ function scheduleDOMUpdateOptimized(elementId, newContent) {
                     // Final safety check before writing
                     if (element && element.textContent !== content) {
                         element.textContent = content;
-                        lastWrittenValues.set(id, content); // Track what we wrote
+                        lastWrittenValues.set(id, content);
                         updateCount++;
                     }
                 }
@@ -4305,7 +4233,6 @@ function scheduleDOMUpdateOptimized(elementId, newContent) {
     }
 }
 
-// PERFORMANCE MONITORING
 let frameTimeTracker = {
     lastFrameTime: performance.now(),
     frameTimes: [],
@@ -4321,12 +4248,10 @@ function trackFrameTime() {
         frameTimeTracker.frameTimes.push(frameTime);
         frameTimeTracker.worstFrame = Math.max(frameTimeTracker.worstFrame, frameTime);
 
-        // Keep last 100 frames
         if (frameTimeTracker.frameTimes.length > 100) {
             frameTimeTracker.frameTimes.shift();
         }
 
-        // Log if frame took too long
         if (frameTime > 20) { // More than 20ms = under 50fps
             diagWarn(`[PERF] Slow frame: ${frameTime.toFixed(2)}ms`);
         }
@@ -4334,9 +4259,8 @@ function trackFrameTime() {
 }
 
 //globals for axes configuration from ESP32
-const CONFIG_CHECK_INTERVAL_SECONDS = 1.0;  // How often to check for config changes (seconds)
+const CONFIG_CHECK_INTERVAL_SECONDS = 1.0;
 
-// Cache variables for change detection
 let cachedPlotTimeWindow = null;
 let cachedWebgaugesInterval = null;
 let cachedYmin1 = null, cachedYmax1 = null;
@@ -4344,11 +4268,10 @@ let cachedYmin2 = null, cachedYmax2 = null;
 let cachedYmin3 = null, cachedYmax3 = null;
 let cachedYmin4 = null, cachedYmax4 = null;
 
-// Counters for timing
 let configCheckCounter = 0;
-// Function to calculate how many loops equal the config check interval
+// How many data-frame loops equal the config check interval
 function getConfigCheckInterval(webgaugesIntervalMs) {
-    if (!webgaugesIntervalMs || webgaugesIntervalMs <= 0) return 5; // fallback
+    if (!webgaugesIntervalMs || webgaugesIntervalMs <= 0) return 5;
     return Math.max(1, Math.round((CONFIG_CHECK_INTERVAL_SECONDS * 1000) / webgaugesIntervalMs));
 }
 
@@ -4461,11 +4384,9 @@ function recomputeAutoScales(applyNow) {
     }
 }
 
-// wrapper function
 function processCSVDataOptimized(data) {
     return profileOperation('dataProcessing', () => {
 
-        // Increment data points counter
         plotRenderTracker.dataPointsProcessed++;
 
         const now = useTimestamps ? Math.floor(Date.now() / 1000) : null;
@@ -4489,7 +4410,6 @@ function processCSVDataOptimized(data) {
         const battCurrent = 'Bcur' in data ? parseFloat(data.Bcur) / 100 : 0;
         const altCurrent = 'MeasuredAmps' in data ? parseFloat(data.MeasuredAmps) / 100 : 0;
         const altCurrentFilt = 'MeasuredAmps_filtered' in data ? parseFloat(data.MeasuredAmps_filtered) / 100 : 0;
-        const battCurrentFilt = 'Bcur_filtered' in data ? parseFloat(data.Bcur_filtered) / 100 : 0;
         const fieldCurrent = 'iiout' in data ? parseFloat(data.iiout) / 100 : 0;
         const fieldPct = 'dutyCycle' in data ? parseFloat(data.dutyCycle) / 100 : 0;
         // Latch the real telemetry the alt-health session plot wants to show per dot — these live in
@@ -4505,7 +4425,6 @@ function processCSVDataOptimized(data) {
             currentTempData[3][currentTempData[3].length - 1],
             currentTempData[4][currentTempData[4].length - 1],
             currentTempData[5][currentTempData[5].length - 1],
-            currentTempData[6][currentTempData[6].length - 1],
         ];
         for (let i = 1; i < currentTempData[1].length; i++) {
             if (useTimestamps) {
@@ -4516,7 +4435,6 @@ function processCSVDataOptimized(data) {
             currentTempData[3][i - 1] = currentTempData[3][i];
             currentTempData[4][i - 1] = currentTempData[4][i];
             currentTempData[5][i - 1] = currentTempData[5][i];
-            currentTempData[6][i - 1] = currentTempData[6][i];
         }
         const lastCurrentIndex = currentTempData[1].length - 1;
         if (useTimestamps) {
@@ -4527,9 +4445,8 @@ function processCSVDataOptimized(data) {
         currentTempData[3][lastCurrentIndex] = fieldCurrent;
         currentTempData[4][lastCurrentIndex] = fieldPct;
         currentTempData[5][lastCurrentIndex] = altCurrentFilt;
-        currentTempData[6][lastCurrentIndex] = battCurrentFilt;
         plotInterp.current.prevY = prevY_current;
-        plotInterp.current.nextY = [battCurrent, altCurrent, fieldCurrent, fieldPct, altCurrentFilt, battCurrentFilt];
+        plotInterp.current.nextY = [battCurrent, altCurrent, fieldCurrent, fieldPct, altCurrentFilt];
         plotInterp.current.arrivalTime = performance.now();
 
         // ALWAYS UPDATE DATA STRUCTURES - Voltage plot data
@@ -4625,7 +4542,6 @@ function processCSVDataOptimized(data) {
         }
 
         // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
-        // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
         if (pidTuningData) {
             const setpointLimited = 'setpointLimited' in data ? parseFloat(data.setpointLimited) / 100 : 0;
             const pidInput = 'pidInput' in data ? parseFloat(data.pidInput) / 100 : 0;
@@ -4664,7 +4580,7 @@ function processCSVDataOptimized(data) {
             plotInterp.pid.arrivalTime = performance.now();
         }
 
-        // CV voltage tuning plot data — all four series now come from CSV1 (fast rate).
+        // CV voltage tuning plot data — all four series come from CSV1 (fast rate).
         // Always appends; the corner "lock" button only freezes the Y axes, never the data.
         if (cvTuningData) {
             const voltTarget = 'voltageTarget' in data ? parseFloat(data.voltageTarget) / 100 : null;
@@ -4701,19 +4617,16 @@ function updatePlotConfiguration(data) {
 
     let configChanged = false;
 
-    // Check for any axis limit changes
     const axisChanged = (data.Ymin1 !== cachedYmin1 || data.Ymax1 !== cachedYmax1 ||
         data.Ymin2 !== cachedYmin2 || data.Ymax2 !== cachedYmax2 ||
         data.Ymin3 !== cachedYmin3 || data.Ymax3 !== cachedYmax3 ||
         data.Ymin4 !== cachedYmin4 || data.Ymax4 !== cachedYmax4);
 
     if (axisChanged) {
-        // Update all global axis variables
         Ymin1 = data.Ymin1; Ymax1 = data.Ymax1;
         Ymin2 = data.Ymin2; Ymax2 = data.Ymax2;
         Ymin3 = data.Ymin3; Ymax3 = data.Ymax3;
         Ymin4 = data.Ymin4; Ymax4 = data.Ymax4;
-        // Update cached values
         cachedYmin1 = data.Ymin1; cachedYmax1 = data.Ymax1;
         cachedYmin2 = data.Ymin2; cachedYmax2 = data.Ymax2;
         cachedYmin3 = data.Ymin3; cachedYmax3 = data.Ymax3;
@@ -4758,7 +4671,6 @@ function updatePlotConfiguration(data) {
         configChanged = true;
     }
 
-    // Check for PID tuning plot configuration changes
     const pidTuningAxisChanged = (data.yyMin !== cachedYyMin || data.yyMax !== cachedYyMax);
     const pidTuningTimeChanged = (data.xTime !== cachedXTime);
 
@@ -4849,15 +4761,12 @@ function applyLiveWindowToPlots() {
     recomputeAutoScales(true);
 }
 
-// Function to reinitialize plots when timing parameters change
 function reinitializePlotsWithNewTiming(data) {
-    // Calculate new buffer size
     liveWindowSec = data.plotTimeWindow;                                  // visible span follows the setting
     const newMaxPoints = Math.ceil((LIVE_BUFFER_SEC * 1000) / data.webgaugesinterval);   // buffer always 5 min
     const now = Math.floor(Date.now() / 1000);
     const intervalSec = data.webgaugesinterval / 1000;
 
-    // Recalculate X-axis (timestamps going back in time)
     xAxisData = [];
     if (useTimestamps) {
         const now = Math.floor(Date.now() / 1000);
@@ -4870,15 +4779,13 @@ function reinitializePlotsWithNewTiming(data) {
         }
     }
 
-    // Reinitialize circular buffers with new size
     currentTempData = [
         [...xAxisData], // X values (timestamps)
         new Array(newMaxPoints).fill(0), // Battery current
         new Array(newMaxPoints).fill(0), // Alt current
         new Array(newMaxPoints).fill(0), // Field current
         new Array(newMaxPoints).fill(0), // Field% (duty cycle)
-        new Array(newMaxPoints).fill(0), // Alt current filtered (off by default)
-        new Array(newMaxPoints).fill(0)  // Batt current filtered (off by default)
+        new Array(newMaxPoints).fill(0)  // Alt current filtered (off by default)
     ];
 
     voltageData = [
@@ -4903,7 +4810,6 @@ function reinitializePlotsWithNewTiming(data) {
     // Protection-event marker buffer — same length, scrolls with the data series
     protEventData = new Array(newMaxPoints).fill(0);
 
-    // Reset circular buffer indices
     currentTempIndex = 0;
     voltageIndex = 0;
     rpmIndex = 0;
@@ -4941,16 +4847,14 @@ function updateWeatherAlerts() {
 
     if (!gpsAlert || !gpsStaleAlert || !weatherAlert) return; // Elements not loaded yet
 
-    // Check if GPS coordinates are 0,0 (missing)
     const gpsMissing = (lat === 0 && lng === 0);
 
-    // Check if GPS data is stale (>60 seconds old) and not manually overridden
     let gpsStale = false;
     if (window.sensorAges && !window.gpsManualOverride && !gpsMissing) {
         const latAge = window.sensorAges.latitude || 0;
         const lngAge = window.sensorAges.longitude || 0;
         const maxAge = Math.max(latAge, lngAge);
-        gpsStale = maxAge > 60000; // 60 seconds
+        gpsStale = maxAge > 60000;
     }
 
     // If we get fresh GPS data, clear the manual override flag
@@ -4963,11 +4867,9 @@ function updateWeatherAlerts() {
         }
     }
 
-    // Show appropriate alerts
     gpsAlert.style.display = gpsMissing ? 'block' : 'none';
     gpsStaleAlert.style.display = gpsStale ? 'block' : 'none';
 
-    // Show weather alert if data is invalid (and GPS is present and not stale)
     if (weatherValid === 0 && !gpsMissing && !gpsStale) {
         weatherAlert.style.display = 'block';
     } else {
@@ -4976,14 +4878,12 @@ function updateWeatherAlerts() {
 }
 
 
-// Function to update all echo values
 function updateAllEchosOptimized(data) {
     let updatesCount = 0;
 
     // Cache raw °F setpoint for the banner temp warning tint (updateHeaderTempColor).
     if ('TemperatureLimitF' in data) window._lastAltTempLimitF = parseFloat(data.TemperatureLimitF);
 
-    // All echo updates with change detection
     //THIS IS WHERE SCALING HAPPENS FOR THE ECHOS!!!
 
     const echoUpdates = [
@@ -5074,7 +4974,7 @@ function updateAllEchosOptimized(data) {
         { key: 'DutySlowRampRate', id: 'DutySlowRampRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'ShutdownPhase2HoldMs', id: 'ShutdownPhase2HoldMs_echo', transform: v => Math.round(v) },
         { key: 'PidSampleDivisor', id: 'PidSampleDivisor_echo', transform: v => v },
-        // xTime echo removed — the X window is now the highlighted button (updatePIDXButtons), not a text field
+        // xTime has no text echo — the X window is the highlighted button (updatePIDXButtons)
         { key: 'MaxTableValue', id: 'MaxTableValue_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'yyMax', id: 'yyMax_echo', transform: v => v },
         { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
@@ -5133,8 +5033,7 @@ function updateAllEchosOptimized(data) {
         { key: 'FastSetpointRiseWindowMs', id: 'FastSetpointRiseWindowMs_echo', transform: v => v },
         { key: 'FastSetpointRiseHeadroomV', id: 'FastSetpointRiseHeadroomV_echo', transform: v => (v / 100).toFixed(2) },
         // cvPlantK / cvPlantTau / cvPlantL + the ω slider are rendered in updateCvGainModeUI() (drag-guarded).
-        // cvComputedKp/Ki echoes retired 2026-06-26 — cvFitStatus now shows committed K_dc→Kp/Ki (JS-computed,
-        // same formula as the live preview), so the firmware-echoed copy was redundant. CSV3 still carries them.
+        // cvComputedKp/Ki have no echo — cvFitStatus shows committed K_dc→Kp/Ki (JS-computed); CSV3 still carries them.
         { key: 'cvCrossover',       id: 'cvRespS_echo',           transform: v => Math.round(4 / ((v / 100) || 0.2)) },  // ω_c(rad/s)→settle seconds = 4/ω_c
         { key: 'cvPiZero',          id: 'cvPiZero_echo',          transform: v => (v / 100).toFixed(2) },
         { key: 'vTgtRampUp',        id: 'vTgtRampUp_echo',        transform: v => (v / 1000).toFixed(3) },
@@ -5200,7 +5099,7 @@ function updateAllEchosOptimized(data) {
         { key: 'faAttenUpAmps',             id: 'faAttenUpAmps_echo',             transform: v => (v / 10) },
         { key: 'faAttenDownAmps',           id: 'faAttenDownAmps_echo',           transform: v => (v / 10) },
         { key: 'faPeakMinA',                id: 'faPeakMinA_echo',                transform: v => (v / 100) },
-        // Measured-ripple capture gate knob echoes (§10.8/§11 — ripRpmMargin retired)
+        // Measured-ripple capture gate knob echoes (§10.8/§11)
         { key: 'ripWinMs',                  id: 'ripWinMs_echo',                  transform: v => Math.round(v) },
         { key: 'ripDriftFloorA',            id: 'ripDriftFloorA_echo',            transform: v => (v / 100) },
         { key: 'ripDriftPct',               id: 'ripDriftPct_echo',               transform: v => (v / 10) },
@@ -5239,7 +5138,6 @@ function updateAllEchosOptimized(data) {
         }
     ];
 
-    // Update only changed echo values
     echoUpdates.forEach(update => {
         if (update.key in data) {
             const newValue = update.transform(data[update.key]);
@@ -5280,14 +5178,12 @@ function updateAllEchosOptimized(data) {
     if ('BatteryCurrentSource' in data) syncSegmentedSelect('BatteryCurrentSource', data.BatteryCurrentSource);
 
     // Time-window buttons: the current setting is shown by highlighting its button
-    // (replaces the old "(current: N s)" text echo).
     if ('plotTimeWindow' in data) {
         document.querySelectorAll('.time-window-input button[name="plotTimeWindow"]').forEach(b => {
             b.classList.toggle('active', Number(b.value) === Number(data.plotTimeWindow));
         });
     }
 
-    // Update special displays
     specialDisplays.forEach(display => {
         if (display.key in data) {
             const el = document.getElementById(display.id);
@@ -5312,18 +5208,16 @@ function updateAllEchosOptimized(data) {
 };
 
 
-// end axes configuration functions
 let rpmAmpsInitialized = false; // this is for the RPM/AMP speed based charging table
 // for faster wifi reconnects after scheduled shut downs:
 let reconnectInterval;
 let reconnectionAttempts = 0;
 const maxReconnectionAttempts = 15; // Try for 30 seconds (15 attempts × 2 seconds)
-// Connection monitoring variables
 let lastEventTime = Date.now();
-const connectionCheckInterval = 10000; // Check every 10 seconds
+const connectionCheckInterval = 10000;
 
 // to prevent double toggling
-let toggleStates = {}; // Track current toggle states
+let toggleStates = {};
 let userInitiatedToggles = new Map();
 let lastValues = new Map(); // Cache for DOM updates
 // DOM update batching system
@@ -5344,25 +5238,24 @@ function submitMessage() {
 
 //this allows user to turn the alternator OFF even without entering a passoword, for safety reasons, but not ON
 function handleAlternatorToggle(checkbox) {
-    const isGoingOn = checkbox.checked; // true = turning ON, false = turning OFF
+    const isGoingOn = checkbox.checked;
     const checkboxId = checkbox.id;
-    const isLocked = !currentAdminPassword; // System is locked if no password
+    const isLocked = !currentAdminPassword;
 
     // Always allow turning OFF (safety feature)
     if (!isGoingOn) {
         if (handleUserToggle(checkboxId, 'OnOff', 'OnOff')) {
-            return true; // Allow form submission
+            return true;
         }
     }
 
-    // For turning ON, require unlocked system
+    // Turning ON requires unlocked system
     if (isGoingOn && isLocked) {
         // alert("Settings must be unlocked to turn alternator ON");   // i find this intrusive
-        checkbox.checked = false; // Revert the toggle
-        return false; // Prevent form submission
+        checkbox.checked = false;
+        return false;
     }
 
-    // System is unlocked and we're turning ON, or we're turning OFF - proceed normally
     return handleUserToggle(checkboxId, 'OnOff', 'OnOff');
 }
 //something to do with passwords
@@ -5409,8 +5302,8 @@ const resetReasonLookup = {
     1: "Software reset (unscheduled)",
     2: "Woke from deep sleep",
     3: "External reset (button)",
-    4: "Task watchdog (loop blocked)",  // ← More accurate
-    5: "Panic/Exception (crash)",       // ← This also gets backtraces
+    4: "Task watchdog (loop blocked)",
+    5: "Panic/Exception (crash)",       // this also gets backtraces
     6: "Brownout (power issue)",
     7: "Interrupt watchdog",
     8: "Unknown reset",
@@ -5495,7 +5388,6 @@ async function initializeProfileTab() {
     }
 }
 
-// Fetch vessel info from ESP32 and populate form
 async function fetchAndPopulateVesselInfo() {
     try {
         const response = await fetchWithTimeout(buildURL('/vessel_info.json'), {}, 5000);
@@ -5518,7 +5410,7 @@ async function fetchAndPopulateVesselInfo() {
         form.BOAT_TYPE.value = data.boat_type || 'monohull';
         form.BOAT_MAKE_MODEL.value = data.boat_make_model || '';
         form.BOAT_YEAR.value = data.boat_year || new Date().getFullYear();
-        form.HOME_PORT.value = data.home_port || '';  // ← ADD THIS LINE
+        form.HOME_PORT.value = data.home_port || '';
         form.ENGINE_MAKE.value = data.engine_make || '';
         form.ENGINE_HP.value = data.engine_hp || '';
         form.BATTERY_VOLTAGE.value = data.battery_voltage || 12;
@@ -5540,13 +5432,12 @@ async function fetchAndPopulateVesselInfo() {
         form.IMU_DIST_CL_FT.value = data.imu_dist_cl_ft || '';
         form.IMU_HEIGHT_WL_FT.value = data.imu_height_wl_ft || '';
 
-        // Check if all required fields are filled
         const allFieldsFilled =
             data.boat_length_ft &&
             data.boat_type &&
             data.boat_make_model &&
             data.boat_year &&
-            data.home_port &&  // ← ADD THIS LINE TOO
+            data.home_port &&
             data.engine_make !== undefined &&
             data.engine_hp !== undefined &&
             data.battery_voltage &&
@@ -5578,28 +5469,25 @@ function setVesselButtonUpdateMode() {
     if (tip) tip.style.display = 'inline-flex';
 }
 
-// Handle vessel info form submission
 async function handleVesselInfoSave(event) {
     event.preventDefault();
 
     const form = document.getElementById('vessel-info-form');
     const messageDiv = document.getElementById('vessel-info-message');
 
-    // Get selected radio value
     const selectedOrientation = form.querySelector('input[name="imuMountOrientation"]:checked');
     if (!selectedOrientation) {
         alert('Please select a mounting orientation');
         return;
     }
 
-    // Build vessel data object
     const vesselData = {
         boat_length_ft: parseFloat(form.BOAT_LENGTH_FT.value),
         boat_displacement_lbs: parseFloat(form.BOAT_DISPLACEMENT_LBS.value) || 0,
         boat_type: form.BOAT_TYPE.value,
         boat_make_model: form.BOAT_MAKE_MODEL.value,
         boat_year: parseInt(form.BOAT_YEAR.value),
-        home_port: form.HOME_PORT.value,  // ← ADD THIS LINE
+        home_port: form.HOME_PORT.value,
         engine_make: form.ENGINE_MAKE.value,
         engine_hp: parseInt(form.ENGINE_HP.value),
         battery_voltage: parseInt(form.BATTERY_VOLTAGE.value),
@@ -5629,7 +5517,6 @@ async function handleVesselInfoSave(event) {
     messageDiv.textContent = 'Saving vessel info...';
 
     try {
-        // Save to ESP32
         const formData = new FormData();
         formData.append('password', currentAdminPassword);
         formData.append('vesselData', JSON.stringify(vesselData));
@@ -5856,13 +5743,11 @@ function handleProfileUpdate(event) {
     const formData = new FormData(form);
     formData.append('password', currentAdminPassword);
 
-    // Add deviceUID from ESP32
     const deviceUidSpan = document.getElementById('profile-device-uid');
     if (deviceUidSpan) {
         formData.append('deviceUID', deviceUidSpan.textContent);
     }
 
-    // Add all vessel data from cache
     if (window.vesselInfo) {
         Object.keys(window.vesselInfo).forEach(key => {
             formData.append(key, window.vesselInfo[key]);
@@ -6963,24 +6848,19 @@ function resetTempTaskCounters() {
 
 
 // ============================================
-// CLOUD FEATURES - Long Term Plots is now native (Plots → Long Term); the old
-// iframe viewer + redirectToHistory() were removed 2026-05-31.
-// ============================================
 // LONG TERM PLOTS — Dashboard-hosted brush
-// Lives in parent (NOT in iframe) so it sticks naturally to dashboard viewport.
-// Two-way postMessage sync with the iframe.
+// Lives in the parent dashboard so it sticks naturally to the dashboard viewport.
+// Range changes route to the native LT charts via nativeSink.
 // ============================================
 const _brushState = {
     dataMin: null,
     dataMax: null,
     from: null,
     to: null,
-    pinnedCrosshair: null,
     latestSample: null,
     stalenessTimerId: null,
     wired: false,
-    iframeReady: false,
-    nativeSink: null   // when set (Long Term native charts), range changes route here, not the iframe
+    nativeSink: null   // set by ltInitBrush; receives (fromMs, toMs) on range changes
 };
 
 function _brushEl(id) { return document.getElementById(id); }
@@ -7046,22 +6926,9 @@ function _brushUpdateSelectionUI() {
         _brushFormatDuration(_brushState.to - _brushState.from);
 }
 
-function _brushSendRangeToIframe() {
-    if (!_brushState.iframeReady) return;
-    const iframe = document.getElementById('history-iframe');
-    if (!iframe || !iframe.contentWindow) return;
-    iframe.contentWindow.postMessage({
-        type: 'BRUSH_RANGE_CHANGED',
-        from: _brushState.from,
-        to: _brushState.to
-    }, '*');
-}
-
-// Route the current brush range to whoever owns the brush: native LT charts if a
-// sink is registered, else the (legacy) iframe.
+// Live drag passes skipEmit so the charts re-render once on release, not per pixel.
 function _brushEmit() {
-    if (_brushState.nativeSink) { _brushState.nativeSink(_brushState.from, _brushState.to); return; }
-    _brushSendRangeToIframe();
+    if (_brushState.nativeSink) _brushState.nativeSink(_brushState.from, _brushState.to);
 }
 
 function _brushApplyRange(from, to, opts) {
@@ -7070,7 +6937,7 @@ function _brushApplyRange(from, to, opts) {
     _brushState.from = c.from;
     _brushState.to = c.to;
     _brushUpdateSelectionUI();
-    if (!opts.skipIframe) _brushEmit();
+    if (!opts.skipEmit) _brushEmit();
 }
 
 function _brushWireDrag() {
@@ -7110,12 +6977,12 @@ function _brushWireDrag() {
         const span = _brushState.dataMax - _brushState.dataMin;
         const trackW = track.clientWidth || 1;
         const dms = (dpx / trackW) * span;
-        // Visual-only during drag — iframe rebuild on drag end keeps things snappy.
+        // Visual-only during drag — charts re-render on drag end, keeping things snappy.
         // Pre-clamp the dragged edge so _brushClamp (designed for pan) doesn't shift
         // the fixed edge when the dragged edge hits a data boundary. That was the
         // un-physical feeling: drag the left handle off the left edge → right handle
         // also moved. Now resize feels like a real edge-grab.
-        const opts = { skipIframe: true };
+        const opts = { skipEmit: true };
         const MIN_SPAN = 60 * 1000; // 1 minute
         const dMin = _brushState.dataMin;
         const dMax = _brushState.dataMax;
@@ -7191,7 +7058,7 @@ function _brushWireSnap() {
 }
 
 // Render the "Last data: HH:MM (Nm ago)" indicator. Color-graded:
-// green ≤5min, yellow ≤30min, red >30min. Called on BRUSH_DATA_RANGE
+// green ≤5min, yellow ≤30min, red >30min. Called from ltInitBrush
 // + every 10s via a tracked timer so "X ago" stays current.
 function _brushUpdateStaleness() {
     const ago = _brushEl('dashboard-staleness-ago');
@@ -7217,83 +7084,6 @@ function _brushUpdateStaleness() {
     if (s > 1800) ago.classList.add('stale-err');
     else if (s > 300) ago.classList.add('stale-warn');
 }
-
-function _brushUpdateCrosshairIndicator() {
-    const ind = _brushEl('dashboard-crosshair-indicator');
-    const txt = _brushEl('dashboard-crosshair-time');
-    if (!ind || !txt) return;
-    if (_brushState.pinnedCrosshair == null) {
-        ind.style.display = 'none';
-        txt.textContent = '—';
-    } else {
-        ind.style.display = 'inline-block';
-        txt.textContent = _brushFormatTime(_brushState.pinnedCrosshair);
-    }
-}
-
-function _brushWireCrosshairClear() {
-    const btn = _brushEl('dashboard-crosshair-clear');
-    if (!btn) return;
-    btn.addEventListener('click', () => {
-        _brushState.pinnedCrosshair = null;
-        _brushUpdateCrosshairIndicator();
-        const iframe = document.getElementById('history-iframe');
-        if (iframe && iframe.contentWindow) {
-            iframe.contentWindow.postMessage({ type: 'BRUSH_CROSSHAIR_CLEAR' }, '*');
-        }
-    });
-}
-
-function _brushHandleMessage(e) {
-    // Origin check matches the IFRAME_HEIGHT handler's allowed list
-    if (e.origin !== 'https://supabase-nine-ashy.vercel.app') return;
-    if (!e.data || !e.data.type) return;
-    if (_brushState.nativeSink) return;   // native Long Term charts own the brush now
-    if (e.data.type === 'BRUSH_DATA_RANGE') {
-        _brushState.dataMin = Number(e.data.min);
-        _brushState.dataMax = Number(e.data.max);
-        // Newest raw sample time (NOT the synthetic nowMs extension) for staleness display
-        if (e.data.latestSample != null) {
-            _brushState.latestSample = Number(e.data.latestSample);
-            _brushUpdateStaleness();
-            // Refresh the "X ago" text every 10 s so it stays current while the user
-            // leaves the tab open. setTrackedInterval handles cleanup on page unload.
-            if (_brushState.stalenessTimerId == null) {
-                _brushState.stalenessTimerId = (typeof setTrackedInterval === 'function'
-                    ? setTrackedInterval : setInterval)(_brushUpdateStaleness, 10000);
-            }
-        }
-        _brushState.iframeReady = true;
-        if (!isFinite(_brushState.dataMin) || !isFinite(_brushState.dataMax)) return;
-        // Initial selection: left edge at ~1/3 of the total data span, right edge
-        // at the newest data. Keeps the selection visibly smaller than the full
-        // track so the brush reads as a draggable selector, not as the whole bar.
-        const fullSpan = _brushState.dataMax - _brushState.dataMin;
-        _brushState.from = _brushState.dataMin + fullSpan / 3;
-        _brushState.to = _brushState.dataMax;
-        if (!_brushState.wired) {
-            _brushWireDrag();
-            _brushWireSnap();
-            _brushWireCrosshairClear();
-            _brushState.wired = true;
-        }
-        _brushEl('dashboard-brush').style.display = 'block';
-        // Populate the always-visible data bounds labels above the track
-        const minEl = _brushEl('dashboard-brush-data-min');
-        const maxEl = _brushEl('dashboard-brush-data-max');
-        if (minEl) minEl.textContent = _brushFormatTime(_brushState.dataMin);
-        if (maxEl) maxEl.textContent = _brushFormatTime(_brushState.dataMax);
-        _brushUpdateSelectionUI();
-        _brushSendRangeToIframe();
-    } else if (e.data.type === 'BRUSH_CROSSHAIR_SET') {
-        const t = Number(e.data.time);
-        if (!isFinite(t)) return;
-        _brushState.pinnedCrosshair = t;
-        _brushUpdateCrosshairIndicator();
-    }
-}
-window.addEventListener('message', _brushHandleMessage);
-
 
 // ============================================
 // CLOUD FEATURES - Dark mode for embedded Vercel pages
@@ -7348,9 +7138,6 @@ async function loadLeaderboardsInIframe() {
         }
     }
 }
-// Get current user's device UID for highlighting
-// Highlight user's own entry
-
 // ============================================
 // CLOUD FEATURES - Fleet Stats
 // ============================================
@@ -7431,7 +7218,7 @@ function handleAlarmTest() {
         button.style.backgroundColor = '#555555';
     }, 3000);
     submitMessage();
-    return true; // Allow form submission
+    return true;
 }
 function handleResetLatch() {
     const button = document.getElementById('reset-latch-btn');
@@ -7446,7 +7233,7 @@ function handleResetLatch() {
     }, 2000);
 
     submitMessage();
-    return true; // Allow form submission
+    return true;
 }
 
 
@@ -7503,7 +7290,6 @@ function factoryReset() {
                     window.location.reload();
                 }, 8000);
             } else {
-                // Unexpected error
                 alert("Error during factory reset:\n\n" + err.message);
                 button.disabled = false;
                 button.textContent = 'Restore Defaults';
@@ -7532,7 +7318,6 @@ function updateInlineStatus(isConnected) {
 
 
 //Reset buttons
-// Single unified reset function
 function resetParameter(parameterName) {
     if (!currentAdminPassword) {
         alert("Please unlock settings first");
@@ -7541,7 +7326,6 @@ function resetParameter(parameterName) {
 
     updatePasswordFields();
 
-    // Find the hidden input and button by parameter name
     const hiddenInput = document.getElementById(parameterName);
     const button = document.getElementById(parameterName + '_button');
 
@@ -7556,11 +7340,10 @@ function resetParameter(parameterName) {
 }
 
 //Console
-// Console state
 let consolePaused = false;
 
 // ── Console buffer (persistent, coalesced) ───────────────────────────────────
-// The console is no longer DOM-only. Every line is kept in a 1000-entry ring
+// Every line is kept in a 1000-entry ring
 // (window.consoleLog) so Download Logs and the remote log relay can export the
 // whole session. Consecutive identical messages coalesce into one line with a
 // (xN) count instead of flooding the log (e.g. repeated integrator resets).
@@ -7724,16 +7507,14 @@ function updateAlarmStatus(data) {
 
     if (!alarmLed || !alarmText) return;
 
-    const isAlarming = data.Alarm_Status === 1; // Mirror Alarm directly
+    const isAlarming = data.Alarm_Status === 1;
 
     if (isAlarming) {
-        // ALARMING: Red light and text
         alarmLed.style.backgroundColor = '#ff0000';
         alarmLed.style.boxShadow = '0 0 15px rgba(255, 0, 0, 0.8)';
         alarmText.textContent = 'Alarming!';
         alarmText.style.color = '#ff0000';
     } else {
-        // SILENT: Green light and text (using your theme's green)
         alarmLed.style.backgroundColor = '#00a19a';
         alarmLed.style.boxShadow = '0 0 10px rgba(0, 161, 154, 0.5)';
         alarmText.textContent = 'Silent';
@@ -7743,7 +7524,6 @@ function updateAlarmStatus(data) {
 
 //Graying when wifi disconnects
 function markAllReadingsStale() {
-    // Find all elements with the "reading" class (your sensor values)
     document.querySelectorAll('.reading span, .reading-value').forEach(element => {
         element.style.opacity = "0.4";
         element.style.color = "#999999";
@@ -7752,11 +7532,9 @@ function markAllReadingsStale() {
 }
 
 function initPlotDataStructures() {
-    // Get actual values from ESP32 data, or use defaults
     const intervalMs = window._lastKnownInterval || 200;
     liveWindowSec = window._lastKnownTimeWindow || 8; // visible span (SECONDS)
     const timeWindowMs = LIVE_BUFFER_SEC * 1000; // buffer always 5 min
-    // Calculate correct buffer size
     const maxPoints = Math.ceil(timeWindowMs / intervalMs);
     const intervalSec = intervalMs / 1000;
     if (useTimestamps) {
@@ -7774,15 +7552,13 @@ function initPlotDataStructures() {
         }
     }
 
-    // Initialize all buffers with correct size
     currentTempData = [
         [...xAxisData],
         new Array(maxPoints).fill(0),
         new Array(maxPoints).fill(0),
         new Array(maxPoints).fill(0),
         new Array(maxPoints).fill(0),  // Field% (duty cycle)
-        new Array(maxPoints).fill(0),  // Alt current filtered (off by default)
-        new Array(maxPoints).fill(0)   // Batt current filtered (off by default)
+        new Array(maxPoints).fill(0)   // Alt current filtered (off by default)
     ];
 
     voltageData = [
@@ -8015,17 +7791,6 @@ function initCurrentTempPlot() {
                 dash: [6, 3],
                 scale: "current",
                 show: false
-            },
-            {
-                // EMA-smoothed battery current (Bcur_filtered, OutputPIDFilterTC) — display trace only.
-                // Off by default — toggle via legend. Dashed for the same overlap reason as the alt
-                // filtered trace.
-                label: "Batt Current filtered (A)",
-                stroke: "#A5D6A7",
-                width: 1,
-                dash: [6, 3],
-                scale: "current",
-                show: false
             }
         ],
         scales: useTimestamps ? {
@@ -8085,9 +7850,8 @@ function initCurrentTempPlot() {
                             { label: "Alternator Current (A)", color: "#2196F3" },
                             { label: "Field Current (A)", color: "#9C27B0" },
                             { label: "Field %", color: "#9E9E9E" },
-                            // off:true → default hidden, matching the series show:false above (filtered = what the loops act on)
-                            { label: "Alt Current filtered (A)", color: "#90CAF9", off: true },
-                            { label: "Batt Current filtered (A)", color: "#A5D6A7", off: true }
+                            // off:true → default hidden, matching the series show:false above (filtered = the CC PID's PV)
+                            { label: "Alt Current filtered (A)", color: "#90CAF9", off: true }
                         ], u);
 
                         const resizePlot = debounce(() => {
@@ -8775,7 +8539,7 @@ function applyStaleStyleByAge(elementId, ageMs, staleThreshold = STALE_THRESHOLD
     // Cache key includes dark mode so toggling dark mode forces re-apply
     const cacheKey = isStale ? (isDark ? 'stale-dark' : 'stale-light') : 'fresh';
     if (element._lastStaleState === cacheKey) {
-        return; // No change needed
+        return;
     }
 
     element._lastStaleState = cacheKey;
@@ -8810,7 +8574,6 @@ function updateHeaderTempColor(ageMs) {
     if (el._tempWarn !== color) { el.style.color = color; el._tempWarn = color; }
 }
 
-// Function to update all staleness styling
 function updateAllStalenessStyles() {
     if (!window.sensorAges) return;
     const sa = window.sensorAges;
@@ -8845,7 +8608,7 @@ function updateAllStalenessStyles() {
 
     // --- Header bar ---
     applyStaleStyleByAge("header-voltage", sa.ibv);
-    applyStaleStyleByAge("header-soc", Math.max(sa.ibv, sa.bcur));      // fixed: was sensorAges.soc which was never populated
+    applyStaleStyleByAge("header-soc", Math.max(sa.ibv, sa.bcur));
     applyStaleStyleByAge("header-alt-current", sa.measuredAmps);
     applyStaleStyleByAge("header-batt-current", sa.bcur);
     applyStaleStyleByAge("header-alt-temp", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
@@ -8875,8 +8638,8 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("STWNMEA_ID", sa.stwNMEA);
     applyStaleStyleByAge("VMGNMEA_ID", sa.vmg);
     applyStaleStyleByAge("LeewayNMEA_ID", sa.leeway);
-    // Apparent/true wind staleness: the old text rows were replaced by the Wind dial +
-    // trend plot (which read these fields directly), so there are no per-field spans to grey.
+    // Apparent/true wind: the Wind dial + trend plot read these fields directly —
+    // there are no per-field spans to grey.
 
     // --- Baro / ambient — dedicated timestamps ---
     // Both come from the BMP388 on an 8s read cycle. Use the 12s threshold for
@@ -8951,7 +8714,6 @@ function updateAllStalenessStyles() {
 
 // Start the staleness detection system - call this from window.load
 function startStalenessDetection() {
-    // Update staleness styling every 2 seconds
     setTrackedInterval(() => { updateAllStalenessStyles(); updateIMUModeStyles(); }, 2000);
 }
 
@@ -8965,7 +8727,6 @@ function createCustomLegend(plotId, legendItems, u) {
     const plotContainer = document.getElementById(plotId);
     if (!plotContainer) return;
 
-    // Remove any existing custom legend
     const existingLegend = plotContainer.querySelector('.custom-legend');
     if (existingLegend) {
         existingLegend.remove();
@@ -8975,7 +8736,6 @@ function createCustomLegend(plotId, legendItems, u) {
     let vis = {};
     try { vis = JSON.parse(localStorage.getItem(visKey)) || {}; } catch (e) { }
 
-    // Create new custom legend
     const legendDiv = document.createElement('div');
     legendDiv.className = 'custom-legend';
     legendDiv.style.cssText = `
@@ -8986,7 +8746,7 @@ margin-top: 10px;
 flex-wrap: wrap;
 `;
 
-    const hiddenIdxs = [];
+    const initialVis = [];  // [seriesIdx, shown] for EVERY series — saved state may need to SHOW a series the constructor built show:false
 
     legendItems.forEach((item, i) => {
         const seriesIdx = i + 1;
@@ -9022,7 +8782,7 @@ flex-wrap: wrap;
         paint();
 
         if (u) {
-            if (!shown) hiddenIdxs.push(seriesIdx);
+            initialVis.push([seriesIdx, shown]);
             legendItem.addEventListener('click', () => {
                 shown = !shown;
                 u.setSeries(seriesIdx, { show: shown });
@@ -9044,10 +8804,12 @@ flex-wrap: wrap;
 
     plotContainer.appendChild(legendDiv);
 
-    // Apply saved hidden state after the constructor finishes — this runs from
-    // the init hook, where an immediate setSeries redraw is unsafe.
-    if (u && hiddenIdxs.length) {
-        requestAnimationFrame(() => hiddenIdxs.forEach(idx => u.setSeries(idx, { show: false })));
+    // Sync uPlot to the legend's resolved state after the constructor finishes (init hook —
+    // an immediate setSeries redraw is unsafe there). Must set show:true too, not just hide:
+    // a saved "on" preference has to override a series built show:false, or the legend paints
+    // ON while the trace stays hidden and the next click toggles it OFF (looks like a dead toggle).
+    if (u && initialVis.length) {
+        requestAnimationFrame(() => initialVis.forEach(([idx, s]) => u.setSeries(idx, { show: s })));
     }
 }
 
@@ -9084,12 +8846,10 @@ function setAdminPassword() {
             if (text.trim() === "OK") {
 
                 currentAdminPassword = password;
-                // Unlock settings
                 const section = document.getElementById('settings-section');
                 if (section) section.classList.remove("locked");
                 document.querySelector('.permanent-header').classList.remove('locked');  // remove this bullshit probably
 
-                // Also unlock header controls
                 const headerControl = document.querySelector('.alternator-control');
                 if (headerControl) headerControl.classList.remove("locked");
 
@@ -9285,12 +9045,10 @@ function updateTogglesFromData(data) {
         if (!data) return;
 
         const now = Date.now();
-        // Update time axis mode when ESP32 value changes
         if (data.timeAxisModeChanging !== undefined) {
             const newTimeAxisMode = (data.timeAxisModeChanging === 1);
             if (useTimestamps !== newTimeAxisMode) {
                 useTimestamps = newTimeAxisMode;
-                // Reinitialize plots with new mode
                 initPlotDataStructures();
                 if (currentTempPlot) { currentTempPlot.destroy(); initCurrentTempPlot(); }
                 if (voltagePlot) { voltagePlot.destroy(); initVoltagePlot(); }
@@ -9341,7 +9099,6 @@ function updateTogglesFromData(data) {
             syncSegmented(id); // keep any segmented A/B control mirrored to firmware state (no-op if none)
         };
 
-        // Update all toggle checkboxes with their data keys (keep existing calls)
         // ESP32 sends 0=PID, 1=Manual — invert so checked=PID matches the label order
         const invertedManual = data.ManualFieldToggle === undefined ? undefined : (data.ManualFieldToggle === 0 ? 1 : 0);
         updateCheckbox("ManualFieldToggle_checkbox", invertedManual, "ManualFieldToggle");
@@ -9449,7 +9206,6 @@ function handleUserToggle(checkboxId, hiddenInputId, dataKey) {
         const newValue = checkbox.checked ? '1' : '0';
         hiddenInput.value = newValue;
 
-        // Track pending toggle with revision
         pendingToggles.set(dataKey, {
             desiredValue: parseInt(newValue),
             baseRev: lastSeenRev
@@ -9786,7 +9542,6 @@ window.addEventListener("load", function () {
     };
     // END DEBUG CODE
 
-    // Fetch and populate vessel info on page load
     fetchAndPopulateVesselInfo();
 
     interceptDualControlSubmissions();
@@ -9800,7 +9555,6 @@ window.addEventListener("load", function () {
 
     populateYearDropdown();
 
-    // Attach vessel info form handler
     const vesselForm = document.getElementById('vessel-info-form');
     if (vesselForm) {
         vesselForm.addEventListener('submit', handleVesselInfoSave);
@@ -9808,7 +9562,7 @@ window.addEventListener("load", function () {
 
     startStalenessDetection(); // stalness detectioin detect stale values
 
-    initPlotDataStructures(); // Initialize efficient data structures
+    initPlotDataStructures();
     //give initial values that will cause graying until proven otherwise
     window.sensorAges = {
         heading: 999999,
@@ -9888,7 +9642,6 @@ window.addEventListener("load", function () {
     initCVTuningPlot();
     startInterpLoop();
 
-    // Add change listener for manual CloudFeatures toggle
     const cloudFeaturesCheckbox = document.getElementById("CloudFeatures_checkbox");
     if (cloudFeaturesCheckbox) {
         cloudFeaturesCheckbox.addEventListener('change', function () {
@@ -9897,7 +9650,6 @@ window.addEventListener("load", function () {
         });
     }
 
-    // Initialize CloudFeatures toggle state based on current mode
     const initialMode = parseInt(document.getElementById("currentModeID")?.value || "0");
     updateCloudFeaturesToggleState(initialMode);
 
@@ -9937,7 +9689,6 @@ window.addEventListener("load", function () {
         }
     }
 
-    // Set up weather alert observers
     const latEl = document.getElementById('LatitudeNMEA_display');
     const lngEl = document.getElementById('LongitudeNMEA_display');
     const validEl = document.getElementById('weatherDataValidID');
@@ -9948,7 +9699,6 @@ window.addEventListener("load", function () {
         weatherObserver.observe(lngEl, { childList: true, characterData: true, subtree: true });
         weatherObserver.observe(validEl, { childList: true, characterData: true, subtree: true });
 
-        // Initial call
         updateWeatherAlerts();
     }
 
@@ -9959,7 +9709,6 @@ window.addEventListener("load", function () {
     //     });
     // }
 
-    // Track if learning table has unsaved changes
     let learningTableHasChanges = false;
     let dirtyInputs = new Set();
     window.resetLearningTableUI = function () {
@@ -10047,7 +9796,6 @@ window.addEventListener("load", function () {
         });
     });
 
-    // Hide save button after form submission
     document.getElementById('learning-table-form').addEventListener('submit', function (e) {
         if (!validateLearningTable()) {
             e.preventDefault();
@@ -10111,7 +9859,6 @@ window.addEventListener("load", function () {
         setTableStatus('fuel-table-status', 'Saving...');
     });
 
-    // Warn before leaving page with unsaved changes
     window.addEventListener('beforeunload', function (e) {
         if (learningTableHasChanges || fuelTableHasChanges) {
             e.preventDefault();
@@ -10147,17 +9894,16 @@ window.addEventListener("load", function () {
             window.stalenessWatchdogStarted = true;
             setTrackedInterval(function () {
                 const timeSinceLastEvent = Date.now() - lastEventTime;
-                if (timeSinceLastEvent > 9000) { // 9 seconds without data = disconnected (was working well at 8s for a long time)
+                if (timeSinceLastEvent > 9000) { // 9 seconds without data = disconnected
                     updateInlineStatus(false);
                     markAllReadingsStale(); //gray out
                 }
-            }, 2000); // Check every 1 seconds (was working well at 2s for a long time)
+            }, 2000);
         }
 
 
         const handleCSVData = function (e) {
 
-            // Update timestamp when data is received
             lastEventTime = Date.now();
 
             // Diagnostic: track inter-event gap to distinguish firmware/WiFi delays from client-side issues
@@ -10168,7 +9914,6 @@ window.addEventListener("load", function () {
             }
             window._lastCSV1Arrival = lastEventTime;
 
-            // Immediately mark as connected when data arrives
             updateInlineStatus(true);
 
             const raw = e.data.split(',').map(Number);
@@ -10224,7 +9969,7 @@ window.addEventListener("load", function () {
 
             // Banner ignition indicator — driven off CSV1 (~10 Hz) so toggling the override
             // (or the real ignition wire changing) shows in the banner within ~0.1 s instead
-            // of waiting up to 5 s for a CSV2 frame. Was in the CSV2 listener before.
+            // of waiting up to 5 s for a CSV2 frame.
             if (data.Ignition !== undefined) {
                 const ignitionStatus = document.getElementById('ignition-status');
                 if (ignitionStatus) {
@@ -10240,7 +9985,7 @@ window.addEventListener("load", function () {
 
             //i'm in the CSV handler here (webgaugesinterval/plotTimeWindow now come from CSVData3)
 
-            // Feed CV tuning plot cache — voltageTarget and Icv are now in CSV1 (fast stream)
+            // Feed CV tuning plot cache — voltageTarget and Icv ride CSV1 (fast stream)
             if (data.voltageTarget !== undefined) {
                 cvPlotCache.voltageTarget = parseFloat(data.voltageTarget);
                 if (_testPanelCurrentTest === 'cv') updateCVPanelDelta();
@@ -10289,12 +10034,10 @@ window.addEventListener("load", function () {
                 }
             }
 
-            //  updateFields          
             const updateFields = (fieldArray) => {
                 for (const [elementId, key] of fieldArray) {
                     const value = data[key];
                     if (value === undefined) continue;
-                    // Calculate what the new text content would be
                     let newTextContent;
                     const num = Number(value);
                     if (!Number.isFinite(num)) {
@@ -10342,18 +10085,16 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 1000000).toFixed(3);
                     }
 
-                    // Special handling for currentMode
                     else if (key === "currentMode") {
                         const modeNames = ["Configuration", "Access Point", "Client"];
                         newTextContent = modeNames[value] || `Unknown (${value})`;
                         updateCloudFeaturesToggleState(value);
                     }
-                    // Special handling for currentPartitionType
                     else if (key === "currentPartitionType") {
                         const partitionNames = ["Factory Golden", "User Updateable"];
                         newTextContent = partitionNames[value] || `Unknown (${value})`;
                     }
-                    // CV loop fields (voltageTarget/Icv moved from CSV2 → CSV1)
+                    // CV loop fields (CSV1)
                     else if (key === "voltageTarget" || key === "voltageError") {
                         newTextContent = (value / 100).toFixed(3);
                     }
@@ -10379,7 +10120,6 @@ window.addEventListener("load", function () {
             // Counter for echo throttling (separate from display throttling)
             if (typeof window.echoUpdateCounter === 'undefined') window.echoUpdateCounter = 0;
 
-            // Add counter for throttling
             if (typeof window.updateCounter === 'undefined') window.updateCounter = 0;
             window.updateCounter++;
 
@@ -10429,7 +10169,7 @@ window.addEventListener("load", function () {
                 ["currentModeID", "currentMode"],
                 ["BatteryV_rawID", "BatteryV_raw"],
                 ["MeasuredAmps_filtered_ID", "MeasuredAmps_filtered"],
-                // CV loop (voltageTarget/Icv moved from CSV2 → CSV1 at indices 32, 33)
+                // CV loop (voltageTarget/Icv — CSV1 indices 32, 33)
                 ["voltageTarget_display", "voltageTarget"],
                 ["Icv_display", "Icv"],
             ];
@@ -10447,7 +10187,6 @@ window.addEventListener("load", function () {
                 if (_testPanelCurrentTest === 'cv') updateCVPanelDelta();
             }
 
-            // Update other stuff every 4th cycle
             if (window.updateCounter % 4 === 0) {
                 updateFields(otherFields);
                 updateAllEchosOptimized(data);
@@ -10477,12 +10216,10 @@ window.addEventListener("load", function () {
                 }
             }
 
-            // Keep critical state updates on every cycle
             if (currentAdminPassword === "") {
                 document.getElementById('settings-section').classList.add("locked");
             }
 
-            // Connection status check
             const nowMs = Date.now();
             const timeSinceLastEvent = nowMs - lastEventTime;
             if (timeSinceLastEvent > 5000) {
@@ -10534,8 +10271,7 @@ window.addEventListener("load", function () {
             renderBattTempDerate();   // live board temp + applied derate scale arrive on CSV2
 
             // Active RPM row highlight in the cap/learning table — currentRPMTableIndex
-            // lives in CSV2, so this MUST run from the CSV2 handler (was wrongly called
-            // from the CSV3 handler, where data.currentRPMTableIndex is undefined).
+            // lives in CSV2, so this MUST run from the CSV2 handler.
             updateLearningTableHighlight(data);
             // pidInitialized is also a CSV2 field — same reason it must run here, not in CSV3.
             updatePidInitializedDisplay(data);
@@ -10622,21 +10358,17 @@ window.addEventListener("load", function () {
                 for (const [elementId, key] of fieldArray) {
                     const value = data[key];
                     if (value === undefined) continue;
-                    // Calculate what the new text content would be
                     let newTextContent;
                     const num = Number(value);
                     if (!Number.isFinite(num)) {
                         newTextContent = "—";
                     }
-                    // Special handling for reset reason lookups
                     else if (key === "LastResetReason" || key === "ancientResetReason") {
                         newTextContent = resetReasonLookup[value] || `Unknown (${value})`;
                     }
-                    // Special handling for imuEnabled
                     else if (key === "imuEnabled") {
                         newTextContent = value === 1 ? "Enabled" : "Disabled";
                     }
-                    // Special handling for imuMountOrientation
                     else if (key === "imuMountOrientation") {
                         const orientations = ["Fwd Bulkhead", "Aft Bulkhead", "Port Wall", "Stbd Wall"];
                         newTextContent = orientations[value] || `Unknown (${value})`;
@@ -10789,11 +10521,9 @@ window.addEventListener("load", function () {
                     else if (["LastSessionMaxLoopTime", "MaximumLoopTime"].includes(key)) {
                         newTextContent = (value / 1000000).toFixed(3);
                     }
-                    // absorptionCompleteTime: stored/sent as ms -> display seconds
                     else if (["bulkVoltageHoldMs"].includes(key)) {
                         newTextContent = (value / 1000).toFixed(2);  // ms -> seconds
                     }
-                    // absorptionCompleteTime: stored/sent as ms -> display seconds
                     else if (["absorptionCompleteTime"].includes(key)) {
                         newTextContent = (value / 1000).toFixed(2);  // ms -> seconds
                     }
@@ -10921,8 +10651,7 @@ window.addEventListener("load", function () {
             };
 
             //stuff for wifi wake countdown and charging mode:
-            // (ignition indicator moved to the CSV1 handler so the banner updates at ~10 Hz)
-            // Update charging mode
+            // (ignition indicator lives in the CSV1 handler so the banner updates at ~10 Hz)
             const chargingMode = document.getElementById('charging-mode');
             const bulkStageValue = document.getElementById('BulkStageID');
             if (chargingMode && bulkStageValue) {
@@ -11280,7 +11009,7 @@ window.addEventListener("load", function () {
                 ["systemIDRiseAvg_ID", "systemIDRiseAvg"],
                 ["systemIDFallAvg_ID", "systemIDFallAvg"],
 
-                // Fields moved from CSV1 otherFields (were in old 137-field CSV1; now in CSV2)
+                // Fields moved from CSV1 otherFields — all in CSV2_FIELDS
                 ["VeTimeID", "VeTime"],
                 ["MaximumLoopTimeID", "MaximumLoopTime"],
                 ["ft_loop_win_ID", "loopTime5sWindow_ms"],
@@ -11574,9 +11303,8 @@ window.addEventListener("load", function () {
             updateDeviceId();
         }, false);
 
-        // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). These rode the slow
-        // 5 s CSV2 cadence before and looked frozen; this handler updates the dial/compass/speed/
-        // solar/fuel gauges at ~2 Hz. Order/scaling of CSV4_FIELDS must match the firmware Csv4Index enum.
+        // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms); updates the dial/compass/
+        // speed/solar/fuel gauges. Order/scaling of CSV4_FIELDS must match the firmware Csv4Index enum.
         source.addEventListener('CSVData4', function (e) {
             const raw = e.data.split(',').map(Number);
             const declaredCount = raw[0];
@@ -11611,7 +11339,7 @@ window.addEventListener("load", function () {
             }
 
             // NavStream numeric readouts. Compact renderer sharing the module-level DOM-diff cache
-            // (lastValues + scheduleDOMUpdateOptimized). Scaling mirrors the old CSV2 formatter.
+            // (lastValues + scheduleDOMUpdateOptimized). Scaling mirrors the CSV2 formatter.
             const navFields = [
                 ["HeadingNMEAID",         "HeadingNMEA"],          // deg, int
                 ["SOGNMEA_ID",            "SOGNMEA"],              // knots ×100
@@ -11680,8 +11408,8 @@ window.addEventListener("load", function () {
             const data = Object.fromEntries(CSV3_FIELDS.map((key, i) => [key, values[i]]));
             g_lastCsv3 = data;  // cache for cvBinToCsv header
 
-            // IMU zero/level calibration status (offsets sent deg ×100). Moved here from CSV2 so
-            // it echoes within ~one tick of capture instead of waiting up to 5s. While a capture
+            // IMU zero/level calibration status (offsets sent deg ×100). Rides CSV3 so it
+            // echoes within ~one tick of capture instead of waiting up to 5s. While a capture
             // is running we hold the "calculating…" label (set on the Zero Now click) and skip the
             // immediate /get echo of the OLD offsets; the capture-complete CSV3 frame lands after
             // the window and shows the new value (or restores the prior value on a firmware abort).
@@ -11727,9 +11455,7 @@ window.addEventListener("load", function () {
             if (data.plotTimeWindow) {
                 window._lastKnownTimeWindow = data.plotTimeWindow;
             }
-            // Update plot axes/configuration whenever settings arrive
             updatePlotConfiguration(data);
-            // Update all setting echo labels and toggles from CSV3 data
             updateAllEchosOptimized(data);
             updateTogglesFromData(data);
             // Auto-commissioning: refresh the badge + step checklist + clear button from the
@@ -11741,7 +11467,7 @@ window.addEventListener("load", function () {
                                            parseInt(data.commissionDoneMask, 10) || 0);
                 } catch (e) { }
             }
-            // capLimitMode pending toggle confirmation (moved from CSV2 handler — capLimitMode is now in CSV3)
+            // capLimitMode pending toggle confirmation (capLimitMode is a CSV3 field)
             if (data.capLimitMode !== undefined) {
                 const pending = pendingToggles.get('capLimitMode');
                 if (pending) {
@@ -11763,7 +11489,7 @@ window.addEventListener("load", function () {
                     setCapMode(data.capLimitMode === 1 ? 'kw' : 'amps');
                 }
             }
-            // HiLow pending toggle confirmation (moved from CSV2 handler — HiLow is now in CSV3)
+            // HiLow pending toggle confirmation (HiLow is a CSV3 field)
             if (data.HiLow !== undefined) {
                 const pending = pendingToggles.get('HiLow');
                 if (pending) {
@@ -11823,7 +11549,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 100).toFixed(2);
                     }
 
-                    // Values scaled by 3600000 for hours
+                    // safeHours: seconds → hours
                     else if (key.startsWith("safeHours")) {
                         newTextContent = (value / 3600).toFixed(2);
                     }
@@ -11847,8 +11573,6 @@ window.addEventListener("load", function () {
             // Other fields for CSVData3 - update every cycle (no throttling since server controls timing)
             const otherFields = [
                 // Step 2: This array is a whitelist - it says "only update these specific HTML elements with these specific data values".
-                // Note: Many of these might not have corresponding HTML elements yet
-                // This list includes potential element IDs that might exist
                 // IMU settings (these fields live in CSV3)
                 ["imuEnabled_ID", "imuEnabled"],
                 ["imuMountOrientation_ID", "imuMountOrientation"],
@@ -11857,7 +11581,7 @@ window.addEventListener("load", function () {
 
             // CSVData3
             updateFields(otherFields);   // Step 3: Process the whitelist
-            updatePidTuningConfiguration(data);  // ADD THIS LINE - Update PID plot config
+            updatePidTuningConfiguration(data);
 
             // Update test-active panel with sysid phase.
             // systemIDActive is in CSV2_FIELDS, not CSV3 — read from DOM,
@@ -12057,12 +11781,10 @@ window.addEventListener("load", function () {
                 }
             }
 
-            // Update echos every cycle
             updateAllEchosOptimized(data);
             updateTogglesFromData(data);
 
-            // Update PID stuff
-            // (active RPM row highlight + PID-initialized display moved to the CSV2 handler —
+            // (active RPM row highlight + PID-initialized display live in the CSV2 handler —
             //  currentRPMTableIndex and pidInitialized are CSV2 fields, undefined in this CSV3 frame)
             drawGlyphs();
 
@@ -12179,7 +11901,6 @@ max-width: 100%;     /* allow full width on mobile */
 `;
     document.head.appendChild(style);
 
-    // Initialize toggle states on page load
     // Invert because labels are swapped
     document.getElementById("ManualFieldToggle_checkbox").checked = (document.getElementById("ManualFieldToggle").value === "0");
     document.getElementById("SwitchControlOverride_checkbox").checked = (document.getElementById("SwitchControlOverride").value === "1");
@@ -12221,7 +11942,6 @@ max-width: 100%;     /* allow full width on mobile */
 
 
 
-// Function to handle Reset Learning Table button with confirmation
 function handleResetLearningTable() {
     const confirmation = confirm(
         "⚠️ RESET LEARNING TABLE ⚠️\n\n" +
@@ -12237,7 +11957,7 @@ function handleResetLearningTable() {
     window.learningTableInitialized = false;
     window.minDutyInitialized = false;
     window.resetLearningTableUI();
-    return true; // Allow form submission to ESP32
+    return true;
 }
 
 function handleClearBuffer() {
@@ -12343,9 +12063,7 @@ function handleClearOverheatHistory() {
     return confirmation;
 }
 
-// Function to update learning table highlighting
 function updateLearningTableHighlight(data) {
-    // Remove all active row classes
     document.querySelectorAll('.learning-table-row-active').forEach(row => {
         row.classList.remove('learning-table-row-active');
     });
@@ -12375,7 +12093,6 @@ function updateLearningTableHighlight(data) {
     }
 }
 
-// Function to update PID initialized display
 function updatePidInitializedDisplay(data) {
     const element = document.getElementById('pidInitialized_display');
     if (element && data.pidInitialized !== undefined) {
@@ -12417,7 +12134,6 @@ function resizeLivePlotsOnShow() {
 }
 
 function showMainTab(tabName) {
-    // Check if trying to access Cloud Features without unlocking
     if (tabName === 'cloudfeatures' && !currentAdminPassword) {
         alert('Please unlock settings first to access Cloud Features');
         return;
@@ -12434,21 +12150,17 @@ function showMainTab(tabName) {
         return;
     }
 
-    // Hide all tab contents
     const tabContents = document.querySelectorAll('.tab-content');
     tabContents.forEach(tab => tab.classList.remove('active'));
 
-    // Remove active class from all main tabs
     const mainTabs = document.querySelectorAll('.main-tab');
     mainTabs.forEach(tab => tab.classList.remove('active'));
 
-    // Show selected tab content
     document.getElementById(tabName).classList.add('active');
 
     // Charts in this tab were built at width 0 while it was hidden — size them now (no debounce wait).
     if (tabName === 'plots' || tabName === 'tuning') resizeLivePlotsOnShow();
 
-    // Find and activate the correct button by looking for the one that calls this tab
     mainTabs.forEach(tab => {
         if (tab.getAttribute('onclick').includes(tabName)) {
             tab.classList.add('active');
@@ -12475,10 +12187,8 @@ function showMainTab(tabName) {
     const header = document.querySelector('.permanent-header');
     if (header) {
         if (tabName === 'plots') {
-            // Remove sticky on Plots main tab
             header.classList.remove('permanent-header-sticky');
         } else {
-            // Add sticky for all other main tabs
             header.classList.add('permanent-header-sticky');
         }
     }
@@ -12501,7 +12211,7 @@ function showSubTab(parentTab, subTabName, evt = null) {
     }
 
     // Block access to Cloud Features subtabs if not registered.
-    // 'mydashboard' (Statistics) was relocated to Live Data → Statistics; content is local data so the gate no longer applies.
+    // 'mydashboard' (Statistics) lives in Live Data → Statistics; local data, so the gate doesn't apply.
     if (parentTab === 'cloudfeatures' && subTabName !== 'myprofile' && !isDeviceRegistered) {
         const featureNames = {
             'leaderboards': 'Leaderboards',
@@ -12513,15 +12223,12 @@ function showSubTab(parentTab, subTabName, evt = null) {
         return;
     }
 
-    // Hide all sub-tab contents for this parent
     const subTabContents = document.querySelectorAll(`#${parentTab} .sub-tab-content`);
     subTabContents.forEach(tab => tab.classList.remove('active'));
 
-    // Remove active class from all sub-tabs
     const subTabs = document.querySelectorAll(`#${parentTab} .sub-tab`);
     subTabs.forEach(tab => tab.classList.remove('active'));
 
-    // Show selected sub-tab content
     const contentEl = document.getElementById(`${parentTab}-${subTabName}`);
     if (contentEl) {
         contentEl.classList.add('active');
@@ -12558,7 +12265,6 @@ function showSubTab(parentTab, subTabName, evt = null) {
             && typeof fastDiagOnOpen === 'function') fastDiagOnOpen();
     }
 
-    // Initialize profile tab when switching to My Profile
     if (parentTab === 'cloudfeatures' && subTabName === 'myprofile') {
         if (typeof initializeProfileTab === 'function') {
             initializeProfileTab();
@@ -12585,7 +12291,6 @@ function showSubTab(parentTab, subTabName, evt = null) {
         loadConfigSharingInIframe();
     }
 
-    // Control sticky header for Cloud Features subtabs
     const header = document.querySelector('.permanent-header');
     if (header && parentTab === 'cloudfeatures') {
         header.classList.add('permanent-header-sticky');
@@ -12635,15 +12340,12 @@ function closeFlushPillConfirm() {
 }
 
 function showAltTab(group, panelId) {
-    // Deactivate all panels and buttons in this group
     document.querySelectorAll('#settings-alternator .alt-panel-' + group)
         .forEach(p => p.classList.remove('active'));
     document.querySelectorAll('#settings-alternator .alt-tab-btn-' + group)
         .forEach(t => t.classList.remove('active'));
-    // Show selected panel
     const panel = document.getElementById(panelId);
     if (panel) panel.classList.add('active');
-    // Activate matching button
     document.querySelectorAll('#settings-alternator .alt-tab-btn-' + group)
         .forEach(t => {
             if ((t.getAttribute('onclick') || '').includes(panelId)) {
@@ -12701,12 +12403,10 @@ function enterOfflineMode() {
             el.style.cursor = 'not-allowed';
         }
     });
-    // Disable toggles in offline mode
     document.querySelectorAll('.switch input').forEach(el => {
         el.disabled = true;
         el.style.opacity = '0.5';
     });
-    // Update corner status to show offline
     const cornerStatus = document.getElementById('corner-status');
     if (cornerStatus) {
         cornerStatus.className = 'corner-status corner-status-disconnected';
@@ -12759,7 +12459,6 @@ function validateSettings() {
         }
     ];
 
-    // Clear all previous error states
     document.querySelectorAll('.input-error').forEach(el => {
         el.classList.remove('input-error');
         el.title = '';
@@ -12778,13 +12477,11 @@ function validateSettings() {
         const button2 = input2.closest('form')?.querySelector('input[type="submit"]');
 
         if (validation.check(value1, value2)) {
-            // Add error styling
             input1.classList.add('input-error');
             input2.classList.add('input-error');
             input1.title = validation.error;
             input2.title = validation.error;
 
-            // Disable buttons
             if (button1) {
                 button1.disabled = true;
                 button1.title = validation.error;
@@ -12794,7 +12491,6 @@ function validateSettings() {
                 button2.title = validation.error;
             }
         } else {
-            // Re-enable buttons if no error
             if (button1) {
                 button1.disabled = false;
                 button1.title = '';
@@ -12813,7 +12509,6 @@ function validateFuelTable() {
     const rpmValues = [];
     const gphValues = [];
 
-    // Collect all values
     for (let i = 0; i < 10; i++) {
         const rpmInput = document.getElementById(`fuelTableRPM${i}_input`);
         const gphInput = document.getElementById(`fuelTableGPH${i}_input`);
@@ -12863,7 +12558,6 @@ function validateLearningTable() {
     const errors = [];
     const rpmValues = [];
 
-    // Collect all RPM values
     for (let i = 0; i < 10; i++) {
         const rpmInput = document.getElementById(`rpmTableRPMPoints${i}_input`);
         if (rpmInput) {
@@ -12871,7 +12565,6 @@ function validateLearningTable() {
         }
     }
 
-    // Find last non-zero index
     let lastNonZeroIndex = -1;
     for (let i = 9; i >= 0; i--) {
         if (rpmValues[i] !== 0) {
@@ -12923,19 +12616,17 @@ function updateRPMRangeDisplays(data) {
 }
 //  validation called in the window load event, for client side checking of input values
 function setupInputValidation() {
-    // Settings validation
     const settingsInputs = ["FloatVoltage", "BulkVoltage", "MinDuty", "MaxDuty"];
 
     settingsInputs.forEach(name => {
         const input = document.querySelector(`input[name="${name}"]`);
         if (input) {
             input.addEventListener("input", validateSettings);
-            input.addEventListener("blur", validateSettings); // Also validate on blur
+            input.addEventListener("blur", validateSettings);
         } else {
             diagWarn(`Validation input not found: ${name}`);
         }
     });
-    // Run initial validation
     setTrackedTimeout(() => {
         validateSettings();
     }, 100); // Small delay to ensure all data is loaded
@@ -13023,12 +12714,10 @@ function updateCloudFeaturesToggleState(currentMode) {
 
     if (checkbox) {
         if (isAPMode) {
-            // Gray out and disable in AP mode
             checkbox.disabled = true;
             checkbox.checked = false;
             if (formRow) formRow.style.opacity = '0.5';
 
-            // Also hide the tab if visible
             updateCloudFeaturesTabVisibility(false);
         } else {
             // Enable in Configuration or Client mode
@@ -13183,12 +12872,10 @@ function drawGlyphs() {
     setTrackedTimeout(syncHeader, 0);
 })();
 
-// Initialize glyphs
 function initLearningGlyphs() {
     drawGlyphs();
 }
 
-// Call on page load
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initLearningGlyphs);
 } else {
@@ -13211,7 +12898,6 @@ if (document.readyState === 'loading') {
     }
 }
 
-// Redraw on window events
 window.addEventListener('resize', drawGlyphs, { passive: true });
 window.addEventListener('scroll', drawGlyphs, { passive: true });
 const ltX = document.getElementById('ltX');
@@ -13644,7 +13330,6 @@ function drawPidWatermark(u) {
 
     ctx.restore();
 }
-// Global variables for PID tuning plot
 let pidTuningPlot = null;
 let pidTuningData = null;
 let pidTuningResizeObserver = null;
@@ -13661,7 +13346,6 @@ let pidTuningSeriesVisible = {
     rpm: true
 };
 
-// Initialize PID tuning data structures
 function initPidTuningDataStructures() {
     const intervalMs = window._lastKnownInterval || 200;
     // Buffer ALWAYS holds the full 5 min (LIVE_BUFFER_SEC), independent of the selected X window (xTime) —
@@ -13694,7 +13378,6 @@ function initPidTuningDataStructures() {
     pidTuningIndex = 0;
     plotInterp.pid.arrivalTime = 0;
 }
-// Initialize PID tuning plot
 // Manual override for the PID plot's right-hand duty axis (browser-side only;
 // the left amps axis persists on the regulator as yyMin/yyMax).
 let pidDutyRange = null;
@@ -14022,7 +13705,6 @@ function createPidTuningLegend() {
     plotContainer.appendChild(legendDiv);
 }
 
-// Toggle series visibility
 function togglePidTuningSeries(seriesIdx, color, visible) {
     if (!pidTuningPlot) {
         return;
@@ -14031,7 +13713,6 @@ function togglePidTuningSeries(seriesIdx, color, visible) {
     pidTuningPlot.setSeries(seriesIdx, {
         show: visible
     });
-    // Update legend visual appearance
     const legendItems = document.querySelectorAll('.custom-legend label');
     const itemIndex = seriesIdx - 1;
 
@@ -14058,12 +13739,10 @@ function queuePidTuningPlotUpdate() {
     });
 }
 
-// Update PID tuning configuration when parameters change
 function updatePidTuningConfiguration(data) {
     let axisChanged = false;
     let timeChanged = false;
 
-    // Check for Y-axis range changes
     if (data.yyMin !== undefined && data.yyMin !== yyMin) {
         yyMin = data.yyMin;
         axisChanged = true;
@@ -14073,7 +13752,6 @@ function updatePidTuningConfiguration(data) {
         axisChanged = true;
     }
 
-    // Check for time window changes
     if (data.xTime !== undefined && !isNaN(data.xTime) && data.xTime > 0 && data.xTime !== xTime) {
         xTime = data.xTime;
         timeChanged = true;
@@ -14097,7 +13775,6 @@ function syncDualControlParameters(batteryAh, solarWatts) {
         if (solarWatts !== undefined) vesselForm.SOLAR_WATTS.value = solarWatts;
     }
 
-    // Update cache
     if (window.vesselInfo) {
         if (batteryAh !== undefined) window.vesselInfo.battery_capacity_ah = batteryAh;
         if (solarWatts !== undefined) window.vesselInfo.solar_watts = solarWatts;
@@ -14105,9 +13782,7 @@ function syncDualControlParameters(batteryAh, solarWatts) {
 }
 
 
-// Intercept dual-control parameter submissions
 function interceptDualControlSubmissions() {
-    // Find all forms that submit BatteryCapacity_Ah or SolarWatts
     document.querySelectorAll('form[action="/get"]').forEach(form => {
         const batteryInput = form.querySelector('input[name="BatteryCapacity_Ah"]');
         const solarInput = form.querySelector('input[name="SolarWatts"]');
@@ -14212,11 +13887,6 @@ function getLogTimestamp() {
     const pad = n => String(n).padStart(2, '0');
     return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
 }
-
-// ── Matrix stats summary (Live Data → Alternator card) ────────────────────
-
-
-
 
 
 function downloadLogs() {
@@ -14578,7 +14248,7 @@ async function pollLogRequest() {
 document.addEventListener('DOMContentLoaded', () => {
     g_logPollTimer = setTimeout(pollLogRequest, 8000);
 });
-// ── Voltage Mode Greyout (unchanged) ─────────────────────────
+// ── Voltage Mode Greyout ─────────────────────────
 // stage: 1=bulk, 2=absorption, 3=float, 4=manual, 5=maintain, 6=target voltage, 7=idle, 0/other=off
 
 function updateVoltageModeGreyout(stage) {
@@ -14596,7 +14266,7 @@ function updateVoltageModeGreyout(stage) {
 let _thermalStateArrays = {
     flagsArr: [], antiWindupArr: [], stageArr: [], tArr: []
 };
-// Index 1 is retired (old middle plot deleted) — slots: 0 temp/penalty, 2 PID terms, 3 mode strip
+// Index 1 is retired — slots: 0 temp/penalty, 2 PID terms, 3 mode strip
 let thermalLogPlots = [null, null, null, null];
 let thermalLogResizeObservers = [null, null, null, null];
 let thermalWindowMin = 30;
@@ -14692,7 +14362,7 @@ function drawThermalDirectionBands(u) {
 // ---------------------------------------------------------------------------
 // Fetch
 // ---------------------------------------------------------------------------
-// Sampled off the live CSV stream (replaces the old /thermallog.bin pull). One
+// Sampled off the live CSV stream. One
 // column per THERMAL_SAMPLE_MS, driven by the CSV2 frame (~5s) so it can never
 // need a manual refresh. measAmps/uTarget ride CSV1 (cached every 10Hz frame);
 // the rest ride CSV2. Anti-windup is OR-accumulated across frames so
@@ -14792,8 +14462,7 @@ const thermalZoomPlugin = {
 // ---------------------------------------------------------------------------
 // Mode decode
 // ---------------------------------------------------------------------------
-// Tableau 10 — one hue per stage, red reserved for Shutdown alone (old palette
-// had three warm bands: shutdown red, absorption orange, manual magenta).
+// Tableau 10 — one hue per stage, red reserved for Shutdown alone.
 // antiWindup is the tick marker; it sits on the background strip above the
 // bands, so it's drawn theme-aware (near-black on light, white on dark)
 // rather than from this value.
@@ -14848,8 +14517,8 @@ function _thermalResizeObserver(plotIdx, elId, h) {
 // Plot 1 
 // ---------------------------------------------------------------------------
 // Corner "auto" checkbox + "lock" button for a thermal-log plot — same convention
-// as the Plots-tab and PID/CV tuning plots. These now live-stream off CSV2 (not the
-// old static /thermallog.bin replay), so the auto-fit axes crawl as data arrives and
+// as the Plots-tab and PID/CV tuning plots. These live-stream off CSV2, so the
+// auto-fit axes crawl as data arrives and
 // a lock is needed. `bucket` is the thermalY entry for this plot; `keys` are its axis
 // names within that bucket. Checked = auto-fit (null ranges); unchecked = pin each
 // axis to what's shown. Lock freezes the current auto range while data keeps streaming
@@ -15057,15 +14726,14 @@ function renderThermalPlot2(data, tMin) {
 // State strip
 // ---------------------------------------------------------------------------
 function renderThermalPlotState(data, tMin, flagsArr, antiWindupArr, stageArr, tArr) {
-    // Always update BEFORE the early return — this is the fix
+    // Always update BEFORE the early return
     _thermalStateArrays.flagsArr = flagsArr;
     _thermalStateArrays.antiWindupArr = antiWindupArr;
     _thermalStateArrays.stageArr = stageArr;
     _thermalStateArrays.tArr = tArr;
 
     if (thermalLogPlots[3]) {
-        thermalLogPlots[3].setData(data);
-        // setData already triggers a full redraw; redundant redraw() removed
+        thermalLogPlots[3].setData(data);   // setData already triggers a full redraw
         return;
     }
 
@@ -16299,8 +15967,8 @@ function turnOffActiveTest() {
         .catch(e => console.warn('turnOffActiveTest failed:', e));
 }
 
-// checkCurrTestGate removed — the current-loop test no longer uses a checkbox; tuningToggleTest()
-// does the conflict gate inline. CV and Thermal still use their own gates below.
+// The current-loop test has no checkbox; tuningToggleTest() does the conflict gate inline.
+// CV and Thermal use their own gates below.
 
 function checkCVTestGate(checkbox) {
     if (!checkbox.checked) return true;
@@ -16519,8 +16187,8 @@ function _setTestBtnRunning(running) {
     }
 }
 
-// Single entry point for the Current Target Generator (replaces the old Waveform On/Off toggle +
-// separate Run Sweep button). The Waveform Type selector decides what runs: 0 square / 1 sine manual
+// Single entry point for the Current Target Generator.
+// The Waveform Type selector decides what runs: 0 square / 1 sine manual
 // arm the generator and run continuously until Stop; 2 sine sweep arms then fires the closed-loop
 // frequency sweep. Pressing again while running (Stop Test) disarms.
 function tuningToggleTest() {
@@ -19022,7 +18690,7 @@ function cxRtConfirm() {  // capture this level from the most-recent in-range wi
         // Record unlocked on ≥CX_RT_MIN_WINS captured in-range ring windows at this level → the last
         // few windows ARE this level. Use the operating current the ring logged (MeasuredAmps),
         // NOT the commanded level.
-        // MEDIAN of the recent windows (was max): with the firmware §10/§11 admission gates the ring rows
+        // MEDIAN of the recent windows: with the firmware §10/§11 admission gates the ring rows
         // are already ramp-free, and the median makes the fit point immune to any single outlier window.
         const recent = inrange.slice(-8);
         const med = a => { const s = a.slice().sort((x, y) => x - y); return s.length ? (s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : 0; };
@@ -19429,8 +19097,6 @@ function applySystemIDResults() {
 }
 
 
-// Fetch matrix stats once on page load (also refreshes whenever Alternator tab is opened)
-
 // Auto-login via URL parameter for local automation (e.g. SwiftBar shortcut)
 window.addEventListener('load', function () {
   const autopass = new URLSearchParams(window.location.search).get('autopass');
@@ -19444,7 +19110,7 @@ window.addEventListener('load', function () {
 // but filtering whole <details class="checkpoint-section"> blocks (data-checkpoints is
 // space-separated; an empty list means All-view only, e.g. Wear Rate / Accuracy Scores).
 (function initDiagCheckpoints() {
-    // Pills now live only in Setup → Diag (the knobs). Live Data → Diag is results-only, never filtered.
+    // Pills live only in Setup → Diag (the knobs). Live Data → Diag is results-only, never filtered.
     const panel = document.getElementById('settings-diag');
     if (!panel) return;
     const pills = panel.querySelectorAll('.checkpoint-filters button[data-filter]');

@@ -25,7 +25,7 @@
  */
 
 void updateCpuLoad() {
-  if (!taskArray) return;  // Safety check - allocated in setup()
+  if (!taskArray) return;  // allocated in setup()
 
   UBaseType_t taskCount = uxTaskGetSystemState(taskArray, MAX_TASKS, NULL);
   if (taskCount == 0) return;
@@ -83,9 +83,9 @@ void updateCpuLoad() {
   lastTotal = total;
 }
 
-// Core-0 sampler for updateCpuLoad() — moved off the Core-1 control loop (the uxTaskGetSystemState
-// scan was ~4ms once every 2s on Core 1). Runs at priority 0, so it only takes Core 0 when no
-// network/upload task needs it. Writes cpuLoadCore0/1(+Max), read by the CSV2 sender on Core 1.
+// Core-0 sampler for updateCpuLoad() — the uxTaskGetSystemState scan (~4ms) is too heavy for the
+// Core-1 control loop. Runs at priority 0, so it only takes Core 0 when no network/upload task
+// needs it. Writes cpuLoadCore0/1(+Max), read by the CSV2 sender on Core 1.
 void cpuLoadTask(void *param) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -96,14 +96,13 @@ void cpuLoadTask(void *param) {
 void updateSystemHealthStats() {
   if (otaInProgress) return;
 
-  // CPU-load scan (updateCpuLoad) moved to cpuLoadTask on Core 0. This now does only the
-  // 4s heap walk, behind the one-heavy-per-pass gate.
+  // Only the 4s heap walk; CPU-load sampling runs in cpuLoadTask on Core 0.
   static unsigned long lastHeapSample = 0;
 
   unsigned long now = millis();
 
-  if (now - lastHeapSample < 4000) return;   // not due
-  if (gHeavyRanThisPass) return;             // gate: another heavy ran this pass — defer (timer unchanged → still due)
+  if (now - lastHeapSample < 4000) return;
+  if (gHeavyRanThisPass) return;  // another heavy ran this pass — defer (timer unchanged → still due)
   gHeavyRanThisPass = true;
   lastHeapSample = now;
 
@@ -119,11 +118,9 @@ void updateSystemHealthStats() {
                  ? 100 - (LargestInternalBlock * 100 / FreeInternalRam)
                  : 100;
 
-    // Low-contiguous-RAM (TLS fragmentation) is surfaced live in the ESP32 Stats panel
-    // via the heap figures computed above. No console message is emitted: every HTTPS
-    // handshake briefly dips largest-block under 34 KB and recovers, so the warning
-    // re-fired every few minutes and crowded out one-time events without adding any
-    // actionable information.
+    // Deliberately no low-contiguous-RAM console warning: every HTTPS handshake briefly
+    // dips largest-block under 34 KB and recovers, so it would re-fire constantly.
+    // The heap figures above surface it live in the ESP32 Stats panel.
   }
 }
 
@@ -193,7 +190,7 @@ bool executeFetchWeatherData() {
     pKwHrToday = (mjToday * MJ_TO_KWH_CONVERSION / STC_IRRADIANCE) * SolarWatts * performanceRatio;
     pKwHrTomorrow = (mjTomorrow * MJ_TO_KWH_CONVERSION / STC_IRRADIANCE) * SolarWatts * performanceRatio;
     pKwHr2days = (mjDay2 * MJ_TO_KWH_CONVERSION / STC_IRRADIANCE) * SolarWatts * performanceRatio;
-    UVToday = mjToday * MJ_TO_KWH_CONVERSION;  // Convert MJ/m² to kWh/m²
+    UVToday = mjToday * MJ_TO_KWH_CONVERSION;
     UVTomorrow = mjTomorrow * MJ_TO_KWH_CONVERSION;
     UVDay2 = mjDay2 * MJ_TO_KWH_CONVERSION;
     weatherDataValid = 1;
@@ -217,14 +214,13 @@ bool executeFetchWeatherData() {
 
 void analyzeWeatherMode() {
   if (otaInProgress) {
-    return;  // Skip during OTA
+    return;
   }
   //If 2 or more days have a UV index above the configured threshold, it sets the mode to high UV mode (1), which disables the alternator.
-  if (!weatherDataValid || !weatherModeEnabled) {  // if weather mode is not enabled, or weather data is invalid
+  if (!weatherDataValid || !weatherModeEnabled) {
     currentWeatherMode = 0;
     return;
   }
-  // Count days above threshold
   int highUVDays = 0;
   if (pKwHrToday >= UVThresholdHigh) highUVDays++;
   if (pKwHrTomorrow >= UVThresholdHigh) highUVDays++;
@@ -238,7 +234,7 @@ void analyzeWeatherMode() {
 }
 void updateWeatherMode() {
   if (otaInProgress) {
-    return;  // Skip during OTA
+    return;
   }
   if (!weatherModeEnabled) {
     currentWeatherMode = 0;
@@ -247,7 +243,6 @@ void updateWeatherMode() {
 
   unsigned long now = millis();
 
-  // Use existing valid data if fresh
   if (weatherDataValid && (now - weatherLastUpdate < WeatherUpdateInterval)) {
     analyzeWeatherMode();
     return;
@@ -260,16 +255,15 @@ void updateWeatherMode() {
     return;
   }
 
-  // Check if time to auto-refresh — signed delta survives the 49.7-day millis() rollover
+  // Signed delta survives the 49.7-day millis() rollover
   if ((int32_t)(now - nextWeatherUpdate) >= 0) {
     HttpsRequest req = { .type = HTTPS_FETCH_WEATHER };
     if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
       nextWeatherUpdate = now + WeatherUpdateInterval;
     } else {
-      nextWeatherUpdate = now + 2000;  // Retry soon if queue full
+      nextWeatherUpdate = now + 2000;
     }
   }
-  // Analyze existing data if available
   if (weatherDataValid) {
     analyzeWeatherMode();
   }
@@ -345,7 +339,6 @@ void initWeatherModeSettings() {
 
 
 void triggerWeatherUpdate() {
-  // Validate prerequisites
   if (LatitudeNMEA == 0.0 && LongitudeNMEA == 0.0) {
     queueConsoleMessageF("Weather: Failed - No GPS lock");
     return;
@@ -361,11 +354,10 @@ void triggerWeatherUpdate() {
     return;
   }
 
-  // Queue the fetch
   HttpsRequest req = { .type = HTTPS_FETCH_WEATHER };
   if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
     queueConsoleMessageF("Weather: Update queued");
-    nextWeatherUpdate = millis() + WeatherUpdateInterval;  // Reset auto timer
+    nextWeatherUpdate = millis() + WeatherUpdateInterval;
   } else {
     queueConsoleMessageF("Weather: Failed - Queue full, retry in 1s");
   }
@@ -396,17 +388,15 @@ void printTempDebugStatus() {
 
 void checkTempTaskHealth() {
   if (otaInProgress) {
-    return;  // Skip during OTA
+    return;
   }
   if (tempTaskSuspended) return;  // Temp task intentionally suspended in 80MHz engine-off idle — not a hang
   static unsigned long lastTempHealthCheck = 0;
   unsigned long now = millis();
 
-  // Check every 5 seconds
   if (now - lastTempHealthCheck < 5000) return;
   lastTempHealthCheck = now;
 
-  // Check if TempTask is alive
   if (now - lastTempTaskHeartbeat > TEMP_TASK_TIMEOUT) {
     if (tempTaskHealthy) {  // First time detecting the problem
       tempTaskHealthy = false;
@@ -417,7 +407,6 @@ void checkTempTaskHealth() {
       // MARK_FRESH call, which produces REASON_TEMP_STALE → MODE_CRITICAL_RAMP → GPIO4 cut.
     }
   } else {
-    // TempTask is responding
     if (!tempTaskHealthy) {  // Was unhealthy, now recovered
       tempTaskHealthy = true;
       tempTaskAlarm = false;
@@ -454,7 +443,6 @@ void imuInit() {
   Serial.print(sizeof(IMUSample));
   Serial.println(" bytes");
 
-  // CRITICAL: Verify device is actually present on I2C bus
   if (!i2cProbe8bit(LSM6DSOX_ADDR)) {
     Serial.println("ERROR: No I2C ACK from LSM6DSOX address - sensor not present");
     Serial.println("IMU disabled - will retry on next boot");
@@ -463,7 +451,6 @@ void imuInit() {
   }
   Serial.println("I2C ACK detected at LSM6DSOX address");
 
-  // CRITICAL: Read WHO_AM_I and verify it's actually an LSM6DSOX
   uint8_t who = 0;
   Wire.beginTransmission(LSM6DSOX_ADDR >> 1);
   Wire.write(0x0F);  // WHO_AM_I register
@@ -493,7 +480,6 @@ void imuInit() {
     return;
   }
 
-  // Enable accelerometer and gyroscope
   if (imu.Enable_X() != LSM6DSOX_OK) {
     Serial.println("ERROR: Failed to enable accelerometer");
     queueConsoleMessageF("IMU: failed to enable accelerometer");
@@ -594,7 +580,6 @@ void imuInit() {
     }
   }
 
-  // Only print success if we actually got here with hardware verified
   Serial.println("LSM6DSOX initialized successfully");
   Serial.println("  Accel ODR: 104 Hz, FIFO BDR: 104 Hz");
   Serial.println("  Gyro ODR: 52 Hz, FIFO BDR: 52 Hz");
@@ -616,7 +601,6 @@ void imuInit() {
   lastIMUPoll = millis();
 }
 void initIMUStructures() {
-  // Zero out the entire window structure to avoid garbage values
   memset(imuWindow, 0, sizeof(ImuWindow));
 
   // Initialize min/max to sentinel values (will be overwritten by first real data)
@@ -632,19 +616,17 @@ void initIMUStructures() {
   imuWindow->lastUpdateTime_us = 0;
   imuWindow->lastGyroUpdateTime_us = 0;
 
-  // Initialize wave period to invalid
-  imuWindow->wave_period = -1000;  // -1.0s scaled
+  imuWindow->wave_period = -1000;  // -1.0s scaled = invalid
 
   Serial.println("IMU structures initialized");
 }
-void initializeHardware() {  // Helper function to organize hardware initialization
+void initializeHardware() {
 
   Serial.println("Starting hardware initialization...");
-  // Force I2C initialization with correct pins
   Wire.end();
   Wire.begin(9, 10);
-  Wire.setClock(400000);  // 400 kHz — in-spec Fast-mode. Reverted from 800 kHz after ADS1115 declared disconnected (adsI2CErrorCount went non-zero — the documented tripwire for backing out the overclock). Was previously stable at 800 kHz; re-evaluate only if ADS1115/IMU I²C errors stay clean at 400 kHz.
-  Wire.setTimeOut(15);   // Added as safety April 2026
+  Wire.setClock(400000);  // in-spec Fast-mode. Do not raise to 800 kHz: ADS1115 was declared disconnected there (adsI2CErrorCount tripwire).
+  Wire.setTimeOut(15);   // do not lower — AsyncTCP preemption can stall I2C transactions this long
   delay(100);
   Serial.println("I2C initialized on SDA=9, SCL=10");
   delay(100);  // Give I2C time to initialize
@@ -666,7 +648,7 @@ Serial.println("BMP388 found");
   NMEA2000.SetForwardType(tNMEA2000::fwdt_Text);
   NMEA2000.SetForwardStream(OutputStream);
   // Set false below, if you do not want to see messages parsed to HEX withing library
-  NMEA2000.EnableForward(false);  // was false
+  NMEA2000.EnableForward(false);
   NMEA2000.SetMsgHandler(HandleNMEA2000Msg);
   //  NMEA2000.SetN2kCANMsgBufSize(2);
   NMEA2000.Open();
@@ -686,20 +668,16 @@ Serial.println("BMP388 found");
   } else {
     INADisconnected = 0;
 
-    // Configure ADC settings (527ms update time with these settings)
     // setAverage() takes raw register value: 0=1, 1=4, 2=16, 3=64, 4=128, 5=256, 6=512, 7=1024 samples
-    // Previous code used setAverage(4)=128 samples (1054ms) — register update exceeded 900ms poll interval.
     INA.setMode(11);                       // Continuous shunt and bus voltage measurement
     INA.setAverage(4);                     // 128-sample averaging — 128 × 8.24ms = 1054ms register update
     INA.setBusVoltageConversionTime(7);    // 4120 µs conversion time
     INA.setShuntVoltageConversionTime(7);  // 4120 µs conversion time
 
-    // Set overvoltage threshold for hardware protection
     updateINA228OvervoltageThreshold();
     queueConsoleMessage("INA228 initialized: Hardware overvoltage protection enabled");
   }
 
-  // Initialize data timestamps
   unsigned long now = millis();
   for (int i = 0; i < MAX_DATA_INDICES; i++) {
     dataTimestamps[i] = now;
@@ -712,7 +690,6 @@ Serial.println("BMP388 found");
   // }
 
   //ADS1115
-  //Connection check
   if (!adc.testConnection()) {
     Serial.println("ADS1115 Connection failed and would have triggered a return if it wasn't commented out");
     queueConsoleMessage("WARNING: ADS1115 Analog Input chip failed");
@@ -730,7 +707,6 @@ Serial.println("BMP388 found");
   } else {
     Serial.println("ADS1115 configured successfully");
   }
-  // Read back the config register to verify settings
   Wire.beginTransmission(0x48);  // ADS1115 default address
   Wire.write(0x01);              // Config register
   Wire.endTransmission(false);
@@ -739,7 +715,6 @@ Serial.println("BMP388 found");
     uint16_t configReg = (Wire.read() << 8) | Wire.read();
     queueConsoleMessage("ADS1115 Config Register: 0x" + String(configReg, HEX));
 
-    // Decode key bits
     uint8_t mux = (configReg >> 12) & 0x07;
     uint8_t pga = (configReg >> 9) & 0x07;
     uint8_t mode = (configReg >> 8) & 0x01;
@@ -764,8 +739,8 @@ Serial.println("BMP388 found");
     queueConsoleMessage("WARNING: No DS18B20 sensors found on the bus");
     sensors.setWaitForConversion(false);  // this is critical!
   }
-  imuInit();            // Accelerometer
-  initIMUStructures();  // Accelerometer
+  imuInit();
+  initIMUStructures();
   Serial.println("Hardware initialization complete");
 }
 void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, create them and populate with the hardcoded values
@@ -855,7 +830,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     BatteryCapacity_Ah = settingRead(NK_BatteryCapacity_Ah).toInt();
   }
-  PeukertRatedCurrent_A = BatteryCapacity_Ah / 20.0f;  // executes ever time InitSystemSettings runs, regardless of which branches are taken.  Correct.
+  PeukertRatedCurrent_A = BatteryCapacity_Ah / 20.0f;  // derived; recomputed every run regardless of branch
   if (!settingExists(NK_ChargeEfficiency)) {
     // Save user-readable form (e.g. "99.0"), NOT the scaled integer, so the load path always
     // sees a value ≤ 100 and can safely apply × 10 to reconstruct the scaled integer.
@@ -882,7 +857,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   if (!settingExists(NK_ManualDutyTarget)) {
     settingWrite(NK_ManualDutyTarget, String(ManualDutyTarget).c_str());
   } else {
-    ManualDutyTarget = settingRead(NK_ManualDutyTarget).toInt();  //
+    ManualDutyTarget = settingRead(NK_ManualDutyTarget).toInt();
   }
   if (!settingExists(NK_capLimitMode)) {
     settingWrite(NK_capLimitMode, String(capLimitMode).c_str());
@@ -890,7 +865,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     capLimitMode = constrain(settingRead(NK_capLimitMode).toInt(), 0, 1);
   }
   // System voltage class (12/24/48) — NVS (NK_BatteryVoltage) is the AUTHORITATIVE source of truth.
-  // vessel_info.json (parsed into BATTERY_VOLTAGE above, ~line 810) is only a mirror, used here ONLY to
+  // vessel_info.json (parsed into BATTERY_VOLTAGE above) is only a mirror, used here ONLY to
   // migrate pre-existing devices on the first boot after this key was introduced. Keeping the class in
   // the same store as the rescaled charge profile is what prevents an overvoltage-trip mismatch if
   // LittleFS (formatOnFail) ever loses vessel_info.json. The CV/CC gain normalization
@@ -1058,7 +1033,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     hardwarePresent = settingRead(NK_hardwarePresent).toInt();
   }
-  // VMGUseTrueWind.txt removed — Target-mode toggle gone; both VMGs always computed. Stale file (if any) is ignored.
   if (!settingExists(NK_gpsTimeSourceMode)) {
     settingWrite(NK_gpsTimeSourceMode, String(gpsTimeSourceMode).c_str());
   } else {
@@ -1408,7 +1382,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     UseFloat = settingRead(NK_UseFloat).toInt();
   }
 
-  // ADD: Dynamic correction settings (add with other settings)
   if (!settingExists(NK_AutoShuntGainCorrection)) {  // BOOLEAN
     settingWrite(NK_AutoShuntGainCorrection, String(AutoShuntGainCorrection).c_str());
   } else {
@@ -1455,7 +1428,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_plotTimeWindow, String(plotTimeWindow).c_str());
   } else {
     plotTimeWindow = settingRead(NK_plotTimeWindow).toInt();
-    plotTimeWindow = constrain(plotTimeWindow, 1, 1000000);  // 10s to 10min
+    plotTimeWindow = constrain(plotTimeWindow, 1, 1000000);
   }
   if (!settingExists(NK_IgnoreLearningDuringPenalty)) {
     settingWrite(NK_IgnoreLearningDuringPenalty, String(IgnoreLearningDuringPenalty).c_str());
@@ -1572,8 +1545,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     VoltageKi = settingRead(NK_VoltageKi).toFloat();
   }
-  // VoltageKd (D term) removed — LittleFS file /VoltageKd.txt no longer loaded.
-  // ProtectionProxGateV removed 2026-05-22 — no longer used by any protection. See CV_Loop_Dev_Summary.md.
   if (!settingExists(NK_SlopeBleedThresh)) {
     settingWrite(NK_SlopeBleedThresh, String(SlopeBleedThresh, 3).c_str());
   } else {
@@ -1770,7 +1741,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     PidSampleDivisor = settingRead(NK_PidSampleDivisor).toInt();
   }
-  // Add after other learning settings:
   if (!settingExists(NK_LearningSettlingPeriod)) {
     settingWrite(NK_LearningSettlingPeriod, String(LearningSettlingPeriod).c_str());
   } else {
@@ -1847,12 +1817,10 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TempSustainedTimeout = settingRead(NK_TempSustainedTimeout).toInt();
   }
   // AlternatorHardShutdownV — absolute hard-shutdown voltage threshold.
-  // First-boot default auto-scales as BulkVoltage + 0.3 V so 24V and 48V systems get
-  // sensible defaults (29.1 V / 57.9 V) instead of the 12V-only static 14.8 V seed.
-  // Once written to LittleFS the value is treated as user-set and never auto-overwritten —
+  // First-boot default auto-scales as BulkVoltage + 0.3 V so 24V/48V systems get sensible
+  // defaults. Once written, the value is treated as user-set and never auto-overwritten —
   // a system-class change later requires manually re-setting it from the UI.
-  // Migration: if the old /VoltageSpikeMargin.txt exists and the new file does not, convert
-  // the stored margin to an absolute value (BulkVoltage was loaded earlier in this function).
+  // Migration: an old VoltageSpikeMargin key (a margin) converts to an absolute value.
   if (!settingExists(NK_AlternatorHardShutdownV)) {
     if (settingExists(NK_VoltageSpikeMargin)) {
       float oldMargin = settingRead(NK_VoltageSpikeMargin).toFloat();
@@ -1953,7 +1921,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     AwBleedRate = settingRead(NK_AwBleedRate).toFloat();
   }
-  // AwRecoverRate is hardcoded (0.1f) — no LittleFS persistence
+  // AwRecoverRate is hardcoded (0.1f) — not persisted
   if (!settingExists(NK_AwSeedProtectMs)) {
     settingWrite(NK_AwSeedProtectMs, String(AwSeedProtectMs).c_str());
   } else {
@@ -2064,7 +2032,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     VoltageDisagreeTimeout = settingRead(NK_VoltageDisagreeTimeout).toInt();
   }
-  // (Old anomaly settings removed — alternator-health settings load via altSettingsLoad() in setup.)
+  // Alternator-health settings load via altSettingsLoad() in setup.
 
   if (!settingExists(NK_VoltageKp)) {
     settingWrite(NK_VoltageKp, String(VoltageKp, 1).c_str());
@@ -2084,7 +2052,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     FIELD_COLLAPSE_DELAY = settingRead(NK_FIELD_COLLAPSE_DELAY).toInt();
   }
-  // IMU safety thresholds — user-set via form, persisted to LittleFS (Pattern B).
+  // IMU safety thresholds — user-set via form, persisted (Pattern B).
   // imuMountOrientation rides on /vessel_info.json (separate path).
   if (!settingExists(NK_CAPSIZE_THRESHOLD_DEG)) {
     settingWrite(NK_CAPSIZE_THRESHOLD_DEG, String(CAPSIZE_THRESHOLD_DEG, 1).c_str());
@@ -2141,8 +2109,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     faAmpsDriftPct = settingRead(NK_faAmpsDriftPct).toFloat();
   }
-  // Measured-ripple capture admission gates (§10.8/§11). ripRpmMargin retired 2026-07-01 (§11
-  // stationarity gate replaced the bin-edge margin) — NVS key "ripRpmMargin" abandoned, never reuse.
+  // Measured-ripple capture admission gates (§10.8/§11). NVS key "ripRpmMargin" is abandoned — never reuse.
   if (!settingExists(NK_ripWinMs)) {
     settingWrite(NK_ripWinMs, String(ripWinMs, 0).c_str());
   } else {
@@ -2229,11 +2196,7 @@ constexpr float GYRO_SCALE = 0.070f;      // dps per LSB
 // sign[i] = +1 or -1
 // Index order: [0]=accel_fwd, [1]=accel_stbd, [2]=accel_up,
 //              [3]=gyro_pitch, [4]=gyro_heel,  [5]=gyro_yaw
-// Verification status:
-//   0: VERIFIED from physical tilt tests
-//   1: VERIFIED from physical tilt tests (2026-06-09)
-//   2: VERIFIED from physical tilt tests
-//   3: VERIFIED from physical tilt tests
+// All four orientations VERIFIED from physical tilt tests.
 struct AxisRemap {
   uint8_t src[6];
   int8_t sign[6];
@@ -2248,7 +2211,7 @@ const AxisRemap axisRemap[4] = {
 
 
 // Complementary filter parameters
-constexpr float CF_ALPHA = 0.90f;  // Gyro weight (0.90 = trust gyro 90%, accel 10%)  time constant ~0.19 seconds, Feels instant on the bench. Will show some wave flutter at sea but still usable.
+constexpr float CF_ALPHA = 0.90f;  // Gyro weight (0.90 = trust gyro 90%, accel 10%) → time constant ~0.19 s; may show some wave flutter at sea
 
 // 60-second rolling window
 constexpr uint16_t ROLLING_WINDOW_SIZE = 60;  // 1 sample per second
@@ -2329,7 +2292,6 @@ void resetAccelStats() {
   imu_slam_peak_max = 0;
 }
 void complementaryFilter(float ax, float ay, float az, float gx, float gy, float dt) {
-  // Complementary filter for heel and pitch estimation
   // Accel-derived angles (noisy but no drift)
   float accel_heel = atan2(ay, sqrt(ax * ax + az * az)) * 180.0f / PI - imuHeelOffsetDeg;
   float accel_pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0f / PI - imuPitchOffsetDeg;
@@ -2351,12 +2313,10 @@ void complementaryFilter(float ax, float ay, float az, float gx, float gy, float
   cf_heel += gy * dt;
   cf_pitch += gx * dt;
 
-  // Fuse: trust gyro 98%, accel 2%
   cf_heel = CF_ALPHA * cf_heel + (1.0f - CF_ALPHA) * accel_heel;
   cf_pitch = CF_ALPHA * cf_pitch + (1.0f - CF_ALPHA) * accel_pitch;
 }
 void updateAccelMetrics() {
-  // Process all available ring buffer samples
   // Called from main loop every iteration (~300 Hz at 3ms loop time, NOT 1 Hz).
   // Most calls find 0 new samples (arrival rate is 104 Hz post-ODR-drop) and exit quickly;
   // accel_cap=50 limits per-call work when a backlog exists. Timer reports sub-ms worst,
@@ -2408,25 +2368,21 @@ void updateAccelMetrics() {
 
     // Update window statistics with time-weighted averaging
     if (dt_us > 0 && dt_us < 100000) {  // Sanity check: 0-100ms
-      // Accel X
       if (ax_scaled < imuWindow->accel_x_min) imuWindow->accel_x_min = ax_scaled;
       if (ax_scaled > imuWindow->accel_x_max) imuWindow->accel_x_max = ax_scaled;
       imuWindow->accel_x_area_v_us += (int64_t)ax_scaled * dt_us;
       imuWindow->accel_x_valid_us += dt_us;
 
-      // Accel Y
       if (ay_scaled < imuWindow->accel_y_min) imuWindow->accel_y_min = ay_scaled;
       if (ay_scaled > imuWindow->accel_y_max) imuWindow->accel_y_max = ay_scaled;
       imuWindow->accel_y_area_v_us += (int64_t)ay_scaled * dt_us;
       imuWindow->accel_y_valid_us += dt_us;
 
-      // Accel Z
       if (az_scaled < imuWindow->accel_z_min) imuWindow->accel_z_min = az_scaled;
       if (az_scaled > imuWindow->accel_z_max) imuWindow->accel_z_max = az_scaled;
       imuWindow->accel_z_area_v_us += (int64_t)az_scaled * dt_us;
       imuWindow->accel_z_valid_us += dt_us;
 
-      // Total acceleration magnitude
       float total_accel = sqrt(ax * ax + ay * ay + az * az);
       int32_t total_accel_scaled = (int32_t)(total_accel * 1000.0f);
       if (total_accel_scaled < imuWindow->total_accel_min) imuWindow->total_accel_min = total_accel_scaled;
@@ -2605,19 +2561,16 @@ void updateAccelMetrics() {
 
     // Update window statistics
     if (dt_us > 0 && dt_us < 100000) {  // Sanity check
-      // Gyro X
       if (gx_scaled < imuWindow->gyro_x_min) imuWindow->gyro_x_min = gx_scaled;
       if (gx_scaled > imuWindow->gyro_x_max) imuWindow->gyro_x_max = gx_scaled;
       imuWindow->gyro_x_area_v_us += (int64_t)gx_scaled * dt_us;
       imuWindow->gyro_x_valid_us += dt_us;
 
-      // Gyro Y
       if (gy_scaled < imuWindow->gyro_y_min) imuWindow->gyro_y_min = gy_scaled;
       if (gy_scaled > imuWindow->gyro_y_max) imuWindow->gyro_y_max = gy_scaled;
       imuWindow->gyro_y_area_v_us += (int64_t)gy_scaled * dt_us;
       imuWindow->gyro_y_valid_us += dt_us;
 
-      // Gyro Z
       if (gz_scaled < imuWindow->gyro_z_min) imuWindow->gyro_z_min = gz_scaled;
       if (gz_scaled > imuWindow->gyro_z_max) imuWindow->gyro_z_max = gz_scaled;
       imuWindow->gyro_z_area_v_us += (int64_t)gz_scaled * dt_us;
@@ -2628,7 +2581,7 @@ void updateAccelMetrics() {
     imu_gyro_x_raw = gx;
     imu_gyro_y_raw = gy;
     imu_gyro_z_raw = gz;
-    imu_yaw_rate_dps = gz;  // Direct from gyro Z
+    imu_yaw_rate_dps = gz;
 
     // Update complementary filter with latest accel + this gyro sample
     float dt_sec = dt_us / 1000000.0f;
@@ -2697,7 +2650,6 @@ void updateAccelMetrics() {
     }
   }
 
-  // Update current display values
   imu_heel_deg = cf_heel;
   imu_pitch_deg = cf_pitch;
   wmIgnUpdate(wmIgn_heel,  imu_heel_deg);   // ignition-cycle watermarks
@@ -2741,7 +2693,6 @@ void updateAccelMetrics() {
       imuWindow->heel_deviation_60s = (int32_t)(heel_dev * 100.0f);
       imuWindow->pitch_deviation_60s = (int32_t)(pitch_dev * 100.0f);
 
-      // Update display values
       imu_heel_change_60s = heel_max_60s - heel_min_60s;
       imu_heel_deviation_60s = heel_dev;
       imu_pitch_change_60s = pitch_max_60s - pitch_min_60s;
@@ -2845,7 +2796,6 @@ void updateAccelMetrics() {
     pitchpole_reported = false;
   }
 
-  // Update lifetime maximums
   if (abs(cf_heel) > imu_heel_max_lifetime) {
     imu_heel_max_lifetime = abs(cf_heel);
   }
@@ -2881,7 +2831,7 @@ void updateAccelMetrics() {
 }
 
 
-//OTA UPDATES--  well, some other stuff first related to authenticating tokens for cloud
+// OTA updates + cloud auth-token handling
 void initializeDeviceId() {
   // STEP 1: Always read real chip ID first
   chipid = ESP.getEfuseMac();
@@ -2945,7 +2895,6 @@ void checkDeviceUIDChange() {
   nvs_commit(handle);
   nvs_close(handle);
 }
-// Base64 decode function
 bool base64Decode(const String &input, uint8_t *output, size_t outputSize, size_t *decodedLength) {
   size_t inputLen = input.length();
   size_t expectedLen = (inputLen * 3) / 4;
@@ -2969,7 +2918,6 @@ bool verifyPackageSignature(uint8_t *packageData, size_t packageSize, const Stri
   Serial.println("🛡️ Starting package signature verification...");
 
   mbedtls_pk_context pk;
-  // Decode the signature from base64
   uint8_t signature[520];  // Buffer for RSA-4096 signatures
   size_t sigLength;
 
@@ -3009,7 +2957,6 @@ bool verifyPackageSignature(uint8_t *packageData, size_t packageSize, const Stri
 
   Serial.println("Package hash computed successfully");
 
-  // Parse and verify with RSA public key
   mbedtls_pk_init(&pk);
 
   ret = mbedtls_pk_parse_public_key(&pk, (const unsigned char *)OTA_PUBLIC_KEY, strlen(OTA_PUBLIC_KEY) + 1);
@@ -3019,7 +2966,6 @@ bool verifyPackageSignature(uint8_t *packageData, size_t packageSize, const Stri
     return false;
   }
 
-  // Verify the signature
   ret = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, 32, signature, sigLength);
   mbedtls_pk_free(&pk);
 
@@ -3031,8 +2977,6 @@ bool verifyPackageSignature(uint8_t *packageData, size_t packageSize, const Stri
     return false;
   }
 }
-// Perform actual firmware download and install
-// Initialize streaming extractor
 bool initStreamingExtractor(StreamingExtractor *extractor) {
   memset(extractor, 0, sizeof(StreamingExtractor));
 
@@ -3056,7 +3000,6 @@ bool initStreamingExtractor(StreamingExtractor *extractor) {
   Serial.println("✅ Streaming tar extractor initialized");
   return true;
 }
-// Parse tar header to get file info
 bool parseTarHeader(StreamingExtractor *extractor) {
   // Validate header first (but skip the all-zeros check since it's handled in processDataChunk)
   if (memcmp(extractor->tarHeader + 257, "ustar", 5) != 0) {
@@ -3079,11 +3022,9 @@ bool parseTarHeader(StreamingExtractor *extractor) {
   // Check file type (position 156 in tar header)
   char typeFlag = extractor->tarHeader[156];
 
-  // Clean filename
   String filename = String(rawFilename);
   filename.trim();
 
-  // Remove leading "./" if present
   if (filename.startsWith("./")) {
     filename = filename.substring(2);
   }
@@ -3115,7 +3056,6 @@ bool parseTarHeader(StreamingExtractor *extractor) {
   memcpy(sizeStr, extractor->tarHeader + 124, 12);
   sizeStr[12] = '\0';
 
-  // Parse octal size manually
   extractor->currentFileSize = 0;
   for (int i = 0; i < 12 && sizeStr[i] != '\0' && sizeStr[i] != ' '; i++) {
     if (sizeStr[i] >= '0' && sizeStr[i] <= '7') {
@@ -3125,7 +3065,6 @@ bool parseTarHeader(StreamingExtractor *extractor) {
 
   extractor->currentFilePos = 0;
 
-  // Check if this is the firmware file
   extractor->isCurrentFileFirmware = extractor->currentFileName.equals("firmware.bin");
 
   Serial.printf("📁 Found file: %s (%d bytes) type='%c'\n",
@@ -3133,7 +3072,6 @@ bool parseTarHeader(StreamingExtractor *extractor) {
 
   // Route file to appropriate destination
   if (extractor->currentFileName.equals("firmware.bin")) {
-    // Initialize OTA partition write
     extractor->otaPartition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
     esp_ota_begin(extractor->otaPartition, extractor->currentFileSize, &extractor->otaHandle);
     extractor->otaStarted = true;
@@ -3155,13 +3093,11 @@ bool parseTarHeader(StreamingExtractor *extractor) {
   }
   return true;
 }
-// Process tar data chunk
 bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataSize) {
   size_t processed = 0;
 
   while (processed < dataSize) {
     if (extractor->inPadding) {
-      // Skip padding bytes
       size_t toSkip = min(extractor->paddingRemaining, dataSize - processed);
       processed += toSkip;
       extractor->paddingRemaining -= toSkip;
@@ -3174,7 +3110,6 @@ bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataS
       }
 
     } else if (extractor->inTarHeader) {
-      // Still reading tar header
       size_t headerRemaining = 512 - extractor->tarHeaderPos;
       size_t toCopy = min(headerRemaining, dataSize - processed);
 
@@ -3197,7 +3132,6 @@ bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataS
           return true;  // SUCCESS! Archive is complete
         }
 
-        // Not end of archive, parse the header
         if (!parseTarHeader(extractor)) {
           Serial.println("❌ Failed to parse tar header");
           return false;  // Actual parsing error
@@ -3214,7 +3148,6 @@ bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataS
       if (toWrite > 0 && extractor->currentFileName.length() > 0) {
         // Only process if we have a valid filename (not a skipped entry)
         if (extractor->isCurrentFileFirmware && extractor->otaStarted) {
-          // Write to firmware partition
           esp_err_t err = esp_ota_write(extractor->otaHandle, data + processed, toWrite);
           if (err != ESP_OK) {
             Serial.printf("❌ OTA write failed: %s\n", esp_err_to_name(err));
@@ -3222,7 +3155,6 @@ bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataS
           }
 
         } else if (extractor->currentWebFile) {
-          // Write to web file
           size_t written = extractor->currentWebFile.write(data + processed, toWrite);
           if (written != toWrite) {
             Serial.printf("❌ Web file write failed: %d/%d bytes\n", written, toWrite);
@@ -3235,7 +3167,6 @@ bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataS
         processed += toWrite;
       }
 
-      // Check if current file is complete
       if (extractor->currentFilePos >= extractor->currentFileSize) {
         if (extractor->isCurrentFileFirmware && extractor->otaStarted) {
           Serial.println("✅ Firmware extraction completed");
@@ -3266,8 +3197,8 @@ bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataS
   return true;
 }
 void prepareForOTA() {
-  otaInProgress = true;  // ADD THIS at top
-  // NEW: Close EventSource FIRST (before any heap measurements)
+  otaInProgress = true;
+  // Close EventSource FIRST (before any heap measurements)
   Serial.println("Closing EventSource connections...");
   events.close();
   delay(100);
@@ -3275,7 +3206,6 @@ void prepareForOTA() {
   Serial.println("🧹 Preparing system for OTA - freeing memory...");
   Serial.printf("Heap BEFORE cleanup: %u bytes\n", ESP.getFreeHeap());
 
-  // Delete tasks
   if (httpsTaskHandle != NULL) {
     esp_task_wdt_delete(httpsTaskHandle);
     vTaskDelete(httpsTaskHandle);
@@ -3409,7 +3339,6 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
     goto cleanup;
   }
 
-  // Additional safety check for current mode
   if (currentMode != MODE_CLIENT) {
     Serial.println("ERROR: Not in client mode - cannot perform OTA update");
     queueConsoleMessage("OTA FAILED: Must be in client mode for updates");
@@ -3443,7 +3372,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   otaHeapMark("AFTER setInsecure");
 
   // CRITICAL: Set matching timeouts BEFORE connection attempt
-  client.setTimeout(30000);           // 30 seconds in milliseconds
+  client.setTimeout(30000);
   client.setHandshakeTimeout(30000);  // Must match setTimeout
 
   Serial.println("8. Pre-flight memory check...");
@@ -3486,7 +3415,6 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   http.addHeader("Current-Version", FIRMWARE_VERSION);
   http.setTimeout(60000);
 
-  // Continue with your existing download logic...
   httpCode = http.GET();
   otaHeapMark("AFTER http.GET");
 
@@ -3524,7 +3452,6 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
       break;
     }
     esp_task_wdt_reset();
-    // Read chunk from network
     int available = stream->available();
     if (available > 0) {
       int toRead = min(available, (int)min(CHUNK_SIZE, (size_t)(contentLength - totalDownloaded)));
@@ -3542,7 +3469,6 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
           break;
         }
 
-        // Progress indication
         if (millis() - lastProgress > 2000) {
           Serial.printf("Progress: %d%% (%d/%d bytes)\n",
                         (totalDownloaded * 100) / contentLength, totalDownloaded, contentLength);
@@ -3574,7 +3500,6 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   // Verify signature
   mbedtls_md_finish(&extractor.hashCtx, hash);
 
-  // Decode and verify signature (reuse existing verification function)
   if (!base64Decode(signatureBase64, signature, sizeof(signature), &sigLength)) {
     Serial.println("SECURITY: Failed to decode signature");
     if (extractor.otaStarted) esp_ota_abort(extractor.otaHandle);
@@ -3604,7 +3529,6 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
 
   Serial.println("SECURITY: Signature verification PASSED");
 
-  // Finalize OTA
   if (extractor.otaStarted) {
     esp_err_t err = esp_ota_end(extractor.otaHandle);
     if (err != ESP_OK) {
@@ -3624,14 +3548,13 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   Serial.println("=== STREAMING OTA UPDATE SUCCESSFUL ===");
   Serial.printf("Updated from %s to %s\n", FIRMWARE_VERSION, updateInfo.version.c_str());
 
-  // NEW: Clear forced update flags in Supabase after successful update
+  // Clear forced update flags in Supabase after successful update
   if (hasForcedUpdate) {
     executeClearForcedUpdate();
   }
   Serial.println("Restarting in 3 seconds...");
 
 cleanup:
-  // Cleanup
   if (extractor.hashStarted) {
     mbedtls_md_free(&extractor.hashCtx);
   }
@@ -3694,12 +3617,10 @@ void performOTAUpdate(const UpdateInfo &updateInfo) {
   signatureBase64.trim();
   Serial.printf("✅ Signature downloaded (%d chars)\n", signatureBase64.length());
 
-  // Warn user before blocking operation
   Serial.println("UPDATE: Starting firmware download, web interface will be unresponsive");
   //events.send("UPDATE: Downloading firmware - interface will freeze 60-90 sec", "console", millis());
   delay(3000);
 
-  // Perform streaming update
   // Check if we need to restart to factory first
   const esp_partition_t *ota0_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
   const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
@@ -3709,7 +3630,6 @@ void performOTAUpdate(const UpdateInfo &updateInfo) {
     Serial.println("OTA: Currently on ota_0, switching to factory for update...");
     // events.send("OTA: Switching to factory partition for update", "console", millis());
 
-    // Switch to factory partition and web files
     esp_ota_set_boot_partition(factory_partition);
     switchToFactoryWebFiles();
 
@@ -3800,7 +3720,6 @@ void performOTAUpdateToVersion(const char *targetVersion) {
     return;
   }
 
-  // Skip if not connected to internet
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("OTA: Cannot update - WiFi not connected");
     events.send("OTA: Cannot update - WiFi not connected", "console", millis());
@@ -3852,7 +3771,6 @@ void performOTAUpdateToVersion(const char *targetVersion) {
                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   core0Busy = false;
 }
-// Validate tar header checksum and magic
 bool isValidTarHeader(uint8_t *header) {
   // Check for all zeros (end of archive)
   bool allZeros = true;
@@ -3867,10 +3785,8 @@ bool isValidTarHeader(uint8_t *header) {
     return false;  // End of archive
   }
 
-  // Check for ustar magic at offset 257
   if (memcmp(header + 257, "ustar", 5) != 0) {
     Serial.println("❌ Invalid tar header: missing ustar magic");
-    // Print some header bytes for debugging
     Serial.print("Header start: ");
     for (int i = 0; i < 20; i++) {
       Serial.printf("%02x ", header[i]);
@@ -4217,14 +4133,12 @@ void executeClearPendingConfig() {
 void printPartitionInfo() {
   Serial.println("=== PARTITION SUMMARY ===");
 
-  // Get current running partition
   const esp_partition_t *running = esp_ota_get_running_partition();
   if (running) {
     Serial.printf("🚀 RUNNING APP: %s - %d bytes (%.2f MB) at 0x%X\n",
                   running->label, running->size, running->size / 1024.0 / 1024.0, running->address);
   }
 
-  // List ALL partitions in the table
   Serial.println("\n📋 ALL PARTITIONS IN TABLE:");
   esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
   int partitionCount = 0;
@@ -4245,7 +4159,6 @@ void printPartitionInfo() {
   esp_partition_iterator_release(it);
   Serial.printf("Total partitions found: %d\n", partitionCount);
 
-  // Check specific expected partitions
   Serial.println("\n🔍 EXPECTED PARTITION VERIFICATION:");
   checkExpectedPartition("factory", ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, 0x280000);
   checkExpectedPartition("ota_0", ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, 0x280000);
@@ -4253,20 +4166,17 @@ void printPartitionInfo() {
   checkExpectedPartition("prod_fs", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x100000);
   checkExpectedPartition("userdata", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x8E0000);
 
-  // OTA partition info
   Serial.println("\n🔄 OTA PARTITION STATUS:");
   const esp_partition_t *ota_partition = esp_ota_get_next_update_partition(NULL);
   if (ota_partition) {
     Serial.printf("Next OTA target: %s at 0x%X\n", ota_partition->label, ota_partition->address);
   }
 
-  // Boot partition info
   const esp_partition_t *boot_partition = esp_ota_get_boot_partition();
   if (boot_partition) {
     Serial.printf("Boot partition: %s at 0x%X\n", boot_partition->label, boot_partition->address);
   }
 
-  // Flash and memory info
   Serial.println("\n💾 FLASH & MEMORY INFO:");
   Serial.printf("Flash size: %d MB\n", ESP.getFlashChipSize() / 1024 / 1024);
   Serial.printf("Current sketch size: %d bytes (%.2f MB)\n",
@@ -4288,7 +4198,6 @@ bool testInternetSpeed() {
   Serial.println("========================================");
   Serial.flush();
 
-  // First check if WiFi is even connected
   Serial.printf(">>> WiFi.status() = %d (3=connected)\n", WiFi.status());
   Serial.flush();
 
@@ -4302,7 +4211,7 @@ bool testInternetSpeed() {
   Serial.println(">>> WiFi connected, starting speed test");
   Serial.flush();
 
-  esp_task_wdt_reset();  // Feed watchdog before test
+  esp_task_wdt_reset();
   Serial.println(">>> Watchdog reset pre-speed-test");
   Serial.flush();
 
@@ -4322,20 +4231,20 @@ bool testInternetSpeed() {
 
   unsigned long connectTime = millis() - connectStart;
   client.stop();
-  esp_task_wdt_reset();  // Feed watchdog after connectivity test
+  esp_task_wdt_reset();
   // Test 2: Download small file and measure speed
   Serial.println(">>> Test 2: Setting up HTTP client for speed test");
   Serial.flush();
   HTTPClient http;
   // Use a reliable small file (Cloudflare's trace - about 200-300 bytes)
   http.begin(client, "http://cloudflare.com/cdn-cgi/trace");
-  http.setTimeout(5000);  // 5 second timeout for speed test
+  http.setTimeout(5000);
   unsigned long downloadStart = millis();
   int httpCode = http.GET();
   Serial.printf(">>> http.GET() returned code %d after %lu ms\n", httpCode, millis() - downloadStart);
   Serial.flush();
   weatherHttpResponseCode = httpCode;
-  esp_task_wdt_reset();  // Feed watchdog after GET request
+  esp_task_wdt_reset();
   Serial.println(">>> Watchdog reset #3");
   Serial.flush();
 
@@ -4363,22 +4272,20 @@ bool testInternetSpeed() {
   Serial.println(">>> HTTP connection ended");
   Serial.flush();
 
-  esp_task_wdt_reset();  // Feed watchdog after completing test
+  esp_task_wdt_reset();
   Serial.println(">>> Watchdog reset #4");
   Serial.flush();
 
-  // Calculate speed in bytes per second
   float bytesPerSecond = 0;
   if (downloadTime > 0) {
-    bytesPerSecond = (bytesReceived * 1000.0) / downloadTime;  // bytes/sec
+    bytesPerSecond = (bytesReceived * 1000.0) / downloadTime;
   }
 
-  float kbps = (bytesPerSecond * 8.0) / 1000.0;  // Convert to kilobits per second
+  float kbps = (bytesPerSecond * 8.0) / 1000.0;
 
   Serial.printf(">>> Speed test result: %.2f Kbps (%d bytes in %lu ms)\n", kbps, bytesReceived, downloadTime);
   Serial.flush();
 
-  // Require minimum 5 Kbps
   if (kbps < 5.0) {
     Serial.printf(">>> Speed test FAILED: Connection too slow (%.2f Kbps < 5 Kbps minimum)\n", kbps);
     Serial.flush();
@@ -4400,12 +4307,11 @@ bool testInternetSpeed() {
 void otaRestoreNormalOperation(bool success) {
   Serial.printf("OTA restore: success=%d, restoring system state...\n", success ? 1 : 0);
 
-  // 1) Clear blocking flags
   core0Busy = false;
   otaInProgress = false;
   lastHttpsOperationTime = millis();
 
-  // 2) Recreate TempTask if deleted (matches your setup: 4096 stack, priority 1, core 0)
+  // Recreate TempTask if deleted — params must match the xTaskCreatePinnedToCore in setup()
   if (tempTaskHandle == NULL) {
     BaseType_t ok = xTaskCreatePinnedToCore(TempTask, "TempTask", 4096, NULL, 1, &tempTaskHandle, 0);
     if (ok == pdPASS) {
@@ -4415,7 +4321,7 @@ void otaRestoreNormalOperation(bool success) {
     }
   }
 
-  // 3) Recreate HTTPS task if deleted (matches setup: 12288 stack, priority 1, core 0 — see setup() note)
+  // Recreate HTTPS task if deleted — params must match setup() (see setup() note)
   if (httpsTaskHandle == NULL) {
     BaseType_t ok = xTaskCreatePinnedToCore(httpsTask, "HTTPS", 12288, NULL, 1, &httpsTaskHandle, 0);
     if (ok == pdPASS) {
@@ -4425,8 +4331,7 @@ void otaRestoreNormalOperation(bool success) {
     }
   }
 
-  // 4) Let tasks initialize cleanly
-  vTaskDelay(pdMS_TO_TICKS(100));
+  vTaskDelay(pdMS_TO_TICKS(100));  // let tasks initialize cleanly
 
   Serial.println("System restoration complete");
 }
@@ -4695,7 +4600,6 @@ const char *formatTimestamp(time_t timestamp) {
 // Returns: valid epoch if time synced, negative millis if not
 time_t computeCollectionTime() {
   if (timeIsSynced && timeBase > 0) {
-    // Compute epoch for window start
     long long deltaMs = (long long)currentWindow->windowStartTime - (long long)timeBaseMillis;
     long long deltaSec = deltaMs / 1000;
     time_t epoch = timeBase + deltaSec;

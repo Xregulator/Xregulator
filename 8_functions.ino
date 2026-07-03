@@ -1,4 +1,5 @@
-// ── 8_functions.ino ── Fast alternator-current failure detector (consumer 2): algorithm bodies.
+// ── 8_functions.ino ── Fast alternator-current failure detector (consumer 2) algorithm bodies,
+// Config Sharing manifest, Battery Health monitor (DCIR + capacity), /debug/fillmax endpoints.
 
 #include <stdint.h>
 #include <string.h>
@@ -210,8 +211,9 @@ static void fadStart(FadJob *J,
 }
 
 // Straight-line detector — runs to completion on the Core-0 worker. Reductions keep the chunked
-// float-partial->double accumulation (FAD_SEG_SAMPLES) so results stay bit-identical to the old
-// sliced version; do not flatten them. Rationale + validation: Fault_Detector_Dev_Summary.md.
+// float-partial->double accumulation (FAD_SEG_SAMPLES) so results stay bit-identical to what the
+// verdict thresholds were tuned against; do not flatten them. Rationale + validation:
+// Fault_Detector_Dev_Summary.md.
 
 // Crest pick: maxima -> local-contrast threshold -> valley-depth merge. -1 = too few maxima.
 static int fadPick(FadJob *J, float wMs, float frac) {
@@ -547,7 +549,7 @@ static void fadRung(FadJob *J, float wMs, float frac) {
 static int fadStep(FadJob *J, int64_t deadline, FadResult *out) {
   (void)deadline;
   int n = J->n;
-  if (J->src) for (int i = 0; i < n; i++) J->xf[i] = (float)J->src[i];  // int16 source -> float
+  if (J->src) for (int i = 0; i < n; i++) J->xf[i] = (float)J->src[i];
   // s = boxcar-3 of xf (numpy clipped-window semantics)
   {
     const float *x = J->xf;
@@ -643,8 +645,6 @@ done:
 // conversion, no /get replay. Cross-rev safe: a key absent on the destination is
 // skipped and that firmware's own default applies (see CLAUDE.md "NVS Cross-Rev Risk").
 // ============================================================================
-// AUTO-CLASSIFIED config manifest (allowlist). tier 1 = free clone, 2 = install/hardware.
-// Generated from NK_ macros + tier classification; see config_drift_check.py guard.
 struct ConfigManifestEntry { const char *param; const char *nvsKey; uint8_t tier; };
 static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "BulkVoltage", NK_BulkVoltage, 1 },
@@ -1089,8 +1089,8 @@ void bhComputeDcir() {
   if (bhSampleCount < 8 || bhToggleCount < (int)bhNumEdges + 3) { bhAbort("not enough samples"); return; }
 
   // Average the SETTLED tail of each level (last `win` ms before its end toggle). End-of-dwell
-  // windows are robust to the slew time of the now-gentle transitions — both levels are fully
-  // settled regardless of how fast the setpoint got there, so ΔV/ΔI is the same as an abrupt step.
+  // windows are robust to the transition slew time — both levels are fully settled regardless
+  // of how fast the setpoint got there, so ΔV/ΔI is the same as an abrupt step.
   uint32_t win = bhDwellMs / 3; if (win < 200) win = 200;
 
   float Rsum = 0.0f, Rsq = 0.0f; int Rn = 0;   // Rsq → per-edge std-dev (fit consistency)

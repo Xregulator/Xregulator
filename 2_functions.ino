@@ -48,11 +48,11 @@ String readFile(fs::FS &fs, const char *path) {
   }
 
   size_t size = file.size();
-  if (size > 4096) {  // pick your limit
+  if (size > 4096) {
     file.close();
     xSemaphoreGive(fsMutex);
     Serial.printf("readFile: file too large (%u): %s\n", (unsigned)size, path);
-    return String();  // More importantly, callers can't distinguish "file too large" from "file not found" — both return String(). The config payload buffer is 8192 bytes, so it's possible valid config JSON could exceed 4096 bytes. Consider bumping the limit or returning a distinct error indicator.
+    return String();  // Callers can't distinguish "too large" from "not found" — both return String(); valid config JSON (8192-byte payload buffer) could exceed 4096.
   }
 
   char *buffer = (char *)ps_malloc(size + 1);
@@ -288,8 +288,7 @@ bool fsRemove(const char *path) {
 #define NK_ripFitAlt  "ripFitAlt"
 // Measured-ripple capture admission gates (§10.8/§11) — own knobs, deliberately DECOUPLED from the
 // fa* anomaly-detector gates so tuning capture admission can't loosen detector arming.
-// NK "ripRpmMargin" RETIRED 2026-07-01 (§11 stationarity gate replaced the bin-edge margin) — key
-// abandoned in NVS, never reuse it for a different meaning.
+// NK "ripRpmMargin" is RETIRED — key abandoned in NVS, never reuse it for a different meaning.
 #define NK_ripWinMs "ripWinMs"
 #define NK_ripDriftFloorA "ripDriftFloorA"
 #define NK_ripDriftPct "ripDriftPct"
@@ -423,7 +422,7 @@ bool fsRemove(const char *path) {
 #define NK_xTime "xTime"
 #define NK_yyMax "yyMax"
 #define NK_yyMin "yyMin"
-// WiFi provisioning + interface password + IMU level calibration (migrated 2nd pass)
+// WiFi provisioning + interface password + IMU level calibration
 #define NK_ssid "ssid"
 #define NK_pass "pass"
 #define NK_apssid "apssid"
@@ -881,7 +880,7 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/perfPruneK.txt", "perfPruneK" },
   { "/perfSpeedSrc.txt", "perfSpeedSrc" },
   { "/perfFoldSymmetric.txt", "perfFoldSymmetr" },
-  // 2nd pass: WiFi provisioning, interface password, IMU level calibration.
+  // WiFi provisioning, interface password, IMU level calibration.
   // Values may carry a trailing newline from the old file writers (println) —
   // the loaders trim. imu_zero is the whole JSON blob as one string value.
   { "/ssid.txt", NK_ssid },
@@ -1460,7 +1459,6 @@ void httpsTask(void *param) {
   const int MAX_CONSECUTIVE_FAILURES = 5;
   static unsigned long uploadsSuspendedUntil = 0;
   for (;;) {
-    // Check if uploads are suspended due to consecutive failures
     if (uploadsSuspendedUntil && (int32_t)(millis() - uploadsSuspendedUntil) < 0) {  // rollover-safe "now < deadline"
       vTaskDelay(pdMS_TO_TICKS(500));
       esp_task_wdt_reset();
@@ -1472,7 +1470,6 @@ void httpsTask(void *param) {
     HttpsRequest request;
     if (xQueueReceive(httpsQueue, &request, pdMS_TO_TICKS(1000))) {
 
-      // VERIFY PAYLOAD BEFORE PROCESSING
       if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG || request.type == HTTPS_UPLOAD_BOATPERF || request.type == HTTPS_UPLOAD_ALTHEALTH) {
         size_t payloadLen = request.payload ? strlen(request.payload) : 0;
         // payloadCap is the ps_malloc'd capacity (NOT sizeof a pointer); free + skip on any bad payload.
@@ -1490,7 +1487,6 @@ void httpsTask(void *param) {
       unsigned long opStart = millis();
       bool opSuccess = false;
 
-      // Execute operation
       switch (request.type) {
         case HTTPS_UPLOAD_PAYLOAD:
           opSuccess = executeUploadPayload(request.payload);
@@ -1538,7 +1534,6 @@ void httpsTask(void *param) {
         Serial.printf("WARNING: Operation took %lums (>9s limit)\n", opDuration);
       }
 
-      // Track consecutive failures for uploads
       if (request.type == HTTPS_UPLOAD_PAYLOAD) {
         if (opSuccess) {
           consecutiveFailures = 0;
@@ -1568,9 +1563,8 @@ void httpsTask(void *param) {
             delay(100);
           }
 
-          // If too many failures, suspend uploads temporarily
           if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-            uploadsSuspendedUntil = millis() + 30000;  // 30 second backoff
+            uploadsSuspendedUntil = millis() + 30000;
             Serial.println("ERROR: Too many failures - suspending uploads for 30s");
             queueConsoleMessage("Cloud sync paused, too many failures, retry in 30s");
             consecutiveFailures = 0;
@@ -1826,7 +1820,6 @@ void resetAccelWindow() {
 }
 
 void updateSensorWindow() {
-  // Calculate time delta since last update
   uint64_t now_us = micros();
   uint64_t delta_us;
 
@@ -2088,7 +2081,6 @@ void updateSensorWindow() {
     }
   }
 
-  // Update GPS buffer and store smoothed position
   updateGPSBuffer();
   double smoothLat, smoothLon;
   getSmoothedGPS(smoothLat, smoothLon);
@@ -2755,7 +2747,7 @@ void pushLongTermRecord() {
   LT_ENV(battCurr,    battCurr,    10, 1);
   LT_ENV(altCurr,     altCurr,     10, 2);
   LT_ENV(victronCurr, victronCurr, 10, 3);
-  LT_ENV(rpm,         rpm,         1,  4);   // store RAW RPM (fits int16; matches JS scale=1 + cloud raw). Was /100 → chart read 100× low.
+  LT_ENV(rpm,         rpm,         1,  4);   // store RAW RPM (fits int16; matches JS scale=1 + cloud raw)
   LT_ENV(duty,        dutyCycle,   1,  5);
   LT_ENV(altTemp,     altTemp,     10, 6);
   LT_ENV(tempTherm,   tempTherm,   10, 7);
@@ -2763,11 +2755,11 @@ void pushLongTermRecord() {
   LT_ENV(tws,         tws,         1,  9);
   LT_ENV(vmg,         vmg,         1,  10);
   LT_ENV(aws,         aws,         1,  11);
-  LT_ENV(awa,         awa,         10, 12);   // moved avg-only → envelope (SensorWindow awa ×100 → ×10)
-  LT_ENV(twa,         twa,         10, 13);   // moved avg-only → envelope
+  LT_ENV(awa,         awa,         10, 12);
+  LT_ENV(twa,         twa,         10, 13);
   LT_IMU(heel,        heel,        1,  14);
   LT_IMU(pitch,       pitch,       1,  15);
-  LT_ENV(soc,         soc,         10, 16);   // moved avg-only → envelope (window already tracks soc_min/max)
+  LT_ENV(soc,         soc,         10, 16);
 
   LT_AVG(baro_avg,    baro,    10, 17);
   LT_AVG(ambTemp_avg, ambTemp, 10, 18);
@@ -2984,7 +2976,7 @@ void clearSensorBuffer() {
 // (~260 keys, grows automatically as settings are added — stored verbatim as jsonb).
 // Settings populate device_settings_snapshots (owner-visible only, never leaderboards).
 // State populates device_state_daily + UPSERTs lifetime fields into device_statistics.
-// Field names and grouping mirror configsnapshot_picker.html (locked 2026-05-27).
+// Field names and grouping mirror configsnapshot_picker.html.
 // All checked-box fields included; "Not in HTML — JS-driven" picker notes are noted but
 // the firmware variables still exist and are emitted normally.
 bool buildConfigPayload() {
@@ -3571,9 +3563,9 @@ bool canUploadNow() {
 #define FA_RAILED_RAW 4090                   // 12-bit code treated as railed full-scale
 #define FA_DECIM 16                          // boxcar-16 → 1.25 kSPS effective (nulls at 1.25 kHz)
 #define FA_WIN_DECIM_N 625                   // 0.5 s tone/gate/matrix window, decimated samples (crystal-timed).
-                                             // Was 2 s; shortened so the per-window flat-top FFT below tracks
-                                             // RPM with less drift smear. The DETECTOR window is decoupled
-                                             // (FA_DET_WIN_N, fixed 2 s) so its analysis length is unchanged.
+                                             // Kept short so the per-window flat-top FFT tracks RPM with less
+                                             // drift smear. The DETECTOR window is decoupled (FA_DET_WIN_N,
+                                             // fixed 2 s) so its analysis length is independent.
 // 6 dB ceiling ≈ +150..+210 A above zero (S3 sources spec full-scale anywhere 1.75–1.95 V).
 // BENCH-VERIFY the real rail point, then set switch-up ~30 A below the measured ceiling,
 // switch-down ~30 A below that (hysteresis). Defaults assume the conservative 1.75 V end.
@@ -3645,10 +3637,10 @@ struct FaCell {
   uint16_t pkpkAX100;   // mean broadband pk-pk of the decimated stream, A ×100
   uint16_t windows;     // qualified windows merged (saturating)
 };
-// Filtered-ripple fields moved OUT of FaCell 2026-07-02 (RPM_RIPPLE_TABLE_SPEC): the raw matrix is
-// always-on and welcomes every operating point; the filtered pk-pk now lives in the game-scoped 1-D
-// ripTab below, rated at ONE fixed commanded current. FA_MATRIX_VER 4→5 rejects old blobs.
-// NOTE (§12, built 2026-07-02 then REVERTED same day): a "detector's-eye excursion peak" per cell
+// FaCell carries no filtered-ripple fields (RPM_RIPPLE_TABLE_SPEC): the raw matrix is always-on and
+// welcomes every operating point; the filtered pk-pk lives in the game-scoped 1-D ripTab below,
+// rated at ONE fixed commanded current.
+// NOTE (§12, built then REVERTED): a "detector's-eye excursion peak" per cell
 // (max mExcessEma while armed+unclamped) was added here and fed to a threshold-recommendation
 // verdict. Timeline analysis of the vicious-cycle log killed it: the recorded excursions were one
 // commanded throttle blip + five post-trip RECOVERY OVERSHOOTS (duty ramping 7 pts past its steady
@@ -3699,7 +3691,7 @@ float ripDriftPct = 5.0f;       // % of window-mean alt current — command-trav
 uint32_t g_ripAltAdmitCount = 0;   // windows that passed ALL alt-fold gates (throughput readout, CSV2; not persisted)
 uint32_t g_ripBattAdmitCount = 0;  // same for the battery detector
 
-// ── RPM ripple table (RPM_RIPPLE_TABLE_SPEC, 2026-07-02) ──
+// ── RPM ripple table (RPM_RIPPLE_TABLE_SPEC) ──
 // 1-D per-50-RPM-bin filtered pk-pk (both detectors), filled ONLY while the RPM Invaders game holds
 // a fixed commanded current through resTest. Replaces the FaCell filtered layer, which had no
 // reproducibility test, smeared the amp axis with a max, and captured at whatever current AUTO
@@ -3752,7 +3744,7 @@ static uint32_t filtRippleH1N = 0, filtRippleH2N = 0;
 // big-step gentling, Hi→Lo glide. Protection latch rejects any window a clamp touched (G1/G2, iExcess,
 // load dump). Sensor steadiness is the half-mean stationarity test (per-detector — a stationary-alt /
 // ramping-batt window folds alt only). The 300 ms EMAs remain ONLY as the crossings baseline.
-static float altAdmEma = 0.0f, battAdmEma = 0.0f;               // 300 ms baselines for the crossings tally (NOT the measurement, no longer a drift gate)
+static float altAdmEma = 0.0f, battAdmEma = 0.0f;               // 300 ms baselines for the crossings tally (NOT the measurement, NOT a drift gate)
 static float cmdWinMin = 1e9f, cmdWinMax = -1e9f;               // setpointLimited travel over the window
 static float filtRippleWinRpmMin = 1e9f, filtRippleWinRpmMax = -1e9f;  // window RPM span → RPM stationarity self-scale
 static bool filtRippleWinProt = false;                          // any protection clamp during the window
@@ -3761,7 +3753,7 @@ static uint32_t filtRippleLastMs = 0, filtRippleWinStartMs = 0;
 static bool filtRippleArmed = false;   // false until the first sample seeds the EMAs (seed, don't measure)
 // Crossings tally — GATE for the cell fold (≥ RIP_CROSS_MIN) and recorded into the commit forensics ring:
 // how many times the fast measurement EMA crossed its slow (300 ms) baseline within the window. A one-shot
-// transient crosses ~twice; sustained oscillation many times. Promoted from forensic-only 2026-07-01 (§11).
+// transient crosses ~twice; sustained oscillation many times.
 static uint16_t altFiltCross = 0, battFiltCross = 0;
 static bool altAboveAdm = false, battAboveAdm = false;   // sign of (measurement − baseline) last sample
 
@@ -3916,7 +3908,7 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
     // self-scales on that sensor's own full-window pk-pk — the dirtier the signal, the more mean
     // movement is allowed. This is what lets a "dirty speed" in while still rejecting ramps: the old
     // amplitude drift gate rejected hunting idle every window, which starved the map at the exact RPM
-    // that trips the bulk over-current supervisor (the 2026-07-01 vicious-cycle log).
+    // that trips the bulk over-current supervisor.
     uint32_t minN = (uint32_t)(ripWinMs * 0.1f);            // ~50% of expected samples at the ~5 ms INA cadence
     bool halvesOk = (filtRippleH1N >= minN / 4) && (filtRippleH2N >= minN / 4);  // both half-means must be real averages, not a few stray samples
     float altShift = 1e9f, battShift = 1e9f, rpmShift = 1e9f, rpmMean = 0.0f;
@@ -3929,7 +3921,7 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
     float limStatAlt  = fmaxf(ripDriftFloorA, RIP_STAT_K * altPkFull);
     float limStatBatt = fmaxf(ripDriftFloorA, RIP_STAT_K * battPkFull);
     float limStatRpm  = fmaxf(RIP_RPM_STAT_FLOOR, RIP_STAT_K * (filtRippleWinRpmMax - filtRippleWinRpmMin));
-    // Command travel keeps the OLD amplitude limit (max(floor, pct%·mean)) — setpointLimited is
+    // Command travel uses an amplitude limit (max(floor, pct%·mean)) — setpointLimited is
     // ripple-free by construction, so smallness IS the correct test for it.
     float limCmd = fmaxf(ripDriftFloorA, ripDriftPct * 0.01f * fabsf(altMean));
     float cmdTravel = cmdWinMax - cmdWinMin;
@@ -4025,7 +4017,7 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
   }
 }
 
-// ── Flat-top windowed FFT (replaced the constant-Q Goertzel bank 2026-06-14) ──
+// ── Flat-top windowed FFT ──
 // One FFT per 0.5 s window over the decimated 1.25 kSPS AC stream. Replaces the 16-bin log
 // Goertzel bank, which scalloped: its bins spaced ~28% apart with main lobes only ~f/10 wide
 // left gaps a tone could fall into and read up to ~6x low (a 28 Hz, 8.7 A real tone read 4.1 A).
@@ -4129,7 +4121,7 @@ static volatile bool faPendingRebaseline = false;  // set by /get handler (Core 
 uint8_t faDetectLastK = 0;  // dashboard field: winning fault class of the last FAULT verdict, 0 = quiet
 static unsigned long faDetectMsgMs = 0, faAnomCapMs = 0, faDetTrendMsgMs = 0;
 
-// Failure detector (consumer 2) — IMPLEMENTED 2026-06-12 (replaced the plug-in stub).
+// Failure detector (consumer 2).
 // The algorithm is the FAD core further down: a faithful port of rect_fault_detector.py,
 // gated 18/18 against the synthetic set on desktop both before and after integration.
 // It does NOT read the scope ring or the decimated stream — crest picking needs the raw
@@ -4138,11 +4130,11 @@ static unsigned long faDetectMsgMs = 0, faAnomCapMs = 0, faDetTrendMsgMs = 0;
 // on that buffer; the Core-0 faDetTask runs the analysis and faDetectorPoll() consumes the
 // verdict on Core 1 ~tens of ms later (latency is irrelevant — a human response takes minutes,
 // and keeping the heavy math off Core 1 is the whole point). Division of
-// labor per the 2026-06-12 layering decision: first-line pk-pk-vs-cell-history detection
+// labor: first-line pk-pk-vs-cell-history detection
 // belongs to the disturbance matrix (consumer 1); this detector covers cold start (no cell
 // history yet), fault classification (winning k), and triggering the flipbook capture.
 #define FA_DET_WIN_N 40000  // 2 s raw detector capture. DECOUPLED from the 0.5 s tone window
-                            // (FA_WIN_DECIM_N) so the detector keeps its 2 s analysis length: it now
+                            // (FA_WIN_DECIM_N) so the detector keeps its 2 s analysis length: it
                             // fills across 4 consecutive CLEAN tone windows (faWindowFinalize resets the
                             // capture on any non-clean window), preserving "one contiguous clean 2 s capture".
 #define FA_DET_MIN_PERIOD_MS 60000UL              // one analysis per minute is plenty
@@ -4281,7 +4273,7 @@ static void faWinReset() {
   faWinRpmEmaMax = faWinAmpsEmaMax = faWinDAmpMax = -1e9f;
   faWinAmpsSum = 0.0;
   faWinStartMs = millis();
-  // (No Goertzel state to clear — the FFT reads faToneBuf[0..faDecimWinN-1] fresh each window.)
+  // (No spectral state to clear — the FFT reads faToneBuf[0..faDecimWinN-1] fresh each window.)
 }
 
 // Fold one found peak into a cell: ±5% frequency match → recent-average (1/min(n+1,N)); else take a
@@ -4645,7 +4637,7 @@ void faDrain() {
       adc_continuous_stop(faAdcHandle);
       faChanState = 2;
       faLastProbeMs = millis();
-      faWinReset();  // clears window stats AND Goertzel state — no stale spectra on resume
+      faWinReset();  // clears window stats — no stale spectra on resume
       faBoxAcc = 0;
       faBoxN = 0;
       if (!faAbsentWarned) {
@@ -4712,9 +4704,8 @@ struct FadResult {
 };
 
 // Analysis state + workspace pointers. The detector runs straight-line on the Core-0 worker
-// (fadStep in 8_functions.ino) — there is no cooperative-slicing state machine anymore, so the
-// old FADS_*/FADP_* stage enums and the per-stage progress/carry scalars are gone; intra-stage
-// cursors are plain locals. Only cross-stage results live here.
+// (fadStep in 8_functions.ino) — no cooperative-slicing state machine; intra-stage cursors are
+// plain locals. Only cross-stage results live here.
 struct FadJob {
   // carved buffers (one external block; fadCarve lays them out)
   float *xf;     // input as float, n
@@ -4789,10 +4780,9 @@ void faDetTask(void *pv) {
     // CPU compute time, immune to Core-0 network/WiFi preemption: ulRunTimeCounter accumulates ONLY
     // the cycles this task actually executes — time the analysis is paused while WiFi/lwIP borrows
     // the core is NOT counted. The catch is units: the run-time-stats counter on this silicon ticks
-    // in CPU CLOCK CYCLES, not microseconds. The original bug stored that raw cycle delta straight
-    // into a "...Us" variable, so the dashboard's /1000 produced the bogus, near-constant "3268.8 ms".
-    // Divide by the live CPU MHz to get true microseconds. getCpuFrequencyMhz() keeps it correct even
-    // in the 80 MHz engine-off idle (CPU is 240 MHz whenever the dashboard is actually open).
+    // in CPU CLOCK CYCLES, not microseconds — divide by the live CPU MHz to get true microseconds.
+    // getCpuFrequencyMhz() keeps it correct even in the 80 MHz engine-off idle (CPU is 240 MHz
+    // whenever the dashboard is actually open).
     TaskStatus_t ts;
     vTaskGetInfo(NULL, &ts, pdFALSE, eInvalid);
     uint32_t c0 = (uint32_t)ts.ulRunTimeCounter;
@@ -4809,7 +4799,7 @@ void faDetTask(void *pv) {
 
 // Verdict consumer — called from loop() every pass via TIMED_CALL(ft_faDetector, ...). The heavy
 // fadStep work runs on faDetTask (Core 0); this only consumes a finished result (cheap, one
-// non-blocking semaphore poll). TREND verdicts are log-only (user decision 2026-06-12).
+// non-blocking semaphore poll). TREND verdicts are log-only.
 // Side-effects stay on Core 1 to avoid faFlip cross-core races.
 void faDetectorPoll() {
   if (!faResultSem || xSemaphoreTake(faResultSem, 0) != pdTRUE) return;  // no verdict ready

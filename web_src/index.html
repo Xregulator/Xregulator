@@ -412,10 +412,10 @@
                   style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin-bottom:10px;">
                   Physical Regulator Installation
                 </summary>
-                <!-- Mounting Alignment Check removed 2026-06-14: superseded by the Level Zero
-                     button below, which measures and corrects residual mount tilt directly so
-                     a perfectly square install is no longer required. The old gravity-vector
-                     "tilt" math could only detect acceleration, never actual mounting angle. -->
+                <!-- No mounting-alignment check here: the Level Zero button below measures and
+                     corrects residual mount tilt directly, so a perfectly square install is not
+                     required. Gravity-vector "tilt" math can only detect acceleration, never
+                     actual mounting angle. -->
                 <!-- Alignment Selection Subsection -->
                 <div class="pri-subsection">
                   <h4 class="pri-subsection-title">Alignment Selection</h4>
@@ -960,9 +960,8 @@
                 </div>
               </div>
 
-              <!-- ===== Automatic Min% Learning ("knee tracker") — lifted out of the cap-table scroll
-                   wrapper into its own card so it reads as a separate section, not part of the RPM cap
-                   table's box above ===== -->
+              <!-- ===== Automatic Min% Learning ("knee tracker") — own card, outside the cap-table
+                   scroll wrapper, so it reads as a separate section from the RPM cap table above ===== -->
               <div class="alt-subsection-card">
                 <div class="knee-learn-panel">
                       <div class="form-row">
@@ -5187,10 +5186,9 @@
           </div>
         </div>
 
-        <!-- Vessel Performance Sub-tab — boat-performance settings moved here from
-             Live Data → GPS/Travel/Wind. The live polar/motoring display, the
-             Sailing/Motoring toggle, the Learning switch and Download CSV stay on
-             the Live Data side; everything configurable lives here. -->
+        <!-- Vessel Performance Sub-tab — everything configurable for boat performance lives
+             here. The live polar/motoring display, the Sailing/Motoring toggle, the Learning
+             switch and Download CSV stay on the Live Data side. -->
         <div id="settings-boatperformance" class="sub-tab-content">
           <div class="settings-card">
             <p class="card-group-title"><span>Performance Learning</span>
@@ -5228,7 +5226,7 @@
             </div>
             <hr />
 
-            <!-- reference mode (now a segmented toggle to match the other choices) -->
+            <!-- reference mode -->
             <div class="form-row">
               <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                 <span>Reference</span>
@@ -5243,7 +5241,7 @@
             </div>
             <hr />
 
-            <!-- simulator (now a segmented toggle to match the other choices) -->
+            <!-- simulator -->
             <div class="form-row">
               <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                 <span>Simulator</span>
@@ -5617,10 +5615,10 @@
         <!-- Checklist rendered by renderCommissionStatus(); rows mirror CX_PHASES / COMMISSION_STEPS. -->
         <div id="commission-checklist" style="background:var(--card-light);padding:6px 16px 12px;border-radius:var(--radius);border-left:4px solid var(--accent);"></div>
 
-        <!-- Start button moved BELOW the checklist so the steps are chosen first. Label/class/help/action
+        <!-- Start button sits BELOW the checklist so the steps are chosen first. Label/class/help/action
              adapt to the ticked plan vs. done-mask in renderCommissionStatus()/cxStartIntent():
              Start / Continue / Clear-and-restart. commissionPrimaryAction() routes a wholesale redo
-             through the revert path; the old separate "Clear & start over" row is folded into this button. -->
+             through the revert path. -->
         <button id="commission-start-btn" onclick="commissionPrimaryAction()" class="btn-primary" style="width:100%;padding:12px;margin-top:12px;">Start commissioning…</button>
         <p id="commission-start-help" style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Only the ticked steps will run.</p>
 
@@ -6006,7 +6004,7 @@
                     </div>
                   </div>
 
-                  <!-- Term Contributions (renamed from PID Terms) -->
+                  <!-- Term Contributions -->
                   <div class="card-group telemetry-group">
                     <p class="card-group-title">Term Contributions</p>
 
@@ -6106,9 +6104,9 @@
               <details class="tuning-section">
                 <summary class="tuning-section-title">Current Target Generator</summary>
 
-                <!-- The Waveform On/Off toggle and the separate Run Sweep button were merged into the single
-                     "Begin Test" / "Stop Test" button at the bottom of this panel, driven by Waveform Type.
-                     The hidden TuningMode input (state source for gating/echo) now lives in that bottom row. -->
+                <!-- Waveform on/off and sweep start share the single "Begin Test" / "Stop Test" button
+                     at the bottom of this panel, driven by Waveform Type. The hidden TuningMode input
+                     (state source for gating/echo) lives in that bottom row. -->
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Waveform Type (<span id="tuningWaveform_echo">?</span>):</span>
@@ -6270,8 +6268,8 @@
                     </div>
                   </div>
 
-                  <!-- Run Sweep button removed — sweeps now start from the unified "Begin Test" button at the
-                       bottom of this panel (when Waveform Type = Sine sweep). The results table stays here. -->
+                  <!-- Sweeps start from the unified "Begin Test" button at the bottom of this panel
+                       (when Waveform Type = Sine sweep); only the results table lives here. -->
 
                   <!-- Closed-loop Bode results -->
                   <div id="tuning-bode-section" style="display:none; margin-top:10px;">
@@ -6306,7 +6304,7 @@
                   </div>
                 </div>
 
-                <!-- X-axis time window moved to the buttons above the plot (setPIDXTime);
+                <!-- X-axis time window is set by the buttons above the plot (setPIDXTime);
                      Y axis min/max are edited on the plot itself (attachYAxisEdit owns yyMin/yyMax). -->
 
               </details> <!-- END Current Target Generator -->
@@ -6629,11 +6627,11 @@
                   </div>
                 </div>
 
-                <!-- Load Dump tiered thresholds moved to Battery → Safety → Load Dump Protection -->
+                <!-- Load Dump tiered thresholds live in Battery → Safety → Load Dump Protection -->
 
               </details> <!-- END Output Current Controller Parameters -->
 
-              <!-- Rate Limiting moved to Setup → Alternator → Rate Limiting -->
+              <!-- Rate Limiting lives in Setup → Alternator → Rate Limiting -->
 
       </div>
     </div>
@@ -7568,7 +7566,7 @@
                   </div>
                 </div>
 
-                <!-- Temp Warning/Critical Excess and Sustained Timeout moved to Setup → Alternator → Temperature Settings -->
+                <!-- Temp Warning/Critical Excess and Sustained Timeout live in Setup → Alternator → Temperature Settings -->
 
               </details> <!-- END Temperature Controller Parameters -->
 
@@ -7880,7 +7878,7 @@
 
         </div> <!-- closes .grid -->
 
-        <!-- ===== STATISTICS (moved here from the former Statistics sub-tab; health/life/charging-health items relocated to Live Data -> Diag) ===== -->
+        <!-- ===== STATISTICS (health/life/charging-health items live in Live Data → Diag) ===== -->
         <div class="section-title">Statistics</div>
 
         <!-- Energy Output -->
@@ -8145,7 +8143,7 @@
 
         </div>
 
-        <!-- ===== ENERGY AND STATISTICS (moved here from the former Statistics sub-tab) ===== -->
+        <!-- ===== ENERGY AND STATISTICS ===== -->
         <div class="section-title">Energy and Statistics</div>
 
         <!-- Energy Table -->
@@ -8390,7 +8388,7 @@
         </div>
       </div>
 
-      <!-- Barometric Pressure (moved from Other): conditions header + 7-day history plot -->
+      <!-- Barometric Pressure: conditions header + 7-day history plot -->
       <div class="settings-card">
         <div class="card-group baro-panel">
           <div class="card-group-title"><span>Barometric Pressure</span>
@@ -8842,7 +8840,6 @@
               <span class="metric-label">Yaw Rate</span>
               <span class="metric-value"><span id="imu_yaw_rate_dps_ID">0.0</span> °/s</span>
             </div>
-            <!-- Vertical Acceleration relocated here from Boat Performance top (low day-to-day interest) -->
             <div class="metric-row">
               <span class="metric-label">Vertical Acceleration</span>
               <span class="with-wm">
@@ -9090,7 +9087,7 @@
           </div>
         </div>
         <div class="grid">
-          <!-- IMU status — accelerometer diagnostic counters moved to ESP32 stats page -->
+          <!-- IMU status — accelerometer diagnostic counters live on the ESP32 stats page -->
           <div class="card-group">
             <div class="metric-row">
               <span class="metric-label">IMU Status
@@ -9362,7 +9359,7 @@
           </div>
         </div>
 
-        <!-- engine lifetime stats continue in the same Lifetime Statistics panel (RPM + fuel flow now live in Vital Signs) -->
+        <!-- engine lifetime stats continue in the same Lifetime Statistics panel (RPM + fuel flow live in Vital Signs) -->
 
         <!-- Engine Fuel Consumed -->
         <hr />
@@ -10785,7 +10782,7 @@
               <span class="metric-value"><span id="nvsFullSaveCount_ID">0</span></span>
             </div>
           </div>
-          <!-- ACCELEROMETER / IMU (moved from Live Data → Accel → Raw & Diagnostics) -->
+          <!-- ACCELEROMETER / IMU -->
           <div class="card-group">
             <p class="card-group-title">Accelerometer / IMU</p>
             <div class="metric-row">
@@ -11136,7 +11133,7 @@
       <!-- ── Shared fast-channel hardware + steady-state gates — feeds both C1 and C2 ── -->
       <details class="diag-section" open>
         <summary class="diag-section-title"><span class="checkpoint-tag c1">C1</span> <span class="checkpoint-tag c2">C2</span> Fast Current Channel</summary>
-<!-- Channel state readout (from the old status strip; its other cards moved into C1 / C2) -->
+<!-- Channel state readout -->
       <div class="settings-card">
         <div class="grid">
           <div class="card"><p>Channel State</p><p class="reading" style="font-size:20px; white-space:normal;"><span id="faChanState_ID">?</span></p></div>
@@ -11173,7 +11170,7 @@
       <!-- ── C1 · Anomaly Detection: the fast-channel fault detector (rectifier/stator) ── -->
       <details class="diag-section" open>
         <summary class="diag-section-title"><span class="checkpoint-tag c1">C1</span> Anomaly Detection</summary>
-      <!-- Fault readouts (from the old status strip; CSV2 diagnostics) -->
+      <!-- Fault readouts (CSV2 diagnostics) -->
       <div class="settings-card">
         <div class="grid">
           <div class="card"><p>Last Fault Class <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A developer/diagnostic readout, not a confirmed diagnosis. The number is the monitor's best guess at the failure type from the ripple pattern. That classification is not yet validated against real teardowns and can be wrong — treat it as a prompt to open the Live Oscilloscope panel and look at the waveform yourself. 0 or blank means no fault detected.</span></span></p><p class="reading" style="font-size:20px;"><span id="faDetectK_ID">?</span></p></div>
@@ -11197,7 +11194,7 @@
             onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});}">Clear Map</button>
         </div>
       </div>
-      <!-- Map fill readout (from the old status strip) -->
+      <!-- Map fill readout -->
       <div class="settings-card">
         <div class="grid">
           <div class="card"><p>Map Cells Learned</p><p class="reading" style="font-size:20px;"><span id="faCellsUsed_ID">?</span></p></div>
@@ -11272,7 +11269,7 @@
 <div class="settings-card fa-paired-top">
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Live Oscilloscope</span>
-          <!-- Series selector mirrors the Reference Flipbook header below for UX consistency. Independent show/hide toggles, not an A/B switch: any combination of Raw+Filtered (incl. both or neither). Swatch matches the trace color. Refresh Capture removed (auto-refreshes every 5 s); Pause now lives on the chart top-right, matching the flipbook. -->
+          <!-- Series selector mirrors the Reference Flipbook header below for UX consistency. Independent show/hide toggles, not an A/B switch: any combination of Raw+Filtered (incl. both or neither). Swatch matches the trace color. Capture auto-refreshes every 5 s; Pause lives on the chart top-right, matching the flipbook. -->
           <div class="cap-mode-toggle">
             <button type="button" id="faScopeRawBtn" class="cap-mode-btn cap-mode-active" onclick="fastScopeViewToggle('raw',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
             <button type="button" id="faScopeFiltBtn" class="cap-mode-btn cap-mode-active" onclick="fastScopeViewToggle('filt',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
@@ -11339,7 +11336,7 @@
       </div>
       </details>
 
-      <!-- Charging-System Health (moved here from Live Data -> Alternator) -->
+      <!-- Charging-System Health -->
       <details class="diag-section" open>
         <summary class="diag-section-title"><span class="checkpoint-tag c3">C3</span> Charging-System Health</summary>
 
@@ -11414,7 +11411,7 @@
       </details>
 
       <!-- Not checkpoints — these two show in the All view only -->
-<!-- Wear Rate & Component Life (moved here from Live Data -> Alternator) -->
+<!-- Wear Rate & Component Life -->
       <details class="diag-section">
         <summary class="diag-section-title">Wear Rate &amp; Component Life</summary>
         <div class="settings-card">
@@ -11943,7 +11940,7 @@
         <div class="plot-container" id="temperature-plot"></div>
       </div>
 
-      <!-- Plot display controls (moved here from the removed Plot Controls sub-tab) -->
+      <!-- Plot display controls -->
       <div class="settings-card">
         <div class="form-row">
           <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -12015,9 +12012,8 @@
       <div class="settings-card">
         <div id="longterm-status" style="text-align:center; padding:8px; font-size:13px;">Loading long-term history…</div>
       </div>
-      <!-- Time-range brush (relocated from My History) — direct child of the sub-tab so
-           its position:sticky pins it to the top while scrolling the charts. Drives all
-           native charts via ltRenderAll. -->
+      <!-- Time-range brush — direct child of the sub-tab so its position:sticky pins it
+           to the top while scrolling the charts. Drives all native charts via ltRenderAll. -->
       <div id="dashboard-brush" style="display:none;">
         <div id="dashboard-brush-bounds">
           <span id="dashboard-brush-data-min">—</span>
@@ -12189,9 +12185,8 @@
 
     <!-- My Dashboard Sub-tab -->
 
-    <!-- Long Term Plots is now native under Plots → Long Term (local ring + cloud stitch).
-         The old Cloud Features iframe view (cloudfeatures-myhistory / history-iframe) was
-         removed 2026-05-31. -->
+    <!-- Long Term Plots lives under Plots → Long Term (local ring + cloud stitch);
+         there is no Cloud Features iframe view. -->
 
     <!-- Leaderboards Sub-tab -->
     <div id="cloudfeatures-leaderboards" class="sub-tab-content">

@@ -41,7 +41,7 @@
   --border: #dddddd;
   /* Light border */
   --reading: #333333;
-  /* Reading text color (changed from green) */
+  /* Reading text color */
   --radius: 4px;
   /* Border radius */
 }
@@ -418,7 +418,6 @@ textarea {
   height: 100%;
   pointer-events: none;
   z-index: 1;
-  /* Changed from 9999 to 1 */
 }
 
 /* Learning Table */
@@ -632,7 +631,7 @@ textarea {
 }
 #settings-alternator .alt-summary-nested::-webkit-details-marker { display: none; }
 
-/* Tuning tab — flat sections (replaces alt-nested-section <details> which is scoped to #settings-alternator) */
+/* Tuning tab — flat sections (alt-nested-section <details> is scoped to #settings-alternator, so these need their own classes) */
 .tuning-section {
   margin-top: 8px;
   padding-left: 12px;
@@ -759,7 +758,7 @@ details.diag-section[open] > summary.diag-section-title::after {
   margin-left: 16px;
 }
 
-/* ===== Buttons — universal "Soft Tonal + depth" system (2026-06-04 restyle) =====
+/* ===== Buttons — universal "Soft Tonal + depth" system =====
    Tonal backgrounds + colored text + a subtle shadow, shared by every action button.
    Small one-off buttons keep their inline padding/font (so they stay compact) and just
    inherit the tonal look from these rules. Nav/filter chips (.sub-tab, .alt-tab-btn) and
@@ -792,7 +791,7 @@ input[type="submit"]:active,
   box-shadow: 0 1px 1px rgba(0, 0, 0, 0.12);
 }
 
-/* Primary (teal) — also the "Set" submit buttons (!important defeats the old #666 override) */
+/* Primary (teal) — also the "Set" submit buttons (!important defeats later input[type=submit] background overrides) */
 .btn-primary,
 input[type="submit"] {
   background: rgba(0, 161, 154, 0.14) !important;
@@ -1273,9 +1272,9 @@ input[type="submit"]:hover {
 
 /* ============================================
    DASHBOARD-HOSTED LONG-TERM-PLOTS BRUSH
-   Lives in parent dashboard (not the iframe) so it can stick naturally to the
-   dashboard viewport top while the app banner scrolls away normally.
-   State syncs to the iframe via postMessage.
+   Lives in the parent dashboard so it can stick naturally to the dashboard
+   viewport top while the app banner scrolls away normally. Range changes route
+   to the native Long Term charts (script.js _brushEmit nativeSink).
    ============================================ */
 #dashboard-brush {
   position: sticky;
@@ -1681,10 +1680,8 @@ input[type="submit"]:hover {
   width: 100%;
   justify-content: center;
   max-width: 400px;
-  /* Add this to limit width */
 }
 
-/* Make sure the lock status is also centered */
 #lock-status {
   text-align: center;
   width: 100%;
@@ -2400,9 +2397,9 @@ input:focus {
   margin-right: auto;
 }
 
-/* Automatic Min% Learning + the table-details readouts: lifted out of the RPM cap table's
-   box into their own recessed sub-card (page-background fill + border + gap) so they read as
-   a distinct section rather than part of the cap table above. Themes via vars (light + dark). */
+/* Automatic Min% Learning + the table-details readouts: own recessed sub-card
+   (page-background fill + border + gap) so they read as a distinct section rather
+   than part of the cap table above. Themes via vars (light + dark). */
 .alt-subsection-card {
   background: var(--bg-light);
   border: 1px solid var(--border);
@@ -2675,7 +2672,6 @@ hr {
 .locked select,
 .locked button,
 .locked label.switch input {
-  /* Add this line */
   pointer-events: none;
   opacity: 0.5;
 }
@@ -3010,22 +3006,9 @@ input:checked+.slider:before {
   color: #aaa;
 }
 
-/* My History iframe styling */
+/* Shared container for the cloud-features iframes (Leaderboards / Fleet Stats / Config Sharing) */
 .history-container {
   padding: 0;
-}
-
-#history-iframe {
-  width: 100%;
-  min-height: 800px;
-  height: calc(100dvh - 250px);
-  border: none;
-  display: none;
-}
-
-#history-status {
-  margin: 15px;
-  color: #666;
 }
 
 /* Center the Leaderboards and Fleet Stats iframe containers on screen (matches the
@@ -3059,7 +3042,7 @@ input:checked+.slider:before {
   border-bottom: 1px solid var(--border);
   white-space: normal;      /* allow long titles to wrap instead of overrunning into the info icon / card edge */
   overflow: visible;        /* keep visible so the tooltip-box (top:125%) isn't clipped — so we wrap rather than ellipsis-clip */
-  display: flex;            /* layout moved off inline styles so align-items below can take effect */
+  display: flex;            /* layout lives here, not inline styles, so align-items below can take effect */
   justify-content: space-between;
   align-items: flex-start;  /* with a wrapped multi-line title, top-align the info icon instead of centering it */
 }
@@ -3108,9 +3091,9 @@ input:checked+.slider:before {
   color: var(--reading);
 }
 
-/* Tabular min/avg/max readouts (IMU Window Stats). Replaces the old single
-   nowrap value line that overran narrow cards once numbers went negative/wide.
-   Units live in the row name or card title so value columns stay purely numeric. */
+/* Tabular min/avg/max readouts (IMU Window Stats) — a single nowrap value line
+   overruns narrow cards once numbers go negative/wide. Units live in the row name
+   or card title so value columns stay purely numeric. */
 .stat-table {
   display: grid;
   grid-template-columns: minmax(0, auto) repeat(3, minmax(0, 1fr));
@@ -3182,8 +3165,7 @@ input:checked+.slider:before {
 }
 
 /* Two-signal interval comparison tables (Timing & Diagnostics):
-   one metric-label column + two right-aligned value columns. Replaces the
-   four single-signal interval cards with two side-by-side comparisons. */
+   one metric-label column + two right-aligned value columns. */
 .interval-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 76px 76px;
@@ -3394,7 +3376,7 @@ input:checked+.slider:before {
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
-/* === Accel Mounting Orientation: responsive layout fix === */
+/* === Accel Mounting Orientation: responsive layout === */
 
 #settings-accel .orientation-options {
   display: grid;
@@ -3514,7 +3496,7 @@ input:checked+.slider:before {
   margin-top: 10px;
 }
 
-/* ========== PHYSICAL REGULATOR INSTALLATION - IMPROVED STYLES ========== */
+/* ========== PHYSICAL REGULATOR INSTALLATION STYLES ========== */
 
 /* Subsection Containers */
 .pri-subsection {
@@ -3740,7 +3722,7 @@ input:checked+.slider:before {
 /* ========== END PHYSICAL REGULATOR INSTALLATION STYLES ========== */
 
 
-/* ========== LOCATION IN VESSEL FORM FIX ========== */
+/* ========== LOCATION IN VESSEL FORM ========== */
 
 /* Form row - two column grid */
 .pri-subsection .form-row {
@@ -3836,10 +3818,9 @@ input:checked+.slider:before {
   }
 }
 
-/* ========== END LOCATION IN VESSEL FORM FIX ========== */
+/* ========== END LOCATION IN VESSEL FORM ========== */
 
 /* ========== WEATHER MODE SETTINGS STYLES ========== */
-/* Add this to your styles.css file */
 
 /* Alert boxes for weather mode */
 .alert {
@@ -3927,7 +3908,7 @@ input:checked+.slider:before {
 
 
 
-/* ========== Etyles for cap-mode toggle and derived-field display ─────────  ========== */
+/* ========== Styles for cap-mode toggle and derived-field display ========== */
   .cap-mode-row {
     display: flex;
     align-items: center;
@@ -3962,9 +3943,9 @@ input:checked+.slider:before {
     cursor: pointer;
     transition: background 0.15s, color 0.15s, box-shadow 0.15s;
   }
-  /* Unified 2026-06-16 with the page-wide `.seg.accent` standard: active = accent-filled
-     pill + white text (was a tonal white/teal pill). rate-low keeps an orange fill so the
-     low-charge state stays visually distinct. Same in both themes for a flat, filled look. */
+  /* Matches the page-wide `.seg.accent` standard: active = accent-filled pill + white
+     text. rate-low keeps an orange fill so the low-charge state stays visually distinct.
+     Same in both themes for a flat, filled look. */
   .cap-mode-btn.cap-mode-active {
     background: var(--accent, #00a19a);
     color: #fff;
@@ -4016,7 +3997,7 @@ input:checked+.slider:before {
     50%       { opacity: 0.6; }
 }
 
-/* ── Logging controls (Plots → Download & Logging) — Option 3 ────── */
+/* ── Logging controls (Plots → Download & Logging) ────── */
 
 /* Lets a form-row span the full card width instead of the default 480px cap */
 .form-row-wide { max-width: none; }
@@ -4050,7 +4031,7 @@ input:checked+.slider:before {
 .time-window-input form { flex-wrap: wrap; justify-content: flex-end; flex-shrink: 1; min-width: 0; }
 
 /* the active (current setting) time-window button — solid teal, driven from the CSV3
-   echo in updateAllEchosOptimized; replaces the old "(current: N s)" text echo.
+   echo in updateAllEchosOptimized.
    !important needed to beat the base .btn-primary tonal background (also !important). */
 .time-window-input .btn-primary.active {
     background: #00a19a !important;
@@ -4774,9 +4755,9 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
 #waiting-for-regulator.wfr-hiding { opacity: 0; pointer-events: none; }
 
 /* ── Boat loading scene — Capacitor cold-launch splash (themed dark/light) ──
-   Faithful port of the approved 300x600 prototype: a fixed-size design "stage"
-   reproduces every tuned px value, and the inline script scales it (--bl-scale)
-   to COVER the viewport, so it looks identical on any screen. ── */
+   A fixed-size 300x600 design "stage" holds every tuned px value, and the inline
+   script scales it (--bl-scale) to COVER the viewport, so it looks identical on
+   any screen. ── */
 #waiting-for-regulator .bl-stage { position: absolute; left: 50%; top: 50%; width: 300px; height: 600px;
   transform: translate(-50%, -50%) scale(var(--bl-scale, 1.45)); transform-origin: center center; }
 

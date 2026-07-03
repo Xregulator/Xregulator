@@ -23,10 +23,8 @@ void SystemTime(const tN2kMsg &N2kMsg) {
 
   if (ParseN2kSystemTime(N2kMsg, SID, SystemDate, SystemTime, TimeSource)) {
     lastNmea2kSystemTimeMs = millis();  // freshness for priority chain (NMEA > Phone > NTP)
-    // Sync time from GPS (Phase 2 Sensor History)
     syncTimeFromGPS(SystemDate, SystemTime);
 
-    // Original verbose output (only if enabled)
     if (NMEA2KVerbose) {
       OutputStream->println("System time:");
       PrintLabelValWithConversionCheckUnDef("  SID: ", SID, 0, true);
@@ -64,7 +62,7 @@ void Rudder(const tN2kMsg &N2kMsg) {
 //*****************************************************************************
 void Heading(const tN2kMsg &N2kMsg) {
   static unsigned long lastHeadingUpdate = 0;
-  if (millis() - lastHeadingUpdate < 2000) return;  // Throttle to once every 2 seconds
+  if (millis() - lastHeadingUpdate < 2000) return;
   lastHeadingUpdate = millis();
   unsigned char SID;
   tN2kHeadingReference HeadingReference;
@@ -74,9 +72,8 @@ void Heading(const tN2kMsg &N2kMsg) {
 
   if (ParseN2kHeading(N2kMsg, SID, Heading, Deviation, Variation, HeadingReference)) {
     if (N2kIsNA(Heading)) return;        // F-RES-04: skip NA field, otherwise -1e9 leaks into HeadingNMEA
-    // Parsing succeeded - update variable and mark fresh
-    HeadingNMEA = Heading * 180.0 / PI;  // Convert radians to degrees
-    MARK_FRESH(IDX_HEADING_NMEA);        // Only called on successful parse
+    HeadingNMEA = Heading * 180.0 / PI;
+    MARK_FRESH(IDX_HEADING_NMEA);
 
     // Uncomment below to get serial monitor output back
     // OutputStream->println("Heading:");
@@ -107,11 +104,11 @@ void COGSOG(const tN2kMsg &N2kMsg) {
     // F-RES-04: bail entirely if both fields NA; otherwise update each independently.
     if (N2kIsNA(COG) && N2kIsNA(SOG)) return;
     if (!N2kIsNA(COG)) {
-      COGNMEA = COG * 180.0 / PI;  // radians → degrees (matches Heading() pattern)
+      COGNMEA = COG * 180.0 / PI;
       MARK_FRESH(IDX_COG_NMEA);
     }
     if (!N2kIsNA(SOG)) {
-      SOGNMEA = SOG * 1.94384;     // m/s → knots (matches WindSpeed() pattern)
+      SOGNMEA = SOG * 1.94384;     // m/s → knots
       MARK_FRESH(IDX_SOG_NMEA);
 
       if (SOGNMEA > MaxSpeed) {
@@ -135,7 +132,7 @@ void GNSS(const tN2kMsg &N2kMsg) {
   //Serial.println("=== GNSS function called ===");
   //Serial.printf("PGN: %lu\n", N2kMsg.PGN);
   static unsigned long lastGNSSUpdate = 0;
-  if (millis() - lastGNSSUpdate < 2000) return;  // Throttle to once every 2 seconds
+  if (millis() - lastGNSSUpdate < 2000) return;
   lastGNSSUpdate = millis();
 
   unsigned char SID;
@@ -165,17 +162,14 @@ void GNSS(const tN2kMsg &N2kMsg) {
     //Serial.println("GNSS parsing SUCCESS!");
     //Serial.printf("Raw values - Lat: %f, Lon: %f, Sats: %d\n", Latitude, Longitude, nSatellites);
 
-    // Check if we have valid GPS data (not NaN and reasonable values)
     if (!isnan(Latitude) && !isnan(Longitude) && Latitude != 0.0 && Longitude != 0.0 && abs(Latitude) <= 90.0 && abs(Longitude) <= 180.0 && nSatellites > 0) {
 
-      //Store values globally for web interface
       LatitudeNMEA = Latitude;
       LongitudeNMEA = Longitude;
       SatelliteCountNMEA = nSatellites;
       lastNmea2kGnssMs = millis();  // freshness for GPS priority chain (NMEA > Phone)
       currentGpsSource = GPS_NMEA;  // NMEA wins when present; consumePhoneGps() flips this when NMEA goes stale
 
-      // Mark all GPS data as fresh - only called on valid data
       MARK_FRESH(IDX_LATITUDE_NMEA);
       MARK_FRESH(IDX_LONGITUDE_NMEA);
       MARK_FRESH(IDX_SATELLITE_COUNT);
@@ -315,13 +309,10 @@ void WindSpeed(const tN2kMsg &N2kMsg) {
     // F-RES-04: bail entirely if both fields NA; otherwise update each independently.
     if (N2kIsNA(WindSpeed) && N2kIsNA(WindAngle)) return;
 
-    // PGN 130306 carries either apparent OR true wind — branch on WindReference so we
-    // don't dump true-wind values into apparent globals (the bug we hit when a network
-    // published true-N directly; calculateDerivedMetrics then ran apparent→true math on
-    // them again, producing nonsense). True_North and Magnetic are earth-frame TWD; we
-    // convert to boat-relative TWA via HeadingNMEA so TrueWindAngleNMEA stays consistent
-    // with the existing apparent→true derivation. True_boat / True_water are already
-    // boat-relative. Apparent path unchanged.
+    // PGN 130306 carries either apparent OR true wind — branch on WindReference so
+    // true-wind values never land in apparent globals (calculateDerivedMetrics would
+    // run apparent→true math on them again). True_North/Magnetic are earth-frame TWD,
+    // converted to boat-relative TWA via HeadingNMEA; True_boat/True_water are already boat-relative.
     bool isTrue = (WindReference == N2kWind_True_North ||
                    WindReference == N2kWind_Magnetic ||
                    WindReference == N2kWind_True_boat ||
@@ -426,10 +417,8 @@ void Attitude(const tN2kMsg &N2kMsg) {
     OutputStream->println(N2kMsg.PGN);
   }
 }
-//NMEA 2000 message handler
 void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
   int iHandler;
-  // Find handler
   if (NMEA2KVerbose == 1) {
     OutputStream->print("In Main Handler: ");
     OutputStream->println(N2kMsg.PGN);
@@ -448,18 +437,17 @@ void ReadVEData() {
   }
   static unsigned long lastVEDataRead = 0;
   static unsigned long lastSolarEnergyUpdate = 0;
-  const unsigned long VE_DATA_INTERVAL = 2000;  // 2 seconds
+  const unsigned long VE_DATA_INTERVAL = 2000;
 
   unsigned long currentTime = millis();
 
-  // Check if it's time to read VE data
   if (currentTime - lastVEDataRead <= VE_DATA_INTERVAL) {
     return;
   }
 
   int start1 = micros();
-  bool dataReceived = false;  // Track if we got any valid data
-  float solarPower_W = 0.0f;  // Track solar power for this update
+  bool dataReceived = false;
+  float solarPower_W = 0.0f;
 
   int veDrainBudget = 256;  // cap per-tick drain so a chatty Victron can't starve the loop
   while (veDrainBudget-- > 0 && Serial1.available()) {
@@ -469,7 +457,7 @@ void ReadVEData() {
         float newVoltage = (atof(myve.veValue[i]) / 1000);
         if (newVoltage > 0 && newVoltage < 100) {  // Sanity check
           VictronVoltage = newVoltage;
-          MARK_FRESH(IDX_VICTRON_VOLTAGE);  // Only mark fresh on valid data
+          MARK_FRESH(IDX_VICTRON_VOLTAGE);
           dataReceived = true;
         }
       }
@@ -477,7 +465,7 @@ void ReadVEData() {
         float newCurrent = (atof(myve.veValue[i]) / 1000);
         if (newCurrent > -1000 && newCurrent < 1000) {  // Sanity check
           VictronCurrent = newCurrent;
-          MARK_FRESH(IDX_VICTRON_CURRENT);  // Only mark fresh on valid data
+          MARK_FRESH(IDX_VICTRON_CURRENT);
           dataReceived = true;
         }
       }
@@ -489,7 +477,7 @@ void ReadVEData() {
           MARK_FRESH(IDX_VICTRON_SOLAR);
           if (solarPower_W > solar_power_max_alltime_w) solar_power_max_alltime_w = solarPower_W;  // leaderboard: peak solar power
         } else {
-          solarPower_W = 0.0f;  // Invalid reading, set to zero
+          solarPower_W = 0.0f;
         }
       }
       if (strcmp(myve.veName[i], "VPV") == 0) {
@@ -514,13 +502,11 @@ void ReadVEData() {
   // Panel current derived from power / voltage (VE.Direct MPPTs report PPV + VPV, not panel A)
   VictronSolarCurrent_A = (VictronSolarVoltage_V > 1.0f) ? (VictronSolarPower_W / VictronSolarVoltage_V) : 0.0f;
 
-  // Calculate solar energy if we got valid power data
   if (dataReceived && lastSolarEnergyUpdate > 0) {
     unsigned long elapsedMillis = currentTime - lastSolarEnergyUpdate;
     float elapsedSeconds = elapsedMillis / 1000.0f;
     float solarEnergyDelta_Wh = (solarPower_W * elapsedSeconds) / 3600.0f;
 
-    // Accumulate solar energy with floating point precision
     static float solarEnergyAccumulator = 0.0f;
     static float solarEnergyAccumulator_AllTime = 0.0f;
 
@@ -599,7 +585,6 @@ void checkAndRestart() {
       }
     }
 
-    // Force-finish if still in progress
     if (core0Busy) {
       Serial.println("Upload still in progress after 30s, proceeding with restart");
       core0Busy = false;
@@ -622,23 +607,22 @@ void checkAndRestart() {
     // unflushed records (the periodic flush only fires every LONGTERM_DUMP_INTERVAL_MS).
     dumpLongTermRing();
 
-    // Cleanly notify and close WiFi connections
     if (WiFi.getMode() != WIFI_OFF) {
       events.send("Performing scheduled restart", "console");
       events.send("Device restarting. Will reconnect shortly.", "status");
       delay(500);             // Give events time to actually send
       events.close();         // Close all SSE connections
       delay(100);             // Let close complete
-      WiFi.disconnect(true);  // NOW disconnect WiFi
+      WiFi.disconnect(true);
       delay(100);
     }
 
     Serial.println("=== RESTARTING NOW ===");
-    Serial.flush();  // Ensure all Serial data is sent
-    delay(100);      // Short delay for cleanup
+    Serial.flush();
+    delay(100);
     writeFile(LittleFS, "/ScheduledRestart.flag", "1");
-    esp_task_wdt_delete(NULL);  // Disable watchdog before restart
-    delay(100);                 // Short delay for cleanup
+    esp_task_wdt_delete(NULL);
+    delay(100);
     ESP.restart();
   }
 }
@@ -661,7 +645,6 @@ void captureResetReason() {
   // Shift: previous last becomes new ancient
   ancientResetReason = previousLast;
 
-  // Check if this was a scheduled restart
   bool wasScheduled = false;
   if (fsExists("/ScheduledRestart.flag")) {
     String flagContent = readFile(LittleFS, "/ScheduledRestart.flag");
@@ -671,7 +654,6 @@ void captureResetReason() {
     fsRemove("/ScheduledRestart.flag");
   }
 
-  // Get current reason
   int rawReason = (int)esp_reset_reason();
   switch (rawReason) {
     case ESP_RST_POWERON: LastResetReason = 0; break;
@@ -703,7 +685,7 @@ void UpdateEngineFuel(unsigned long elapsedMillis) {
     return;
   }
 
-  float elapsedHours = elapsedMillis / 3600000.0f;  // Convert ms to hours
+  float elapsedHours = elapsedMillis / 3600000.0f;
 
   // Find the number of valid entries (allow first entry to be zero for idle)
   int validEntries = 0;
@@ -715,7 +697,6 @@ void UpdateEngineFuel(unsigned long elapsedMillis) {
     }
   }
 
-  // If no valid data, return
   if (validEntries == 0) {
     currentFuelGPH = 0.0f;  // no table configured -> no live flow / economy
     currentNMPG = 0.0f;
@@ -739,16 +720,12 @@ void UpdateEngineFuel(unsigned long elapsedMillis) {
   float fuelRate_GPH = 0.0f;
 
   if (RPM <= fuelTableRPM[0]) {
-    // Below first entry, use first GPH value
     fuelRate_GPH = fuelTableGPH[0];
   } else if (RPM >= fuelTableRPM[validEntries - 1]) {
-    // Above last valid entry, use last valid GPH value
     fuelRate_GPH = fuelTableGPH[validEntries - 1];
   } else {
-    // Find the two points to interpolate between
     for (int i = 0; i < validEntries - 1; i++) {
       if (RPM >= fuelTableRPM[i] && RPM < fuelTableRPM[i + 1]) {
-        // Linear interpolation
         float rpmRange = fuelTableRPM[i + 1] - fuelTableRPM[i];
         float fuelRange = fuelTableGPH[i + 1] - fuelTableGPH[i];
         float rpmOffset = RPM - fuelTableRPM[i];
@@ -811,11 +788,9 @@ void UpdateEngineFuel(unsigned long elapsedMillis) {
     fcRun = false;  // stopped or no GPS speed -> break the run
   }
 
-  // Calculate fuel consumed in this interval
   float fuelConsumed_Gallons = fuelRate_GPH * elapsedHours;
-  float fuelConsumed_Liters = fuelConsumed_Gallons * 3.78541;  // Convert gallons to liters
+  float fuelConsumed_Liters = fuelConsumed_Gallons * 3.78541;
 
-  // Accumulate with floating point precision
   static float engineFuelAccumulator = 0.0f;
   static float engineFuelAccumulator_AllTime = 0.0f;
 
@@ -835,30 +810,24 @@ void UpdateEngineFuel(unsigned long elapsedMillis) {
   }
 }
 void UpdateBatterySOC(unsigned long elapsedMillis) {
-  // Convert elapsed milliseconds to seconds for calculations
   float elapsedSeconds = elapsedMillis / 1000.0f;
   // =================================================================
   //     BATTERY STATE MONITORING
   // =================================================================
-  // This section tracks battery state of charge from ALL sources:
-  // Get current battery voltage and current readings
+  // This section tracks battery state of charge from ALL sources
   float currentBatteryVoltage = getBatteryVoltage();
   Voltage_scaled = currentBatteryVoltage * 100;  // V × 100 for precision
-  // Get battery current for SoC tracking (uses dedicated battery source)
-  float batteryCurrentForSoC = getBatteryCurrent();
+  float batteryCurrentForSoC = getBatteryCurrent();  // dedicated battery source, not alternator
   BatteryCurrent_scaled = batteryCurrentForSoC * 100;  // A × 100 for precision
-  // Calculate battery power (positive = charging, negative = discharging)
+  // positive = charging, negative = discharging
   BatteryPower_scaled = (Voltage_scaled * BatteryCurrent_scaled) / 100;  // W × 100
-  // Energy calculations - convert power to energy over time
   float batteryPower_W = BatteryPower_scaled / 100.0f;
-  float energyDelta_Wh = (batteryPower_W * elapsedSeconds) / 3600.0f;  // Power × time = energy
-  // Energy accumulation with floating point precision
+  float energyDelta_Wh = (batteryPower_W * elapsedSeconds) / 3600.0f;
   static float chargedEnergyAccumulator = 0.0f;
   static float dischargedEnergyAccumulator = 0.0f;
   static float chargedEnergyAccumulator_AllTime = 0.0f;
   static float dischargedEnergyAccumulator_AllTime = 0.0f;
   if (BatteryCurrent_scaled > 0) {
-    // Charging - energy going INTO battery
     chargedEnergyAccumulator += energyDelta_Wh;
     chargedEnergyAccumulator_AllTime += energyDelta_Wh;
     if (chargedEnergyAccumulator >= 1.0f) {
@@ -870,7 +839,6 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
       chargedEnergyAccumulator_AllTime -= (int)chargedEnergyAccumulator_AllTime;
     }
   } else if (BatteryCurrent_scaled < 0) {
-    // Discharging - energy coming OUT of battery
     dischargedEnergyAccumulator += abs(energyDelta_Wh);
     dischargedEnergyAccumulator_AllTime += abs(energyDelta_Wh);
     if (dischargedEnergyAccumulator >= 1.0f) {
@@ -890,7 +858,7 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
 
   static float coulombAccumulator_Ah = 0.0f;
   float batteryCurrent_A = BatteryCurrent_scaled / 100.0f;
-  float deltaAh = (batteryCurrent_A * elapsedSeconds) / 3600.0f;  // A × hours = Ah
+  float deltaAh = (batteryCurrent_A * elapsedSeconds) / 3600.0f;
   if (BatteryCurrent_scaled >= 0) {
     // Charging - apply charge efficiency (not all energy makes it in)
     // ChargeEfficiency_scaled is % × 10 (e.g. 990 = 99.0%), so divide by 1000 to get the multiplier.
@@ -902,7 +870,6 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
     float peukertThreshold = BatteryCapacity_Ah / 100.0f;  // C/100 threshold
 
     if (dischargeCurrent_A > peukertThreshold) {
-      // High discharge rate - apply Peukert equation
       float peukertExponent = PeukertExponent_scaled / 100.0f;
       dischargeCurrent_A = constrain(dischargeCurrent_A, 0, BatteryCapacity_Ah);  // Max 1C
       float currentRatio = PeukertRatedCurrent_A / dischargeCurrent_A;
@@ -911,19 +878,16 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
       float batteryDeltaAh = deltaAh * peukertFactor;
       coulombAccumulator_Ah += batteryDeltaAh;
     } else {
-      // Low discharge rate - no Peukert compensation needed
       coulombAccumulator_Ah += deltaAh;
     }
   }
 
-  // Update SoC when we've accumulated enough change (0.01 Ah threshold)
   if (abs(coulombAccumulator_Ah) >= 0.01f) {
     int deltaAh_scaled = (int)(coulombAccumulator_Ah * 100.0f);
     CoulombCount_Ah_scaled += deltaAh_scaled;
     coulombAccumulator_Ah -= (deltaAh_scaled / 100.0f);  // Keep remainder
   }
 
-  // Calculate State of Charge percentage with bounds checking
   CoulombCount_Ah_scaled = constrain(CoulombCount_Ah_scaled, 0, BatteryCapacity_Ah * 100);
   float SoC_float = (float)CoulombCount_Ah_scaled / (BatteryCapacity_Ah * 100.0f) * 100.0f;
   SOC_percent = (int)(SoC_float * 100);  // Store as percentage × 100 for 2 decimals
@@ -942,13 +906,10 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   // we know it's fully charged regardless of what's charging it
   // Units: BatteryCurrent_scaled is A×100. TailCurrent is % of capacity, so the
   // threshold in A×100 is (TailCurrent/100 × Capacity) × 100 = TailCurrent × Capacity.
-  // (The old "/ 100" compared amps against A×100 — 100x too strict, never fired.)
   if ((abs(BatteryCurrent_scaled) <= (TailCurrent * BatteryCapacity_Ah)) && (Voltage_scaled >= ChargedVoltage_Scaled)) {
-    // Conditions met - start/continue timer
     FullChargeTimer += elapsedSeconds;
 
     if (FullChargeTimer >= ChargedDetectionTime) {
-      // Timer expired - battery is definitely full
       SOC_percent = 10000;  // 100.00%
       CoulombCount_Ah_scaled = BatteryCapacity_Ah * 100;
 
@@ -977,7 +938,6 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
       }
     }
   } else {
-    // Conditions not met - reset timer
     FullChargeTimer = 0;
     FullChargeDetected = false;
   }
@@ -987,13 +947,11 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   // =================================================================
   // These metrics are ONLY about the alternator's contribution
 
-  // Determine if alternator is actually producing current
   alternatorIsOn = (MeasuredAmps > CurrentThreshold);
 
   if (alternatorIsOn) {
-    // Track alternator runtime (seconds → AlternatorOnTime)
     alternatorOnAccumulator += elapsedMillis;
-    if (alternatorOnAccumulator >= 1000) {  // Every 1 second
+    if (alternatorOnAccumulator >= 1000) {
       int secondsRun = alternatorOnAccumulator / 1000;
       AlternatorOnTime += secondsRun;
       AlternatorOnTime_AllTime += secondsRun;
@@ -1002,7 +960,6 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
 
     alternatorWasOn = alternatorIsOn;
 
-    // Calculate alternator energy output
     static float alternatorEnergyAccumulator = 0.0f;
     static float alternatorEnergyAccumulator_AllTime = 0.0f;
     float alternatorPower_W = (currentBatteryVoltage * MeasuredAmps);
@@ -1026,18 +983,16 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
       // Calculate diesel fuel used to produce this electrical energy
       // Chain: Diesel → Engine (30% eff) → Alternator (50% eff) → Electricity
 
-      float energyJoules = altEnergyDelta_Wh * 3600.0f;  // Convert Wh to Joules
+      float energyJoules = altEnergyDelta_Wh * 3600.0f;
       const float engineEfficiency = 0.30f;              // Engine: fuel → mechanical (30%)
       const float alternatorEfficiency = 0.50f;          // Alt: mechanical → electrical (50%)
 
-      // Total system efficiency = 0.30 × 0.50 = 0.15 (15%)
       float fuelEnergyUsed_J = energyJoules / (engineEfficiency * alternatorEfficiency);
       const float dieselEnergy_J_per_mL = 36000.0f;  // Energy content of diesel
 
       float fuelUsed_mL = fuelEnergyUsed_J / dieselEnergy_J_per_mL;
-      float fuelUsed_L = fuelUsed_mL / 1000.0f;  // Convert mL to L
+      float fuelUsed_L = fuelUsed_mL / 1000.0f;
 
-      // Accumulate fuel (prevents losing fractional L)
       static float fuelAccumulator = 0.0f;
       static float fuelAccumulator_AllTime = 0.0f;
       fuelAccumulator += fuelUsed_L;
@@ -1059,11 +1014,9 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   // =================================================================
   //     CHARGE CYCLE CALCULATION
   // =================================================================
-  // Calculate charge cycles based on total energy throughput
-  // One cycle = one full battery capacity worth of energy charged
-  // Use the user-entered nominal bank class (BATTERY_VOLTAGE) directly — this runs continuously, well
-  // after InitSystemSettings has loaded it, so there's no need to (mis)guess the class from the measured
-  // voltage. A deeply-discharged 24V bank sagging below 16V no longer mis-buckets as 12V (2× cycle error).
+  // One cycle = one full battery capacity worth of energy charged.
+  // Nominal bank class comes from user-entered BATTERY_VOLTAGE, never guessed from measured
+  // voltage (a deeply-discharged 24V bank sagging below 16V would mis-bucket as 12V, 2× cycle error).
   float nominalVoltage = (float)BATTERY_VOLTAGE;
 
   float batteryCapacity_Wh = BatteryCapacity_Ah * nominalVoltage;
@@ -1076,10 +1029,8 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   // =================================================================
   //     AVERAGE SOC TRACKING (TIME-WEIGHTED)
   // =================================================================
-  // Time-weighted average SOC calculation
   static float socAccumulator = 0.0f;
-  // socAccumulator_AllTime is now GLOBAL (not static here)
-  // totalSocSampleTime_AllTime is now GLOBAL (not static here)
+  // socAccumulator_AllTime and totalSocSampleTime_AllTime are globals, not statics here
   static unsigned long totalSocSampleTime = 0;  // Session seconds tracked
 
   float currentSOC = SOC_percent / 100.0f;  // Convert to actual percentage
@@ -1097,7 +1048,6 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   }
 
 
-  // Check calculation
   if (totalSocSampleTime_AllTime > 0) {
     float calculatedAvg = socAccumulator_AllTime / totalSocSampleTime_AllTime;
   } else {
@@ -1105,10 +1055,8 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   }
 
 
-  // Track voltage sampling time
   totalVoltageSampleTime_AllTime += elapsedSeconds;
 
-  // Calculate time-weighted average voltage
   // voltageAccumulator_AllTime = 0.0f; don't do this shit anymore
   float currentVoltage = getBatteryVoltage();
   voltageAccumulator_AllTime += currentVoltage * elapsedSeconds;
@@ -1122,9 +1070,8 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
   // DISTANCE CALCULATION - Using GPS position (Haversine)
   // ==========================================================================
 
-  // gpsValid is shared with trip-tracking below — spec criteria: not stale,
-  // not NaN, not (0,0). Stricter than the old IS_STALE-only gate; the extra
-  // checks reject the "boot before first fix" sentinel.
+  // gpsValid is shared with trip-tracking below — not stale, not NaN, not (0,0);
+  // the (0,0) check rejects the "boot before first fix" sentinel.
   bool gpsValid = !IS_STALE(IDX_LATITUDE_NMEA) && !IS_STALE(IDX_LONGITUDE_NMEA)
                   && !isnan(LatitudeNMEA) && !isnan(LongitudeNMEA)
                   && !(LatitudeNMEA == 0.0 && LongitudeNMEA == 0.0);
@@ -1151,10 +1098,9 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
         uint32_t dtMs = nowMs - lastFixMs;
         float impliedKn = (dtMs > 0) ? (float)(distanceDelta_nm / (dtMs / 3600000.0)) : 9999.0f;
 
-        // Implied-speed gate replaces the old fixed 0.1 nm jump filter, which dropped every
-        // step above ~6 kt on 60 s phone-GPS fixes (zeroing distance for fast boats). A
-        // <=5 min gap at <150 kt is real motion (covers ~100 mph powerboats; real GPS teleports
-        // imply hundreds of kt); anything else rebaselines without polluting the odometer.
+        // Implied-speed gate: a <=5 min gap at <150 kt is real motion (covers ~100 mph
+        // powerboats; real GPS teleports imply hundreds of kt); anything else rebaselines
+        // without polluting the odometer.
         if (dtMs <= 300000UL && impliedKn < 150.0f) {
           static float distanceAccumulator = 0.0f;
           static float distanceAccumulator_AllTime = 0.0f;
@@ -1375,20 +1321,16 @@ void UpdateAnchorageDetection(bool gpsValid) {
 }
 
 void UpdateEngineRuntime(unsigned long elapsedMillis) {
-  // Check if engine is running (RPM > 100)
   bool engineIsRunning = (RPM > 100 && RPM < 6000);
 
   if (engineIsRunning) {
-    // Accumulate running time in milliseconds
     engineRunAccumulator += elapsedMillis;
 
-    // Update total engine run time every second
-    if (engineRunAccumulator >= 1000) {  // 1 second in milliseconds
+    if (engineRunAccumulator >= 1000) {
       int secondsRun = engineRunAccumulator / 1000;
       EngineRunTime += secondsRun;
       EngineRunTime_AllTime += secondsRun;
 
-      // Update engine cycles (RPM * seconds / 60)
       int cyclesDelta = (RPM * secondsRun) / 60;
       EngineCycles += cyclesDelta;
       EngineCycles_AllTime += cyclesDelta;
@@ -1408,7 +1350,7 @@ void UpdateEngineRuntime(unsigned long elapsedMillis) {
 
   engineWasRunning = engineIsRunning;
 }
-// Function to get smoothed GPS position (5-sample moving average)
+// 5-sample moving average
 void getSmoothedGPS(double &smoothLat, double &smoothLon) {
   if (gpsBufferCount == 0) {
     smoothLat = LatitudeNMEA;
@@ -1428,14 +1370,13 @@ void getSmoothedGPS(double &smoothLat, double &smoothLon) {
   smoothLat = latSum / samplesToAverage;
   smoothLon = lonSum / samplesToAverage;
 }
-// Call this whenever you get a new GPS position (in your GNSS handler or main loop)
+// Call on each new GPS position
 void updateGPSBuffer() {
-  // Only update if we have valid GPS data
   if (IS_STALE(IDX_LATITUDE_NMEA) || IS_STALE(IDX_LONGITUDE_NMEA)) {
     return;
   }
 
-  // **FIX: On first valid reading, pre-fill entire buffer**
+  // On first valid reading, pre-fill entire buffer
   if (gpsBufferCount == 0) {
     for (int i = 0; i < GPS_SMOOTHING_SAMPLES; i++) {
       latBuffer[i] = LatitudeNMEA;
@@ -1447,23 +1388,19 @@ void updateGPSBuffer() {
     return;
   }
 
-  // Add to circular buffer
   latBuffer[gpsBufferIndex] = LatitudeNMEA;
   lonBuffer[gpsBufferIndex] = LongitudeNMEA;
 
   gpsBufferIndex = (gpsBufferIndex + 1) % GPS_SMOOTHING_SAMPLES;
 }
-// Calculate distance between two GPS coordinates using Haversine formula
 double calculateHaversineDistance(double lat1, double lon1, double lat2, double lon2) {
   const double R = 3440.065;  // Earth's radius in nautical miles
 
-  // Convert to radians
   double lat1_rad = lat1 * PI / 180.0;
   double lat2_rad = lat2 * PI / 180.0;
   double delta_lat = (lat2 - lat1) * PI / 180.0;
   double delta_lon = (lon2 - lon1) * PI / 180.0;
 
-  // Haversine formula
   double a = sin(delta_lat / 2.0) * sin(delta_lat / 2.0) + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2.0) * sin(delta_lon / 2.0);
   double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
 
@@ -1475,16 +1412,13 @@ double calculateHaversineDistance(double lat1, double lon1, double lat2, double 
  * Sailing conditions: SOG > 0.5 knots AND RPM < 50 AND Ignition == 0
  */
 void UpdateSailingMetrics(unsigned long elapsedMillis) {
-  // Check sailing conditions
   bool isSailing = false;
   if (!IS_STALE(IDX_SOG_NMEA) && SOGNMEA > 0.5 && RPM < 50 && Ignition == 0) {
     isSailing = true;
   }
 
-  // Update total operational time (always, regardless of sailing)
   float elapsedSeconds = elapsedMillis / 1000.0f;
 
-  // Update sailing time (only when sailing)
   if (isSailing) {
     float elapsedDays = elapsedMillis / (1000.0f * 60.0f * 60.0f * 24.0f);
 
@@ -1499,8 +1433,7 @@ void UpdateSailingMetrics(unsigned long elapsedMillis) {
     }
   }
 
-  // Calculate sailing ratio using existing totalSocSampleTime_AllTime
-  float total_operational_days = totalSocSampleTime_AllTime / 86400.0f;  // ✅ Use existing variable
+  float total_operational_days = totalSocSampleTime_AllTime / 86400.0f;
   if (total_operational_days > 0) {
     sailing_ratio = (sailing_days_alltime / total_operational_days) * 100.0f;
   } else {
@@ -1536,8 +1469,7 @@ void UpdateBoardTempPressureMaximums() {
 
 
 float getBatteryCurrent() {
-  // Return battery current from appropriate source
-  // Variables are populated by ReadAnalogInputs() or ReadAnalogInputs_Fake()
+  // Source variables are populated by ReadAnalogInputs() or ReadAnalogInputs_Fake()
   switch (BatteryCurrentSource) {
     case 3: return VictronCurrent;  // Victron VE.Direct
     default: return Bcur;           // INA228 (case 0, and fallback)
@@ -1563,7 +1495,6 @@ float getFiltV() {
 // Channel 3 topology per docs/hardware/analoginputsADS1115.md:
 //   3.3 V → Thermistor (R_NTC) → V_node → R_fixed (10 kΩ pulldown) → GND
 //   V_node = 3.3 × R_fixed / (R_fixed + R_NTC)  →  R_NTC = R_fixed × (Vcc - V) / V
-// Earlier firmware assumed the inverted topology with Vcc=5V and produced wrong R_NTC.
 float thermistorTempC(float V_node) {
   const float Vcc = 3.3f;
   if (V_node <= 0.0f || V_node >= Vcc) return -99.0f;  // unrecoverable: divide-by-zero or rail
@@ -1651,9 +1582,9 @@ void CheckAlarms() {
       lastColdChargeAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
     }
 
-    // (Alternator-health is advisory-only now — no audible alarm. See Phase 2 redesign.)
+    // (Alternator-health is advisory-only — no audible alarm.)
 
-    // Fast alt-current pulse-pattern fault (rectifier/stator) — opt-in audible alarm (item 5).
+    // Fast alt-current pulse-pattern fault (rectifier/stator) — opt-in audible alarm.
     // Sounds while a FAULT verdict is fresh (seen within the last 2 min); default OFF until
     // real-capture validation. AlarmActivate-gated like every other condition in this block.
     static unsigned long lastFaFaultAlarmMsgMs = 0;
@@ -1976,44 +1907,37 @@ void logDashboardValues() {
 }
 
 void applySocGainCorrection() {
-  // Only apply if feature is enabled — battery current always comes from INA228
+  // battery current always comes from INA228
   if (AutoShuntGainCorrection == 0) {
     return;
   }
 
-  // Check minimum time interval
   unsigned long now = millis();
   if (now - lastGainCorrectionTime < MIN_GAIN_CORRECTION_INTERVAL) {
     queueConsoleMessage("SOC Gain: Correction blocked, too soon since last adjustment");
     return;
   }
 
-  // Calculate actual vs expected capacity
   float expectedCapacity = BatteryCapacity_Ah;
-  float calculatedCapacity = CoulombCount_Ah_scaled / 100.0;  // Convert from scaled value
+  float calculatedCapacity = CoulombCount_Ah_scaled / 100.0;
 
-  // Sanity check - make sure we have reasonable values
   if (calculatedCapacity < 10 || expectedCapacity < 10) {
     queueConsoleMessage("SOC Gain: Invalid capacity values, skipping correction");
     return;
   }
 
-  // Calculate error ratio
   float errorRatio = abs(expectedCapacity - calculatedCapacity) / expectedCapacity;
 
-  // Check if error is too large to be reasonable
   if (errorRatio > MAX_REASONABLE_ERROR) {
     queueConsoleMessageF("SOC Gain: Error too large (%.1f%%), ignoring correction",
                          errorRatio * 100);
     return;
   }
 
-  // Calculate desired correction factor
   float desiredCorrectionFactor = expectedCapacity / calculatedCapacity;
   float currentFactor = DynamicShuntGainFactor;
   float newFactor = currentFactor * desiredCorrectionFactor;
 
-  // Limit the adjustment rate per cycle
   float maxChange = currentFactor * MAX_GAIN_ADJUSTMENT_PER_CYCLE;
   if (newFactor > currentFactor + maxChange) {
     newFactor = currentFactor + maxChange;
@@ -2023,7 +1947,6 @@ void applySocGainCorrection() {
     queueConsoleMessage("SOC Gain: Correction limited to maximum change rate");
   }
 
-  // Apply bounds checking
   if (newFactor > MAX_DYNAMIC_GAIN_FACTOR) {
     newFactor = MAX_DYNAMIC_GAIN_FACTOR;
     queueConsoleMessageF("SOC Gain: Factor hit maximum limit (%.2f), check system",
@@ -2034,7 +1957,6 @@ void applySocGainCorrection() {
                          MIN_DYNAMIC_GAIN_FACTOR);
   }
 
-  // Apply the correction
   DynamicShuntGainFactor = newFactor;
   lastGainCorrectionTime = now;
   queueConsoleMessageF("SOC Gain: Corrected from %.4f to %.4f (Calc:%.1fAh, Expected:%.1fAh)",
@@ -2049,8 +1971,8 @@ void handleSocGainReset() {
   }
 }
 // ===== Temperature-compensated zero correction (ZERO_DRIFT_TEMPCOMP_SPEC.md) ==================
-// Replaces the old active auto-zero. The zero-drift log is the data source; the daily fit builds a
-// line zero(T)=c+b·(T−T_REF), EMA-smoothed across days, and the live correction is clamped to ±3 A.
+// The zero-drift log is the data source; the daily fit builds a line zero(T)=c+b·(T−T_REF),
+// EMA-smoothed across days, and the live correction is clamped to ±3 A.
 
 // ZFitResult (one regression's output) is declared in Xregulator.ino so Arduino's auto-generated
 // prototype for zeroFitRegress can see the return type.
@@ -2256,20 +2178,18 @@ void handleAltZeroReset() {
 void calculateChargeTimes() {
   static unsigned long lastCalcTime = 0;
   unsigned long now = millis();
-  if (now - lastCalcTime < INA_SLOW_INTERVAL_MS) return;  // Only run every X seconds
+  if (now - lastCalcTime < INA_SLOW_INTERVAL_MS) return;
   lastCalcTime = now;
 
-  // Get the current amperage from INA228 battery shunt
   float currentAmps = getBatteryCurrent();  // this is for battery state
 
   if (currentAmps > 0.01) {  // charging
-    // Calculate remaining capacity needed to reach 100%
-    float currentSoC = SOC_percent / 100.0;  // Convert from scaled format
+    float currentSoC = SOC_percent / 100.0;
     float remainingCapacity = BatteryCapacity_Ah * (100.0 - currentSoC) / 100.0;
     timeToFullChargeMin = (int)(remainingCapacity / currentAmps * 60.0);
     timeToFullDischargeMin = -999;           // Not applicable while charging
   } else if (currentAmps < -0.01) {          // discharging
-    float currentSoC = SOC_percent / 100.0;  // Convert from scaled format
+    float currentSoC = SOC_percent / 100.0;
     float availableCapacity = BatteryCapacity_Ah * currentSoC / 100.0;
     timeToFullDischargeMin = (int)(availableCapacity / (-currentAmps) * 60.0);
     timeToFullChargeMin = -999;  // Not applicable while discharging
@@ -2282,7 +2202,6 @@ void calculateChargeTimes() {
 void calculateThermalStress() {
   unsigned long now = millis();
 
-  // **FIX 1: Initialize lastThermalUpdateTime on first run**
   if (lastThermalUpdateTime == 0) {
     lastThermalUpdateTime = now;
     return;  // Skip first calculation
@@ -2292,40 +2211,36 @@ void calculateThermalStress() {
     return;
   }
 
-  // **FIX 2: Add RPM validation**
   if (RPM < 0.0f || RPM > 10000.0f || isnan(RPM) || isinf(RPM)) {
     return;  // Invalid RPM
   }
 
 
   if (now - lastThermalUpdateTime < THERMAL_UPDATE_INTERVAL) {
-    return;  // Not time to update yet
+    return;
   }
 
-  // **PROTECTION 0: Skip if temperature is invalid (NaN/Inf)**
   if (isnan(TempToUse) || isinf(TempToUse)) {
     return;  // Temperature sensor not initialized yet
   }
 
-  // **PROTECTION 1: Validate temperature before using it (DS18B20 range: -67°F to +257°F)**
+  // DS18B20 valid range: -67°F to +257°F
   if (TempToUse < -67.0f || TempToUse > 257.0f) {
-    return;  // Skip calculation if temperature is outside sensor's valid range
+    return;
   }
 
   float elapsedSeconds = (now - lastThermalUpdateTime) / 1000.0f;
   lastThermalUpdateTime = now;
 
-  // Calculate component temperatures
   float T_winding_F = TempToUse + WindingTempOffset;
   float T_bearing_F = TempToUse + WindingTempOffset;  // temporarily using same offset for simplicity until we see how this thing works
   float T_brush_F = TempToUse + WindingTempOffset;    // temporarily using same offset for simplicity until we see how this thing works
 
-  // **PROTECTION 2: Sanity check component temperatures (allow some headroom for offset)**
+  // Sanity check component temperatures (allow some headroom for offset)
   if (T_winding_F < -100.0f || T_winding_F > 400.0f || T_bearing_F < -100.0f || T_bearing_F > 400.0f || T_brush_F < -100.0f || T_brush_F > 400.0f) {
     return;  // Don't accumulate damage from obviously bad readings
   }
 
-  // Calculate alternator RPM
   float Alt_RPM = RPM * PulleyRatio;
 
   // Calculate individual component lives
@@ -2346,18 +2261,15 @@ void calculateThermalStress() {
   float grease_damage_rate = 1.0f / L_grease;
   float brush_damage_rate = 1.0f / L_brush;
 
-  // Accumulate damage over elapsed time
   float hours_elapsed = elapsedSeconds / 3600.0f;
   CumulativeInsulationDamage += insul_damage_rate * hours_elapsed;
   CumulativeGreaseDamage += grease_damage_rate * hours_elapsed;
   CumulativeBrushDamage += brush_damage_rate * hours_elapsed;
 
-  // Constrain damage to 0-1 range
   CumulativeInsulationDamage = constrain(CumulativeInsulationDamage, 0.0f, 1.0f);
   CumulativeGreaseDamage = constrain(CumulativeGreaseDamage, 0.0f, 1.0f);
   CumulativeBrushDamage = constrain(CumulativeBrushDamage, 0.0f, 1.0f);
 
-  // Calculate remaining life percentages
   InsulationLifePercent = (1.0f - CumulativeInsulationDamage) * 100.0f;
   GreaseLifePercent = (1.0f - CumulativeGreaseDamage) * 100.0f;
   BrushLifePercent = (1.0f - CumulativeBrushDamage) * 100.0f;
@@ -2366,7 +2278,6 @@ void calculateThermalStress() {
   float min_damage_rate = max({ insul_damage_rate, grease_damage_rate, brush_damage_rate });
   PredictedLifeHours = 1.0f / min_damage_rate;
 
-  // Set indicator color
   if (PredictedLifeHours > 5000.0f) {
     LifeIndicatorColor = 0;  // Green
   } else if (PredictedLifeHours > 1000.0f) {
@@ -2380,13 +2291,12 @@ void calculateThermalStress() {
 //INA228 functions to compensate for lack of library features related to ALERT pin
 uint16_t readINA228AlertRegister(uint8_t i2cAddress) {
   Wire.beginTransmission(i2cAddress);
-  Wire.write(0x0B);                                     // DIAG_ALRT (correct register)
+  Wire.write(0x0B);                                     // DIAG_ALRT register
   if (Wire.endTransmission(false) != 0) return 0xFFFF;  // keep repeated start
   if (Wire.requestFrom(i2cAddress, (uint8_t)2) != 2) return 0xFFFF;
   return (Wire.read() << 8) | Wire.read();
 }
 bool clearINA228AlertLatch(uint8_t i2cAddress) {
-  // Read CONFIG
   Wire.beginTransmission(i2cAddress);
   Wire.write(0x00);  // CONFIG register
   Wire.endTransmission(false);
@@ -2395,7 +2305,6 @@ bool clearINA228AlertLatch(uint8_t i2cAddress) {
   uint16_t config = (Wire.read() << 8) | Wire.read();
   // Set ALERT_LATCH_CLEAR bit (bit 3)
   config |= 0x0008;
-  // Write CONFIG back
   Wire.beginTransmission(i2cAddress);
   Wire.write(0x00);
   Wire.write(config >> 8);
@@ -2404,41 +2313,33 @@ bool clearINA228AlertLatch(uint8_t i2cAddress) {
 }
 
 void updateINA228OvervoltageThreshold() {
-  // Only update if INA228 is connected
   if (INADisconnected != 0) {
     queueConsoleMessageF("INA228: Cannot update threshold - chip not connected");
     return;
   }
 
-  // Update the hardware limit based on current BulkVoltage setting
   VoltageHardwareLimit = BulkVoltage + 0.3;
 
-  // Calculate threshold in LSB units for INA228 with proper rounding
   const double LSB = 0.003125;                                           // 3.125 mV/LSB
   uint16_t thresholdLSB = (uint16_t)(VoltageHardwareLimit / LSB + 0.5);  // Round instead of truncate
 
-  // Diagnostic messages (no String churn)
   queueConsoleMessageF("INA228 threshold calc: %.3fV / %.6f = %u LSB", VoltageHardwareLimit, LSB, (unsigned)thresholdLSB);
   queueConsoleMessageF("INA228 effective threshold: %.3fV", (double)thresholdLSB * LSB);
 
-  // Program overvoltage threshold and clear under-voltage
   INA.setBusOvervoltageTH(thresholdLSB);
-  INA.setBusUndervoltageTH(0x0000);  // Clear under-voltage threshold (fix accidental setting)
+  INA.setBusUndervoltageTH(0x0000);  // under-voltage threshold deliberately disabled
 
-  // Configure DIAG_ALRT behavior explicitly for predictable operation
-  INA.setDiagnoseAlertBit(INA228_DIAG_SLOW_ALERT);        // Compare on SLOW\_ALERT uses the averaged value
+  INA.setDiagnoseAlertBit(INA228_DIAG_SLOW_ALERT);        // SLOW_ALERT: compare uses the averaged value
   INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_LATCH);     // Transparent mode - alerts clear when condition clears
   INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_POLARITY);  // Active-low open-drain (default)
   INA.setDiagnoseAlertBit(INA228_DIAG_BUS_OVER_LIMIT);    // Enable BUSOL reporting
 
-  // Verify what was actually written to the chip
   uint16_t readback_BOVL = INA.getBusOvervoltageTH();
   uint16_t readback_BUVL = INA.getBusUndervoltageTH();
 
   queueConsoleMessageF("INA228 readback: BOVL=0x%04X (%.3fV), BUVL=0x%04X",
                        (unsigned)readback_BOVL, (double)readback_BOVL * LSB, (unsigned)readback_BUVL);
 
-  // Verify writes were successful
   if (readback_BOVL != thresholdLSB) {
     queueConsoleMessageF("WARNING: BOVL write failed - expected 0x%04X, got 0x%04X",
                          (unsigned)thresholdLSB, (unsigned)readback_BOVL);
@@ -2464,7 +2365,6 @@ void checkWebFilesExist() {
   int missingCount = 0;
   Serial.println("=== CHECKING WEB FILES ===");
 
-  // First ensure web filesystem is mounted
   if (!ensureWebFS()) {
     Serial.println("ERROR: Web filesystem not mounted!");
     queueConsoleMessage("CRITICAL: Web filesystem mount failed!");
@@ -2514,9 +2414,8 @@ static inline void adsGapUpdate(uint8_t ch, uint32_t now) {
 
 void ReadAnalogInputs() {
   // Outer wrapper — ft_rai_total captures the true worst-case duration including
-  // I2C timeouts that the old INA228-only timer missed entirely. Individual
-  // section timers triangulate which sub-block is responsible when ft_rai_total
-  // spikes.
+  // I2C timeouts. Individual section timers triangulate which sub-block is
+  // responsible when ft_rai_total spikes.
   TIMED_CALL(ft_rai_total, _ReadAnalogInputs_inner());
 }
 
@@ -2534,7 +2433,6 @@ void _ReadAnalogInputs_inner() {
       INA.setBusVoltageConversionTime(4);   // 540µs
       INA.setShuntVoltageConversionTime(4); // 540µs — total update: 4×1080µs ≈ 4.3ms
       IBV_filtered = IBV;                   // reseed EMA so CV loop starts clean
-      Bcur_filtered = Bcur;                 // match IBV_filtered — reseed the Bcur display EMA on fast-mode entry
       inaReadInterval = INA_FAST_INTERVAL_MS;
       inaFastModeActive = true;
     } else if (!fieldGateOpen && inaFastModeActive) {
@@ -2569,20 +2467,17 @@ void _ReadAnalogInputs_inner() {
                      if (inaBusDt > inaBusReadWorstUs) inaBusReadWorstUs = inaBusDt;
                      if (inaBusDt > 15000UL) inaBusSlowCount++;          // ≥1 Wire-timeout's worth = bus stall
 
-                     // Sanity check the readings
                      if (!isnan(IBV) && IBV > 5.0 && IBV < 70.0 && !isnan(ShuntVoltage_mV)) {
                        Bcur = ShuntVoltage_mV * 1000.0f / ShuntResistanceMicroOhm;
                        Bcur = Bcur + BatteryCOffset;
-                       // Apply inversion if needed
                        if (InvertBattAmps == 1) {
                          Bcur = -Bcur;
                        }
-                       // Apply dynamic gain correction only when enabled — battery current always from INA228
+                       // battery current always from INA228
                        if (AutoShuntGainCorrection == 1) {
                          Bcur = Bcur * DynamicShuntGainFactor;
                        }
-                       BatteryCurrent_scaled = Bcur * 100;  // Store raw value for battery monitoring
-                       // Only mark fresh on successful, valid readings
+                       BatteryCurrent_scaled = Bcur * 100;
                        MARK_FRESH(IDX_IBV);
                        MARK_FRESH(IDX_BCUR);
 
@@ -2616,24 +2511,6 @@ void _ReadAnalogInputs_inner() {
                          bcurPrevMs = nowIna;
                        }
 
-                       // Bcur EMA — telemetry/plot trace (dashed battery-current trace on the live plot).
-                       // Mirrors g_pidI_filtered's EMA on MeasuredAmps, reusing OutputPIDFilterTC. Raw Bcur
-                       // above stays the load-dump dBcur/dt source.
-                       {
-                         uint32_t nowBc = millis();
-                         static bool bcur_ema_init = false;
-                         static uint32_t lastBcurEmaMs = 0;
-                         if (!bcur_ema_init) {
-                           Bcur_filtered = Bcur;
-                           bcur_ema_init = true;
-                         } else {
-                           float dt_f = fmaxf(1.0f, (float)(nowBc - lastBcurEmaMs));
-                           float alpha = dt_f / (OutputPIDFilterTC + dt_f);
-                           Bcur_filtered = alpha * Bcur + (1.0f - alpha) * Bcur_filtered;
-                         }
-                         lastBcurEmaMs = nowBc;
-                       }
-
                        // Fold this fast Bcur sample (+ co-sampled MeasuredAmps) into the measured
                        // filtered-ripple capture (§3.1). ALWAYS-ON: peak IExcessTau-filtered pk-pk per
                        // FaCell for the map + Protections plot; the 3-level test ring appends only when armed.
@@ -2646,13 +2523,12 @@ void _ReadAnalogInputs_inner() {
                        wmIgnUpdate(wmIgn_IBV,  IBV);   // ignition-cycle watermarks (lo + hi)
                        wmIgnUpdate(wmIgn_Bcur, Bcur);
                      } else {
-                       ina228ErrorCount++;   // implausible read — dropped (no MARK_FRESH); was silent before
+                       ina228ErrorCount++;   // implausible read — dropped (no MARK_FRESH)
                      }
 
                    } catch (...) {
                      ina228ErrorCount++;   // exception path — visible on dashboard "I2C Bus Health"
-                     // INA228 read failed - do not call MARK_FRESH. The counter replaces the old
-                     // throttled console spam (now redundant); keep one rare Serial line for USB debug.
+                     // no MARK_FRESH; one rare Serial line kept for USB debug
                      static unsigned long lastINAFailureWarning = 0;
                      if (millis() - lastINAFailureWarning > 10000) {
                        Serial.println("INA228 read failed");
@@ -2673,9 +2549,8 @@ void _ReadAnalogInputs_inner() {
   // ft_rai_ads_state measures cost per state step (not a full logical read cycle),
   // which is the correct unit for a non-blocking state machine.
   if (ADS1115Disconnected != 0) {
-    // Throttled error message to prevent console spam
     static unsigned long lastADSWarning = 0;
-    if (millis() - lastADSWarning > 10000) {  // Only warn every 10 seconds
+    if (millis() - lastADSWarning > 10000) {
       queueConsoleMessage("theADS1115 was not connected and triggered a return");
       lastADSWarning = millis();
     }
@@ -2688,7 +2563,6 @@ void _ReadAnalogInputs_inner() {
                switch (adsState) {
 
                  case ADS_IDLE:
-                   // Trigger single-shot conversion on current channel
                    adsTriggeredChannel = adsCurrentChannel;
                    adc.setMux(adsMuxCodes[adsTriggeredChannel]);
                    adc.triggerConversion();
@@ -2758,14 +2632,13 @@ void _ReadAnalogInputs_inner() {
                      }
 
                      // CRITICAL: Use adsTriggeredChannel, NOT adsSequenceIndex!
-                     // Only process and mark fresh on a confirmed good read
                      if (readOK) {
                        switch (adsTriggeredChannel) {
                          case 0:
                            Channel0V = Raw / 32768.0 * 6.144 * 21.0401;  // divider 1,000,000Ω / 49.9kΩ, scale ≈21.0401
                            BatteryV = Channel0V;
                            if (BatteryV > 5.0 && BatteryV < 70.0) {  // Sanity check
-                             MARK_FRESH(IDX_BATTERY_V);              // Only mark fresh on valid reading
+                             MARK_FRESH(IDX_BATTERY_V);
                              battVFreshFlag = true;
                              adsGapUpdate(0, now);  // CH0 battV inter-sample gap meter
                            }
@@ -2804,10 +2677,9 @@ void _ReadAnalogInputs_inner() {
                              MeasuredAmps = (Channel1V - 2.5f) * kAmpScale[rIdx];
 
                            if (InvertAltAmps == 1) {
-                             MeasuredAmps = MeasuredAmps * -1;  // swap sign if necessary
+                             MeasuredAmps = MeasuredAmps * -1;
                            }
                            MeasuredAmps = MeasuredAmps - AlternatorCOffset;
-                           // Apply dynamic zero correction only when enabled
                            if (AutoAltCurrentZero == 1) {
                              MeasuredAmps = MeasuredAmps - DynamicAltCurrentZero;
                            }
@@ -2863,8 +2735,8 @@ void _ReadAnalogInputs_inner() {
                            }
 
                            // ── cvLog: write here, tied to actual CH1 sample arrival ──────────────────
-                           // Removed from AdjustFieldLearnMode. Control-state globals (cv_I, Icv, etc.)
-                           // reflect the previous control tick — one-tick lag is acceptable for analysis.
+                           // Control-state globals (cv_I, Icv, etc.) reflect the previous control tick —
+                           // one-tick lag is acceptable for analysis.
                            cvLog_tick(millis());
 
                            if (MeasuredAmps > MeasuredAmpsMax)         { MeasuredAmpsMax         = MeasuredAmps; }
@@ -2899,17 +2771,15 @@ void _ReadAnalogInputs_inner() {
                              RPM = 0;
                            }
                            if (RPM >= 0 && RPM < 10000) {  // Sanity check
-                             MARK_FRESH(IDX_RPM);          // Only mark fresh on valid reading
+                             MARK_FRESH(IDX_RPM);
                              wmIgnUpdate(wmIgn_RPM, RPM);  // ignition-cycle watermark
                              adsGapUpdate(2, now);  // CH2 RPM inter-sample gap meter
                            }
                            break;
 
                          case 3:
-                           // Channel3V = voltage at the ADC pin. ADS1115 gain ±6.144V FSR;
+                           // Channel3V = plain volts at the ADC pin. ADS1115 gain ±6.144V FSR;
                            // real signal range is 0-3.3V per docs/hardware/analoginputsADS1115.md.
-                           // Previous formula (* 833 * 2) was a leftover scaler from an old PCB rev
-                           // and produced garbage values; the current scaling is plain volts at pin.
                            Channel3V = Raw / 32768.0 * 6.144;
 
                            // Disconnect detection: per the hardware doc, the lowest legitimate
@@ -2933,7 +2803,6 @@ void _ReadAnalogInputs_inner() {
                            if (temperatureThermistor > -58 && temperatureThermistor < 392) {  // °F bounds
                              MARK_FRESH(IDX_THERMISTOR_TEMP);
 
-                             // Track max thermistor temperature
                              if (temperatureThermistor > MaxTemperatureThermistor)         MaxTemperatureThermistor         = temperatureThermistor;
                              if (temperatureThermistor > MaxTemperatureThermistor_AllTime) MaxTemperatureThermistor_AllTime = temperatureThermistor;
                            }
@@ -2941,9 +2810,8 @@ void _ReadAnalogInputs_inner() {
                        }
                      }
 
-                     // Advance to next channel and return to IDLE
-                     // Change 1: sequence — CH1 gets 3 of 6 slots, worst-case gap = 2 conversion cycles
-                     static const uint8_t adsSeq[] = { 1, 0, 1, 2, 1, 3 };  // was {0, 1, 0, 1, 2, 3}
+                     // Sequence — CH1 gets 3 of 6 slots, worst-case gap = 2 conversion cycles
+                     static const uint8_t adsSeq[] = { 1, 0, 1, 2, 1, 3 };
                      static const uint8_t adsSeqLen = 6;
 
                      static uint8_t adsSeqIdx = 0;
@@ -3087,7 +2955,6 @@ void drainIMUFifo() {
                  return;
                }
 
-               // Check for FIFO overrun
                uint8_t fifo_ovr = 0;
                if (imu.Get_FIFO_Overrun_Status(&fifo_ovr) == LSM6DSOX_OK && fifo_ovr) {
                  imu_fifo_overrun_count++;
@@ -3181,11 +3048,11 @@ void ReadAnalogInputs_Fake() {
   static unsigned long lastINARead_local2 = 0;
 
   if (millis() - lastINARead_local2 >= INA_SLOW_INTERVAL_MS) {  // could go down to 600 here, but this logic belongs in Loop anyway
-    lastINARead_local2 = millis();                                 // ← ADD THIS LINE!
+    lastINARead_local2 = millis();
 
     static unsigned long lastFakeUpdate = 0;
     static float fakeVoltage = 13.2;
-    static float fakeCurrent = -85.0;  // Start at -85A
+    static float fakeCurrent = -85.0;
     static float fakeRPM = 1000;
     static float fakeTemp = 45.0;
 
@@ -3212,26 +3079,22 @@ void ReadAnalogInputs_Fake() {
     MARK_FRESH(IDX_LONGITUDE_NMEA);
     MARK_FRESH(IDX_SATELLITE_COUNT);
 
-    // Speed Over Ground - vary a lot more
     fakeSOG += (random(-80, 80) / 100.0);  // ±0.8 kt per update
     if (fakeSOG < 0.5) fakeSOG = 0.5;
     if (fakeSOG > 12.0) fakeSOG = 12.0;
     SOGNMEA = fakeSOG;
     MARK_FRESH(IDX_SOG_NMEA);
 
-    // Track max speed (session and lifetime)
     if (fakeSOG > MaxSpeed)         MaxSpeed         = fakeSOG;
     if (fakeSOG > MaxSpeed_AllTime) MaxSpeed_AllTime = fakeSOG;
 
 
-    // Course Over Ground - wander more
     fakeCOG += (random(-40, 40) / 10.0);  // ±4° per update
     if (fakeCOG < 0) fakeCOG += 360;
     if (fakeCOG >= 360) fakeCOG -= 360;
     COGNMEA = fakeCOG;
     MARK_FRESH(IDX_COG_NMEA);
 
-    // Heading - similar to COG but can differ more
     fakeHeading += (random(-60, 60) / 10.0);  // ±6° per update
     if (fakeHeading < 0) fakeHeading += 360;
     if (fakeHeading >= 360) fakeHeading -= 360;
@@ -3251,7 +3114,7 @@ void ReadAnalogInputs_Fake() {
     ApparentWindAngleNMEA = fakeApparentWindAngle;
     MARK_FRESH(IDX_APPARENT_WIND_ANGLE);
 
-    // Generate fake battery voltage (11.5–15.0V range, much looser)
+    // Fake battery voltage, 11.5–15.0V
     fakeVoltage += (random(-80, 80) / 100.0);  // ±0.8 V per update
     if (fakeVoltage < 11.5) fakeVoltage = 11.5;
     if (fakeVoltage > 15.0) fakeVoltage = 15.0;
@@ -3269,12 +3132,12 @@ void ReadAnalogInputs_Fake() {
     if (MinVoltage_AllTime == 0.0 || IBV < MinVoltage_AllTime) { MinVoltage_AllTime = IBV; }
 
 
-    // Generate fake alternator current: wander heavily in a broad band
+    // Fake alternator current
     //fakeCurrent += (random(-50, 50) / 100.0);  // ±0.5 A per update
     //if (fakeCurrent < -140.0) fakeCurrent = -140.0;
     // if (fakeCurrent > 150.0) fakeCurrent = 150.0;
     fakeCurrent = 10;
-    MeasuredAmps = fakeCurrent * (InvertAltAmps ? -1 : 1);  // Apply invert flag
+    MeasuredAmps = fakeCurrent * (InvertAltAmps ? -1 : 1);
     ch1FreshFlag = true;                                    // Signal PID that fresh current data is available
     MARK_FRESH(IDX_MEASURED_AMPS);
 
@@ -3282,7 +3145,7 @@ void ReadAnalogInputs_Fake() {
     if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; }
 
 
-    // Generate fake battery current - broad noisy range
+    // Fake battery current
     static float fakeBattCurrent = 0;
     if (SOC_percent > 99) {
       fakeBattCurrent = -100.0;
@@ -3294,14 +3157,13 @@ void ReadAnalogInputs_Fake() {
     //if (fakeBattCurrent < -180.0) fakeBattCurrent = -180.0;
     //if (fakeBattCurrent > 180.0) fakeBattCurrent = 180.0;
     fakeBattCurrent = 100;
-    Bcur = fakeBattCurrent * (InvertBattAmps ? -1 : 1);  // Apply invert flag
-    Bcur_filtered = Bcur;                                 // fake mode: no EMA lag needed
+    Bcur = fakeBattCurrent * (InvertBattAmps ? -1 : 1);
     BatteryCurrent_scaled = Bcur * 100;
     VictronCurrent = Bcur + (random(-80, 80) / 10.0);  // ±8 A offset
     MARK_FRESH(IDX_BCUR);
     MARK_FRESH(IDX_VICTRON_CURRENT);
 
-    // Generate fake RPM (800–3200 range, looser)
+    // Fake RPM
     //fakeRPM += (random(-3, 3));  // ±3 rpm per update
     // if (fakeRPM < 800) fakeRPM = 800;
     // if (fakeRPM > 3200) fakeRPM = 3200;
@@ -3312,7 +3174,7 @@ void ReadAnalogInputs_Fake() {
     if (RPM > RPMMax)         { RPMMax         = RPM; }
     if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; }
 
-    // Generate fake temperatures (10–110°C, looser swings)
+    // Fake temperatures (10–110°C)
     fakeTemp += (random(-30, 30) / 10.0);
     if (fakeTemp < 10) fakeTemp = 10;
     if (fakeTemp > 110) fakeTemp = 110;
@@ -3324,7 +3186,6 @@ void ReadAnalogInputs_Fake() {
     MARK_FRESH(IDX_THERMISTOR_TEMP);
     MARK_FRESH(IDX_ALTERNATOR_TEMP);
 
-    // Track temperature maxes
     if (temperatureThermistor > MaxTemperatureThermistor)             MaxTemperatureThermistor             = temperatureThermistor;
     if (temperatureThermistor > MaxTemperatureThermistor_AllTime)     MaxTemperatureThermistor_AllTime     = temperatureThermistor;
     if (AlternatorTemperatureF > MaxAlternatorTemperatureF)           MaxAlternatorTemperatureF            = AlternatorTemperatureF;
@@ -3336,14 +3197,13 @@ void ReadAnalogInputs_Fake() {
     if (millis() - lastSolarUpdate >= 2000) {  // Update every 2 seconds like real VE.Direct
       lastSolarUpdate = millis();
 
-      // Simulate solar power output (100–800W range, quite loose)
+      // Solar power 100–800W band
       static float fakeSolarPower = 300.0;
       fakeSolarPower += (random(-300, 300));  // ±300 W per update
       if (fakeSolarPower < 100) fakeSolarPower = 100;
       if (fakeSolarPower > 800) fakeSolarPower = 800;
 
-      // Calculate energy: Power × time = energy
-      float elapsedSeconds = 2.0;  // 2 second update interval
+      float elapsedSeconds = 2.0;  // matches the 2s update gate above
       float solarEnergyDelta_Wh = (fakeSolarPower * elapsedSeconds) / 3600.0f;
 
       // Mirror the fake solar onto the live dashboard fields + leaderboard watermark
@@ -3378,7 +3238,7 @@ void ReadAnalogInputs_Fake() {
 
     // Fake other channels
     Channel0V = BatteryV;
-    Channel1V = 2.5 + (MeasuredAmps / 50.0);  // more aggressive scaling
+    Channel1V = 2.5 + (MeasuredAmps / 50.0);
     Channel2V = RPM / RPMScalingFactor;
     Channel3V = 50 + (random(-60, 60));  //  -10–110 range
     MARK_FRESH(IDX_CHANNEL3V);
@@ -3436,7 +3296,6 @@ void ReadAnalogInputs_Fake() {
     float ay_g = sin(heel_rad) * cos(pitch_rad);  // Port/starboard tilt
     float az_g = cos(heel_rad) * cos(pitch_rad);  // Vertical (1g when level)
 
-    // Add vertical slam spike
     az_g += slamDecay;
 
     // Add wave-induced vertical motion (~0.3g peak, ~8s period)
@@ -3563,7 +3422,6 @@ bool ensureWebFS() {
   Serial.println("========================================");
   Serial.flush();
 
-  // Check which partition we're running from
   const esp_partition_t *running_partition = esp_ota_get_running_partition();
   const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
 
@@ -3587,7 +3445,7 @@ bool ensureWebFS() {
         Serial.println("\n✓✓✓ SUCCESS: factory_fs validated and mounted ✓✓✓");
         Serial.flush();
         webMounted = true;
-        cacheGzFiles();  // <-- ADDED
+        cacheGzFiles();
         esp_task_wdt_reset();
         return true;
       } else {
@@ -3619,7 +3477,7 @@ bool ensureWebFS() {
         Serial.println("\n✓✓✓ SUCCESS: prod_fs validated and mounted ✓✓✓");
         Serial.flush();
         webMounted = true;
-        cacheGzFiles();  // <-- ADDED
+        cacheGzFiles();
         esp_task_wdt_reset();
         return true;
 
@@ -3657,7 +3515,7 @@ bool ensureWebFS() {
         Serial.println("\n✓✓✓ SUCCESS: factory_fs validated and mounted (fallback from prod_fs) ✓✓✓");
         Serial.flush();
         webMounted = true;
-        cacheGzFiles();  // <-- ADDED
+        cacheGzFiles();
         esp_task_wdt_reset();
         return true;
 
@@ -3719,10 +3577,8 @@ void calculateDerivedMetrics() {
       (!IS_STALE(IDX_STW_NMEA) || !IS_STALE(IDX_SOG_NMEA)) && !IS_STALE(IDX_HEADING_NMEA) &&
       IS_STALE(IDX_TRUE_WIND_SPEED)) {
 
-    // Convert apparent wind angle to radians for calculation
     float awaRad = ApparentWindAngleNMEA * PI / 180.0;
 
-    // Calculate true wind speed and direction using vector mathematics
     // True wind = Apparent wind - Boat motion vector
     float awsX = ApparentWindSpeedNMEA * sin(awaRad);  // Apparent wind X component
     float awsY = ApparentWindSpeedNMEA * cos(awaRad);  // Apparent wind Y component
@@ -3734,11 +3590,9 @@ void calculateDerivedMetrics() {
     float twsX = awsX;
     float twsY = awsY - boatSpeedTW;
 
-    // Calculate true wind speed and angle
     TrueWindSpeedNMEA = sqrt(twsX * twsX + twsY * twsY);
     TrueWindAngleNMEA = atan2(twsX, twsY) * 180.0 / PI;
 
-    // Normalize angle to 0-360
     if (TrueWindAngleNMEA < 0) TrueWindAngleNMEA += 360.0;
 
     MARK_FRESH(IDX_TRUE_WIND_SPEED);
@@ -3751,11 +3605,9 @@ void calculateDerivedMetrics() {
   // (else: bus is providing true wind directly via WindSpeed PGN handler — leave it alone)
 
   // ===== LEEWAY CALCULATION =====
-  // Only calculate if we have valid heading and COG
   if (!IS_STALE(IDX_HEADING_NMEA) && !IS_STALE(IDX_COG_NMEA)) {
     LeewayNMEA = HeadingNMEA - COGNMEA;
 
-    // Normalize to -180 to +180 range
     if (LeewayNMEA > 180.0) LeewayNMEA -= 360.0;
     if (LeewayNMEA < -180.0) LeewayNMEA += 360.0;
 
@@ -3874,7 +3726,6 @@ bool ensureLittleFS() {
     return false;
   }
 
-  // Create mutex if it doesn't exist yet
   if (!fsMutex) {
     fsMutex = xSemaphoreCreateMutex();  // MUST be a mutex (priority inheritance + ownership)
     if (!fsMutex) {
@@ -3917,7 +3768,7 @@ void ensurePreferredBootPartition() {
 
   // Check GPIO41 for manual factory reset
   pinMode(41, INPUT_PULLUP);
-  bool forceFactory = (digitalRead(41) == LOW);  //When pin 41 is low, forceFactory = 1
+  bool forceFactory = (digitalRead(41) == LOW);
 
   if (forceFactory) {
     // Clear any pending update flags to prevent boot loops
@@ -3947,7 +3798,6 @@ void ensurePreferredBootPartition() {
     return;  // <<<< CRITICAL: Exit function, don't run normal logic
   }
 
-  // Check if ota_0 has valid firmware
   esp_app_desc_t app_desc;
   esp_err_t err = esp_ota_get_partition_description(ota0_partition, &app_desc);
   bool ota0_valid = (err == ESP_OK);
@@ -3962,7 +3812,7 @@ void ensurePreferredBootPartition() {
     events.send("Boot: ota_0 invalid, using factory partition", "console", millis());
   }
 }
-void sha256(const char *input, char *outputBuffer) {  // for security
+void sha256(const char *input, char *outputBuffer) {
   byte shaResult[32];
   mbedtls_md_context_t ctx;
   const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
@@ -4035,7 +3885,7 @@ bool validatePassword(const char *password) {
 
   return (strcmp(hash, storedPasswordHash) == 0);
 }
-// NEW - printf-style (for new code and critical fixes as of 1/20/26 that were churning heap)
+// printf-style — avoids String heap churn
 void queueConsoleMessageF(const char *format, ...) {
   if (otaInProgress) {
     return;  // Skip during OTA
@@ -4060,7 +3910,7 @@ void queueConsoleMessageF(const char *format, ...) {
   consoleCount++;
   portEXIT_CRITICAL(&consoleMux);
 }
-//Legacy  // Works, but no formatting benefit
+// Legacy c-string variant — no formatting
 void queueConsoleMessage(const char *msg) {
   if (otaInProgress) {
     return;  // Skip during OTA
@@ -4080,7 +3930,7 @@ void queueConsoleMessage(const char *msg) {
   consoleCount++;
   portEXIT_CRITICAL(&consoleMux);
 }
-//legacy // OLD - String overload (keeps existing code working)
+// Legacy String overload
 void queueConsoleMessage(const String &message) {
   if (otaInProgress) {
     return;  // Skip during OTA
@@ -4129,7 +3979,6 @@ void trySendConsoleSSE(bool &sentSomething, unsigned long now) {
   lastEventSourceSend = now;  // DELETE THIS LINE TO UNTHROTTLE CONSOLE
   sentSomething = true;
 }
-//NVS STUFF
 void initializeNVS() {
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -4243,9 +4092,9 @@ void saveNVSDataFull() {
   if (prev_imu_pitch_max_lifetime != imu_pitch_max_lifetime)                { nvs_set_blob(h, "IMU_PitchMax",  &imu_pitch_max_lifetime,     sizeof(float));     prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;                chg = true; }
   if (prev_imu_slam_peak_lifetime != imu_slam_peak_lifetime)                { nvs_set_blob(h, "IMU_SlamMax",   &imu_slam_peak_lifetime,     sizeof(float));     prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;                chg = true; }
   // imuMountOrientation / CAPSIZE_THRESHOLD_DEG / PITCHPOLE_THRESHOLD_DEG / SLAM_THRESHOLD_G
-  // moved to LittleFS (Pattern B) — user-set form inputs, no longer in NVS.
+  // persist via LittleFS/settings (Pattern B) — user-set form inputs, not written here.
 
-  // Watermarks (session + lifetime peaks) — load block at top of loadNVSData() previously had no matching writes (F-RES-03 fix).
+  // Watermarks (session + lifetime peaks)
   if (prev_MaxSpeed != MaxSpeed)                                            { nvs_set_blob(h, "MaxSpd",        &MaxSpeed,                          sizeof(float));    prev_MaxSpeed = MaxSpeed;                                            chg = true; }
   if (prev_MaxSpeed_AllTime != MaxSpeed_AllTime)                            { nvs_set_blob(h, "MaxSpd_AT",     &MaxSpeed_AllTime,                  sizeof(float));    prev_MaxSpeed_AllTime = MaxSpeed_AllTime;                            chg = true; }
   // Longest single trip — distances stored ×100 for 0.01-nm resolution. Epoch is Unix seconds (0 = was unsynced).
@@ -4512,8 +4361,8 @@ void loadNVSData() {
   if (totalSpeedSampleTime_AllTime > 0)
     AvgSpeed_AllTime = speedAccumulator_AllTime / (float)totalSpeedSampleTime_AllTime;
 
-  // NEW: Sailing metrics (add after other _AllTime loads)
-  required_size = sizeof(float);  // ✅ Just assign, don't declare
+  // Sailing metrics
+  required_size = sizeof(float);
   nvs_get_blob(nvs_handle, "SailDays_AT", &sailing_days_alltime, &required_size);
   required_size = sizeof(float);
   nvs_get_blob(nvs_handle, "SailDist_AT", &sailing_dist_alltime, &required_size);
@@ -4581,7 +4430,7 @@ void loadNVSData() {
                   CoulombCount_Ah_scaled);
   }
 
-  // Session Health Stats (✅ restore to prior-session variables)
+  // Session Health Stats (restore to prior-session variables)
   if (nvs_get_u32(nvs_handle, "SessionDur", &temp_uint32) == ESP_OK) LastSessionDuration = temp_uint32;
   if (nvs_get_i32(nvs_handle, "MaxLoop", &temp_int32) == ESP_OK) LastSessionMaxLoopTime = temp_int32;
   if (nvs_get_i32(nvs_handle, "MinHeap", &temp_int32) == ESP_OK) lastSessionMinHeap = temp_int32;
@@ -4599,7 +4448,7 @@ void loadNVSData() {
   nvs_get_blob(nvs_handle, "ShuntGain", &DynamicShuntGainFactor, &required_size);
   if (nvs_get_u32(nvs_handle, "LastGainTime", &temp_uint32) == ESP_OK) lastGainCorrectionTime = temp_uint32;
   // Temp-comp zero-correction learned equation (hold-last-good survives reboot). Old AltZero/LastZeroTime/
-  // LastZeroTemp keys are orphaned and intentionally not read. (temp_int32 already declared above.)
+  // LastZeroTemp keys are orphaned and intentionally not read.
   if (nvs_get_i32(nvs_handle, "ZFitValid",  &temp_int32) == ESP_OK) zfValid  = temp_int32;
   if (nvs_get_i32(nvs_handle, "ZFitSensor", &temp_int32) == ESP_OK) zfSensor = temp_int32;
   required_size = sizeof(float);
@@ -4630,8 +4479,8 @@ void loadNVSData() {
   nvs_get_blob(nvs_handle, "IMU_PitchMax", &imu_pitch_max_lifetime, &required_size);
   nvs_get_blob(nvs_handle, "IMU_SlamMax", &imu_slam_peak_lifetime, &required_size);
 
-  // imuMountOrientation now loads from /vessel_info.json in InitSystemSettings.
-  // CAPSIZE_THRESHOLD_DEG / PITCHPOLE_THRESHOLD_DEG / SLAM_THRESHOLD_G now load from
+  // imuMountOrientation loads from /vessel_info.json in InitSystemSettings.
+  // CAPSIZE_THRESHOLD_DEG / PITCHPOLE_THRESHOLD_DEG / SLAM_THRESHOLD_G load from
   // their own NVS "settings" keys in InitSystemSettings (Pattern B).
 
   // Extrema, environment maxima, and UV forecast
