@@ -1268,27 +1268,59 @@ function exportConfigDownload(){
 // Pre-apply diff preview. Fetches this regulator's current config twice (with and
 // without hardware keys — the difference identifies tier-2 keys, which the browser
 // otherwise can't distinguish from never-set tier-1 keys) and shows current → new for
-// every key the incoming blob would change. Nothing is written until the user approves.
+// every key the incoming blob would change, each with a checkbox (all checked by
+// default). Apply POSTs a REBUILT blob holding only the checked keys — unchecked rows
+// and already-matching keys are left out entirely. Resolves with the filtered body
+// text to POST, or null on cancel. Nothing is written until the user approves.
 // Residual imprecision: a tier-2 key never set in NVS on this device is invisible to
 // both exports, so with hardware excluded it's listed as "will apply" though the
 // firmware skips it — harmless direction (over-warns, never under-warns).
-let _cfgDiffResolve=null;
+let _cfgDiffResolve=null,_cfgDiffIncoming=null;
+const _CFG_TABLE_LABELS={rpmPoints:'RPM Breakpoints',capTable:'Current Cap Table — Normal (A)',
+  capPowerTable:'Power Cap Table — Normal (W)',capTableLo:'Current Cap Table — Low (A)',
+  capPowerTableLo:'Power Cap Table — Low (W)',minDutyTable:'Min Field Duty Floors (%)'};
 function cfgDiffClose(apply){
+  const inc=_cfgDiffIncoming;
+  if(apply && inc){
+    const cbs=Array.from(document.querySelectorAll('#cfgdiff-body .cfgdiff-cb'));
+    const picked=cbs.filter(c=>c.checked);
+    if(cbs.length && !picked.length){ alert('Nothing is checked — check at least one setting, or Cancel.'); return; }
+    const out={};
+    for(const k of Object.keys(inc)) if(k!=='config'&&k!=='tables') out[k]=inc[k];
+    out.config={};
+    picked.filter(c=>c.dataset.kind==='config').forEach(c=>{ out.config[c.dataset.key]=inc.config[c.dataset.key]; });
+    const tp=picked.filter(c=>c.dataset.kind==='tables');
+    if(tp.length){ out.tables={}; tp.forEach(c=>{ out.tables[c.dataset.key]=inc.tables[c.dataset.key]; }); }
+    document.getElementById('cfgdiff-modal-overlay').style.display='none';
+    const r=_cfgDiffResolve; _cfgDiffResolve=null; _cfgDiffIncoming=null;
+    if(r) r(JSON.stringify(out));
+    return;
+  }
   document.getElementById('cfgdiff-modal-overlay').style.display='none';
-  const r=_cfgDiffResolve; _cfgDiffResolve=null;
-  if(r) r(apply);
+  const r=_cfgDiffResolve; _cfgDiffResolve=null; _cfgDiffIncoming=null;
+  if(r) r(null);
+}
+function cfgDiffToggleAll(){
+  const cbs=Array.from(document.querySelectorAll('#cfgdiff-body .cfgdiff-cb'));
+  if(!cbs.length) return;
+  const target=!cbs.every(c=>c.checked);
+  cbs.forEach(c=>{ c.checked=target; });
+  const b=document.getElementById('cfgdiff-toggle-btn');
+  if(b) b.textContent=target?'Uncheck All':'Check All';
 }
 function _cfgEsc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 async function cfgDiffPreview(blobText, hw, sourceLabel){
   let incoming;
-  try{ incoming=JSON.parse(blobText); }catch(e){ alert('That is not a valid configuration file.'); return false; }
-  if(!incoming || typeof incoming.config!=='object'){ alert('That file has no "config" section — not a regulator configuration.'); return false; }
+  try{ incoming=JSON.parse(blobText); }catch(e){ alert('That is not a valid configuration file.'); return null; }
+  if(!incoming || typeof incoming.config!=='object'){ alert('That file has no "config" section — not a regulator configuration.'); return null; }
   const base='/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware=';
-  // sequential, not Promise.all — each export builds a ~10KB String in internal heap on the device
+  // sequential, not Promise.all — each export builds a ~14KB String in internal heap on the device
   const rFull=await fetchWithTimeout(buildURL(base+'1'),{},10000);
   const rT1=await fetchWithTimeout(buildURL(base+'0'),{},10000);
-  if(!rFull.ok||!rT1.ok){ alert('Could not read the current configuration for comparison (HTTP '+(rFull.ok?rT1.status:rFull.status)+').'); return false; }
-  const curFull=(await rFull.json()).config||{};
+  if(!rFull.ok||!rT1.ok){ alert('Could not read the current configuration for comparison (HTTP '+(rFull.ok?rT1.status:rFull.status)+').'); return null; }
+  const fullJ=await rFull.json();
+  const curFull=fullJ.config||{};
+  const curTables=fullJ.tables||{};
   const tier1=(await rT1.json()).config||{};
   const tier2=new Set(Object.keys(curFull).filter(k=>!(k in tier1)));
   const changed=[],fresh=[],skipped=[];
@@ -1301,27 +1333,48 @@ async function cfgDiffPreview(blobText, hw, sourceLabel){
       else changed.push({k,cur:String(curFull[k]),nv});
     } else fresh.push({k,nv});
   }
+  // RPM tables ride a separate "tables" section (older config files have none)
+  const tblChanged=[],tblFresh=[];
+  if(incoming.tables && typeof incoming.tables==='object'){
+    for(const k of Object.keys(incoming.tables).sort()){
+      const nv=String(incoming.tables[k]);
+      if(k in curTables){
+        if(String(curTables[k])===nv) unchanged++;
+        else tblChanged.push({k,cur:String(curTables[k]),nv});
+      } else tblFresh.push({k,nv});
+    }
+  }
+  const nChange=changed.length+tblChanged.length, nFresh=fresh.length+tblFresh.length;
   const sum=document.getElementById('cfgdiff-summary');
   const body=document.getElementById('cfgdiff-body');
   const vNow=incoming.vessel&&incoming.vessel.battery_voltage;
   sum.innerHTML='Loading <b>'+_cfgEsc(sourceLabel)+'</b>'+(incoming.fw_version?' (saved on firmware '+_cfgEsc(incoming.fw_version)+')':'')+'.<br>'
-    +'<b>'+changed.length+'</b> settings change, <b>'+fresh.length+'</b> are new here, <b>'+unchanged+'</b> already match'
+    +'<b>'+nChange+'</b> settings change, <b>'+nFresh+'</b> are new here, <b>'+unchanged+'</b> already match'
     +(skipped.length?', <b>'+skipped.length+'</b> hardware settings skipped (box unchecked)':'')+'.'
+    +'<br>Only checked rows are applied.'
     +(vNow?'<br>Source system voltage: <b>'+_cfgEsc(vNow)+' V</b> — confirm this matches your bank.':'')
     +(hw?'<br><span style="color:#fca5a5;">Hardware settings (sensor/shunt/polarity) WILL be applied — identical hardware only.</span>':'');
-  const row=(k,cur,nv)=>'<tr><td style="padding:3px 8px 3px 0; color:#9cc; word-break:break-all;">'+_cfgEsc(k)+'</td>'
+  const row=(kind,k,label,cur,nv)=>'<tr>'
+    +'<td style="padding:3px 6px 3px 0;"><input type="checkbox" class="cfgdiff-cb" data-kind="'+kind+'" data-key="'+_cfgEsc(k)+'" checked style="width:16px; height:16px; margin:0; vertical-align:middle;"></td>'
+    +'<td style="padding:3px 8px 3px 0; color:#9cc; word-break:break-all;">'+_cfgEsc(label)+'</td>'
     +'<td style="padding:3px 8px; color:#888; word-break:break-all;">'+_cfgEsc(cur)+'</td>'
     +'<td style="padding:3px 0; color:#fff; word-break:break-all;">'+_cfgEsc(nv)+'</td></tr>';
   let h='';
-  if(changed.length||fresh.length){
-    h='<table style="width:100%; border-collapse:collapse; font-size:0.85em;"><tr style="color:#aaa; text-align:left;"><th style="padding:3px 8px 3px 0;">Setting</th><th style="padding:3px 8px;">Now</th><th style="padding:3px 0;">New</th></tr>'
-      +changed.map(c=>row(c.k,c.cur,c.nv)).join('')
-      +fresh.map(f=>row(f.k,'(not set)',f.nv)).join('')+'</table>';
+  if(nChange||nFresh){
+    h='<table style="width:100%; border-collapse:collapse; font-size:0.85em;"><tr style="color:#aaa; text-align:left;"><th></th><th style="padding:3px 8px 3px 0;">Setting</th><th style="padding:3px 8px;">Now</th><th style="padding:3px 0;">New</th></tr>'
+      +changed.map(c=>row('config',c.k,c.k,c.cur,c.nv)).join('')
+      +fresh.map(f=>row('config',f.k,f.k,'(not set)',f.nv)).join('')
+      +tblChanged.map(c=>row('tables',c.k,_CFG_TABLE_LABELS[c.k]||c.k,c.cur,c.nv)).join('')
+      +tblFresh.map(f=>row('tables',f.k,_CFG_TABLE_LABELS[f.k]||f.k,'(not set)',f.nv)).join('')+'</table>';
   } else {
     h='<div style="color:#888; font-size:0.9em; padding:8px 0;">No settings would change — this regulator already matches the file.</div>';
   }
   body.innerHTML=h;
-  document.getElementById('cfgdiff-apply-btn').style.display=(changed.length||fresh.length)?'':'none';
+  const hasRows=!!(nChange||nFresh);
+  document.getElementById('cfgdiff-apply-btn').style.display=hasRows?'':'none';
+  const tb=document.getElementById('cfgdiff-toggle-btn');
+  if(tb){ tb.style.display=hasRows?'':'none'; tb.textContent='Uncheck All'; }
+  _cfgDiffIncoming=incoming;
   document.getElementById('cfgdiff-modal-overlay').style.display='flex';
   return new Promise(res=>{ _cfgDiffResolve=res; });
 }
@@ -1341,7 +1394,7 @@ function importConfigFromFile(){
   reader.onload=function(){
     const txt=reader.result;
     cfgDiffPreview(txt, hw, inp.files[0].name)
-      .then(ok=>{ if(ok) _cfgPostImport(txt, hw); })
+      .then(body=>{ if(body) _cfgPostImport(body, hw); })
       .catch(e=>alert('Preview failed: '+(e&&e.message?e.message:e)));
   };
   reader.readAsText(inp.files[0]);
@@ -4019,42 +4072,45 @@ function handleForcedUpdate(data) {
         // If user already pressed Update Now within the last few minutes, show
         // a progress message instead of re-rendering the prompt every 5 s.
         const updateActive = Date.now() < forcedUpdateInProgressUntil;
+        const fuPanel = inner => `
+          <div style="background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box;">
+            <div style="padding:10px 16px 9px; border-bottom:1px solid #333; background:#252525; border-radius:8px 8px 0 0;">
+              <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Firmware Update</span>
+            </div>
+            <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; text-align:center;">${inner}</div>
+          </div>`;
         if (updateActive) {
-            overlay.innerHTML = `
-              <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
-                  <div style="margin-bottom: 12px; text-align:center; font-weight: bold; font-size: 16px;">
+            overlay.innerHTML = fuPanel(`
+                  <div style="margin-bottom: 12px; font-weight: bold; font-size: 16px;">
                       Update in progress…
                   </div>
                   <p style="margin: 8px 0 4px 0; font-size: 15px;">
                       Downloading firmware v<strong>${versionStr}</strong> and rebooting.
                   </p>
-                  <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
+                  <p style="margin: 12px 0 4px 0; font-size: 13px; color: #999;">
                       Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux, or fully close and reopen the app on mobile. A regular refresh may show stale cached files.
                   </p>
-                  <p style="margin-top: 12px; font-size: 11px; color: #888;">
+                  <p style="margin: 12px 0 0; font-size: 11px; color: #777;">
                       Do not power-cycle the device during the update.
                   </p>
-              </div>
-            `;
+            `);
         } else {
-            overlay.innerHTML = `
-              <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
-                  <div style="margin-bottom: 12px; text-align:center; font-weight: bold; font-size: 16px;">
+            overlay.innerHTML = fuPanel(`
+                  <div style="margin-bottom: 12px; font-weight: bold; font-size: 16px;">
                       Forced Firmware Update
                   </div>
                   <p style="margin: 8px 0 16px 0; font-size: 15px;">
                       This device must upgrade to firmware v<strong>${versionStr}</strong>.
                   </p>
                   <button onclick="triggerForcedUpdate('${versionStr}')"
-                          class="forced-update-btn btn-primary"
-                          style="margin-top: 4px;">
+                          class="forced-update-btn"
+                          style="display:block; width:100%; margin-top:4px; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:14px; border:none; border-radius:5px; padding:10px 16px; cursor:pointer;">
                       Update Now
                   </button>
-                  <p style="margin-top: 12px; font-size: 11px; color: #888;">
+                  <p style="margin: 12px 0 0; font-size: 11px; color: #777;">
                       To postpone, restart with WiFi disconnected or in Factory Mode.
                   </p>
-              </div>
-            `;
+            `);
         }
 
         disableAllInputs();
@@ -4351,7 +4407,7 @@ function visiblePointCount() {
 function recomputeAutoScales(applyNow) {
     const vc = visiblePointCount();
     if (autoScaleCurrent && !autoScaleCurrentLocked) {
-        _autoScaleCurrentLeft  = computeScaleRange(currentTempData, [1, 2, 3], 5, 0.10, undefined, vc, currentTempPlot);
+        _autoScaleCurrentLeft  = computeScaleRange(currentTempData, [1, 2, 3, 5], 5, 0.10, undefined, vc, currentTempPlot);
         _autoScaleCurrentRight = computeScaleRange(currentTempData, [4], 20, 0.10, 0, vc, currentTempPlot);
         if (applyNow && currentTempPlot) {
             if (_autoScaleCurrentLeft)  currentTempPlot.setScale('current', _autoScaleCurrentLeft);
@@ -5566,12 +5622,14 @@ async function handleVesselInfoSave(event) {
 // ===== Battery-defaults populator =====
 // After a Vessel Info save that sets or changes battery type / capacity / system voltage,
 // propose chemistry-appropriate starting values for the charge-stage and protection settings
-// and show them in a Now → Proposed modal. Never applies silently; every setting stays
-// individually editable afterward. Bulk/Absorption voltages are deliberately excluded —
-// those come from the battery manufacturer's data sheet. Type "other" skips the whole pass.
+// and show them in a Now → Proposed modal with per-row apply checkboxes. Never applies
+// silently; every setting stays individually editable afterward. Bulk/Absorption proposals
+// are deliberately conservative (lifetime over capacity) and the summary tells the user to
+// verify against the manufacturer's data sheet. Type "other" skips the whole pass.
 
 // Compile-time firmware defaults in UI units — fallback "Now" when a key is absent from /exportConfig
 const BATTDEF_FW_DEFAULT = {
+    BulkVoltage: 14.5, AbsorptionVoltage: 14.0,
     UseFloat: 0, FloatVoltage: 13.4, FLOAT_DURATION: 12, RebulkVoltage: 13.2, RebulkCurrent_A: 5,
     SOC_BlockRebulk_percent: 95, SOC_AllowRebulk_percent: 94, TailCurrent_A: 5, TailCurrent: 2,
     ChargedVoltage: 14, BattCurrentLimitA: 100, MaximumAllowedBatteryAmps: 150,
@@ -5589,10 +5647,13 @@ const BATTDEF_MODE_NAMES = ['No Float (idle)', 'Voltage Float', 'Zero-Current Fl
 // battSrc: BatteryCurrentSource (0 = INA228 shunt). Zero-current float regulates on the fast
 // INA battery-current channel, so a Victron-sourced install gets idle instead for lithium.
 function deriveBatteryDefaults(type, capAh, sysV, battSrc) {
+    // bulkV/absV are deliberately conservative: LiFePO4 13.9 V ≈ high-90s% SoC with far less cell
+    // stress than 14.4+; lead chemistries stay at the gentle end of full absorption (14.4) because
+    // going LOWER chronically undercharges them (sulfation) — that's the conservative choice there.
     const T = {
-        lifepo4:   { floatV: null, durH: null, rebulkV: 13.1, socBlock: 90, socAllow: 80, tailC: 0.05, tailPct: 5, chgDetV: 13.8, limC: 0.50, cold: 1, peukert: 1.02, chgEff: 98, vAlmHi: 14.8, vAlmLo: 12.0, socAlm: 10 },
-        agm:       { floatV: 13.6, durH: 8,    rebulkV: 12.5, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.2, limC: 0.25, cold: 0, peukert: 1.10, chgEff: 93, vAlmHi: 15.0, vAlmLo: 11.8, socAlm: 40 },
-        lead_acid: { floatV: 13.4, durH: 8,    rebulkV: 12.4, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.1, limC: 0.13, cold: 0, peukert: 1.25, chgEff: 88, vAlmHi: 15.2, vAlmLo: 11.5, socAlm: 40 }
+        lifepo4:   { bulkV: 13.9, absV: 13.9, floatV: null, durH: null, rebulkV: 13.1, socBlock: 90, socAllow: 80, tailC: 0.05, tailPct: 5, chgDetV: 13.8, limC: 0.50, cold: 1, peukert: 1.02, chgEff: 98, vAlmHi: 14.8, vAlmLo: 12.0, socAlm: 10 },
+        agm:       { bulkV: 14.4, absV: 14.4, floatV: 13.6, durH: 8,    rebulkV: 12.5, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.2, limC: 0.25, cold: 0, peukert: 1.10, chgEff: 93, vAlmHi: 15.0, vAlmLo: 11.8, socAlm: 40 },
+        lead_acid: { bulkV: 14.4, absV: 14.4, floatV: 13.4, durH: 8,    rebulkV: 12.4, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.1, limC: 0.13, cold: 0, peukert: 1.25, chgEff: 88, vAlmHi: 15.2, vAlmLo: 11.5, socAlm: 40 }
     }[type];
     if (!T) return null;
     const kV = (sysV === 24) ? 2 : (sysV === 48) ? 4 : 1;   // 12V-equivalent voltages scale by class
@@ -5601,6 +5662,8 @@ function deriveBatteryDefaults(type, capAh, sysV, battSrc) {
     const useFloat = (type === 'lifepo4') ? ((battSrc === 0) ? 2 : 0) : 1;
 
     const rows = [];
+    rows.push({ param: 'BulkVoltage', label: 'Bulk Voltage (V)', value: r2(T.bulkV * kV) });
+    rows.push({ param: 'AbsorptionVoltage', label: 'Absorption Voltage (V)', value: r2(T.absV * kV) });
     rows.push({ param: 'UseFloat', label: 'Float Mode', value: useFloat, show: v => BATTDEF_MODE_NAMES[v] || v });
     if (useFloat === 1) {   // FloatVoltage/FLOAT_DURATION are inert in idle and zero-current modes
         rows.push({ param: 'FloatVoltage', label: 'Float Voltage (V)', value: r2(T.floatV * kV) });
@@ -5628,6 +5691,23 @@ function deriveBatteryDefaults(type, capAh, sysV, battSrc) {
 }
 
 let _battDefResolve = null;
+function battDefCbChanged() {
+    const cbs = Array.from(document.querySelectorAll('#battdef-body .battdef-cb'));
+    const n = cbs.filter(c => c.checked).length;
+    const btn = document.getElementById('battdef-apply-btn');
+    btn.disabled = !n;
+    btn.style.opacity = n ? '' : '0.45';
+    btn.style.cursor = n ? 'pointer' : 'default';
+    const all = document.getElementById('battdef-cb-all');
+    if (all) {
+        all.checked = n === cbs.length && n > 0;
+        all.indeterminate = n > 0 && n < cbs.length;
+    }
+}
+function battDefCbAll(on) {
+    document.querySelectorAll('#battdef-body .battdef-cb').forEach(cb => { cb.checked = on; });
+    battDefCbChanged();
+}
 function battDefClose(apply) {
     document.getElementById('battdef-modal-overlay').style.display = 'none';
     const r = _battDefResolve; _battDefResolve = null;
@@ -5675,7 +5755,8 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt) {
         sum.innerHTML = 'Based on your battery bank (<b>' + _cfgEsc(typeName) + '</b>, ' + capTxt + vessel.battery_voltage + ' V), '
             + 'the regulator can fill in recommended starting values for the charge-stage and protection settings below.<br>'
             + 'These are starting points, not locks — every setting stays individually editable in Setup afterward. '
-            + 'Bulk and Absorption voltages are not touched; set those from the battery manufacturer\'s data sheet.'
+            + 'The proposed values are deliberately conservative to favor battery lifetime; we strongly recommend '
+            + 'checking the charge voltages against your battery manufacturer\'s data sheet.'
             + ((type === 'lifepo4' && battSrc !== 0) ? '<br><span style="color:#fca5a5;">Zero-current float needs the INA228 battery shunt as the Battery Current Source, so Float Mode is proposed as No Float (idle) instead.</span>' : '')
             + (unchanged ? '<br><b>' + unchanged + '</b> setting' + (unchanged === 1 ? ' already matches' : 's already match') + ' and ' + (unchanged === 1 ? 'is' : 'are') + ' not shown.' : '');
 
@@ -5683,8 +5764,9 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt) {
         if (changed.length) {
             const show = row => row.show ? row.show : (v => String(v));
             body.innerHTML = '<table style="width:100%; border-collapse:collapse; font-size:0.85em;">'
-                + '<tr style="color:#aaa; text-align:left;"><th style="padding:3px 8px 3px 0;">Setting</th><th style="padding:3px 8px;">Now</th><th style="padding:3px 0;">Proposed</th></tr>'
-                + changed.map(c => '<tr><td style="padding:3px 8px 3px 0; color:#9cc;">' + _cfgEsc(c.label) + '</td>'
+                + '<tr style="color:#aaa; text-align:left;"><th style="padding:3px 6px 3px 0; text-align:center;"><input type="checkbox" id="battdef-cb-all" checked onchange="battDefCbAll(this.checked)" title="Check / uncheck all" style="accent-color:#00a19a; margin:0; vertical-align:middle;"><br>Apply</th><th style="padding:3px 8px 3px 0;">Setting</th><th style="padding:3px 8px;">Now</th><th style="padding:3px 0;">Proposed</th></tr>'
+                + changed.map((c, i) => '<tr><td style="padding:3px 6px 3px 0; text-align:center;"><input type="checkbox" class="battdef-cb" data-i="' + i + '" checked onchange="battDefCbChanged()" style="accent-color:#00a19a; margin:0; vertical-align:middle;"></td>'
+                    + '<td style="padding:3px 8px 3px 0; color:#9cc;">' + _cfgEsc(c.label) + '</td>'
                     + '<td style="padding:3px 8px; color:#888;">' + _cfgEsc(isFinite(c.now) ? show(c)(c.now) : '?') + '</td>'
                     + '<td style="padding:3px 0; color:#fff;">' + _cfgEsc(show(c)(c.value)) + '</td></tr>').join('')
                 + '</table>';
@@ -5692,13 +5774,19 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt) {
             body.innerHTML = '<div style="color:#888; font-size:0.9em; padding:8px 0;">Nothing to change — the current settings already match the recommendations for this bank.</div>';
         }
         document.getElementById('battdef-apply-btn').style.display = changed.length ? '' : 'none';
+        battDefCbChanged();   // re-enable the button if a previous open left it disabled
         document.getElementById('battdef-modal-overlay').style.display = 'flex';
         const apply = await new Promise(res => { _battDefResolve = res; });
         if (!apply || !changed.length) return;
 
+        // Modal is hidden but still in the DOM, so the checkbox states survive the await
+        const picked = [];
+        document.querySelectorAll('#battdef-body .battdef-cb:checked').forEach(cb => picked.push(changed[+cb.dataset.i]));
+        if (!picked.length) return;
+
         // One /get request — every hasParam block in the refactored handler processes independently
         let url = '/get?password=' + encodeURIComponent(currentAdminPassword);
-        for (const c of changed) url += '&' + c.param + '=' + encodeURIComponent(c.value);
+        for (const c of picked) url += '&' + c.param + '=' + encodeURIComponent(c.value);
         const ar = await fetchWithTimeout(buildURL(url), {}, 10000);
         const messageDiv = document.getElementById('vessel-info-message');
         if (messageDiv) {
@@ -5706,7 +5794,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt) {
             if (ar.ok) {
                 messageDiv.style.backgroundColor = '#e8f5e9';
                 messageDiv.style.color = '#2e7d32';
-                messageDiv.textContent = 'Applied ' + changed.length + ' battery default' + (changed.length === 1 ? '' : 's') + '. Review them any time under Setup.';
+                messageDiv.textContent = 'Applied ' + picked.length + ' battery default' + (picked.length === 1 ? '' : 's') + '. Review them any time under Setup.';
             } else {
                 messageDiv.style.backgroundColor = '#ffebee';
                 messageDiv.style.color = '#c62828';
@@ -5716,6 +5804,147 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt) {
     } catch (e) {
         diagLog('battery defaults proposal failed:', e);
     }
+}
+
+// ===== First-boot SoC seed popup =====
+// The firmware records a one-shot snapshot of the boot-time voltage seed (served at /socseed).
+// Auto-opens once per device (SocSeedAck flag in NVS) after the first CSV packet; reopens any
+// time from the header SOC readout.
+let _socSeedData = null;
+
+async function socSeedFetch() {
+    try {
+        const r = await fetchWithTimeout(buildURL('/socseed'), {}, 8000);
+        if (r.ok) _socSeedData = await r.json();
+    } catch (e) { diagLog('socseed fetch failed:', e); }
+    return _socSeedData;
+}
+
+async function socSeedMaybeAutoOpen() {
+    const d = await socSeedFetch();
+    if (d && d.snap && !d.ack && !sessionStorage.getItem('socSeedDismissed')) socSeedOpen();
+}
+
+function socSeedClose(finish) {
+    document.getElementById('socseed-modal-overlay').style.display = 'none';
+    // ✕ (or Finish while settings are locked) suppresses for this session only; Finish persists the ack
+    if (finish && currentAdminPassword) {
+        fetch(buildURL('/get?SocSeedAck=1&password=' + encodeURIComponent(currentAdminPassword))).catch(() => { });
+        if (_socSeedData) _socSeedData.ack = 1;
+    } else {
+        sessionStorage.setItem('socSeedDismissed', '1');
+    }
+}
+
+async function socSeedApplySoc() {
+    const inp = document.getElementById('socseed-override');
+    const msg = document.getElementById('socseed-override-msg');
+    const v = parseFloat(inp.value);
+    if (!isFinite(v) || v < 0 || v > 100) { msg.style.color = '#fca5a5'; msg.textContent = 'Enter a value from 0 to 100 %.'; return; }
+    try {
+        const r = await fetchWithTimeout(buildURL('/get?ManualSOCPoint=' + encodeURIComponent(v) + '&password=' + encodeURIComponent(currentAdminPassword)), {}, 8000);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        document.getElementById('socseed-result-pct').textContent = Math.round(v) + ' %';
+        msg.style.color = '#2ec4b6'; msg.textContent = 'State of charge set to ' + v + ' %. The charge counter restarted from this value.';
+    } catch (e) {
+        msg.style.color = '#fca5a5'; msg.textContent = 'Could not set SOC (' + e.message + ').';
+    }
+}
+
+async function socSeedOpen() {
+    if (!_socSeedData) await socSeedFetch();
+    const s = _socSeedData && _socSeedData.snap;
+    const body = document.getElementById('socseed-body');
+    if (!body) return;
+    if (!s) {
+        body.innerHTML = '<div style="color:#888; padding:8px 0;">No commissioning estimate is stored on this device &mdash; on its last fresh start, the state of charge was restored from memory rather than estimated from voltage.</div>';
+    } else {
+        socSeedRender(s);
+    }
+    document.getElementById('socseed-modal-overlay').style.display = 'flex';
+}
+
+function socSeedRender(s) {
+    const chemName = { lifepo4: 'LiFePO4', agm: 'AGM', lead_acid: 'Lead Acid' }[String(s.chem || '').toLowerCase()] || s.chem || 'unknown';
+    const secTitle = t => '<div style="font-size:11px; font-weight:600; letter-spacing:0.06em; color:#777; text-transform:uppercase; margin:16px 0 6px;">' + t + '</div>';
+    const eq = (lbl, math) => '<div style="padding:7px 0; border-bottom:1px solid #2a2a2a; font-size:13px;"><span style="color:#999; font-size:12px;">' + lbl + '</span>'
+        + '<span style="display:block; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; color:#8fd9d4; margin-top:2px; overflow-x:auto; white-space:nowrap;">' + math + '</span></div>';
+
+    const intro = '<p style="font-size:13px; color:#bbb; margin:0 0 12px;">Calculating battery bank state of charge % based on the following inputs:</p>';
+
+    const inputs = '<div style="display:grid; grid-template-columns:1fr auto; row-gap:5px; column-gap:12px; font-size:13px;">'
+        + '<span style="color:#999;">Battery terminal voltage</span><span style="text-align:right;">' + Number(s.v).toFixed(2) + ' V</span>'
+        + '<span style="color:#999;">Battery current (&minus; = discharging)</span><span style="text-align:right;">' + Number(s.i).toFixed(1) + ' A</span>'
+        + '<span style="color:#999;">Board temperature</span><span style="text-align:right;">' + (s.tF == null ? 'unavailable' : Math.round(s.tF) + ' &deg;F') + '</span>'
+        + '<span style="color:#999;">Chemistry</span><span style="text-align:right;">' + _cfgEsc(chemName) + '</span>'
+        + '<span style="color:#999;">Bank capacity</span><span style="text-align:right;">' + (s.cap > 0 ? s.cap + ' Ah, ' : '') + s.sysV + ' V</span>'
+        + '</div>';
+
+    const result = '<div style="display:flex; align-items:baseline; justify-content:space-between; background:#222; border:1px solid rgba(46,196,182,0.13); border-left:3px solid #2ec4b6; border-radius:6px; padding:10px 14px; margin:14px 0 2px;">'
+        + '<div style="font-size:12px; color:#888;">Estimated state of charge</div>'
+        + '<div id="socseed-result-pct" style="font-size:26px; font-weight:700; color:#2ec4b6;">' + s.soc + ' %</div></div>';
+
+    let calc = '', ladder = '';
+    if (s.fb) {
+        calc = '<div style="color:#bbb; font-size:13px; margin-top:10px;">The battery voltage reading was not valid at boot, so the estimate fell back to 50&nbsp;%.</div>';
+    } else {
+        calc = secTitle('Calculation');
+        calc += eq('Internal resistance, scaled for temperature',
+            s.tF == null ? 'R scale = 1.00 (no temperature reading)'
+                : 'R scale = e^(0.035 &times; (25 &minus; ' + ((s.tF - 32) / 1.8).toFixed(1) + ' &deg;C)) = ' + Number(s.rs).toFixed(2));
+        if (s.cap > 0) {
+            const rBase = s.lith ? 6 : 12;
+            const rEff = rBase * s.rs * (100 / s.cap) * (s.sysV / 12);
+            calc += eq('Effective resistance for this bank',
+                'R = ' + rBase + ' m&Omega; &times; ' + Number(s.rs).toFixed(2) + ' &times; (100 / ' + s.cap + ' Ah) = ' + rEff.toFixed(1) + ' m&Omega;');
+            calc += eq('Resting voltage (open-circuit voltage, OCV)',
+                'V rest = ' + Number(s.v).toFixed(2) + ' &minus; (' + Number(s.i).toFixed(1) + ' A &times; ' + rEff.toFixed(1) + ' m&Omega;) = ' + Number(s.vocv).toFixed(3) + ' V');
+        } else {
+            calc += eq('Resting voltage (open-circuit voltage, OCV)',
+                'Bank capacity unknown &mdash; no current correction, V rest = ' + Number(s.v).toFixed(2) + ' V');
+        }
+        if (s.lith) {
+            calc += eq('Resting-voltage table, interpolated',
+                Number(s.vlo).toFixed(2) + ' V = ' + s.plo + ' % &hellip; ' + Number(s.vhi).toFixed(2) + ' V = ' + s.phi + ' % &rarr; ' + s.soc + ' %');
+            if (s.vhi > s.vlo) {
+                const pos = Math.max(0, Math.min(1, (s.vocv - s.vlo) / (s.vhi - s.vlo))) * 100;
+                const knee = (s.soc <= 30)
+                    ? 'This reading sits on the bottom knee of the LiFePO4 curve &mdash; the one region where voltage alone gives a trustworthy state of charge.'
+                    : 'The LiFePO4 voltage curve is very flat in this range, so this estimate is coarse &mdash; if you know the true state of charge, set it below.';
+                ladder = '<div style="margin-top:20px;">'
+                    + '<div style="position:relative; height:26px; border-radius:5px; background:linear-gradient(to right,#46392a 0%,#3a3a2c 35%,#2a4340 100%); border:1px solid #333;">'
+                    + '<div style="position:absolute; top:-5px; bottom:-5px; left:' + pos.toFixed(0) + '%; width:2px; background:#2ec4b6; box-shadow:0 0 6px rgba(46,196,182,0.67);">'
+                    + '<span style="position:absolute; top:-15px; left:50%; transform:translateX(-50%); font-size:10px; color:#2ec4b6; white-space:nowrap;">' + Number(s.vocv).toFixed(2) + ' V</span></div></div>'
+                    + '<div style="display:flex; justify-content:space-between; font-size:10px; color:#666; margin-top:4px;">'
+                    + '<span>' + Number(s.vlo).toFixed(2) + ' V<br>' + s.plo + ' %</span>'
+                    + '<span style="text-align:right;">' + Number(s.vhi).toFixed(2) + ' V<br>' + s.phi + ' %</span></div>'
+                    + '<div style="font-size:11px; color:#777; margin-top:6px;">' + knee + '</div></div>';
+            }
+        } else {
+            calc += eq('Resting-voltage ladder (lead-acid)',
+                s.vlo > 0 ? 'V rest &ge; ' + Number(s.vlo).toFixed(2) + ' V &rarr; ' + s.soc + ' %'
+                    : 'below the lowest rung &rarr; ' + s.soc + ' %');
+        }
+    }
+
+    const unlocked = !!currentAdminPassword;
+    const override = '<div style="margin-top:16px; padding-top:12px; border-top:1px solid #333;">'
+        + '<div style="font-size:11px; font-weight:600; letter-spacing:0.06em; color:#777; text-transform:uppercase;">Manual override</div>'
+        + '<div style="display:flex; gap:8px; align-items:center; margin-top:6px;">'
+        + '<input type="number" id="socseed-override" min="0" max="100" step="1" placeholder="' + s.soc + '"' + (unlocked ? '' : ' disabled')
+        + ' style="flex:1; min-width:0; background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:7px 10px; font-size:14px; box-sizing:border-box;">'
+        + '<span style="color:#888; font-size:13px;">%</span>'
+        + '<button onclick="socSeedApplySoc()"' + (unlocked ? '' : ' disabled')
+        + ' style="background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:5px; padding:8px 16px; cursor:pointer;' + (unlocked ? '' : ' opacity:0.45; cursor:default;') + '">Set SOC</button></div>'
+        + '<div id="socseed-override-msg" style="font-size:11px; color:#777; margin-top:6px;">'
+        + (unlocked ? 'If you know the true state of charge, set it here &mdash; the charge counter (coulomb counter) restarts from this value.'
+            : 'Unlock settings (admin password) to set a value.') + '</div></div>';
+
+    const foot = '<div style="margin-top:14px; padding-top:10px; border-top:1px solid #333; font-size:11px; color:#777;">This is a one-time starting estimate. From here SOC tracks measured amp-hours in and out, and it self-corrects over time: every detected full charge re-anchors SOC to 100&nbsp;%, and deep discharges followed by a rest let the regulator measure the bank\'s true usable capacity.</div>';
+
+    const finish = '<button onclick="socSeedClose(true)" style="display:block; width:100%; margin-top:14px; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:14px; border:none; border-radius:5px; padding:10px 16px; cursor:pointer;">Finish</button>';
+
+    document.getElementById('socseed-body').innerHTML = intro + inputs + result + calc + ladder + override + foot + finish;
 }
 
 function populateProfileForm(profile) {
@@ -6753,7 +6982,7 @@ function createCVTuningLegend() {
             if (cvTuningPlot) cvTuningPlot.setSeries(item.idx, { show: cb.checked });
         });
         const box = document.createElement('div');
-        box.style.cssText = `width:16px;height:3px;background:${item.color};border-radius:1px;`;
+        box.style.cssText = legendSwatchCss(item.color, seriesDashOf(cvTuningPlot, item.idx));
         const span = document.createElement('span');
         span.textContent = item.label;
         span.style.cssText = 'color:var(--text-dark);';
@@ -7200,7 +7429,7 @@ function _configShareHandleMessage(e) {
     const label = e.data.name ? ('"' + e.data.name + '"') : 'this shared configuration';
     const txt = JSON.stringify(e.data.config);
     cfgDiffPreview(txt, 0, label)
-        .then(ok => { if (ok) _cfgPostImport(txt, 0); })
+        .then(body => { if (body) _cfgPostImport(body, 0); })
         .catch(err => alert('Preview failed: ' + (err && err.message ? err.message : err)));
 }
 window.addEventListener('message', _configShareHandleMessage);
@@ -7431,6 +7660,15 @@ function renderConsoleFromBuffer() {
 
 // Throttled persistence: flush at most every 3s, plus on tab hide / unload.
 loadConsoleLog();
+// Device reports a random ID persisted in NVS (survives reflash, regenerated by an
+// NVS erase / factory reset). A changed ID means a different install — drop the old history.
+fetch('/installid').then(r => r.text()).then(id => {
+    id = (id || '').trim();
+    if (!id) return;
+    const prev = localStorage.getItem('xreg_install_id');
+    if (prev && prev !== id) clearConsole();
+    localStorage.setItem('xreg_install_id', id);
+}).catch(() => { });
 setInterval(() => { if (consoleLsDirty) saveConsoleLogNow(); }, 3000);
 document.addEventListener('visibilitychange', () => { if (document.hidden && consoleLsDirty) saveConsoleLogNow(); });
 window.addEventListener('pagehide', () => { if (consoleLsDirty) saveConsoleLogNow(); });
@@ -7786,7 +8024,7 @@ function initCurrentTempPlot() {
                 // almost exactly on the raw blue trace at this plot's sample rate; the dash is what
                 // makes it visible when overlapping. Diverges from raw during fast ripple/resonance.
                 label: "Alt Current filtered (A)",
-                stroke: "#90CAF9",
+                stroke: "#009688",
                 width: 1,
                 dash: [6, 3],
                 scale: "current",
@@ -7851,7 +8089,7 @@ function initCurrentTempPlot() {
                             { label: "Field Current (A)", color: "#9C27B0" },
                             { label: "Field %", color: "#9E9E9E" },
                             // off:true → default hidden, matching the series show:false above (filtered = the CC PID's PV)
-                            { label: "Alt Current filtered (A)", color: "#90CAF9", off: true }
+                            { label: "Alt Current filtered (A)", color: "#009688", off: true }
                         ], u);
 
                         const resizePlot = debounce(() => {
@@ -8723,6 +8961,23 @@ function startStalenessDetection() {
 // (item i → series i+1; slot 0 is the x axis). Pass the uPlot instance to make
 // entries click-to-toggle; visibility persists per plot in localStorage so it
 // survives reloads and the re-inits triggered by time-axis mode changes.
+// uPlot wraps stroke/fill/dash in accessor fns (fnOrSelf) at init, so series[i].dash
+// is () => [..], not the array. Resolve it to the array (or null) for the legend.
+function seriesDashOf(plot, idx) {
+    const s = plot && plot.series[idx];
+    if (!s || s.dash == null) return null;
+    return typeof s.dash === 'function' ? s.dash(plot, idx) : s.dash;
+}
+
+// Legend swatch that mirrors the series line style: a dashed rule when the series
+// carries a dash pattern, a solid bar otherwise — so a legend can never disagree
+// with the trace it labels.
+function legendSwatchCss(color, dash) {
+    return (Array.isArray(dash) && dash.length)
+        ? `width:16px;height:0;border-top:2px dashed ${color};`
+        : `width:16px;height:3px;background:${color};border-radius:1px;`;
+}
+
 function createCustomLegend(plotId, legendItems, u) {
     const plotContainer = document.getElementById(plotId);
     if (!plotContainer) return;
@@ -8764,12 +9019,7 @@ flex-wrap: wrap;
         if (u) legendItem.title = 'Click to show/hide';
 
         const colorBox = document.createElement('div');
-        colorBox.style.cssText = `
-  width: 16px;
-  height: 3px;
-  background-color: ${item.color};
-  border-radius: 1px;
-`;
+        colorBox.style.cssText = legendSwatchCss(item.color, u ? seriesDashOf(u, seriesIdx) : item.dash);
 
         const label = document.createElement('span');
         label.textContent = item.label;
@@ -10242,6 +10492,7 @@ window.addEventListener("load", function () {
             handleCSVData(e);
             if (isFirstPacket) {
                 maybeApplyLanding();
+                socSeedMaybeAutoOpen();
             }
         }, false);
 
@@ -12365,14 +12616,21 @@ function showRecoveryOptions() {
     const recoveryDiv = document.createElement('div');
     recoveryDiv.id = 'recoveryDialog';
     recoveryDiv.innerHTML = `
-<div style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
-            background: var(--card-light); padding: 20px; border-radius: var(--radius); 
-            box-shadow: 0 4px 8px rgba(0,0,0,0.3); z-index: 10000; border: 2px solid var(--accent);">
-  <h3 style="margin-top: 0; color: var(--text-dark);">Connection Lost</h3>
-  <p style="color: var(--text-dark);">Lost connection to alternator regulator.</p>
-  <button class="btn-primary" onclick="retryConnection()" style="margin-right: 10px;">Retry Connection</button>
-  <button class="btn-secondary" onclick="enterOfflineMode()">Continue Offline</button>
-  <p style="font-size: 12px; color: var(--text-dark);"><small>If problem persists, the device may need to be power-cycled.</small></p>
+<div style="position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:10000; display:flex; align-items:center; justify-content:center;">
+  <div style="background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box;">
+    <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0;">
+      <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Connection Lost</span>
+      <button onclick="closeRecovery()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">&#10005;</button>
+    </div>
+    <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5;">
+      <p style="margin:0 0 14px; color:#bbb;">Lost connection to the alternator regulator.</p>
+      <div style="display:flex; gap:10px;">
+        <button onclick="retryConnection()" style="flex:1; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:5px; padding:9px 16px; cursor:pointer;">Retry Connection</button>
+        <button onclick="enterOfflineMode()" style="flex:1; background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:5px; padding:9px 16px; cursor:pointer; font-size:13px;">Continue Offline</button>
+      </div>
+      <p style="font-size:11px; color:#777; margin:12px 0 0;">If the problem persists, the device may need to be power-cycled.</p>
+    </div>
+  </div>
 </div>
 `;
     document.body.appendChild(recoveryDiv);
@@ -13492,7 +13750,7 @@ function initPidTuningPlot() {
             hooks: {
                 init: [
                     (u) => {
-                        createPidTuningLegend();
+                        createPidTuningLegend(u);
 
                         const resizePlot = debounce(() => {
                             const plotEl = document.getElementById("pid-tuning-plot");
@@ -13628,7 +13886,7 @@ function updatePIDXButtons() {
 }
 
 // Custom legend with checkboxes for PID tuning plot
-function createPidTuningLegend() {
+function createPidTuningLegend(u) {
     const plotContainer = document.getElementById('pid-tuning-plot');
     if (!plotContainer) return;
 
@@ -13681,13 +13939,8 @@ function createPidTuningLegend() {
         });
 
         const colorBox = document.createElement('div');
-        colorBox.style.cssText = `
-            width: 16px;
-            height: 3px;
-            background-color: ${item.color};
-            border-radius: 1px;
-            opacity: ${pidTuningSeriesVisible[item.key] ? 1 : 0.3};
-        `;
+        colorBox.style.cssText = legendSwatchCss(item.color, seriesDashOf(u, item.seriesIdx));
+        colorBox.style.opacity = pidTuningSeriesVisible[item.key] ? 1 : 0.3;
 
         const span = document.createElement('span');
         span.textContent = item.label;
@@ -14897,7 +15150,7 @@ function _createThermalLegend(container, plotIdx, items) {
         cb.style.cssText = 'cursor:pointer;margin:0;';
 
         const bar = document.createElement('div');
-        bar.style.cssText = `width:16px;height:3px;background:${item.color};border-radius:1px;`;
+        bar.style.cssText = legendSwatchCss(item.color, seriesDashOf(thermalLogPlots[plotIdx], item.idx));
 
         const span = document.createElement('span');
         span.textContent = item.label;

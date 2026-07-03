@@ -825,6 +825,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     }
   }
 
+  if (!settingExists(NK_InstallId)) {
+    settingWrite(NK_InstallId, String((unsigned long)esp_random(), HEX).c_str());
+  }
+  installId = settingRead(NK_InstallId);
+
   if (!settingExists(NK_BatteryCapacity_Ah)) {
     settingWrite(NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());
   } else {
@@ -4063,12 +4068,12 @@ void executeGetPendingConfig() {
   // http.begin(client,url) pattern uses far more internal RAM (CLAUDE.md) and getString() can hang,
   // which made this call return -1 when contiguous RAM was tight (e.g. right after the registration
   // handshake). doCloudPOST adds the anon-key Bearer + Content-Type itself. Response holds the full
-  // tier-1 config blob (exportConfigJson reserves 8 KB), so stage it in a 16 KB PSRAM scratch buffer,
+  // tier-1 config blob (exportConfigJson reserves 14 KB), so stage it in a 24 KB PSRAM scratch buffer,
   // copy to the String the parsing below expects, and free the scratch immediately.
   String response;
   int httpCode = -1;
   {
-    const size_t CAP = 16384;
+    const size_t CAP = 24576;
     char *scratch = (char *)ps_malloc(CAP);
     if (!scratch) {
       Serial.println("PENDING_CONFIG: ps_malloc failed");

@@ -635,9 +635,15 @@ done:
 // 7_functions.ino) are ALSO shareable but save through generic loops the literal
 // manifest can't reference — they are emitted/imported programmatically (tier-1)
 // minus CFG_REGISTRY_SKIP, so a knob added to either registry is covered automatically.
-// Per-device calibration, identity/secrets, UI prefs, and momentary actions are
-// NEVER in the manifest (see config_drift_check.py — it fails the build if any
-// settingWrite key is in neither the manifest nor its EXCLUDE list).
+// Philosophy: the export captures essentially EVERY persisted setting — including UI
+// prefs and per-install calibration/measured fits (those are tier 2). Paring down to
+// what's appropriate to apply happens at import/share time (tier gate + the import
+// diff checkboxes), never by omitting from the export. Only identity/secrets (WiFi
+// creds, passwords, InstallId), device lifecycle/history state, learned per-device
+// state, and momentary actions stay out (see config_drift_check.py — it fails the
+// build if any settingWrite key is in neither the manifest nor its EXCLUDE list).
+// The user-editable RPM tables are raw blobs in the "learning" namespace, carried by
+// a separate "tables" export section (exportTablesObject), not this manifest.
 //
 // Values are carried as the RAW NVS strings (settingRead output), so import is a
 // straight settingWrite of byte-identical internal state followed by a reboot —
@@ -853,11 +859,60 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "wifiNapEnabled", NK_wifiNapEnabled, 1 },
   { "ZeroLogEnable", NK_ZeroLogEnable, 1 },
   { "performanceRatio", NK_performanceRatio, 1 },
+  { "HiLow", NK_HiLow, 1 },
+  { "ManualSOCPoint", NK_ManualSOCPoint, 1 },
+  { "ManualLifePercentage", NK_ManualLifePercentage, 1 },
+  { "CloudFeatures", NK_CloudFeatures, 1 },
+  { "FuelEfficiency", NK_FuelEfficiency, 1 },
+  { "WeatherUpdateInterval", NK_WeatherUpdateInterval, 1 },
+  { "WeatherTimeoutMs", NK_WeatherTimeoutMs, 1 },
+  { "webgaugesinterval", NK_webgaugesinterval, 1 },
+  { "plotTimeWindow", NK_plotTimeWindow, 1 },
+  { "maxPoints", NK_maxPoints, 1 },
+  { "xTime", NK_xTime, 1 },
+  { "timeAxisModeChanging", NK_timeAxisModeChanging, 1 },
+  { "Ymin1", NK_Ymin1, 1 },
+  { "Ymax1", NK_Ymax1, 1 },
+  { "Ymin2", NK_Ymin2, 1 },
+  { "Ymax2", NK_Ymax2, 1 },
+  { "Ymin3", NK_Ymin3, 1 },
+  { "Ymax3", NK_Ymax3, 1 },
+  { "Ymin4", NK_Ymin4, 1 },
+  { "Ymax4", NK_Ymax4, 1 },
+  { "yyMin", NK_yyMin, 1 },
+  { "yyMax", NK_yyMax, 1 },
+  { "bhStepLowA", NK_bhStepLowA, 1 },
+  { "bhStepDeltaA", NK_bhStepDeltaA, 1 },
+  { "bhDwellSec", NK_bhDwellMs, 1 },   // raw NVS value is MILLISECONDS (UI param is seconds)
+  { "bhNumEdges", NK_bhNumEdges, 1 },
+  { "capRestFrac", NK_capRestFrac, 1 },
+  { "capRestFloor", NK_capRestFloor, 1 },
+  { "capSettleRate", NK_capSettleRate, 1 },
+  { "capSocLowMax", NK_capSocLowMax, 1 },
+  { "capMinSpan", NK_capMinSpan, 1 },
+  { "capFullSoc", NK_capFullSoc, 1 },
+  { "capRefMode", NK_capRefMode, 1 },
+  { "capTempNorm", NK_capTempNorm, 1 },
+  { "capTempCoeff", NK_capTempCoeff, 1 },
+  { "capTempRef", NK_capTempRef, 1 },
+  { "capOcv", NK_capOcvBlob, 1 },
   { "BatteryCurrentSource", NK_BatteryCurrentSource, 2 },
   { "ShuntResistanceMicroOhm", NK_ShuntResistanceMicroOhm, 2 },
   { "AmpSensorRange", NK_AmpSensorRange, 2 },
   { "InvertAltAmps", NK_InvertAltAmps, 2 },
   { "InvertBattAmps", NK_InvertBattAmps, 2 },
+  { "AlternatorCOffset", NK_AlternatorCOffset, 2 },
+  { "BatteryCOffset", NK_BatteryCOffset, 2 },
+  { "AutoAltCurrentZero", NK_AutoAltCurrentZero, 2 },
+  { "AutoShuntGainCorrection", NK_AutoShuntGainCorrection, 2 },
+  { "BatteryVoltage", NK_BatteryVoltage, 2 },
+  { "cvPlantK", NK_cvPlantK, 2 },
+  { "cvPlantTau", NK_cvPlantTau, 2 },
+  { "cvPlantL", NK_cvPlantL, 2 },
+  { "CommissionTempF", NK_CommissionTempF, 2 },
+  { "systemIDPlantTauMs", NK_sysidPlantTau, 2 },
+  { "ripFitAlt", NK_ripFitAlt, 2 },
+  { "imu_zero", NK_imu_zero, 2 },
 };
 static const size_t CONFIG_MANIFEST_COUNT = sizeof(CONFIG_MANIFEST)/sizeof(CONFIG_MANIFEST[0]);
 
@@ -893,7 +948,7 @@ static void cfgAppendJsonStr(String &out, const String &val) {
 // so knobs added to those registries are covered without touching the manifest.
 String manifestConfigObject(bool includeHardware) {
   String j;
-  j.reserve(8192);
+  j.reserve(12288);
   j = "{";
   bool first = true;
   for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
@@ -930,14 +985,53 @@ String manifestConfigObject(bool includeHardware) {
   return j;
 }
 
+// User-editable RPM tables, read straight from the "learning" NVS namespace (raw
+// float/int blobs the string-settings manifest can't carry). Both the Normal and Low
+// cap tables are emitted regardless of the active HiLow mode. Values are comma-joined
+// raw numbers (amps / watts / duty-%). A blob missing from NVS is omitted.
+String exportTablesObject() {
+  String j;
+  j.reserve(768);
+  j = "{";
+  nvs_handle_t h;
+  if (nvs_open("learning", NVS_READONLY, &h) != ESP_OK) { j += "}"; return j; }
+  bool first = true;
+  {
+    int pts[RPM_TABLE_SIZE];
+    size_t sz = sizeof(pts);
+    if (nvs_get_blob(h, "rpmPoints", pts, &sz) == ESP_OK && sz == sizeof(pts)) {
+      j += "\"rpmPoints\":\"";
+      for (int i = 0; i < RPM_TABLE_SIZE; i++) { if (i) j += ','; j += String(pts[i]); }
+      j += '"';
+      first = false;
+    }
+  }
+  static const char *CFG_TABLE_FKEYS[] = { "capTable", "capPowerTable", "capTableLo", "capPowerTableLo", "minDutyTable" };
+  for (size_t k = 0; k < sizeof(CFG_TABLE_FKEYS)/sizeof(CFG_TABLE_FKEYS[0]); k++) {
+    float f[RPM_TABLE_SIZE];
+    size_t sz = sizeof(f);
+    if (nvs_get_blob(h, CFG_TABLE_FKEYS[k], f, &sz) != ESP_OK || sz != sizeof(f)) continue;
+    if (!first) j += ',';
+    first = false;
+    j += '"'; j += CFG_TABLE_FKEYS[k]; j += "\":\"";
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) { if (i) j += ','; j += String(f[i], 2); }
+    j += '"';
+  }
+  nvs_close(h);
+  j += "}";
+  return j;
+}
+
 // Build the shareable config blob: fw_version + vessel metadata (for the cloud
-// table-of-contents) + the manifest "config" object. includeHardware adds tier-2 keys.
+// table-of-contents) + the manifest "config" object + the RPM "tables" object.
+// includeHardware adds tier-2 keys. payload_v 2 = tables section added; older
+// firmware ignores unknown sections, so blobs remain cross-rev compatible both ways.
 String exportConfigJson(bool includeHardware) {
   String j;
-  j.reserve(10240);
+  j.reserve(14336);
   j = "{\"fw_version\":\"";
   j += FIRMWARE_VERSION;
-  j += "\",\"payload_v\":1,\"vessel\":{";
+  j += "\",\"payload_v\":2,\"vessel\":{";
   j += "\"boat_make_model\":";        cfgAppendJsonStr(j, BOAT_MAKE_MODEL);
   j += ",\"engine_make\":";           cfgAppendJsonStr(j, ENGINE_MAKE);
   j += ",\"engine_hp\":";             j += String((unsigned)ENGINE_HP);
@@ -948,13 +1042,16 @@ String exportConfigJson(bool includeHardware) {
   j += ",\"alternator_brand_model\":";cfgAppendJsonStr(j, ALTERNATOR_BRAND_MODEL);
   j += "},\"config\":";
   j += manifestConfigObject(includeHardware);
+  j += ",\"tables\":";
+  j += exportTablesObject();
   j += "}";
   return j;
 }
 
 // Extract a flat top-level value for "key" from a JSON object starting at 'from'.
 // Quote-delimited needle prevents prefix collisions (e.g. TailCurrent vs TailCurrent_A).
-// Values are simple numbers / short identifiers (raw NVS strings) — no nested escaping.
+// Quoted values fold \" and \\ escapes back (cfgAppendJsonStr produces them — e.g. the
+// imu_zero value is itself a JSON string with quotes).
 static bool cfgJsonExtract(const char *from, const char *key, String &val) {
   String needle = "\"";
   needle += key;
@@ -965,9 +1062,11 @@ static bool cfgJsonExtract(const char *from, const char *key, String &val) {
   while (*p == ' ' || *p == '\t' || *p == ':' ) p++;
   if (*p == '"') {
     p++;
-    const char *e = p;
-    while (*e && *e != '"') e++;
-    val = ""; val.concat(p, e - p);
+    val = "";
+    while (*p && *p != '"') {
+      if (*p == '\\' && p[1]) p++;
+      val += *p++;
+    }
     return true;
   }
   const char *e = p;
@@ -976,10 +1075,69 @@ static bool cfgJsonExtract(const char *from, const char *key, String &val) {
   return true;
 }
 
-// Apply an imported config blob. Only manifest + registry (allowlisted) keys are
-// written — anything else in the body is ignored by construction. Returns count
-// applied, or -1 if the body has no "config" object. settingWrite is compare-first
-// so unchanged values cost no flash. Caller reboots so the new set loads cleanly.
+// Strict comma-joined parsers for the "tables" section — exactly n values or reject.
+static bool cfgCsvToFloat(const String &s, float *out, int n) {
+  int pos = 0;
+  for (int i = 0; i < n; i++) {
+    if (pos >= (int)s.length()) return false;
+    out[i] = atof(s.c_str() + pos);
+    int c = s.indexOf(',', pos);
+    if (c < 0) return i == n - 1;
+    if (i == n - 1) return false;
+    pos = c + 1;
+  }
+  return true;
+}
+static bool cfgCsvToInt(const String &s, int *out, int n) {
+  int pos = 0;
+  for (int i = 0; i < n; i++) {
+    if (pos >= (int)s.length()) return false;
+    out[i] = atoi(s.c_str() + pos);
+    int c = s.indexOf(',', pos);
+    if (c < 0) return i == n - 1;
+    if (i == n - 1) return false;
+    pos = c + 1;
+  }
+  return true;
+}
+
+// Apply the "tables" section: user-editable RPM tables into the "learning" namespace.
+// A changed rpmPoints set invalidates the knee tracker + Min% commissioning stage the
+// same way a manual breakpoint edit does (3_functions.ino handler) — reset BEFORE the
+// imported minDutyTable blob lands so the two stay consistent with the source file.
+// Live arrays reload at the end (import normally reboots; this covers noReboot=1).
+static int applyImportTables(const char *body) {
+  const char *tbl = strstr(body, "\"tables\"");
+  if (!tbl) return 0;
+  String val;
+  int pts[RPM_TABLE_SIZE];
+  bool havePts = cfgJsonExtract(tbl, "rpmPoints", val) && cfgCsvToInt(val, pts, RPM_TABLE_SIZE);
+  if (havePts) {
+    bool moved = false;
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) if (pts[i] != rpmTableRPMPoints[i]) moved = true;
+    if (moved) { kneeLearnResetDefaults(); commissionClearStage(7); }
+  }
+  int applied = 0;
+  nvs_handle_t h;
+  if (nvs_open("learning", NVS_READWRITE, &h) != ESP_OK) return 0;
+  if (havePts) { nvs_set_blob(h, "rpmPoints", pts, sizeof(pts)); applied++; }
+  static const char *CFG_TABLE_FKEYS[] = { "capTable", "capPowerTable", "capTableLo", "capPowerTableLo", "minDutyTable" };
+  for (size_t k = 0; k < sizeof(CFG_TABLE_FKEYS)/sizeof(CFG_TABLE_FKEYS[0]); k++) {
+    float f[RPM_TABLE_SIZE];
+    if (!cfgJsonExtract(tbl, CFG_TABLE_FKEYS[k], val) || !cfgCsvToFloat(val, f, RPM_TABLE_SIZE)) continue;
+    nvs_set_blob(h, CFG_TABLE_FKEYS[k], f, sizeof(f));
+    applied++;
+  }
+  if (applied) nvs_commit(h);
+  nvs_close(h);
+  if (applied) loadLearningTableFromNVS();
+  return applied;
+}
+
+// Apply an imported config blob. Only manifest + registry (allowlisted) keys plus the
+// "tables" section are written — anything else in the body is ignored by construction.
+// Returns count applied, or -1 if the body has no "config" object. settingWrite is
+// compare-first so unchanged values cost no flash. Caller reboots so the new set loads cleanly.
 int applyImportConfig(const char *body, bool includeHardware) {
   if (!body) return -1;
   const char *cfg = strstr(body, "\"config\"");
@@ -1007,6 +1165,7 @@ int applyImportConfig(const char *body, bool includeHardware) {
   CFG_IMPORT_REGISTRY(ALT_SETTINGS, ALT_SETTING_COUNT)
   CFG_IMPORT_REGISTRY(PERF_SETTINGS, PERF_SETTING_COUNT)
   #undef CFG_IMPORT_REGISTRY
+  applied += applyImportTables(body);
   return applied;
 }
 

@@ -33,7 +33,7 @@
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.45";
+const char *FIRMWARE_VERSION = "0.0.46";
 
 // OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
 // proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
@@ -1383,6 +1383,8 @@ double voltageAccumulator_AllTime = 0.0;  // V·s (lifetime) — double; float o
 double speedAccumulator_AllTime = 0.0;    // kt·s (lifetime) — double
 float AvgVoltage_AllTime = 0.0f;
 
+
+String installId = "";  // NK_InstallId; browsers compare it to a stored copy to auto-clear console history after an NVS erase
 
 //supabase authentications stuff
 String authToken = "";      // Stored auth token
@@ -2890,6 +2892,7 @@ int cvWavePeriodSec = 30;         // s — full period of the Waveform Generator
 float cvKOvershoot = 10.0f;       // penalty weight on integrated overshoot (user-exposed)
 uint8_t cvConsecutiveReads = 10;  // consecutive filtered reads within ±0.1V to declare settled (~1s at 100ms rate)
 int CVTuningMode = 0;             // 0=off, 1=on
+bool cvWaveExitWindDown = false;  // one-shot: set when the waveform test is turned off so the elevated target glides back to base via the down-slew instead of snapping (a snap would drop the target below the still-high actual voltage and trip fast-OV/iExcess)
 float cvBaseTarget = 0.0f;        // real ChargingVoltageTarget captured at test start; global so wave gen + scorer share it
 
 const float CV_SETTLE_V_THRESH    = 0.10f;   // V — settling threshold
@@ -5029,6 +5032,7 @@ void loop() {
     handleAltZeroReset();   // do the dynamic udpates
     TIMED_CALL(ft_kneeLearnService, kneeLearnService(fieldOffSettled(2000)));  // Auto Min% learning: NVS flush of learned floors, field-off-gated (never stalls control)
     if (fieldOffSettled(2000)) TIMED_CALL(ft_bhFlushCapNVS, bhFlushCapNVS());  // Battery Health NVS persist — field-off only
+    if (fieldOffSettled(2000)) overheatHistFlush();  // overheat-history NVS persist — dirty-flagged at overheat entry, written field-off only
 
     // Barometric pressure history sampler — 5-min cadence into baroPressureHistory ring.
     // Skipped if BMP388 hasn't reported (NAN). Wall-clock epoch stamped only if timeIsSynced

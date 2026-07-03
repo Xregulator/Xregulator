@@ -120,9 +120,9 @@
           <span class="duo-lbl">Batt</span>
           <span class="duo-num"><span id="header-voltage">-</span></span>
           <span class="duo-unit">V</span>
-          <span class="duo-lbl">SOC</span>
-          <span class="duo-num"><span id="header-soc">-</span></span>
-          <span class="duo-unit">%</span>
+          <span class="duo-lbl" onclick="socSeedOpen()" style="cursor:pointer;">SOC</span>
+          <span class="duo-num" onclick="socSeedOpen()" style="cursor:pointer;"><span id="header-soc">-</span></span>
+          <span class="duo-unit" onclick="socSeedOpen()" style="cursor:pointer;">%</span>
         </div>
 
         <!-- Alt + Batt currents — 3-column grid keeps A's vertically aligned -->
@@ -7351,7 +7351,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">PID Setpoint
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Active temperature setpoint the PID controls against. When the 60-second slope buffer is full (~65s after startup or reset), this is TemperatureLimit − 5°F. During warmup it is TemperatureLimit − 20°F, giving a wider margin while slope prediction is unavailable.</span>
+                          <span class="tooltip-box">Active temperature setpoint the PID controls against. When the 60-second slope buffer is full (~65s after startup or reset), this is TemperatureLimit − 7°F. During warmup it is TemperatureLimit − 20°F, giving a wider margin while slope prediction is unavailable.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="tempPIDSetpoint_display">?</span> <span class="temp-unit-label">°F</span></span>
@@ -7465,7 +7465,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Proportional gain (A per °F of temperature error). The error is the controlled temperature — the higher of projected and present — minus the control target (5 °F below the temperature limit). Higher values derate current more aggressively as the controlled temperature approaches the limit.</span></span>
+                        class="tooltip-box">Proportional gain (A per °F of temperature error). The error is the controlled temperature — the higher of projected and present — minus the control target (7 °F below the temperature limit). Higher values derate current more aggressively as the controlled temperature approaches the limit.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -8507,29 +8507,6 @@
           </div>
         </div>
       </div>
-
-      <div class="settings-card">
-        <div class="grid">
-          <div class="card">
-            <p>Board Temperature
-              <span class="tooltip" onclick="this.classList.toggle('active')">
-                ℹ️
-                <span class="tooltip-box">
-                  Temperature measured in the regulator, will often be 5-25 deg hotter than
-                  ambient depending on location and electrical demands
-                </span>
-              </span>
-            </p>
-            <p class="reading with-wm" id="ambientTemp-display" style="font-size: 28px;">
-              <span><span id="ambientTempID">0</span> <span class="temp-unit-label">°F</span></span>
-              <span class="wm-inline">
-                <span><span class="arr">↑</span><span id="ambientTempID_hi">—</span></span>
-                <span><span class="arr">↓</span><span id="ambientTempID_lo">—</span></span>
-              </span>
-            </p>
-          </div>
-        </div>
-      </div>
     </div>
 
     <div id="livedata-boatperformance" class="sub-tab-content">
@@ -9528,6 +9505,21 @@
                 </span>
               </span>
               <span class="metric-value"><span id="cpuFreqMhz_ID">?</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Board Temperature
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Temperature measured in the regulator, will often be 5-25 deg hotter than
+                    ambient depending on location and electrical demands</span>
+                </span>
+              </span>
+              <span class="metric-value with-wm" id="ambientTemp-display">
+                <span><span id="ambientTempID">0</span> <span class="temp-unit-label">°F</span></span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="ambientTempID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="ambientTempID_lo">—</span></span>
+                </span>
+              </span>
             </div>
             <div class="metric-row">
               <span class="metric-label">Buffered Records (count)
@@ -12852,6 +12844,7 @@
   </div><!-- END bhw-modal-overlay -->
 
   <!-- Config-import diff preview: every setting the incoming file would change, current → new,
+       each row checkbox-selectable (all checked by default; only checked rows are applied),
        shown BEFORE anything is written. Shared by file Load Configuration and the community library. -->
   <div id="cfgdiff-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9100; align-items:center; justify-content:center;">
     <div id="cfgdiff-modal-panel" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1e1e1e; color:#ddd; width:560px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); display:flex; flex-direction:column;">
@@ -12862,6 +12855,7 @@
       <div id="cfgdiff-summary" style="padding:12px 16px 0; font-size:0.9em; line-height:1.45; color:#ddd;"></div>
       <div id="cfgdiff-body" style="padding:8px 16px; overflow-y:auto; flex:1; min-height:0;"></div>
       <div style="padding:12px 16px; border-top:1px solid #333; display:flex; gap:10px; justify-content:flex-end;">
+        <button id="cfgdiff-toggle-btn" onclick="cfgDiffToggleAll()" style="background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em; margin-right:auto;">Uncheck All</button>
         <button onclick="cfgDiffClose(false)" style="background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Cancel</button>
         <button id="cfgdiff-apply-btn" onclick="cfgDiffClose(true)" style="background:#b91c1c; border:1px solid #d34; color:#fff; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em; font-weight:600;">Apply &amp; Reboot</button>
       </div>
@@ -12886,6 +12880,18 @@
     </div>
   </div><!-- END battdef-modal-overlay -->
 
+  <!-- First-boot SoC seed popup — auto-opens once after the boot-time voltage seed (ack persisted
+       in NVS via SocSeedAck), reopens any time from the header SOC readout. Body rendered by socSeedRender(). -->
+  <div id="socseed-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9100; align-items:center; justify-content:center;">
+    <div id="socseed-modal-panel" style="background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 60px); display:flex; flex-direction:column;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">State of Charge &mdash; Commissioning Estimate</span>
+        <button onclick="socSeedClose(false)" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">&#10005;</button>
+      </div>
+      <div id="socseed-body" style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; overflow-y:auto; flex:1; min-height:0;"></div>
+    </div>
+  </div><!-- END socseed-modal-overlay -->
+
   <!-- Scheduled-restart warning banner (visible during the 10-min countdown window) -->
   <div id="restart-countdown-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9000;
        background:#b91c1c; color:#fff; text-align:center; font-weight:600;
@@ -12895,18 +12901,20 @@
   </div>
 
   <!-- One-shot restart-warning popup overlay -->
-  <div id="restart-popup-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55);
-       z-index:9100; align-items:center; justify-content:center;">
-    <div style="background:#1f2937; color:#f3f4f6; max-width:420px; width:90%; padding:20px 22px;
-         border-radius:10px; box-shadow:0 6px 24px rgba(0,0,0,0.5); font-family:inherit;">
-      <div style="font-size:18px; font-weight:700; margin-bottom:10px; color:#fca5a5;">⚠ Scheduled Restart Coming</div>
-      <div id="restart-popup-text" style="font-size:14px; line-height:1.5; margin-bottom:14px;">
-        The regulator will perform its scheduled maintenance reboot within the next 10 minutes.
-        Field will be cleanly ramped down, settings are saved automatically, and the device will
-        return to its current operating mode after restart. Any active tests will be aborted.
+  <div id="restart-popup-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9100; align-items:center; justify-content:center;">
+    <div style="background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 60px); display:flex; flex-direction:column;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0;">
+        <span style="font-weight:600; font-size:13px; color:#fca5a5; letter-spacing:0.03em;">Scheduled Restart Coming</span>
+        <button type="button" onclick="document.getElementById('restart-popup-overlay').style.display='none';" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">&#10005;</button>
       </div>
-      <div style="text-align:right;">
-        <button type="button" class="btn-primary" onclick="document.getElementById('restart-popup-overlay').style.display='none';">OK</button>
+      <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; overflow-y:auto;">
+        <div id="restart-popup-text" style="font-size:14px; line-height:1.5; margin-bottom:14px;">
+          The regulator will perform its scheduled maintenance reboot within the next 10 minutes.
+          Field will be cleanly ramped down, settings are saved automatically, and the device will
+          return to its current operating mode after restart. Any active tests will be aborted.
+        </div>
+        <button type="button" onclick="document.getElementById('restart-popup-overlay').style.display='none';"
+                style="display:block; width:100%; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:14px; border:none; border-radius:5px; padding:10px 16px; cursor:pointer;">OK</button>
       </div>
     </div>
   </div>

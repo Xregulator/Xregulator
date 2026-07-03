@@ -2332,9 +2332,20 @@ void setupServer() {
   server.on("/altschema", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", altSchemaJson());
   });
+  server.on("/installid", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", installId);
+  });
   // Auto Min% learning ("knee tracker") state: knobs + live status + per-bin learned floors.
   server.on("/kneeLearnState", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", kneeLearnStateJson());
+  });
+  // First-boot SoC seed record for the commissioning popup; ack=1 once the user pressed Finish.
+  server.on("/socseed", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String snap = settingExists(NK_SocSeedSnap) ? settingRead(NK_SocSeedSnap) : String();
+    String ack = settingExists(NK_SocSeedAck) ? settingRead(NK_SocSeedAck) : String();
+    if (snap.length() == 0) snap = "null";
+    if (ack.length() == 0) ack = "1";
+    request->send(200, "application/json", String("{\"snap\":") + snap + ",\"ack\":" + ack + "}");
   });
   // Battery Health: DCIR test status + result table + capacity-vs-cycles trend.
   server.on("/batteryHealth", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -2623,7 +2634,7 @@ void setupServer() {
     },
     NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-      if (total > 65536) return;   // bound: a real config blob is ~6 KB; reject anything absurd
+      if (total > 65536) return;   // bound: a real config blob is ~10 KB; reject anything absurd
       if (index == 0) { importConfigBuf = ""; importConfigBuf.reserve(total + 1); }
       importConfigBuf.concat((const char *)data, len);
     });
@@ -4295,6 +4306,11 @@ void setupServer() {
       inputMessage = request->getParam("LoadDumpDtThresh3")->value();
       LoadDumpDtThresh3 = inputMessage.toFloat();
       settingWrite(NK_LoadDumpDtThresh3, String(LoadDumpDtThresh3).c_str());
+    }
+    if (request->hasParam("SocSeedAck")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SocSeedAck")->value();
+      settingWrite(NK_SocSeedAck, inputMessage.c_str());
     }
     if (request->hasParam("ManualSOCPoint")) {
       foundParameter = true;

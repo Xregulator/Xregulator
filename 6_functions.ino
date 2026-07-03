@@ -15,6 +15,13 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 // Forward declarations
 
+// Control-path serial: skip the write when the TX buffer lacks room — a connected-but-stalled
+// USB host otherwise blocks the control tick. queueConsoleMessage still carries the line to the UI.
+static inline void serialPrintlnNB(const char *msg) {
+  size_t n = strlen(msg);
+  if ((size_t)Serial.availableForWrite() >= n + 2) Serial.println(msg);
+}
+
 void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason);
 // ==================== FIELD CONTROL HELPER FUNCTION DECLARATIONS ====================
 // Snapshot builder
@@ -540,7 +547,7 @@ void handleLimpHome(uint32_t currentMillis, const TickSnapshot &tick) {
     if (currentMillis - lastLimpReport >= 30000) {
       lastLimpReport = currentMillis;
       queueConsoleMessage("LIMP HOME MODE: 30% duty, all safeties bypassed");
-      Serial.println("LIMP HOME MODE: 30% duty, all safeties bypassed");
+      serialPrintlnNB("LIMP HOME MODE: 30% duty, all safeties bypassed");
     }
   }
 }
@@ -1661,7 +1668,7 @@ void AdjustFieldLearnMode() {
     char modeMsg[100];
     snprintf(modeMsg, sizeof(modeMsg), "Control Mode: %s - %s",
              modeToString(mode), reasonToString(reason));
-    Serial.println(modeMsg);
+    serialPrintlnNB(modeMsg);
     queueConsoleMessage(modeMsg);
     lastDebugMode = mode;
     lastDebugReason = reason;
@@ -1671,7 +1678,7 @@ void AdjustFieldLearnMode() {
     static uint32_t lastNoReasonWarnMs = 0;
     if ((uint32_t)(currentMillis - lastNoReasonWarnMs) >= 5000) {
       lastNoReasonWarnMs = currentMillis;
-      Serial.println("ERROR: Shutdown mode with no reason specified");
+      serialPrintlnNB("ERROR: Shutdown mode with no reason specified");
     }
   }
 
@@ -1746,7 +1753,7 @@ void AdjustFieldLearnMode() {
       case SYS_MODE_OFF:
         enter_sys_off();
         queueConsoleMessage("Charging disabled");
-        Serial.println("Charging disabled");
+        serialPrintlnNB("Charging disabled");
         break;
       case SYS_MODE_MANUAL:
         enter_sys_manual();
@@ -1756,7 +1763,7 @@ void AdjustFieldLearnMode() {
           shutdownPhase2EntryMs = 0;
           settledAtZeroDutyMs = 0;
           queueConsoleMessage("Charging enabled (MANUAL)");
-          Serial.println("Charging enabled (MANUAL)");
+          serialPrintlnNB("Charging enabled (MANUAL)");
         }
         break;
       case SYS_MODE_AUTO:
@@ -1772,7 +1779,7 @@ void AdjustFieldLearnMode() {
           warmupCeiling = 0.0f;
           inStartupRamp = (StartupRiseRate > 0.0f);  // slow-ramp setpoint on field turn-on; cleared once setpointLimited catches command
           queueConsoleMessage("Charging enabled (AUTO)");
-          Serial.println("Charging enabled (AUTO)");
+          serialPrintlnNB("Charging enabled (AUTO)");
         }
         break;
       case SYS_MODE_FAULT:
@@ -1793,7 +1800,7 @@ void AdjustFieldLearnMode() {
     static uint32_t lastCooldownDoneMs = 0;
     if (lastCooldownDoneMs == 0 || (uint32_t)(tick.nowMs - lastCooldownDoneMs) >= 60000) {
       queueConsoleMessage(isNormalMode ? "Cooldown complete - charging resumed" : "Cooldown complete");
-      Serial.println(isNormalMode ? "Cooldown complete - charging resumed" : "Cooldown complete");
+      serialPrintlnNB(isNormalMode ? "Cooldown complete - charging resumed" : "Cooldown complete");
       lastCooldownDoneMs = tick.nowMs;
     }
   }
@@ -2712,12 +2719,13 @@ void AdjustFieldLearnMode() {
           static bool lastCVTuningMode = false;
 
           // Discard accumulator on CVTuningMode turn-off — commit is always manual.
-          // Snap the real target back to the commanded (non-test) value so the wave's HIGH
-          // offset can't glide off at vTgtRampDn — otherwise CV keeps chasing the leftover
-          // test peak (max current) for minutes after the test ends.
+          // Do NOT snap the real target back to base here: if the test is turned off during a
+          // HIGH phase the actual voltage is still near the peak, so an instant drop of the
+          // target below it trips the relative fast-OV / iExcess protections. Arm a wind-down
+          // instead so the down-slew glides the target back to base at vTgtRampDn.
           if (lastCVTuningMode && !CVTuningMode) {
             cvTuningScore = {};
-            ChargingVoltageTarget = ChargingVoltageTargetReq;
+            cvWaveExitWindDown = true;
           }
           lastCVTuningMode = (CVTuningMode != 0);
 
@@ -2834,7 +2842,11 @@ void AdjustFieldLearnMode() {
         //   in CVTuningMode when enabled, so the square-wave test can be studied with the limiter on/off.
         //   Always snap (no ramp) when not doing voltage control, or on the first CV tick (bumpless seed —
         //   start the target at the right value rather than ramping it up from a stale one). 0 = instant.
-        if ((vTgtRampEnable == 0 && !g_autoTestActive) || !voltageControlActive || enteringCV) {
+        // A waveform-exit wind-down overrides the vTgtRampEnable=0 instant path so the elevated
+        // target always glides back to base — but idle / CV-entry still snap (and abort the glide).
+        bool forceSnap = (!voltageControlActive || enteringCV) ||
+                         (vTgtRampEnable == 0 && !g_autoTestActive && !cvWaveExitWindDown);
+        if (forceSnap) {
           ChargingVoltageTarget = ChargingVoltageTargetReq;            // snap (disabled / idle / CV entry)
         } else if (ChargingVoltageTargetReq > ChargingVoltageTarget) {
           float step = (vTgtRampUp > 0.0f) ? (vTgtRampUp * actualDtSec) : 1.0e9f;
@@ -2842,6 +2854,10 @@ void AdjustFieldLearnMode() {
         } else if (ChargingVoltageTargetReq < ChargingVoltageTarget) {
           float step = (vTgtRampDn > 0.0f) ? (vTgtRampDn * actualDtSec) : 1.0e9f;
           ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, ChargingVoltageTarget - step);
+        }
+        if (cvWaveExitWindDown &&
+            (!voltageControlActive || ChargingVoltageTarget <= ChargingVoltageTargetReq + 0.001f)) {
+          cvWaveExitWindDown = false;
         }
 
         // ── Voltage target rise governor (inner windup guard) ──
@@ -4581,7 +4597,8 @@ void saveUserTableEdits() {
 }
 
 // Immediate save of historical data (no throttle)
-// Used by clearOverheatHistoryAction() - user-initiated
+// Called by clearOverheatHistoryAction() (user-initiated, off the control loop) and
+// overheatHistFlush() (field-off settle) — never directly from a field-on control tick.
 void saveHistoricalDataImmediate() {
   nvs_handle_t nvs_handle;
   esp_err_t err = nvs_open("learning", NVS_READWRITE, &nvs_handle);
@@ -4624,6 +4641,14 @@ void saveHistoricalDataImmediate() {
   }
 }
 
+static bool overheatHistDirty = false;
+
+void overheatHistFlush() {
+  if (!overheatHistDirty) return;
+  overheatHistDirty = false;
+  saveHistoricalDataImmediate();
+}
+
 void updateRPMBucketHistory(uint32_t nowMs) {
   static uint32_t lastHistoryMs = 0;
   uint32_t dtMs = (lastHistoryMs == 0) ? 0 : (uint32_t)(nowMs - lastHistoryMs);
@@ -4644,7 +4669,7 @@ void updateRPMBucketHistory(uint32_t nowMs) {
       overheatCount[bucket]++;
       totalOverheats++;
       timeSinceLastOverheat = 0;
-      saveHistoricalDataImmediate();  // save immediately on overheat entry
+      overheatHistDirty = true;  // NVS write deferred to overheatHistFlush() at field-off settle — never on a field-on tick
     } else {
       cumulativeNoOverheatTime[bucket] += dtMs;
       totalSafeMs += (uint64_t)dtMs;
@@ -5396,9 +5421,9 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
       }
     }
     // Warmup setpoint: a cleared (blind) buffer takes the −20°F margin; a preserved-full buffer
-    // or active suppression (commissioning/tuning) takes the normal −5°F.
+    // or active suppression (commissioning/tuning) takes the normal −7°F.
     const float reEnableSetpoint = activeTempLimit -
-        ((suppressWarmupMargin || thermalSlopeBufFull) ? 5.0f : 20.0f);
+        ((suppressWarmupMargin || thermalSlopeBufFull) ? 7.0f : 20.0f);
 
     tempPIDInput_d = (double)projectedTempF;
 
@@ -5416,7 +5441,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     thermalIntegral = 0.0f;  // FF carries the resume cut; the integral rebuilds the hold
 
     // Approach gate from present state: resume hot = released, resume cool = fresh approach.
-    thermalIntegratorReleased = (projectedTempF >= activeTempLimit - 5.0f);
+    thermalIntegratorReleased = (projectedTempF >= activeTempLimit - 7.0f);
 
     tempPIDActive = true;
     queueConsoleMessageF("TempPID: resumed | projTemp=%.1f°F setpoint=%.1f°F penalty=%.1fA (was %.1fA) stage=%s",
@@ -5425,9 +5450,9 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   }
 
   // effectiveSetpoint: −20°F fallback margin during the blind warmup (buffer not full) so the PID
-  // reacts before projected temp reaches the limit; −5°F once the buffer fills or while suppressed.
-  const float warmupMargin = suppressWarmupMargin ? 5.0f : 20.0f;
-  const float effectiveSetpoint = thermalSlopeBufFull ? (activeTempLimit - 5.0f) : (activeTempLimit - warmupMargin);
+  // reacts before projected temp reaches the limit; −7°F once the buffer fills or while suppressed.
+  const float warmupMargin = suppressWarmupMargin ? 7.0f : 20.0f;
+  const float effectiveSetpoint = thermalSlopeBufFull ? (activeTempLimit - 7.0f) : (activeTempLimit - warmupMargin);
   tempPIDSetpoint_d = (double)effectiveSetpoint;
 
   // lookaheadDeltaF / tempNowPid are kept only for the logging decomposition (outerTermLookahead/
@@ -5561,7 +5586,7 @@ void pidLog_tick(uint32_t nowMs) {
   // Pause watchdog: auto-resume if download stalled or was aborted
   if (pidLogPaused) {
     if ((uint32_t)(nowMs - pidLogPausedAtMs) > THERMAL_LOG_PAUSE_TIMEOUT_MS) {
-      Serial.println("pidLog: pause watchdog triggered - connection likely aborted");
+      serialPrintlnNB("pidLog: pause watchdog triggered - connection likely aborted");
       pidLogPaused = false;
     } else {
       return;
@@ -5680,7 +5705,7 @@ void thermalLog_tick(uint32_t nowMs) {
   // Watchdog: auto-unpause if download stalled/aborted
   if (thermalLogPaused) {
     if ((uint32_t)(nowMs - thermalLogPausedAtMs) > THERMAL_LOG_PAUSE_TIMEOUT_MS) {
-      Serial.println("thermalLog: pause watchdog triggered - connection likely aborted");
+      serialPrintlnNB("thermalLog: pause watchdog triggered - connection likely aborted");
       thermalLogPaused = false;
     } else {
       return;
@@ -5696,10 +5721,10 @@ void thermalLog_tick(uint32_t nowMs) {
   e.ts = nowMs;
   e.tempFiltered = thermalLogScale10(tempFiltered);
   e.tempProjected = thermalLogScale10(projectedTempF);
-  // effective setpoint: mirrors the logic in tempPID_tick (slopeBufFull = 5°F margin, else 20°F warmup margin)
+  // effective setpoint: mirrors the logic in tempPID_tick (slopeBufFull = 7°F margin, else 20°F warmup margin)
   {
     float logLimit = TemperatureLimitF;
-    float logSetpoint = thermalSlopeBufFull ? (logLimit - 5.0f) : (logLimit - 20.0f);
+    float logSetpoint = thermalSlopeBufFull ? (logLimit - 7.0f) : (logLimit - 20.0f);
     e.nominalTarget = thermalLogScale10(logSetpoint);
   }
   e.rpmCap = thermalLogScale10(getCapCurrentForRPM(RPM));

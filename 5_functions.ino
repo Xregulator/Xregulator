@@ -4204,11 +4204,18 @@ void seedSocFromVoltage() {
   float socM = BATTERY_VOLTAGE / 12.0f;  // bank-class scale for the 12V-referenced thresholds
   int estimatedSoC = 50;                 // fallback if the INA never produced a sane reading
 
+  // Hoisted so the /socseed snapshot below can record them; snapVlo/plo..vhi/phi are the
+  // OCV-table bracket (or lead-acid ladder rung) the lookup actually landed in.
+  float iBat = 0.0f, boardTempF = NAN, rTempScale = 1.0f, vOcv = 0.0f;
+  float snapVlo = 0.0f, snapVhi = 0.0f;
+  int snapPlo = 0, snapPhi = 0;
+  bool isLithium = false;
+
   if (voltage > 5.0f) {  // same sanity floor as the INA read path
     String bt = BATTERY_TYPE;
     bt.toLowerCase();
-    bool isLithium = (bt.indexOf("lifepo") >= 0 || bt.indexOf("lithium") >= 0 ||
-                      bt.indexOf("li-ion") >= 0 || bt.indexOf("liion") >= 0 || bt.indexOf("lfp") >= 0);
+    isLithium = (bt.indexOf("lifepo") >= 0 || bt.indexOf("lithium") >= 0 ||
+                 bt.indexOf("li-ion") >= 0 || bt.indexOf("liion") >= 0 || bt.indexOf("lfp") >= 0);
 
     // Current compensation: back out open-circuit voltage before the table lookup
     // (Vocv ≈ Vterm − I·Reff). The published SoC-vs-V curve families at different C-rates are
@@ -4220,7 +4227,7 @@ void seedSocFromVoltage() {
     // still NAN here on a cold boot (BMP388 runs an 8s cycle in ReadAnalogInputs and discards
     // its first sample), so take one blocking forced conversion — ~50ms once, only on the
     // fresh-NVS path, and the board hasn't self-heated yet so it's the best proxy it ever is.
-    float boardTempF = ambientTemp;
+    boardTempF = ambientTemp;
     if (isnan(boardTempF)) {
       bmp388.startForcedConversion();
       float t, p, a;
@@ -4233,23 +4240,38 @@ void seedSocFromVoltage() {
         delay(5);
       }
     }
-    float rTempScale = 1.0f;
     if (!isnan(boardTempF)) {
       float tC = (boardTempF - 32.0f) / 1.8f;
       rTempScale = constrain(expf(0.035f * (25.0f - tC)), 0.5f, 3.0f);
     }
 
-    float iBat = getBatteryCurrent();  // positive = charging
+    iBat = getBatteryCurrent();  // positive = charging
     float corr = 0.0f;
     if (BatteryCapacity_Ah > 0) {
       float r100 = (isLithium ? 0.006f : 0.012f) * rTempScale;
       corr = iBat * r100 * (100.0f / (float)BatteryCapacity_Ah) * socM;
       corr = constrain(corr, -0.6f * socM, 0.6f * socM);
     }
-    float vOcv = voltage - corr;
+    vOcv = voltage - corr;
 
     if (isLithium) {
       estimatedSoC = (int)(ocvToSoC(vOcv) + 0.5f);  // ocvToSoC scales by BATTERY_VOLTAGE/12 itself
+      if (vOcv >= capOcvVolt[0] * socM) {
+        snapVlo = snapVhi = capOcvVolt[0] * socM;
+        snapPlo = snapPhi = 100;
+      } else if (vOcv < capOcvVolt[CAP_OCV_ROWS - 1] * socM) {
+        snapVlo = snapVhi = capOcvVolt[CAP_OCV_ROWS - 1] * socM;
+        snapPlo = snapPhi = 0;
+      } else {
+        for (int i = 0; i < CAP_OCV_ROWS - 1; i++) {
+          float vHi = capOcvVolt[i] * socM, vLo = capOcvVolt[i + 1] * socM;
+          if (vOcv <= vHi && vOcv >= vLo) {
+            snapVhi = vHi; snapPhi = capOcvSocPct[i];
+            snapVlo = vLo; snapPlo = capOcvSocPct[i + 1];
+            break;
+          }
+        }
+      }
     } else {
       if (vOcv >= 12.7f * socM) estimatedSoC = 100;
       else if (vOcv >= 12.5f * socM) estimatedSoC = 90;
@@ -4258,6 +4280,11 @@ void seedSocFromVoltage() {
       else if (vOcv >= 12.0f * socM) estimatedSoC = 40;
       else if (vOcv >= 11.8f * socM) estimatedSoC = 20;
       else estimatedSoC = 10;
+      float rung = (estimatedSoC == 100) ? 12.7f : (estimatedSoC == 90) ? 12.5f
+                 : (estimatedSoC == 80)  ? 12.4f : (estimatedSoC == 60) ? 12.2f
+                 : (estimatedSoC == 40)  ? 12.0f : (estimatedSoC == 20) ? 11.8f : 0.0f;
+      snapVlo = snapVhi = rung * socM;
+      snapPlo = snapPhi = estimatedSoC;
     }
     Serial.printf("SOC SEED: estimated %d%% from %.2fV terminal, %.1fA, %.0f°F (Rx%.2f) -> %.2fV OCV (%s)\n",
                   estimatedSoC, voltage, iBat, isnan(boardTempF) ? -99.0f : boardTempF, rTempScale,
@@ -4273,6 +4300,23 @@ void seedSocFromVoltage() {
     CoulombCount_Ah_scaled = (BatteryCapacity_Ah * SOC_percent) / 100;
     coulombSeedPending = false;
   }
+
+  // One-shot record served by /socseed for the commissioning popup; ack cleared so it auto-shows once
+  String snap = String("{\"fb\":") + ((voltage > 5.0f) ? "0" : "1")
+              + ",\"v\":" + String(voltage, 3)
+              + ",\"i\":" + String(iBat, 2)
+              + ",\"tF\":" + (isnan(boardTempF) ? String("null") : String(boardTempF, 1))
+              + ",\"rs\":" + String(rTempScale, 3)
+              + ",\"cap\":" + String(BatteryCapacity_Ah)
+              + ",\"sysV\":" + String((int)BATTERY_VOLTAGE)
+              + ",\"lith\":" + (isLithium ? "1" : "0")
+              + ",\"chem\":\"" + String(BATTERY_TYPE) + "\""
+              + ",\"vocv\":" + String(vOcv, 3)
+              + ",\"vlo\":" + String(snapVlo, 3) + ",\"plo\":" + String(snapPlo)
+              + ",\"vhi\":" + String(snapVhi, 3) + ",\"phi\":" + String(snapPhi)
+              + ",\"soc\":" + String(estimatedSoC) + "}";
+  settingWrite(NK_SocSeedSnap, snap.c_str());
+  settingWrite(NK_SocSeedAck, "0");
 }
 
 void loadNVSData() {

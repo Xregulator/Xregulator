@@ -202,6 +202,7 @@ bool fsRemove(const char *path) {
 #define NK_IgnoreRPM "IgnoreRPM"
 #define NK_IgnoreTemperature "IgnoreTemperatr"
 #define NK_InputFilterTC "InputFilterTC"
+#define NK_InstallId       "InstallId"       // random device identity; survives reflash, regenerated only when NVS is erased
 #define NK_InvertAltAmps "InvertAltAmps"
 #define NK_InvertBattAmps "InvertBattAmps"
 #define NK_KHard "KHard"
@@ -266,6 +267,8 @@ bool fsRemove(const char *path) {
 #define NK_SOC_BlockRebulk_percent "SOCBlckRblkprcn"
 #define NK_SafeOperationThreshold "SafOprtnThrshld"
 #define NK_SocAlarmLow "SocAlarmLow"
+#define NK_SocSeedAck "SocSeedAck"
+#define NK_SocSeedSnap "SocSeedSnap"
 #define NK_SetpointFallRate "SetpointFallRat"
 #define NK_SetpointRiseRate "SetpointRiseRat"
 #define NK_SetpointBigStepThresh "SetpntBigStpTh"
