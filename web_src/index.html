@@ -945,14 +945,14 @@
                       <form action="/get" method="GET" target="hidden-form" style="display: inline;">
                         <input type="hidden" name="password" class="password_field">
                         <input type="hidden" name="ClearOverheatHistory" value="1">
-                        <input onclick="return handleClearOverheatHistory();" type="submit"
+                        <input onclick="handleClearOverheatHistory(this.form); return false;" type="submit"
                           value="Clear Overheats / Safe Hours" class="btn-secondary" />
                       </form>
 
                       <form action="/get" method="GET" target="hidden-form" style="display: inline;">
                         <input type="hidden" name="password" class="password_field">
                         <input type="hidden" name="ResetLearningTable" value="1">
-                        <input onclick="return handleResetLearningTable();" type="submit" value="Reset Table"
+                        <input onclick="handleResetLearningTable(this.form); return false;" type="submit" value="Reset Table"
                           class="btn-secondary" />
                       </form>
                     </div>
@@ -1991,7 +1991,7 @@
                     <span class="toggle-label">Off</span>
                     <label class="switch">
                       <input id="TargetVoltageMode_checkbox" type="checkbox"
-                        onchange="if(validateAndSubmitBatteryToggle(this, 'TargetVoltageMode') && handleUserToggle('TargetVoltageMode_checkbox', 'TargetVoltageMode', 'TargetVoltageMode')) { this.form.submit(); submitMessage(); }" />
+                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'TargetVoltageMode').then(ok => { if (ok && handleUserToggle('TargetVoltageMode_checkbox', 'TargetVoltageMode', 'TargetVoltageMode')) { cb.form.submit(); submitMessage(); } });" />
                       <span class="slider round"></span>
                     </label>
                     <span class="toggle-label">On</span>
@@ -2020,10 +2020,15 @@
                 </div>
               </div>
 
+                <hr />
+              <div style="margin:10px 0 2px;">
+                <a class="xnav-link" onclick="goToVoltageTuning()">Tune the voltage loop &mdash; Tuning &rarr; Voltage <span class="xnav-arrow">&rarr;</span></a>
+              </div>
+
             </div>
 
 
-            
+
 
 
             <!-- ═══════════════════════════════════════════════════════════
@@ -2886,7 +2891,7 @@
                     <span class="toggle-label">Off</span>
                     <label class="switch">
                       <input id="MaintainMode_checkbox" type="checkbox"
-                        onchange="if(validateAndSubmitBatteryToggle(this, 'MaintainMode') && handleUserToggle('MaintainMode_checkbox', 'MaintainMode', 'MaintainMode')) { this.form.submit(); submitMessage(); }" />
+                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'MaintainMode').then(ok => { if (ok && handleUserToggle('MaintainMode_checkbox', 'MaintainMode', 'MaintainMode')) { cb.form.submit(); submitMessage(); } });" />
                       <span class="slider round"></span>
                     </label>
                     <span class="toggle-label">On</span>
@@ -3099,7 +3104,7 @@
                       <span class="toggle-label">No</span>
                       <label class="switch">
                         <input id="socInfoAvailable_checkbox" type="checkbox"
-                          onchange="if(validateAndSubmitBatteryToggle(this, 'socInfoAvailable') && handleUserToggle('socInfoAvailable_checkbox', 'socInfoAvailable', 'socInfoAvailable')) { this.form.submit(); submitMessage(); }" />
+                          onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'socInfoAvailable').then(ok => { if (ok && handleUserToggle('socInfoAvailable_checkbox', 'socInfoAvailable', 'socInfoAvailable')) { cb.form.submit(); submitMessage(); } });" />
                         <span class="slider round"></span>
                       </label>
                       <span class="toggle-label">Yes</span>
@@ -3174,7 +3179,7 @@
                     <span class="toggle-label">No</span>
                     <label class="switch">
                       <input id="InvertBattAmps_checkbox" type="checkbox"
-                        onchange="if(validateAndSubmitBatteryToggle(this, 'InvertBattAmps') && handleUserToggle('InvertBattAmps_checkbox', 'InvertBattAmps', 'InvertBattAmps')) { this.form.submit(); submitMessage(); }" />
+                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'InvertBattAmps').then(ok => { if (ok && handleUserToggle('InvertBattAmps_checkbox', 'InvertBattAmps', 'InvertBattAmps')) { cb.form.submit(); submitMessage(); } });" />
                       <span class="slider round"></span>
                     </label>
                     <span class="toggle-label">Yes</span>
@@ -3438,7 +3443,7 @@
                     <span class="toggle-label">Off</span>
                     <label class="switch">
                       <input id="AutoShuntGainCorrection_checkbox" type="checkbox"
-                        onchange="if(validateAndSubmitBatteryToggle(this, 'AutoShuntGainCorrection') && handleUserToggle('AutoShuntGainCorrection_checkbox', 'AutoShuntGainCorrection', 'AutoShuntGainCorrection')) { this.form.submit(); submitMessage(); }" />
+                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'AutoShuntGainCorrection').then(ok => { if (ok && handleUserToggle('AutoShuntGainCorrection_checkbox', 'AutoShuntGainCorrection', 'AutoShuntGainCorrection')) { cb.form.submit(); submitMessage(); } });" />
                       <span class="slider round"></span>
                     </label>
                     <span class="toggle-label">On</span>
@@ -4005,7 +4010,7 @@
         </button>
         <button type="button" data-filter="c3">
           <span class="group-label">C3</span>
-          <span class="nick-label">Charging-System Health</span>
+          <span class="nick-label">Charging System Health</span>
         </button>
         <button type="button" data-filter="c4">
           <span class="group-label">C4</span>
@@ -4016,7 +4021,7 @@
       <div class="checkpoint-intro">
         <p data-intro="c1"><strong>C1 — Anomaly Detection</strong> watches the fast current sensor for rectifier/stator fault signatures. It shares the fast channel and its steady-state admission gates (current drift floor/slope, input-range switching) with C2 — those live in the shared Fast Current Channel section. Its own pieces: the fault alarm, the fault-class and lifetime-anomaly readouts, and the anomaly snapshots in the Waveforms flipbook. Arming ignores engine speed entirely, so it keeps working with a dead tach.</p>
         <p data-intro="c2"><strong>C2 — Resonance &amp; Ripple Map</strong> learns the strongest current-ripple tones at every engine speed and load, from the same fast channel as C1. It uses the shared current-drift gates plus two gates of its own: the steady-state RPM margin (a window is discarded when the engine sits on a speed-bin edge) and the minimum tone amplitude. Its results: the map itself, the worst ripple &amp; tone table, and the biggest actionable disturbance.</p>
-        <p data-intro="c3"><strong>C3 — Charging-System Health</strong> grades output amps against the best this machine has ever done at the same operating point. A point is admitted only after every signal — RPM, field duty, voltage, temperature, amps — holds steady. Those admission gates and the curve-fit tuning are the knobs under Gates &amp; Tuning in this section; the resulting health gauge, session plot, and engine-hours trend appear on Live Data → Diag → Alternator.</p>
+        <p data-intro="c3"><strong>C3 — Charging System Health</strong> grades output amps against the best this machine has ever done at the same operating point. A point is admitted only after every signal — RPM, field duty, voltage, temperature, amps — holds steady. Those admission gates and the curve-fit tuning are the knobs under Gates &amp; Tuning in this section; the resulting health gauge, session plot, and engine-hours trend appear on Live Data → Diag → Alternator.</p>
         <p data-intro="c4"><strong>C4 — Ripple Measurements</strong> is one measurement engine with two collectors: the RPM ripple table is filled <em>only</em> by the commissioning game, and the ripple-vs-current line on the Protections plots is filled <em>only</em> by Commissioning Step 5. These gates define what counts as a valid measurement for both. They are deliberately separate from C1/C2’s gates, so tuning them can never loosen fault-detector arming.</p>
       </div>
 
@@ -4188,7 +4193,7 @@
           </div>
 
           <div class="checkpoint-param" data-checkpoints="c3">
-            <div class="checkpoint-param-chips"><span class="checkpoint-tag c3">C3</span> <span class="checkpoint-param-title">Charging-System Health — Gates &amp; Tuning</span></div>
+            <div class="checkpoint-param-chips"><span class="checkpoint-tag c3">C3</span> <span class="checkpoint-param-title">Charging System Health — Gates &amp; Tuning</span></div>
             <div class="settings-card">
 <!-- Alternator Health — Steady-State Tuning (settings) -->
               <div class="tuning-section">
@@ -4591,7 +4596,7 @@
                   </div>
                   <div class="form-input">
                     <input type="button" value="Reset / Start Over" class="btn-danger"
-                      onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear My History, the whole % vs Engine-Hours trend (including the current partial hour) and the session stats, restart the engine-hour axis at 0, and revert the source to My History? Tuning settings are kept. Do this after replacing the alternator, regulator, or belt. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}" />
+                      onclick="if(!currentAdminPassword){xAlert('Please unlock settings first');return;} xConfirm('Clear My History, the whole % vs Engine-Hours trend (including the current partial hour) and the session stats, restart the engine-hour axis at 0, and revert the source to My History? Tuning settings are kept. Do this after replacing the alternator, regulator, or belt. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}})" />
                   </div>
                 </div>
                 <hr>
@@ -4665,6 +4670,9 @@
       </div>
           </div>
 
+          <div style="margin:16px 0 6px;text-align:center;">
+            <a class="xnav-link" onclick="showMainTab('livedata');showSubTab('livedata','diag')">See the live results these gates feed &mdash; Live Data &rarr; Diag <span class="xnav-arrow">&rarr;</span></a>
+          </div>
         </div>
 
         <!-- System Settings Sub-tab -->
@@ -5263,7 +5271,7 @@
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Clear All erases every learned point in both the sailing and motoring maps and zeroes the best surface points and hours counters. Use after a major rig, sail, or propeller change. Cannot be undone.</span></span>
               </div>
               <div class="form-input">
-                <input type="button" value="Clear All" class="btn-danger-ghost" onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Wipe ALL learned boat-performance data? This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetBoatPerformance=1'),{},5000).then(()=>{perfCells=[];motorCells=[];drawPerfPlot();drawMotorPlot();}).catch(()=>{});}" />
+                <input type="button" value="Clear All" class="btn-danger-ghost" onclick="if(!currentAdminPassword){xAlert('Please unlock settings first');return;} xConfirm('Wipe ALL learned boat-performance data? This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetBoatPerformance=1'),{},5000).then(()=>{perfCells=[];motorCells=[];drawPerfPlot();drawMotorPlot();}).catch(()=>{});}})" />
               </div>
             </div>
             <hr />
@@ -7038,6 +7046,11 @@
               <details open class="tuning-section">
                 <summary class="tuning-section-title">Controller Parameters</summary>
 
+                <div style="margin:8px 0;">
+                  <a class="xnav-link" onclick="goToCVMode()">Voltage setpoint &amp; mode &mdash; Setup &rarr; Alternator &rarr; CV Mode <span class="xnav-arrow">&rarr;</span></a>
+                </div>
+
+                <hr />
                 <!-- Reset CV Integrator -->
                 <div style="margin:8px 0;">
                   <button onclick="resetVoltageLoop()" class="btn-secondary">Reset CV Integrator</button>
@@ -9540,7 +9553,7 @@
                   <form action="/get" method="GET" target="hidden-form" style="display:inline;">
                     <input type="hidden" name="password" class="password_field">
                     <input type="hidden" name="ClearBuffer" value="1">
-                    <input onclick="return handleClearBuffer();" type="submit" value="Clear" class="btn-secondary"
+                    <input onclick="handleClearBuffer(this.form); return false;" type="submit" value="Clear" class="btn-secondary"
                       title="Delete all buffered sensor uploads" />
                   </form>
                 </span>
@@ -11115,82 +11128,192 @@
   
     <div id="livedata-diag" class="sub-tab-content">
 
-      <div class="diag-panel-tabs">
-        <button class="diag-panel-tab active" onclick="showDiagPanel('alternator', event)">Alternator</button>
-        <button class="diag-panel-tab" onclick="showDiagPanel('battery', event)">Battery</button>
+      <div class="settings-card" style="padding-top:0;">
+        <div class="alt-tabs alt-tabs-primary">
+          <button class="alt-tab-btn alt-tab-btn-primary diag-panel-tab active" onclick="showDiagPanel('alternator', event)">Alternator</button>
+          <button class="alt-tab-btn alt-tab-btn-primary diag-panel-tab" onclick="showDiagPanel('battery', event)">Battery</button>
+        </div>
       </div>
 
       <div id="diag-panel-alternator" class="diag-panel active">
 
       <!-- ── Shared fast-channel hardware + steady-state gates — feeds both C1 and C2 ── -->
-      <details class="diag-section" open>
-        <summary class="diag-section-title"><span class="checkpoint-tag c1">C1</span> <span class="checkpoint-tag c2">C2</span> Fast Current Channel</summary>
-<!-- Channel state readout -->
-      <div class="settings-card">
-        <div class="grid">
-          <div class="card"><p>Channel State</p><p class="reading" style="font-size:20px; white-space:normal;"><span id="faChanState_ID">?</span></p></div>
-        </div>
-      </div>
 
-      <!-- How this diagnostic panel works — its own box -->
-      <div class="settings-card">
+      <!-- Charging System Health -->
+      <details class="diag-section" open>
+        <summary class="diag-section-title">Charging System Health</summary>
+
+        <div class="settings-card">
+        <!-- Charging-system health summary (v2) — sits directly above the plots -->
+        <div style="display:flex;align-items:center;gap:18px;margin:4px 0 10px;flex-wrap:wrap;">
+          <div style="min-width:96px;text-align:center;flex-shrink:0;">
+            <div style="font-size:11px;color:var(--text-muted);">Charging System Health <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Output amps as a percentage of the best the charging system has done in the past under these same conditions. Both sides of that comparison are smoothed over several seconds (the Signal smoothing filter setting), so this reads steady-state performance — momentary dips and spikes are deliberately filtered out and never move this number. The label under the number tells you what the comparison is based on: MEASURED means a recorded best exists at this operating point (within a small matching window); ESTIMATED means it's interpolated between nearby records; "learning" means there isn't enough recorded here yet to grade fairly, so no number is shown.</span></span></div>
+            <div id="alt-health-pct" style="font-size:30px;font-weight:800;line-height:1.1;">—</div>
+            <div id="alt-health-status" style="font-size:12px;color:#888;">Learning</div>
+            <div id="alt-hifield-alert" style="display:none;font-size:11px;font-weight:700;color:#d9534f;">Low output despite high field drive</div>
+          </div>
+          <div style="flex:1;min-width:210px;font-size:12px;color:var(--text-muted);line-height:1.7;">
+            <div id="alt-coverage" style="font-size:10px;">no best surface points yet</div>
+            <div id="alt-session-stats" style="font-size:10px;"></div>
+          </div>
+        </div>
+        <hr />
+        <p class="card-group-title">
+          <span>Charging System Health vs Engine Hours <span id="alt-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span></span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. Only FULL steady runs feed this trend — graded against the active reference (Measured/Estimated only; learning-a-new-region and no-reference runs are excluded), at most one sample every 10 seconds. A bucket needs at least 2 such samples (the "min samples per bucket" setting) before it commits a point; a sparser bucket shows a gap rather than a single-reading artifact. The bucket spans one engine-hour in normal use (shorter for testing). The in-progress bucket persists across reboots, so a part-finished hour resumes where it left off. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline. Use the Window buttons (10 h / 100 h / All) to zoom the engine-hours axis; click the axis numbers to set the % range, or the "auto" box to refit.</span></span>
+        </p>
+        <div style="display:flex;justify-content:center;margin:0 auto 8px;max-width:560px;">
+          <span class="time-window-input" id="altTrendWinButtons" style="white-space:nowrap;display:inline-flex;gap:6px;align-items:center;font-size:12px;color:#555;">
+            Window:
+            <span class="seg">
+              <button type="button" value="10"  onclick="setAltTrendWindow(10)">10 h</button>
+              <button type="button" value="100" onclick="setAltTrendWindow(100)">100 h</button>
+              <button type="button" value="0"   onclick="setAltTrendWindow(0)">All</button>
+            </span>
+          </span>
+        </div>
+        <div id="alt-trend" style="width:100%;max-width:560px;margin:0 auto;"></div>
+        <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i>worst</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid rgba(58,123,213,.45);"></i>average</span>
+        </div>
+        <hr />
+        <p class="card-group-title">
+          <span>This Session</span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A health reading every 5 seconds since this page was opened, but only while the operating point is holding steady (the lighter session gate: all inputs steady for a few seconds and temperature steady for half the full record-book dwell). Green dots are measured comparisons (a recorded best exists at that operating point); blue dots are estimated (interpolated between nearby records). A dot ringed in orange is also a full steady run — the same kind of point that updates the reference and the engine-hours trend. Shaded spans are periods with no dot — not holding steady, no reference yet, or not running — where no number is shown on purpose. (A full steady run in brand-new territory has no reference to grade against, so it shows no dot and no ring here, by design.) Click the axis numbers to set the plot range.</span></span>
+        </p>
+        <div id="alt-session-plot" style="width:100%;max-width:560px;margin:0 auto;"></div>
+        <div id="alt-session-point" style="max-width:560px;margin:6px auto 0;font-size:11px;color:#888;text-align:center;">Click a dot to see the conditions behind it.</div>
         <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
-          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How this diagnostic panel works</summary>
+          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
           <div style="margin-top:8px;line-height:1.5;">
-            <p><b>Channel State</b> is whether the fast current sensor is actively sampling, dormant
-              (its sense wire reads open, so the regulator stopped and re-probes every few minutes),
-              or switched off with the Fast Current Channel master toggle in Setup → Diag.</p>
-            <p><b>Map Cells Learned</b> counts how many RPM/output-current operating points have a
-              stored ripple signature yet — the Resonance &amp; Ripple Map fills in as the engine runs at
-              more speeds and loads. The <b>Highest Tone</b> row in the Worst ripple &amp; tone box is the
-              strongest single tone across all of those cells, and where it occurs.</p>
-            <p><b>Last Fault Class / Lifetime Anomalies</b> summarize the rectifier/stator monitor: the
-              most recent fault category and the running count of fault detections over the unit's
-              life. The <b>Worst ripple &amp; tone</b> table lists the largest broadband ripple
-              (<b>Ripple Pk-Pk</b>) and strongest single tone (<b>Highest Tone</b>) seen since you last
-              pressed <b>Reset Worsts</b>, with the engine operating point where each occurred. These
-              worsts persist across reboots, so they only clear when you press that button.</p>
-            <p>The <b>Worst ripple &amp; tone</b> table and the <b>Resonance &amp; Ripple Map</b> are two
-              independent datasets. <b>Reset Worsts</b> (next to the table) zeros only the worst values;
-              <b>Clear Map</b> wipes only the learned map. Neither button affects the other, and clearing
-              one never re-populates from the other.</p>
+            <p>Today's output vs. the highest the alternator has produced at the same conditions.</p>
+            <p><b>MEASURED</b> — a recorded best exists at this operating point; <b>ESTIMATED</b> —
+              interpolated between trustworthy nearby records; <b>Learning this operating region</b> —
+              the recorded data around this point is too one-sided to grade fairly, so no number is
+              shown; <b>No reference here yet</b> — nothing recorded nearby, and a steady run here
+              records a new point instead of guessing.</p>
+            <p>Data is optionally pruned in the cloud. Every 15 minutes, if the engine is off and
+              device online, new frontier points upload. The cloud then drops points that have become
+              redundant (sitting below the envelope of their neighbours) and returns the cleaned set.</p>
           </div>
         </details>
-      </div>
+        <hr />
+        <span class="metric-value" style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
+          <input type="button" value="Export Health Dataset" class="btn-secondary"
+            onclick="downloadCsv('/altcurve.csv','Alternator Health Data')"
+            title="Save this device's learned best-ever data (My History) to your Downloads as a dated CSV — not the chart image. Use it to back up, move to another unit, or share, then load on another unit with Import Health Dataset." />
+          <input type="button" id="alt-load-btn" value="Import Health Dataset" class="btn-secondary"
+            onclick="altLoadCsv()"
+            title="Load a health dataset (from another unit or a backup) into the Uploaded reference surface — resident alongside My History, which is kept. It switches grading to the uploaded surface; you'll choose Pause learning (just compare) or Continue learning My History while graded against it." />
+          <input type="file" id="alt-load-file" accept=".csv,text/csv,text/plain" style="display:none;" onchange="altUploadCsvFile(this)" />
+        </span>
+        </div>
+
+
       </details>
 
-      <!-- ── C1 · Anomaly Detection: the fast-channel fault detector (rectifier/stator) ── -->
-      <details class="diag-section" open>
-        <summary class="diag-section-title"><span class="checkpoint-tag c1">C1</span> Anomaly Detection</summary>
-      <!-- Fault readouts (CSV2 diagnostics) -->
-      <div class="settings-card">
-        <div class="grid">
-          <div class="card"><p>Last Fault Class <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A developer/diagnostic readout, not a confirmed diagnosis. The number is the monitor's best guess at the failure type from the ripple pattern. That classification is not yet validated against real teardowns and can be wrong — treat it as a prompt to open the Live Oscilloscope panel and look at the waveform yourself. 0 or blank means no fault detected.</span></span></p><p class="reading" style="font-size:20px;"><span id="faDetectK_ID">?</span></p></div>
-          <div class="card"><p>Lifetime Anomalies</p><p class="reading" style="font-size:20px;"><span id="faAnomalyCount_ID">?</span></p></div>
+      <!-- ── Waveform instruments (scope + flipbook) — read the same fast channel as C1/C2.
+           Keeps id=fa-monitor-details + ontoggle so the 5 s scope auto-refresh wiring is unchanged. ── -->
+      <details class="diag-section" id="fa-monitor-details" open ontoggle="if(this.open){if(typeof fastDiagOnOpen==='function')fastDiagOnOpen();}else{if(typeof fastDiagStopAuto==='function')fastDiagStopAuto();}">
+        <summary class="diag-section-title">Live Oscilloscope &amp; Historical Snapshots</summary>
+        <p style="max-width:560px;margin:8px auto 4px;font-size:12px;color:var(--text-muted);text-align:center;">Fast current channel: <span id="faChanState_ID" style="font-weight:600;">?</span> <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Whether the fast current sensor feeding this scope is actively sampling, dormant (its sense wire reads open, so the regulator stopped and re-probes every few minutes), or switched off with the Fast Current Channel master toggle in Setup → Diag.</span></span></p>
+<div class="settings-card fa-paired-top">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:14px; font-weight:600;">Live Oscilloscope</span>
+          <!-- Series selector mirrors the Reference Flipbook header below for UX consistency. Independent show/hide toggles, not an A/B switch: any combination of Raw+Filtered (incl. both or neither). Swatch matches the trace color. Capture auto-refreshes every 5 s; Pause lives on the chart top-right, matching the flipbook. -->
+          <div class="cap-mode-toggle">
+            <button type="button" id="faScopeRawBtn" class="cap-mode-btn cap-mode-active" onclick="fastScopeViewToggle('raw',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
+            <button type="button" id="faScopeFiltBtn" class="cap-mode-btn cap-mode-active" onclick="fastScopeViewToggle('filt',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
+          </div>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">
+            The "scope" displays a snapshot of alternator output current, sampled 20,000 times per second — fast
+            enough to show the rectifier ripple pulses, mechanical drive resonances, and other content the normal
+            current reading averages away. It is diagnostic only (plays no part in regulation) and refreshes every
+            few seconds. The Filtered trace applies a 16 sample boxcar moving average (same one used by Resonance
+            and Ripple Map).</span></span>
+          <button type="button" class="btn-secondary btn-sm" onclick="downloadFaScopeCsv()">Download CSV</button>
+          <span id="fastscope-status" style="font-size:13px; color:#666;">No capture yet. Refreshes every 5 seconds; each capture is a 20,000-per-second snapshot.</span>
         </div>
+        <!-- Shared time window: these buttons re-window BOTH the scope and the Reference Flipbook
+             below, so the two X axes always span the same milliseconds. Capped at 200 ms because
+             a flipbook page is only 200 ms long. -->
+        <div class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:6px;">
+          <span style="font-size:13px; font-weight:600;">Time window (both plots):</span>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom active" data-ms="200" onclick="fastScopeZoom(200, this)">200 ms</button>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="100" onclick="fastScopeZoom(100, this)">100 ms</button>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="50" onclick="fastScopeZoom(50, this)">50 ms</button>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="20" onclick="fastScopeZoom(20, this)">20 ms</button>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="5" onclick="fastScopeZoom(5, this)">5 ms</button>
+          <span id="fastscope-cycle-hint" style="font-size:13px; color:#666; flex-basis:100%; min-height:1.2em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
+        </div>
+        <div class="plot-container" id="fastscope-plot" style="margin-top:8px;"></div>
       </div>
+<!-- Reference flipbook: one frozen page per 1000-RPM band + anomaly captures.
+           Paired back-to-back under the Live Oscilloscope; shares its Time window buttons. -->
+      <div class="settings-card fa-paired-bottom">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:14px; font-weight:600;">Historical Snapshots</span>
+          <!-- Raw/Filtered overlay toggles — mirror the Live Oscilloscope above. The filtered trace
+               is the same boxcar-16 moving average, computed in-browser from the saved raw samples. -->
+          <div class="cap-mode-toggle">
+            <button type="button" id="faFlipRawBtn" class="cap-mode-btn cap-mode-active" onclick="faFlipViewToggle('raw')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
+            <button type="button" id="faFlipFiltBtn" class="cap-mode-btn cap-mode-active" onclick="faFlipViewToggle('filt')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
+          </div>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">
+            A photo album of healthy waveforms. The first time the engine runs steadily in each RPM band (and
+            alternator is charging at 20–100 A), the regulator permanently freezes a snapshot of the current
+            waveform, a "known good" record to compare against at any point in the future. Anomaly captures sit
+            alongside so you can see before/after. Diagnostic only. Filtered trace is a 16 sample boxcar moving
+            average (same one used by Resonance and Ripple Map).</span></span>
+          <button type="button" class="btn-secondary btn-sm" onclick="downloadFaFlipPageCsv()">Download CSV</button>
+          <span id="fastflip-status" style="font-size:13px; color:#666;"></span>
+        </div>
 
-      <p style="font-size:12px;color:var(--text-muted);margin:4px 0 0;">Anomaly waveform snapshots are saved to the Reference Flipbook — in the Waveforms section below.</p>
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px;">
+          <span style="font-size:13px; font-weight:600;">Reference pages</span>
+          <button type="button" class="btn-danger-ghost btn-sm" style="margin-left:auto;"
+            onclick="if(!currentAdminPassword){xAlert('Please unlock settings first');return;} xConfirm('Re-baseline the reference pages? The frozen reference waveforms are wiped and re-captured on the next steady runs (do this after replacing the alternator or belt). Anomaly captures are kept. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltRebaseline=1'),{},5000).then(()=>{setTimeout(fetchFastFlip,3000);}).catch(()=>{});}})">Re-baseline</button>
+        </div>
+        <div id="fastflip-bands" class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:4px;"></div>
+
+        <div class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:10px;">
+          <span style="font-size:13px; font-weight:600;">Anomaly Captures</span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Not live. A new anomaly snapshot is saved at most once every 5 minutes, into 4 rotating slots (the oldest is overwritten). Detection, alerts, and the alarm keep running regardless; the Pause button on the chart below only stops new snapshots from overwriting the ones you're examining. This panel refreshes itself every ~30 seconds while open.</span></span>
+          <span style="margin-left:auto;font-size:12px;color:var(--text-muted);white-space:normal;">Lifetime anomalies: <span id="faAnomalyCount_ID" style="font-weight:600;">?</span> &middot; Last fault class: <span id="faDetectK_ID" style="font-weight:600;">?</span> <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A developer/diagnostic readout, not a confirmed diagnosis. The number is the monitor's best guess at the failure type from the ripple pattern. That classification is not yet validated against real teardowns and can be wrong — treat it as a prompt to look at the anomaly captures below yourself. 0 or blank means no fault detected.</span></span></span>
+        </div>
+        <div id="fastflip-anoms" class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:4px;"></div>
+
+        <div id="fastflip-meta" style="font-size:13px; color:#666; margin-top:8px;"></div>
+        <div class="plot-container" id="fastflip-plot" style="margin-top:8px;"></div>
+      </div>
       </details>
 
       <!-- ── C2 · Resonance & Ripple Map: learned tone table from the same fast channel ── -->
-      <details class="diag-section" open>
-        <summary class="diag-section-title"><span class="checkpoint-tag c2">C2</span> Resonance &amp; Ripple Map</summary>
+      <details class="diag-section" open ontoggle="if(this.open&&typeof drawRippleMap==='function')drawRippleMap()">
+        <summary class="diag-section-title">Resonance &amp; Ripple Map</summary>
 <!-- Resonance & Ripple Map identity + its own Download/Clear -->
       <div class="settings-card">
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Resonance &amp; Ripple Map</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A learned table of the strongest current-ripple tones at every engine speed and load — a separate, long-running dataset from the worst-value table below. Each cell is a rolling recent-average of the last 4 qualified windows (fixed depth, not user-adjustable), so it tracks the machine lately and never freezes; the map persists until Clear Map. Download CSV saves the whole table; Clear Map wipes it (after a belt or alternator change) and it re-learns on the next steady runs. Clear Map affects ONLY this map; it does not reset the worst-value table below (use Reset Worsts there for that). A tone that stays at a fixed frequency as RPM changes points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is ordinary rectifier ripple.</span></span>
-          <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="downloadRippleBundle()">Download CSV</button>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A learned table of the strongest current-ripple tones at every engine speed and load — a separate, long-running dataset from the worst-value table below. Each cell is a rolling recent-average of the last 4 qualified windows (fixed depth, not user-adjustable), so it tracks the machine lately and never freezes; the map persists until Clear Map. Download CSV saves the whole table; Clear Map wipes it (after a belt or alternator change) and it re-learns on the next steady runs. Clear Map also clears the Highest Tone row of the worst-value table below (that headline belongs to the map); the Ripple Pk-Pk worst is kept. A tone that stays at a fixed frequency as RPM changes points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is ordinary rectifier ripple.</span></span>
+          <span style="margin-left:auto;font-size:12px;color:var(--text-muted);white-space:nowrap;"><span id="faCellsUsed_ID" style="font-weight:600;">?</span> cells learned</span>
+          <button type="button" class="btn-secondary btn-sm" onclick="downloadRippleBundle()">Download CSV</button>
           <button type="button" class="btn-danger-ghost btn-sm"
-            onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});}">Clear Map</button>
+            onclick="if(!currentAdminPassword){xAlert('Please unlock settings first');return;} xConfirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});}})">Clear Map</button>
         </div>
       </div>
-      <!-- Map fill readout -->
+
+      <!-- Learned-map heatmap -->
       <div class="settings-card">
-        <div class="grid">
-          <div class="card"><p>Map Cells Learned</p><p class="reading" style="font-size:20px;"><span id="faCellsUsed_ID">?</span></p></div>
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:13px; font-weight:600;">Ripple by speed &amp; load</span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each square is one operating point — engine speed across, output current up. Color is the broadband ripple recorded there: darker teal means more ripple. Faint squares haven't been run long enough to learn yet; the map fills in on its own as the engine spends time at more speeds and loads. Tap or hover a square for its numbers.</span></span>
         </div>
+        <div style="width:100%;max-width:800px;margin:4px auto 0;">
+          <canvas id="ripplemap-canvas" style="display:block;width:100%;"></canvas>
+        </div>
+        <div id="ripplemap-info" style="font-size:12px;color:var(--text-muted);text-align:center;margin-top:6px;">—</div>
       </div>
 
       <!-- Worst ripple & tone — its own box -->
@@ -11252,154 +11375,6 @@
         </div>
         <div id="faActionableResult" style="font-size:13px; color:#555; margin-top:4px;">Run a Plant Delay sine sweep in Commissioning to evaluate this.</div>
       </div>
-      </details>
-
-      <!-- ── Waveform instruments (scope + flipbook) — read the same fast channel as C1/C2.
-           Keeps id=fa-monitor-details + ontoggle so the 5 s scope auto-refresh wiring is unchanged. ── -->
-      <details class="diag-section" id="fa-monitor-details" open ontoggle="if(this.open){if(typeof fastDiagOnOpen==='function')fastDiagOnOpen();}else{if(typeof fastDiagStopAuto==='function')fastDiagStopAuto();}">
-        <summary class="diag-section-title"><span class="checkpoint-tag c1">C1</span> <span class="checkpoint-tag c2">C2</span> Waveforms — Live Oscilloscope &amp; Reference Flipbook</summary>
-<div class="settings-card fa-paired-top">
-        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
-          <span style="font-size:14px; font-weight:600;">Live Oscilloscope</span>
-          <!-- Series selector mirrors the Reference Flipbook header below for UX consistency. Independent show/hide toggles, not an A/B switch: any combination of Raw+Filtered (incl. both or neither). Swatch matches the trace color. Capture auto-refreshes every 5 s; Pause lives on the chart top-right, matching the flipbook. -->
-          <div class="cap-mode-toggle">
-            <button type="button" id="faScopeRawBtn" class="cap-mode-btn cap-mode-active" onclick="fastScopeViewToggle('raw',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
-            <button type="button" id="faScopeFiltBtn" class="cap-mode-btn cap-mode-active" onclick="fastScopeViewToggle('filt',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
-          </div>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">
-            The "scope" displays a snapshot of alternator output current, sampled 20,000 times per second — fast
-            enough to show the rectifier ripple pulses, mechanical drive resonances, and other content the normal
-            current reading averages away. It is diagnostic only (plays no part in regulation) and refreshes every
-            few seconds. The Filtered trace applies a 16 sample boxcar moving average (same one used by Resonance
-            and Ripple Map).</span></span>
-          <button type="button" class="btn-secondary btn-sm" onclick="downloadFaScopeCsv()">Download CSV</button>
-          <span id="fastscope-status" style="font-size:13px; color:#666;">No capture yet. Refreshes every 5 seconds; each capture is a 20,000-per-second snapshot.</span>
-        </div>
-        <!-- Shared time window: these buttons re-window BOTH the scope and the Reference Flipbook
-             below, so the two X axes always span the same milliseconds. Capped at 200 ms because
-             a flipbook page is only 200 ms long. -->
-        <div class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:6px;">
-          <span style="font-size:13px; font-weight:600;">Time window (both plots):</span>
-          <button type="button" class="btn-secondary btn-sm fastscope-zoom active" data-ms="200" onclick="fastScopeZoom(200, this)">200 ms</button>
-          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="100" onclick="fastScopeZoom(100, this)">100 ms</button>
-          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="50" onclick="fastScopeZoom(50, this)">50 ms</button>
-          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="20" onclick="fastScopeZoom(20, this)">20 ms</button>
-          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="5" onclick="fastScopeZoom(5, this)">5 ms</button>
-          <span id="fastscope-cycle-hint" style="font-size:13px; color:#666; flex-basis:100%; min-height:1.2em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
-        </div>
-        <div class="plot-container" id="fastscope-plot" style="margin-top:8px;"></div>
-      </div>
-<!-- Reference flipbook: one frozen page per 1000-RPM band + anomaly captures.
-           Paired back-to-back under the Live Oscilloscope; shares its Time window buttons. -->
-      <div class="settings-card fa-paired-bottom">
-        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
-          <span style="font-size:14px; font-weight:600;">Reference Flipbook</span>
-          <!-- Raw/Filtered overlay toggles — mirror the Live Oscilloscope above. The filtered trace
-               is the same boxcar-16 moving average, computed in-browser from the saved raw samples. -->
-          <div class="cap-mode-toggle">
-            <button type="button" id="faFlipRawBtn" class="cap-mode-btn cap-mode-active" onclick="faFlipViewToggle('raw')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
-            <button type="button" id="faFlipFiltBtn" class="cap-mode-btn cap-mode-active" onclick="faFlipViewToggle('filt')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
-          </div>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">
-            A photo album of healthy waveforms. The first time the engine runs steadily in each RPM band (and
-            alternator is charging at 20–100 A), the regulator permanently freezes a snapshot of the current
-            waveform, a "known good" record to compare against at any point in the future. Anomaly captures sit
-            alongside so you can see before/after. Diagnostic only. Filtered trace is a 16 sample boxcar moving
-            average (same one used by Resonance and Ripple Map).</span></span>
-          <button type="button" class="btn-secondary btn-sm" onclick="downloadFaFlipPageCsv()">Download CSV</button>
-          <span id="fastflip-status" style="font-size:13px; color:#666;"></span>
-        </div>
-
-        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px;">
-          <span style="font-size:13px; font-weight:600;">Reference pages</span>
-          <button type="button" class="btn-danger-ghost btn-sm" style="margin-left:auto;"
-            onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Re-baseline the reference pages? The frozen reference waveforms are wiped and re-captured on the next steady runs (do this after replacing the alternator or belt). Anomaly captures are kept. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltRebaseline=1'),{},5000).then(()=>{setTimeout(fetchFastFlip,3000);}).catch(()=>{});}">Re-baseline</button>
-        </div>
-        <div id="fastflip-bands" class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:4px;"></div>
-
-        <div class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:10px;">
-          <span style="font-size:13px; font-weight:600;">Anomaly Captures</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Not live. A new anomaly snapshot is saved at most once every 5 minutes, into 4 rotating slots (the oldest is overwritten). Detection, alerts, and the alarm keep running regardless; the Pause button on the chart below only stops new snapshots from overwriting the ones you're examining. This panel refreshes itself every ~30 seconds while open.</span></span>
-        </div>
-        <div id="fastflip-anoms" class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:4px;"></div>
-
-        <div id="fastflip-meta" style="font-size:13px; color:#666; margin-top:8px;"></div>
-        <div class="plot-container" id="fastflip-plot" style="margin-top:8px;"></div>
-      </div>
-      </details>
-
-      <!-- Charging-System Health -->
-      <details class="diag-section" open>
-        <summary class="diag-section-title"><span class="checkpoint-tag c3">C3</span> Charging-System Health</summary>
-
-        <div class="settings-card">
-        <!-- Charging-system health summary (v2) — sits directly above the trend plot -->
-        <div style="display:flex;align-items:center;gap:18px;margin:4px 0 10px;flex-wrap:wrap;">
-          <div style="min-width:96px;text-align:center;flex-shrink:0;">
-            <div style="font-size:11px;color:var(--text-muted);">Charging-System Health <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Output amps as a percentage of the best the charging system has done in the past under these same conditions. Both sides of that comparison are smoothed over several seconds (the Signal smoothing filter setting), so this reads steady-state performance — momentary dips and spikes are deliberately filtered out and never move this number. The label under the number tells you what the comparison is based on: MEASURED means a recorded best exists at this operating point (within a small matching window); ESTIMATED means it's interpolated between nearby records; "learning" means there isn't enough recorded here yet to grade fairly, so no number is shown.</span></span></div>
-            <div id="alt-health-pct" style="font-size:30px;font-weight:800;line-height:1.1;">—</div>
-            <div id="alt-health-status" style="font-size:12px;color:#888;">Learning</div>
-            <div id="alt-hifield-alert" style="display:none;font-size:11px;font-weight:700;color:#d9534f;">Low output despite high field drive</div>
-          </div>
-          <div style="flex:1;min-width:210px;font-size:12px;color:var(--text-muted);line-height:1.7;">
-            <div id="alt-coverage" style="font-size:10px;">no best surface points yet</div>
-            <div id="alt-session-stats" style="font-size:10px;"></div>
-          </div>
-        </div>
-        <hr />
-        <p class="card-group-title">
-          <span>This Session</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A health reading every 5 seconds since this page was opened, but only while the operating point is holding steady (the lighter session gate: all inputs steady for a few seconds and temperature steady for half the full record-book dwell). Green dots are measured comparisons (a recorded best exists at that operating point); blue dots are estimated (interpolated between nearby records). A dot ringed in orange is also a full steady run — the same kind of point that updates the reference and the engine-hours trend. Shaded spans are periods with no dot — not holding steady, no reference yet, or not running — where no number is shown on purpose. (A full steady run in brand-new territory has no reference to grade against, so it shows no dot and no ring here, by design.) Click the axis numbers to set the plot range.</span></span>
-        </p>
-        <div id="alt-session-plot" style="width:100%;max-width:560px;margin:0 auto;"></div>
-        <div id="alt-session-point" style="max-width:560px;margin:6px auto 0;font-size:11px;color:#888;text-align:center;">Click a dot to see the conditions behind it.</div>
-        <hr />
-        <p class="card-group-title">
-          <span>Charging-System Health vs Engine Hours <span id="alt-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span></span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. Only FULL steady runs feed this trend — graded against the active reference (Measured/Estimated only; learning-a-new-region and no-reference runs are excluded), at most one sample every 10 seconds. A bucket needs at least 2 such samples (the "min samples per bucket" setting) before it commits a point; a sparser bucket shows a gap rather than a single-reading artifact. The bucket spans one engine-hour in normal use (shorter for testing). The in-progress bucket persists across reboots, so a part-finished hour resumes where it left off. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline. Use the Window buttons (10 h / 100 h / All) to zoom the engine-hours axis; click the axis numbers to set the % range, or the "auto" box to refit.</span></span>
-        </p>
-        <div style="display:flex;justify-content:center;margin:0 auto 8px;max-width:560px;">
-          <span class="time-window-input" id="altTrendWinButtons" style="white-space:nowrap;display:inline-flex;gap:6px;align-items:center;font-size:12px;color:#555;">
-            Window:
-            <span class="seg">
-              <button type="button" value="10"  onclick="setAltTrendWindow(10)">10 h</button>
-              <button type="button" value="100" onclick="setAltTrendWindow(100)">100 h</button>
-              <button type="button" value="0"   onclick="setAltTrendWindow(0)">All</button>
-            </span>
-          </span>
-        </div>
-        <div id="alt-trend" style="width:100%;max-width:560px;margin:0 auto;"></div>
-        <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i>worst</span>
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid rgba(58,123,213,.45);"></i>average</span>
-        </div>
-        <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
-          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
-          <div style="margin-top:8px;line-height:1.5;">
-            <p>Today's output vs. the highest the alternator has produced at the same conditions.</p>
-            <p><b>MEASURED</b> — a recorded best exists at this operating point; <b>ESTIMATED</b> —
-              interpolated between trustworthy nearby records; <b>Learning this operating region</b> —
-              the recorded data around this point is too one-sided to grade fairly, so no number is
-              shown; <b>No reference here yet</b> — nothing recorded nearby, and a steady run here
-              records a new point instead of guessing.</p>
-            <p>Data is optionally pruned in the cloud. Every 15 minutes, if the engine is off and
-              device online, new frontier points upload. The cloud then drops points that have become
-              redundant (sitting below the envelope of their neighbours) and returns the cleaned set.</p>
-          </div>
-        </details>
-        <hr />
-        <span class="metric-value" style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
-          <input type="button" value="Export Health Dataset" class="btn-secondary"
-            onclick="downloadCsv('/altcurve.csv','Alternator Health Data')"
-            title="Save this device's learned best-ever data (My History) to your Downloads as a dated CSV — not the chart image. Use it to back up, move to another unit, or share, then load on another unit with Import Health Dataset." />
-          <input type="button" id="alt-load-btn" value="Import Health Dataset" class="btn-secondary"
-            onclick="altLoadCsv()"
-            title="Load a health dataset (from another unit or a backup) into the Uploaded reference surface — resident alongside My History, which is kept. It switches grading to the uploaded surface; you'll choose Pause learning (just compare) or Continue learning My History while graded against it." />
-          <input type="file" id="alt-load-file" accept=".csv,text/csv,text/plain" style="display:none;" onchange="altUploadCsvFile(this)" />
-        </span>
-        </div>
-
-
       </details>
 
       <!-- Not checkpoints — these two show in the All view only -->
@@ -11488,55 +11463,6 @@
           press Reset below. Dash = no qualifying data yet.
         </p>
 
-        <!-- Color guide: maps the green/orange/red of each cell to its value range (thresholds live in accScoreCell calls in script.js) -->
-        <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:0 0 12px 0;background:var(--bg-elev,rgba(127,127,127,0.06));">
-          <div style="font-size:0.78em;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px;">Color guide</div>
-          <table style="width:100%;border-collapse:collapse;font-size:0.82em;">
-            <thead>
-              <tr style="color:var(--text-muted);">
-                <th style="text-align:left;font-weight:600;padding:2px 6px 6px 0;"></th>
-                <th style="text-align:left;font-weight:600;padding:2px 8px 6px 8px;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#21c25e;margin-right:5px;vertical-align:middle;"></span>Good</th>
-                <th style="text-align:left;font-weight:600;padding:2px 8px 6px 8px;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f08c1d;margin-right:5px;vertical-align:middle;"></span>Watch</th>
-                <th style="text-align:left;font-weight:600;padding:2px 0 6px 8px;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:5px;vertical-align:middle;"></span>Poor</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr style="border-top:1px solid var(--border);">
-                <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Current RMS</td>
-                <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 3 A</td>
-                <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">3 – 5 A</td>
-                <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 5 A</td>
-              </tr>
-              <tr style="border-top:1px solid var(--border);">
-                <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Voltage RMS</td>
-                <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 200 mV</td>
-                <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">200 – 300 mV</td>
-                <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 300 mV</td>
-              </tr>
-              <tr style="border-top:1px solid var(--border);">
-                <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Voltage overshoot</td>
-                <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 100 mV</td>
-                <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">100 – 150 mV</td>
-                <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 150 mV</td>
-              </tr>
-              <tr style="border-top:1px solid var(--border);">
-                <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Thermal RMS</td>
-                <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 10 °F</td>
-                <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">10 – 15 °F</td>
-                <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 15 °F</td>
-              </tr>
-              <tr style="border-top:1px solid var(--border);">
-                <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Thermal overshoot</td>
-                <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 1 °F</td>
-                <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">1 – 2 °F</td>
-                <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 2 °F</td>
-              </tr>
-            </tbody>
-          </table>
-          <p style="font-size:0.74em;color:var(--text-muted);margin:8px 0 0 0;">
-            Thermal-overshoot bands track the live over-temp shutdown trip (default 2&nbsp;°F); red means it reached shutdown. Current overshoot is not scored at this time, too noisy to be meaningful.
-          </p>
-        </div>
 
         <div class="metric-row" style="font-size:0.8em;color:var(--text-muted);">
           <span class="metric-label">Loop</span>
@@ -11577,45 +11503,109 @@
         <div style="text-align:right;margin-top:8px;">
           <button onclick="resetAccuracyScores()" class="btn-secondary btn-sm">Reset</button>
         </div>
+
+        <details style="margin:12px 0 0;">
+          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;font-size:13px;">Color guide</summary>
+          <!-- Color guide: maps the green/orange/red of each cell to its value range (thresholds live in accScoreCell calls in script.js) -->
+          <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:0 0 12px 0;background:var(--bg-elev,rgba(127,127,127,0.06));">
+            <table style="width:100%;border-collapse:collapse;font-size:0.82em;">
+              <thead>
+                <tr style="color:var(--text-muted);">
+                  <th style="text-align:left;font-weight:600;padding:2px 6px 6px 0;"></th>
+                  <th style="text-align:left;font-weight:600;padding:2px 8px 6px 8px;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#21c25e;margin-right:5px;vertical-align:middle;"></span>Good</th>
+                  <th style="text-align:left;font-weight:600;padding:2px 8px 6px 8px;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#f08c1d;margin-right:5px;vertical-align:middle;"></span>Watch</th>
+                  <th style="text-align:left;font-weight:600;padding:2px 0 6px 8px;"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;margin-right:5px;vertical-align:middle;"></span>Poor</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr style="border-top:1px solid var(--border);">
+                  <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Current RMS</td>
+                  <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 3 A</td>
+                  <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">3 – 5 A</td>
+                  <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 5 A</td>
+                </tr>
+                <tr style="border-top:1px solid var(--border);">
+                  <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Voltage RMS</td>
+                  <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 200 mV</td>
+                  <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">200 – 300 mV</td>
+                  <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 300 mV</td>
+                </tr>
+                <tr style="border-top:1px solid var(--border);">
+                  <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Voltage overshoot</td>
+                  <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 100 mV</td>
+                  <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">100 – 150 mV</td>
+                  <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 150 mV</td>
+                </tr>
+                <tr style="border-top:1px solid var(--border);">
+                  <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Thermal RMS</td>
+                  <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 10 °F</td>
+                  <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">10 – 15 °F</td>
+                  <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 15 °F</td>
+                </tr>
+                <tr style="border-top:1px solid var(--border);">
+                  <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Thermal overshoot</td>
+                  <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 1 °F</td>
+                  <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">1 – 2 °F</td>
+                  <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 2 °F</td>
+                </tr>
+              </tbody>
+            </table>
+            <p style="font-size:0.74em;color:var(--text-muted);margin:8px 0 0 0;">
+              Thermal-overshoot bands track the live over-temp shutdown trip (default 2&nbsp;°F); red means it reached shutdown. Current overshoot is not scored at this time, too noisy to be meaningful.
+            </p>
+          </div>
+        </details>
         </div>
       </details>
+      <details class="diag-section">
+        <summary class="diag-section-title">About this Alternator Diag Page</summary>
+        <div class="settings-card">
+          <div style="max-width:560px;margin:0 auto;font-size:13px;color:#555;line-height:1.55;">
+            <p>This subtab is the health station for the charging system — the alternator, its
+              rectifier and belt drive, and the control loops driving them. Everything here is
+              results; the detection gates and tuning knobs live in Setup → Diag (link at the
+              bottom of the page).</p>
+            <p><b>Charging System Health</b> grades today's alternator output against the best
+              it's ever done under the same conditions. The engine-hours trend is the plot to
+              watch: a healthy system holds roughly flat in the mid-90s+, and a steady downward
+              slope is an early warning. The This Session plot below it shows the same grading
+              live since this page was opened.</p>
+            <p><b>Live Oscilloscope &amp; Historical Snapshots</b> shows the alternator's output
+              current sampled 20,000 times a second — fast enough to see individual rectifier
+              pulses. Reference pages are known-good waveforms frozen once per RPM band; anomaly
+              captures are saved automatically when the fault monitor trips. When something looks
+              off, flip between the capture and the reference for that speed and compare.</p>
+            <p><b>Resonance &amp; Ripple Map</b> is a learned table of the strongest ripple tone at
+              every speed and load — used by the commissioning wizard to help optimize signal
+              filter and control response.</p>
+            <p><b>Wear Rate &amp; Component Life</b> estimates how fast the alternator is aging at
+              the present speed and temperature, and roughly how much component life remains
+              (based on physics, but not yet calibrated&hellip;)</p>
+            <p><b>Control Accuracy Scores</b> grade how tightly each loop — current, voltage,
+              thermal — holds its target while avoiding overshoot. Grading is limited to transient
+              scenarios so that long steady runs are not rewarded.</p>
+            <p><b>Is an anomaly alert a confirmed failure?</b> No. The fault class is the monitor's
+              best guess from the ripple pattern. Treat it as a prompt to compare the anomaly
+              capture against the reference page for that RPM band before touching hardware.</p>
+            <p><b>Does it need anything from me?</b> No — everything on this page learns on its own
+              during ordinary steady running. A new install shows gaps and "learning" labels until
+              the engine has spent time at more speeds and loads.</p>
+            <p><b>Replaced the alternator, regulator, or belt?</b> Reset the learned baselines so
+              old data doesn't grade the new hardware: Start Over (health record book, in Setup →
+              Diag), Re-baseline (reference pages), and Clear Map (ripple map).</p>
+          </div>
+        </div>
+      </details>
+      <div style="margin:14px 0 6px;text-align:center;">
+        <a class="xnav-link" onclick="showMainTab('settings');showSubTab('settings','diag')">Adjust detection gates &amp; tuning &mdash; Setup &rarr; Diag <span class="xnav-arrow">&rarr;</span></a>
+      </div>
       </div><!-- closes #diag-panel-alternator -->
 
       <div id="diag-panel-battery" class="diag-panel">
 
-                <!-- ════════════ Battery Health (active DCIR test + capacity trend) ════════════ -->
-                <div class="settings-card">
-                    <p
-                      style="font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin: 0 0 10px;">
-                      Health
-                    </p>
-
-                    <p style="margin: 6px 0 12px 0;">
-                      Estimates how the lithium bank is aging from two signals: an active internal-resistance test
-                      (internal resistance, DCIR) you run on demand, and a capacity estimate captured automatically
-                      each time the bank reaches full charge. The battery is assumed brand-new when first installed —
-                      the first capacity reading becomes the 100% baseline. Press <strong>Start Over</strong> if you
-                      replace the bank.
-                    </p>
-
-                    <details style="margin-bottom: 12px;">
-                      <summary style="cursor: pointer; font-weight: 600;">How it works</summary>
-                      <div style="padding: 8px 0; font-size: 14px; line-height: 1.5;">
-                        <p><strong>Resistance test (DCIR):</strong> with the engine running, the regulator commands a
-                          repeated step up and down in charge current — ramped at a fixed gentle rate, not slammed — and
-                          measures how far the battery voltage moves for a known change in current (ΔV ÷ ΔI), reading
-                          each level only after it has settled. Rising resistance over months is an early aging signal.
-                          The absolute value depends on temperature and state of charge, so compare runs taken under
-                          similar conditions — the trend matters more than any single number.</p>
-                        <p><strong>Capacity:</strong> each time the bank charges from a low point all the way to full,
-                          the amp-hours returned are extrapolated to a full 0–100% span. Plotted against charge cycles,
-                          a falling line is real capacity fade. Only reasonably deep charges are used, so the plot fills
-                          in slowly.</p>
-                        <p style="opacity: 0.8;">This reads the whole bank through one shunt — it cannot see an
-                          individual weak cell. A pack-level number can look healthy while one cell is failing.</p>
-                      </div>
-                    </details>
-
+      <details class="diag-section" open>
+        <summary class="diag-section-title">Resistance Test (DCIR)</summary>
+        <div class="settings-card">
                     <!-- Run / status -->
                     <div class="form-row">
                       <div class="form-label">Test status:</div>
@@ -11632,7 +11622,7 @@
                     <div style="display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0;">
                       <button type="button" class="btn-primary" onclick="bhwOpen()">Run Health Test</button>
                       <form action="/get" method="GET" target="hidden-form" style="margin: 0;"
-                        onsubmit="return confirm('Clear all battery-health history and reset the 100% baseline? Use this only when the battery has been replaced.');">
+                        onsubmit="return xConfirmSubmit(this, 'Clear all battery-health history and reset the 100% baseline? Use this only when the battery has been replaced.');">
                         <input type="hidden" name="password" class="password_field">
                         <input type="hidden" name="bhStartOver" value="1">
                         <input type="submit" value="Start Over (battery replaced)" class="btn-danger-ghost"
@@ -11706,7 +11696,7 @@
                     <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 10px 0 6px 0;">
                       <div style="font-weight: 600;">Resistance test history</div>
                       <form action="/get" method="GET" target="hidden-form" style="margin: 0;"
-                        onsubmit="return confirm('Clear all resistance-test rows from the table? The capacity 100% baseline and capacity trend are NOT affected — use Start Over for that.');">
+                        onsubmit="return xConfirmSubmit(this, 'Clear all resistance-test rows from the table? The capacity 100% baseline and capacity trend are NOT affected — use Start Over for that.');">
                         <input type="hidden" name="password" class="password_field">
                         <input type="hidden" name="bhClearHistory" value="1">
                         <input type="submit" value="Clear history" class="btn-secondary btn-sm"
@@ -11743,14 +11733,18 @@
                       </table>
                     </div>
 
-                    <hr />
+        </div>
+      </details>
+
+      <details class="diag-section" open>
+        <summary class="diag-section-title">Capacity Trend</summary>
+        <div class="settings-card">
                     <!-- Capacity % vs date (OCV-anchored) -->
                     <div style="font-weight: 600; margin: 10px 0 4px 0;">
                       Battery Capacity — <span id="bh_capheadline">awaiting first deep cycle</span>
                     </div>
                     <div id="bh_capstatus" style="opacity: 0.8; font-size: 12px; margin-bottom: 6px;">—</div>
-                    <canvas id="bhCapCanvas" width="600" height="220"
-                      style="width: 100%; max-width: 600px; height: 220px; background: var(--card-bg, #111); border: 1px solid var(--border, #333); border-radius: 6px;"></canvas>
+                    <div id="bhCapPlot" style="width: 100%; max-width: 600px;"></div>
                     <div id="bh_capempty" style="opacity: 0.7; font-size: 13px; margin-top: 6px;">
                       No capacity points yet — one is recorded only after the bank rests low (bottom knee) and then
                       charges to full. Hollow markers = low-confidence reads.
@@ -11851,14 +11845,42 @@
 
                       <hr />
                       <form action="/get" method="GET" target="hidden-form" style="margin: 6px 0;"
-                        onsubmit="return confirm('Clear the capacity trend and reset the baseline? (Resistance history is kept.)');">
+                        onsubmit="return xConfirmSubmit(this, 'Clear the capacity trend and reset the baseline? (Resistance history is kept.)');">
                         <input type="hidden" name="password" class="password_field">
                         <input type="hidden" name="capClearPoints" value="1">
                         <input type="submit" value="Clear capacity trend" class="btn-danger-ghost"
                           onclick="setTimeout(pollBatteryHealth, 600);" />
                       </form>
                     </details>
-                </div>
+        </div>
+      </details>
+
+      <details class="diag-section">
+        <summary class="diag-section-title">About this Battery Diag Page</summary>
+        <div class="settings-card">
+          <div style="max-width:560px;margin:0 auto;font-size:13px;color:#555;line-height:1.55;">
+            <p>This page tracks how the battery bank is aging, from two independent signals: an
+              internal-resistance test you run on demand, and a capacity estimate captured
+              automatically each time the bank reaches full charge. The bank is assumed brand-new
+              when first installed — the first capacity reading becomes the 100% baseline.</p>
+            <p><b>Resistance Test (DCIR)</b> steps the charge current up and down with the engine
+              running and measures how far the battery voltage moves for a known change in current.
+              Rising resistance over months is an early aging signal. The absolute number depends
+              on temperature and state of charge, so compare runs taken under similar conditions;
+              the trend matters more than any single value.</p>
+            <p><b>Capacity Trend</b>: each time the bank charges from a low point all the way to
+              full, the amp-hours returned are extrapolated to a full 0–100% span and plotted. A
+              falling line is real capacity fade. Only deep charges qualify, so the plot fills in
+              slowly.</p>
+            <p><b>Replaced the bank?</b> Press Start Over in the Resistance Test section — the next
+              capacity reading becomes the new 100% baseline.</p>
+            <p>Note: lots of better functionality is planned for future versions of this page.</p>
+          </div>
+        </div>
+      </details>
+      <div style="margin:14px 0 6px;text-align:center;">
+        <a class="xnav-link" onclick="showMainTab('settings');showSubTab('settings','battery')">Battery capacity &amp; monitor settings &mdash; Setup &rarr; Battery <span class="xnav-arrow">&rarr;</span></a>
+      </div>
 
       </div><!-- closes #diag-panel-battery -->
     </div>

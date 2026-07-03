@@ -98,6 +98,9 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include "esp_adc/adc_continuous.h"   // fast alternator-current channel (GPIO3/ADC1_CH2) — hardware-timed DMA sampling
 #include "esp_adc/adc_cali.h"         // eFuse factory gain correction for the fast channel (nominal scaling, NOT user calibration)
 #include "esp_adc/adc_cali_scheme.h"
+// rom/rtc.h can't be included here (its SLEEP_MODE enum collides with BMP388_DEV.h), so declare
+// the ROM function directly; it returns the RESET_REASON enum, ABI-compatible with int.
+extern "C" int rtc_get_reset_reason(int cpu_no);
 // Confidence states returned by FrontStore::classify (engine lives in 7_functions.ino; shared by
 // the alternator and both boat fronts; mirrored in script.js — keep the numeric order in sync with
 // the dashboard labels). These #defines stay HERE because globals below initialize from them.
@@ -750,7 +753,7 @@ unsigned long sessionStartTime = 0;
 // Duration of last WiFi session (seconds, persistent)
 unsigned long LastSessionDuration = 0;     // seconds, persistent
 unsigned long CurrentSessionDuration = 0;  // seconds
-int LastSessionMaxLoopTime = 0;            // milliseconds, persistent
+int LastSessionMaxLoopTime = 0;            // microseconds, persistent (UI divides by 1e6 to show seconds)
 int MaxLoopTime = 0;                       // not displayed on client, but available here
 int lastSessionMinHeap = 999999;           // KB, persistent
 int wifiReconnectsTotal = 0;               // persistent, the one i actually use
@@ -759,6 +762,37 @@ int wifiDisconnectCount = 0;
 int LastResetReason;         // why the ESP32 restarted most recently
 int ancientResetReason = 0;  // why the ESP32 restarted 2 sessions ago
 int totalPowerCycles = 0;    // Total number of power cycles (persistent)
+
+// Raw reset causes captured at boot by captureResetReason(): the esp-level enum plus the
+// per-CPU ROM codes, which distinguish causes the esp level collapses (e.g. GLITCH_RTC_RST
+// vs POWER_GLITCH_RESET). Shown in the BOOTED console line and serial banner.
+int g_rawResetEsp = -1;
+int g_rawResetRtc0 = -1;
+int g_rawResetRtc1 = -1;
+
+// Black box: last-alive snapshot in RTC noinit RAM. Survives every reset type EXCEPT a true
+// power-down (magic garbage after real power loss — that distinction is itself the diagnostic:
+// valid magic after an unexplained reset proves the 3.3V rail never died). Written every loop
+// pass; captured and re-armed once at boot in captureResetReason().
+typedef struct {
+  uint32_t magic;
+  uint32_t upMillis;
+  float ibv;
+  float duty;
+  float rpm;
+  float measAmps;
+  int32_t maxLoopUs;   // session-worst MaxLoopTime (µs) — feeds LastSessionMaxLoopTime on next boot
+  int32_t minHeapKB;   // session MinFreeHeap — feeds lastSessionMinHeap on next boot
+  int16_t altTempF;
+  uint8_t sysMode;
+  uint8_t chargeStage;
+} BlackBoxSnap;
+// Struct size folded into the magic so any future layout change auto-invalidates a snapshot
+// written by older firmware instead of misreading shifted fields.
+#define BLACKBOX_MAGIC (0xB1ACB0C5UL ^ (uint32_t)sizeof(BlackBoxSnap))
+RTC_NOINIT_ATTR BlackBoxSnap g_blackBox;
+BlackBoxSnap g_blackBoxPrev;        // copy of last session's snapshot, taken at boot
+bool g_blackBoxPrevValid = false;   // true if last session's magic matched (RTC RAM survived)
 
 // These are health variables for the TempTask (digital temperature measurement)
 unsigned long lastTempTaskHeartbeat = 0;
@@ -838,9 +872,9 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // Protections continue to read originals. Control loops will migrate to
 // _filtered in a subsequent pass via getBatteryVoltage() / getTargetAmps().
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
-float InputFilterTC = 34.0f;       // ms — iExcess EMA TC, NVS-backed (τ/3 at commissioning plant τ=103ms)
-float OutputPIDFilterTC = 34.0f;   // ms — Output Current PID EMA TC, NVS-backed (τ/3 at commissioning plant τ=103ms)
-float VoltageFilterTC = 103.0f;    // ms — IBV EMA TC for CV voltage loop, NVS-backed (full plant τ at commissioning, τ=103ms)
+float InputFilterTC = 37.0f;       // ms — iExcess EMA TC, NVS-backed (τ/3 at commissioning plant τ=112ms)
+float OutputPIDFilterTC = 37.0f;   // ms — Output Current PID EMA TC, NVS-backed (τ/3 at commissioning plant τ=112ms)
+float VoltageFilterTC = 112.0f;    // ms — IBV EMA TC for CV voltage loop, NVS-backed (full plant τ at commissioning, τ=112ms)
 float MeasuredAmps_filtered = 0.0f;  // iExcess EMA signal
 float g_pidI_filtered = 0.0f;        // Output Current PID EMA signal
 float IBV_filtered = 0.0f;           // EMA of INA228 bus voltage — used by getFiltV()
@@ -853,7 +887,7 @@ float IBV_filtered = 0.0f;           // EMA of INA228 bus voltage — used by ge
 // Manual mode is banned: duty is locked to ManualDutyTarget so the test's duty commands are silently ignored.
 // Note: voltageControlActive = !inIdleStage, so it is true even in bulk — do NOT gate on !voltageControlActive.
 // Enforced in the /get startSystemID handler and in the JS preflight check.
-float SystemIDStepAmplitude = 6.0f;  // % duty step — web-configurable; 6% is a good default
+float SystemIDStepAmplitude = 6.4f;  // % duty step — web-configurable; default from the 2026-07-03 commissioning field curve
 
 // ── SystemID sine-sweep (open-loop plant Bode) — Stage 1 ──────────────────────
 // Test type selects step (rise/fall delay) vs sine sweep (per-frequency gain/phase
@@ -865,7 +899,7 @@ uint8_t systemIDSineCycles    = 2;     // analysed cycles per frequency (1 settl
 // Fitted plant time constant (ms) from the dashboard's Plant Delay sweep fit. 0 = not yet fitted.
 // Persisted (NVS) so the Biggest Actionable Disturbance readout survives reboots/reloads; only
 // re-fit when the plant changes (alternator, belt, field wiring).
-uint16_t systemIDPlantTauMs   = 0;
+uint16_t systemIDPlantTauMs   = 112;   // ms — default from the 2026-07-03 commissioning plant fit; overwritten by each fit
 #define SYSID_SINE_NPOINTS 10          // log-spaced sweep points
 struct SysIDBodePoint { float freqHz; float gainApPct; float phaseDeg; };  // gain = A output per %duty
 SysIDBodePoint systemIDBode[SYSID_SINE_NPOINTS] = {};
@@ -905,7 +939,7 @@ uint8_t systemIDAbortReason = 0;               // FieldEventReason code if prote
 uint8_t systemIDAbortPhase = 0;                // phase (1-9) at moment of protection abort; 0 = no abort
 
 // ── Stabilize-phase constants ────────────────────────────────────────────────
-float SystemIDStabilizeAmps = 10.0f;      // target alternator output before the sweep (= sweep trough); dashboard setting
+float SystemIDStabilizeAmps = 35.0f;      // target alternator output before the sweep (= sweep trough); default from the 2026-07-03 commissioning field curve
 #define SYSID_STABILIZE_SAMPLES 5         // ring buffer size: 5 samples × 1Hz = 5-second window
 #define SYSID_STABILIZE_BAND_A 3.0f       // 5-s rolling average must be within ±3A of target
 #define SYSID_STABILIZE_TIMEOUT_MS 30000  // abort if can't stabilize within this window
@@ -3014,8 +3048,8 @@ float pidError = 0.0f;  // PID error for display (A)
 // recomputeCcGains() bakes in ×(12/BATTERY_VOLTAGE) to get the duty-space gains the loop actually
 // applies (PidK*_active), because field current per duty-% scales with bus voltage. Mirror of the CV
 // loop's recomputeCvGains(). Do NOT scale these per-class by hand — the normalization does it.
-float PidKp = 0.812f;  // 12V-equivalent proportional gain (commissioning plant fit: τ 103ms, K 1.135 A/%, θ 9ms, IMC seed)
-float PidKi = 7.884f;  // 12V-equivalent integral gain (commissioning plant fit)
+float PidKp = 0.827f;  // 12V-equivalent proportional gain (2026-07-03 commissioning plant fit: τ 112ms, IMC seed)
+float PidKi = 7.357f;  // 12V-equivalent integral gain (2026-07-03 commissioning plant fit)
 float PidKd = 0.01f;  // 12V-equivalent derivative gain
 volatile float PidKp_active = 0.812f;  // DERIVED duty-space gain the PID uses (PidKp × 12/BATTERY_VOLTAGE). Set by recomputeCcGains().
 volatile float PidKi_active = 7.884f;  // DERIVED duty-space Ki.
@@ -3030,7 +3064,7 @@ uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) —
                                   // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply.
 // cvLambdaMult's old CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged
 // (gains come from cvCrossover/ω_c).
-float   cvPlantK     = 0.0f;      // measured plant gain K (V/A at the pack) from the CV plant-fit step; 0 = no valid fit
+float   cvPlantK     = 0.0216f;   // measured plant gain K20 (V/A at the pack); default = 2026-07-03 bench seed so Auto mode has sane gains pre-commissioning; the CV plant-fit step overwrites
 // Measured ripple projection (RIPPLE_DETECTION_REARCH_SPEC §3.3). The commissioning current-check
 // runs a 3-level test per detector and line-fits ripple(I) = a0 + a1·I to the IExcessTau-filtered
 // excess pk-pk (the same quantity the detector trips on). This is REFERENCE DATA ONLY — it drives the
@@ -3068,8 +3102,6 @@ static void ripFitDecode(const String &s, RipFit &r) {
   r.pkPt[0] = f[6]; r.pkPt[1] = f[7]; r.pkPt[2] = f[8];
   r.nPts = (uint8_t)constrain(n, 0, 3);
 }
-float   cvPlantTau   = 0.0f;      // measured rise time τ (s)
-float   cvPlantL     = 0.0f;      // measured dead time L (s)
 float   cvComputedKp = 30.0f;     // user-facing (12V-equivalent) gains the Auto path produced — dashboard display only
 float   cvComputedKi = 25.0f;
 // CV measured-gain auto-tune knobs (design constants CV_CROSSOVER_TARGET / CV_PI_ZERO; user-adjustable in
@@ -4719,9 +4751,17 @@ void setup() {
   loadNVSData();                   // Load persistent variables from NVS- everything from last session is restored
   initNVSCache();                  // Sync change-detection cache with loaded NVS values to prevent false writes
   restoreSoftClock();              // Re-establish a usable timebase (retained RTC, else NVS epoch) so AP-mode/no-internet Long Term records aren't stamped 0 and rendered as phantom gaps. Snaps to truth when a real source reports.
+  // Black box beats the NVS copy for last-session stats: NVS full-saves fire only at the
+  // field-off edge / shutdown, so a session that ends in a crash or reset leaves SessionDur/
+  // MaxLoop/MinHeap holding an older session's values. The snapshot is exact at death.
+  if (g_blackBoxPrevValid) {
+    LastSessionDuration = g_blackBoxPrev.upMillis / 1000UL;
+    LastSessionMaxLoopTime = g_blackBoxPrev.maxLoopUs;
+    lastSessionMinHeap = g_blackBoxPrev.minHeapKB;
+  }
   //Reset some parameters to zero since we are re-starting on a re-boot
   CurrentSessionDuration = 0;
-  prevSessionMaxLoopTime = MaxLoopTime;  // snapshot last session's worst before zeroing
+  prevSessionMaxLoopTime = (uint32_t)LastSessionMaxLoopTime;  // last session's worst (µs), black-box-corrected above when available
   MaxLoopTime = 0;                       // reset for this session (persists to NVS on next save)
   totalPowerCycles++;
   saveNVSDataFull();  // Synchronous write — persists boot-time adjustments before loop() starts
@@ -4913,6 +4953,19 @@ void setup() {
 void loop() {
 
   esp_task_wdt_reset();
+
+  // Black box heartbeat: magic written last so a reset mid-update can't leave a stale-but-valid snapshot
+  g_blackBox.upMillis = millis();
+  g_blackBox.ibv = IBV;
+  g_blackBox.duty = dutyCycle;
+  g_blackBox.rpm = RPM;
+  g_blackBox.measAmps = MeasuredAmps;
+  g_blackBox.altTempF = (int16_t)(isnan(AlternatorTemperatureF) ? -999 : AlternatorTemperatureF);
+  g_blackBox.maxLoopUs = MaxLoopTime;
+  g_blackBox.minHeapKB = MinFreeHeap;
+  g_blackBox.sysMode = (uint8_t)sysMode;
+  g_blackBox.chargeStage = chargeStageDisplay;  // global kept fresh by the control loop — no function call here
+  g_blackBox.magic = BLACKBOX_MAGIC;
 
   gHeavyRanThisPass = false;  // reset the one-heavy-per-pass scheduler gate for this loop pass
 

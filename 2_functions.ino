@@ -295,8 +295,8 @@ bool fsRemove(const char *path) {
 #define NK_ripWinMs "ripWinMs"
 #define NK_ripDriftFloorA "ripDriftFloorA"
 #define NK_ripDriftPct "ripDriftPct"
-#define NK_cvPlantTau "cvPlantTau"
-#define NK_cvPlantL "cvPlantL"
+// RETIRED NVS keys — never reuse these key strings for a new setting (old devices still hold
+// stored values under them): "cvPlantTau", "cvPlantL" (removed 2026-07-03; τ/L fit retired).
 #define NK_CommissionTempF "CommissionTmpF"
 #define NK_battTempDerateEn "battTmpDerEn"
 #define NK_battTempCoeff "battTmpCoeff"

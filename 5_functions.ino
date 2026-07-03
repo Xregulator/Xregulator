@@ -668,7 +668,37 @@ void captureResetReason() {
     case ESP_RST_INT_WDT: LastResetReason = 7; break;
     case ESP_RST_WDT: LastResetReason = 9; break;
     case ESP_RST_SDIO: LastResetReason = 10; break;
+    case ESP_RST_PWR_GLITCH: LastResetReason = 12; break;
+    case ESP_RST_CPU_LOCKUP: LastResetReason = 13; break;
+    case ESP_RST_USB: LastResetReason = 14; break;
+    case ESP_RST_JTAG: LastResetReason = 15; break;
+    case ESP_RST_EFUSE: LastResetReason = 16; break;
     default: LastResetReason = 8; break;
+  }
+
+  // Raw codes for the BOOTED console line: the ROM per-CPU causes carry detail the esp-level
+  // enum collapses (S3 ROM codes of interest: 15=RTCWDT_BROWN_OUT 18=SUPER_WDT 19=GLITCH_RTC
+  // 23=POWER_GLITCH — full list in rom/rtc.h RESET_REASON).
+  g_rawResetEsp = rawReason;
+  g_rawResetRtc0 = (int)rtc_get_reset_reason(0);
+  g_rawResetRtc1 = (int)rtc_get_reset_reason(1);
+
+  // Black box: capture last session's snapshot before loop() starts overwriting it, then
+  // invalidate so a reset before the first loop pass can't replay this session's copy.
+  memcpy(&g_blackBoxPrev, &g_blackBox, sizeof(g_blackBoxPrev));
+  g_blackBoxPrevValid = (g_blackBoxPrev.magic == BLACKBOX_MAGIC);
+  g_blackBox.magic = 0;
+
+  Serial.printf("RESET: %s | esp=%d rtc0=%d rtc1=%d\n",
+                resetReasonName(), g_rawResetEsp, g_rawResetRtc0, g_rawResetRtc1);
+  if (g_blackBoxPrevValid) {
+    Serial.printf("BLACKBOX: up=%lus IBV=%.2fV duty=%.1f%% RPM=%d amps=%.1f altT=%dF mode=%u stage=%u loop=%.1fms heap=%ldKB\n",
+                  (unsigned long)(g_blackBoxPrev.upMillis / 1000UL), g_blackBoxPrev.ibv,
+                  g_blackBoxPrev.duty, (int)g_blackBoxPrev.rpm, g_blackBoxPrev.measAmps,
+                  (int)g_blackBoxPrev.altTempF, g_blackBoxPrev.sysMode, g_blackBoxPrev.chargeStage,
+                  g_blackBoxPrev.maxLoopUs / 1000.0f, (long)g_blackBoxPrev.minHeapKB);
+  } else {
+    Serial.println("BLACKBOX: RTC RAM lost - true power interruption preceded this boot");
   }
 
   // Save both values: "current,ancient"
@@ -1892,7 +1922,13 @@ const char *resetReasonName() {
     case ESP_RST_INT_WDT:   return "interrupt watchdog";
     case ESP_RST_WDT:       return "other watchdog";
     case ESP_RST_SDIO:      return "SDIO";
-    default:                return "unknown";
+    case ESP_RST_PWR_GLITCH: return "power glitch";
+    case ESP_RST_CPU_LOCKUP: return "CPU lockup";
+    case ESP_RST_USB:       return "USB";
+    case ESP_RST_JTAG:      return "JTAG";
+    case ESP_RST_EFUSE:     return "eFuse error";
+    case ESP_RST_UNKNOWN:   return "indeterminate";
+    default:                return "unrecognized code";
   }
 }
 

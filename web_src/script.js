@@ -1070,9 +1070,9 @@ function fetchKneeLearnState(){
         }
     }).catch(()=>{});
 }
-function resetKneeLearn(){
-    if (!currentAdminPassword) { alert("Please unlock settings first"); return; }
-    if (!confirm("Reset all learned Min% floors to factory defaults?")) return;
+async function resetKneeLearn(){
+    if (!currentAdminPassword) { xAlert("Please unlock settings first"); return; }
+    if (!await xConfirm("Reset all learned Min% floors to factory defaults?")) return;
     const params = new URLSearchParams({ password: currentAdminPassword, ResetKneeLearn: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(()=>{ setTimeout(fetchKneeLearnState, 400); })
@@ -1103,9 +1103,9 @@ function fetchZeroLogState(){
         }
     }).catch(()=>{});
 }
-function resetZeroLog(){
-    if (!currentAdminPassword) { alert("Please unlock settings first"); return; }
-    if (!confirm("Erase the zero-drift log and start a fresh session?")) return;
+async function resetZeroLog(){
+    if (!currentAdminPassword) { xAlert("Please unlock settings first"); return; }
+    if (!await xConfirm("Erase the zero-drift log and start a fresh session?")) return;
     const params = new URLSearchParams({ password: currentAdminPassword, ResetZeroLog: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(()=>{ setTimeout(fetchZeroLogState, 400); })
@@ -1187,18 +1187,18 @@ function updateAltHealth() {
 
 // Simulator Off(0)/On(1) — segmented toggle in Setup, parallels Vessel Performance's perfSimMode.
 function altSetSim(v){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSimMode='+(v?1:0)),{},5000).catch(()=>{});
 }
 // Reference Source: My History (0) | Uploaded File (1). INDEPENDENT of Pause. Selecting Uploaded
 // defaults Pause = ON firmware-side (spec §4.3); the user can flip Continue afterward.
 function altSetSource(src){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSource='+(src?1:0)),{},5000).catch(()=>{});
 }
 // Pause / Continue Learning — independent of Reference Source (spec §4.1). Learning always writes My History.
 function altSetPaused(p){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altPaused='+(p?1:0)),{},5000).catch(()=>{});
 }
 // Download the full alt-health state dump (params, live/gate state, both surfaces, trend) for AI debugging.
@@ -1210,7 +1210,7 @@ function altDownloadDebug(){ downloadCsv('/altdebug.csv','Alternator Health Debu
 // a separate path.)
 function downloadCsv(url, baseName){
   fetchWithTimeout(buildURL(url),{},10000).then(r=>r.text()).then(txt=>{
-    if(!txt || txt.trim().length < 8){ alert('No '+baseName+' to download yet.'); return; }
+    if(!txt || txt.trim().length < 8){ xAlert('No '+baseName+' to download yet.'); return; }
     const d=new Date(), p=n=>String(n).padStart(2,'0');
     const stamp=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+'-'+p(d.getMinutes())+'-'+p(d.getSeconds());
     const a=document.createElement('a');
@@ -1218,7 +1218,7 @@ function downloadCsv(url, baseName){
     a.download=baseName+' '+stamp+'.csv';
     document.body.appendChild(a); a.click();
     setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-  }).catch(e=>alert('Download failed: '+(e&&e.message?e.message:e)));
+  }).catch(e=>xAlert('Download failed: '+(e&&e.message?e.message:e)));
 }
 
 // The Resonance & Ripple Map button pulls THREE distinct datasets, not one: the fast ESP32 tone/broadband
@@ -1251,7 +1251,7 @@ function configHwFlag(){
   return (cb && cb.checked) ? 1 : 0;
 }
 function exportConfigDownload(){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   const hw=configHwFlag();
   fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware='+hw),{},10000)
     .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
@@ -1263,7 +1263,7 @@ function exportConfigDownload(){
       a.download='regulator-config '+stamp+'.json';
       document.body.appendChild(a); a.click();
       setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-    }).catch(e=>alert('Export failed: '+(e&&e.message?e.message:e)));
+    }).catch(e=>xAlert('Export failed: '+(e&&e.message?e.message:e)));
 }
 // Pre-apply diff preview. Fetches this regulator's current config twice (with and
 // without hardware keys — the difference identifies tier-2 keys, which the browser
@@ -1284,7 +1284,7 @@ function cfgDiffClose(apply){
   if(apply && inc){
     const cbs=Array.from(document.querySelectorAll('#cfgdiff-body .cfgdiff-cb'));
     const picked=cbs.filter(c=>c.checked);
-    if(cbs.length && !picked.length){ alert('Nothing is checked — check at least one setting, or Cancel.'); return; }
+    if(cbs.length && !picked.length){ xAlert('Nothing is checked — check at least one setting, or Cancel.'); return; }
     const out={};
     for(const k of Object.keys(inc)) if(k!=='config'&&k!=='tables') out[k]=inc[k];
     out.config={};
@@ -1311,13 +1311,13 @@ function cfgDiffToggleAll(){
 function _cfgEsc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 async function cfgDiffPreview(blobText, hw, sourceLabel){
   let incoming;
-  try{ incoming=JSON.parse(blobText); }catch(e){ alert('That is not a valid configuration file.'); return null; }
-  if(!incoming || typeof incoming.config!=='object'){ alert('That file has no "config" section — not a regulator configuration.'); return null; }
+  try{ incoming=JSON.parse(blobText); }catch(e){ xAlert('That is not a valid configuration file.'); return null; }
+  if(!incoming || typeof incoming.config!=='object'){ xAlert('That file has no "config" section — not a regulator configuration.'); return null; }
   const base='/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware=';
   // sequential, not Promise.all — each export builds a ~14KB String in internal heap on the device
   const rFull=await fetchWithTimeout(buildURL(base+'1'),{},10000);
   const rT1=await fetchWithTimeout(buildURL(base+'0'),{},10000);
-  if(!rFull.ok||!rT1.ok){ alert('Could not read the current configuration for comparison (HTTP '+(rFull.ok?rT1.status:rFull.status)+').'); return null; }
+  if(!rFull.ok||!rT1.ok){ xAlert('Could not read the current configuration for comparison (HTTP '+(rFull.ok?rT1.status:rFull.status)+').'); return null; }
   const fullJ=await rFull.json();
   const curFull=fullJ.config||{};
   const curTables=fullJ.tables||{};
@@ -1382,30 +1382,30 @@ function _cfgPostImport(bodyText, hw){
   fetchWithTimeout(buildURL('/importConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware='+hw),
     {method:'POST',body:bodyText},12000)
     .then(r=>{ if(!r.ok){ return r.text().then(t=>{ throw new Error(t||('HTTP '+r.status)); }); } return r.json(); })
-    .then(res=>alert('Applied '+res.applied+' settings. '+(res.reboot?'The regulator is rebooting — reconnect in ~30 s.':'')))
-    .catch(e=>alert('Import failed: '+(e&&e.message?e.message:e)));
+    .then(res=>xAlert('Applied '+res.applied+' settings. '+(res.reboot?'The regulator is rebooting — reconnect in ~30 s.':'')))
+    .catch(e=>xAlert('Import failed: '+(e&&e.message?e.message:e)));
 }
 function importConfigFromFile(){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   const inp=document.getElementById('importConfigFile');
-  if(!inp || !inp.files || !inp.files.length){ alert('Choose a configuration file first.'); return; }
+  if(!inp || !inp.files || !inp.files.length){ xAlert('Choose a configuration file first.'); return; }
   const hw=configHwFlag();
   const reader=new FileReader();
   reader.onload=function(){
     const txt=reader.result;
     cfgDiffPreview(txt, hw, inp.files[0].name)
       .then(body=>{ if(body) _cfgPostImport(body, hw); })
-      .catch(e=>alert('Preview failed: '+(e&&e.message?e.message:e)));
+      .catch(e=>xAlert('Preview failed: '+(e&&e.message?e.message:e)));
   };
   reader.readAsText(inp.files[0]);
 }
 async function shareConfigToLibrary(){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   const nameEl=document.getElementById('shareConfigName');
   const name=nameEl?nameEl.value.trim():'';
   try{
     const token=await ensureCloudToken();
-    if(!token){ alert('This regulator is not registered for cloud features. Complete registration first.'); return; }
+    if(!token){ xAlert('This regulator is not registered for cloud features. Complete registration first.'); return; }
     const r=await fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware=0'),{},10000);
     if(!r.ok) throw new Error('export HTTP '+r.status);
     const config=await r.json();
@@ -1413,33 +1413,33 @@ async function shareConfigToLibrary(){
       method:'POST', headers:cloudHeaders(), body:JSON.stringify({token, display_name:name, config})
     });
     const data=await resp.json();
-    if(resp.ok) alert('Submitted to the library for review (id '+data.id+'). It appears once approved.');
-    else alert('Submit failed: '+(data.error||('HTTP '+resp.status)));
-  }catch(e){ alert('Submit failed: '+(e&&e.message?e.message:e)); }
+    if(resp.ok) xAlert('Submitted to the library for review (id '+data.id+'). It appears once approved.');
+    else xAlert('Submit failed: '+(data.error||('HTTP '+resp.status)));
+  }catch(e){ xAlert('Submit failed: '+(e&&e.message?e.message:e)); }
 }
 
 // Import a health curve from a file in Downloads (BEFRONT1). Opens the native picker;
 // altUploadCsvFile() reads it and POSTs the raw text to /altUploadFront. Mirrors perfLoadCsv.
 function altLoadCsv(){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   const inp=document.getElementById('alt-load-file'); if(inp){ inp.value=''; inp.click(); }   // freeze/learn is asked after the file is chosen
 }
-function altUploadCsvFile(inp){
+async function altUploadCsvFile(inp){
   const f=inp.files && inp.files[0]; if(!f) return;
   // The file loads into the Uploaded surface (resident alongside My History). Ask whether to also keep
   // learning My History while graded against it: OK = Pause (just compare); Cancel = Continue learning.
-  const freeze = confirm('Import "'+f.name+'"\n\nThis loads into the Uploaded reference surface and grades against it. My History is kept.\n\nOK = Pause learning — just grade against the uploaded surface.\nCancel = Continue learning — keep refining My History while graded against the uploaded one.');
+  const freeze = await xConfirm('Import "'+f.name+'"\n\nThis loads into the Uploaded reference surface and grades against it. My History is kept.\n\nOK = Pause learning — just grade against the uploaded surface.\nCancel = Continue learning — keep refining My History while graded against the uploaded one.');
   const rd=new FileReader();
   rd.onload=function(){
     const txt=String(rd.result||'');
-    if(txt.indexOf('BEFRONT1')<0){ alert('That file is not an alternator health (BEFRONT1) CSV.'); inp.value=''; return; }
+    if(txt.indexOf('BEFRONT1')<0){ xAlert('That file is not an alternator health (BEFRONT1) CSV.'); inp.value=''; return; }
     fetchWithTimeout(buildURL('/altUploadFront?password='+encodeURIComponent(currentAdminPassword)+'&fixed='+(freeze?1:0)),{method:'POST',body:txt},10000)
-      .then(r=>{ if(r.ok){ alert('Uploaded reference loaded — '+(freeze?'learning paused':'still learning My History')+'.'); if(typeof fetchAltTrend==='function') fetchAltTrend(); }
-                 else { r.text().then(t=>alert('Import failed: '+(t||('HTTP '+r.status)))).catch(()=>alert('Import failed: HTTP '+r.status)); } })
-      .catch(e=>alert('Import failed: '+(e&&e.message?e.message:e)));
+      .then(r=>{ if(r.ok){ xAlert('Uploaded reference loaded — '+(freeze?'learning paused':'still learning My History')+'.'); if(typeof fetchAltTrend==='function') fetchAltTrend(); }
+                 else { r.text().then(t=>xAlert('Import failed: '+(t||('HTTP '+r.status)))).catch(()=>xAlert('Import failed: HTTP '+r.status)); } })
+      .catch(e=>xAlert('Import failed: '+(e&&e.message?e.message:e)));
     inp.value='';
   };
-  rd.onerror=function(){ alert('Could not read that file.'); inp.value=''; };
+  rd.onerror=function(){ xAlert('Could not read that file.'); inp.value=''; };
   rd.readAsText(f);
 }
 
@@ -1872,7 +1872,7 @@ let _perfPlotPending = false, _perfModelLastFetch = 0;
 function fetchPerfSchema(){ return fetch('/perfschema').then(r=>r.json()).then(j=>{ perfSchema=j; }).catch(()=>{}); }
 
 function perfSet(key, val){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&'+key+'='+val),{},5000).catch(()=>{});
 }
 
@@ -1954,35 +1954,35 @@ function updatePerfControls(){
   if(s.perfFoldSymmetric!=null) setSeg(['perf-sym-1','perf-sym-0'], (s.perfFoldSymmetric>=0.5)?0:1);
 }
 // Switching STW↔SOG invalidates every learned point → the firmware does a Clear-All. Warn first.
-function perfSetSpeedSrc(v){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+async function perfSetSpeedSrc(v){
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   if((perfSettings.perfSpeedSrc|0) === v) return;
-  if(!confirm('Switching speed source (STW ↔ SOG) clears ALL learned boat-performance data — same as Clear All. Continue?')) return;
+  if(!await xConfirm('Switching speed source (STW ↔ SOG) clears ALL learned boat-performance data — same as Clear All. Continue?')) return;
   perfSet('perfSpeedSrc', v);
 }
 // LEARNED↔FIXED reference toggle.
-function perfSetSource(src){ if(!currentAdminPassword){ alert('Please unlock settings first'); return; } perfSet('perfSource', src?1:0); }
+function perfSetSource(src){ if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; } perfSet('perfSource', src?1:0); }
 // Import a boat polar from a file (a shared BEFRONT1 CSV, or a Download-CSV backup). Opens the
 // native file picker; perfUploadCsvFile() reads it and POSTs the raw text to /perfUploadFront.
 function perfLoadCsv(){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   const inp=document.getElementById('perf-load-file'); if(inp){ inp.value=''; inp.click(); }   // freeze/learn is asked after the file is chosen
 }
-function perfUploadCsvFile(inp){
+async function perfUploadCsvFile(inp){
   const f=inp.files && inp.files[0]; if(!f) return;
   // Ask how to use the imported polar, right after the file is chosen: freeze (hold as-is) vs learn (refine from it).
-  const freeze = confirm('Import "'+f.name+'"\n\nHow should this polar be used?\n\nOK = FREEZE — hold it exactly as imported (FIXED, learning paused).\nCancel = LEARN — use it as a starting point; your own sailing keeps refining it (LEARNED).');
+  const freeze = await xConfirm('Import "'+f.name+'"\n\nHow should this polar be used?\n\nOK = FREEZE — hold it exactly as imported (FIXED, learning paused).\nCancel = LEARN — use it as a starting point; your own sailing keeps refining it (LEARNED).');
   const rd=new FileReader();
   rd.onload=function(){
     const txt=String(rd.result||'');
-    if(txt.indexOf('BEFRONT1')<0){ alert('That file is not a boat polar (BEFRONT1) CSV.'); inp.value=''; return; }
+    if(txt.indexOf('BEFRONT1')<0){ xAlert('That file is not a boat polar (BEFRONT1) CSV.'); inp.value=''; return; }
     fetchWithTimeout(buildURL('/perfUploadFront?password='+encodeURIComponent(currentAdminPassword)+'&fixed='+(freeze?1:0)),{method:'POST',body:txt},10000)
-      .then(r=>{ if(r.ok){ alert('Polar imported — '+(freeze?'FIXED (learning paused)':'LEARNED (still refining from your sailing)')+'. The plot will refresh.'); fetchPerfCurve(); }
-                 else { r.text().then(t=>alert('Import failed: '+(t||('HTTP '+r.status)))).catch(()=>alert('Import failed: HTTP '+r.status)); } })
-      .catch(e=>alert('Import failed: '+(e&&e.message?e.message:e)));
+      .then(r=>{ if(r.ok){ xAlert('Polar imported — '+(freeze?'FIXED (learning paused)':'LEARNED (still refining from your sailing)')+'. The plot will refresh.'); fetchPerfCurve(); }
+                 else { r.text().then(t=>xAlert('Import failed: '+(t||('HTTP '+r.status)))).catch(()=>xAlert('Import failed: HTTP '+r.status)); } })
+      .catch(e=>xAlert('Import failed: '+(e&&e.message?e.message:e)));
     inp.value='';
   };
-  rd.onerror=function(){ alert('Could not read that file.'); inp.value=''; };
+  rd.onerror=function(){ xAlert('Could not read that file.'); inp.value=''; };
   rd.readAsText(f);
 }
 
@@ -2493,8 +2493,6 @@ const CSV3_FIELDS = [
     "cvGainMode",                    // CV gain mode: 0=Manual, 1=Auto (lambda-based)
     "EXTRA1",                        // reserved placeholder
     "cvPlantK",                      // measured plant gain K (V/A); ×10000
-    "cvPlantTau",                    // measured rise time tau (s); ×100
-    "cvPlantL",                      // measured dead time L (s); ×100
     "cvComputedKp",                  // Auto-computed Kp (12V-equiv); ×100
     "cvComputedKi",                  // Auto-computed Ki (12V-equiv); ×100
     "cvCrossover",                   // CV crossover ω_c (rad/s); ×100
@@ -3844,7 +3842,7 @@ function displayAvailableVersions() {
                         <span style="color: #666; font-size: 0.9em;">${notes}</span><br>
                         <span style="color: #888; font-size: 0.8em;">${size}</span>
                     </div>
-                    <form action="${buildURL('/get')}" method="GET" target="hidden-form" onsubmit="return confirmUpdate('${version}')">
+                    <form action="${buildURL('/get')}" method="GET" target="hidden-form" onsubmit="confirmUpdate(this, '${version}'); return false;">
                         <input type="hidden" name="password" class="password_field" value="${passwordValue}">
                         <input type="hidden" name="UpdateToVersion" value="${version}">
                         <input type="submit" value="Change to ${version}" class="btn-primary">
@@ -3859,14 +3857,14 @@ function displayAvailableVersions() {
     versionList.style.display = 'block';
 }
 
-function confirmUpdate(version) {
+function confirmUpdate(form, version) {
     // Password is guaranteed to exist because button can only be clicked after unlock
-    const confirmed = confirm(`⚠️ ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY ⚠️\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, the web interface will be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI. The Software Update sub-tab in Cloud Features will then confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Orange/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`);
-    if (confirmed) {
+    xConfirm(`ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, the web interface will be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI. The Software Update sub-tab in Cloud Features will then confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Orange/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`).then(confirmed => {
+        if (!confirmed) return;
         kickOffAppWebUpdate(version);  // No-op in browser; in iOS app downloads matching web bundle in parallel
         showUpdateInProgressOverlay(version);  // Same modal the forced-update path shows
-    }
-    return confirmed;
+        form.submit();
+    });
 }
 
 // Shows the "Update in progress…" full-screen overlay used by both the manual
@@ -3878,21 +3876,19 @@ function showUpdateInProgressOverlay(versionStr) {
     const overlay = document.getElementById('forced-update-overlay');
     if (!overlay) return;
     overlay.style.display = 'flex';
-    overlay.innerHTML = `
-      <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
-          <div style="margin-bottom: 12px; text-align:center; font-weight: bold; font-size: 16px;">
+    overlay.innerHTML = fuPanel(`
+          <div style="margin-bottom: 12px; font-weight: bold; font-size: 16px;">
               Update in progress…
           </div>
           <p style="margin: 8px 0 4px 0; font-size: 15px;">
               Downloading firmware v<strong>${versionStr}</strong> and rebooting.
           </p>
-          <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
+          <p style="margin: 12px 0 4px 0; font-size: 13px; color: #999;">
               Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux, or fully close and reopen the app on mobile. A regular refresh may show stale cached files.
           </p>
-          <p style="margin-top: 12px; font-size: 11px; color: #888;">
+          <p style="margin: 12px 0 0; font-size: 11px; color: #777;">
               Do not power-cycle the device during the update.
-          </p>
-      </div>`;
+          </p>`);
 }
 
 // When running inside the iOS (Capacitor) app, kick off a parallel download of
@@ -4072,13 +4068,6 @@ function handleForcedUpdate(data) {
         // If user already pressed Update Now within the last few minutes, show
         // a progress message instead of re-rendering the prompt every 5 s.
         const updateActive = Date.now() < forcedUpdateInProgressUntil;
-        const fuPanel = inner => `
-          <div style="background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box;">
-            <div style="padding:10px 16px 9px; border-bottom:1px solid #333; background:#252525; border-radius:8px 8px 0 0;">
-              <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Firmware Update</span>
-            </div>
-            <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; text-align:center;">${inner}</div>
-          </div>`;
         if (updateActive) {
             overlay.innerHTML = fuPanel(`
                   <div style="margin-bottom: 12px; font-weight: bold; font-size: 16px;">
@@ -4159,34 +4148,14 @@ function enableAllInputs() {
     });
 }
 
-function triggerForcedUpdate(versionStr) {
-    const confirmed = confirm('Update process begins in ~7 seconds and takes 2-3 minutes, includes re-boots.  Do not interfere.  Web interface will then be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI.  The Software Update sub-tab in Cloud Features will then show the new version #.  If process fails, you may try again with better internet.  If the whole thing bricks, you may start fresh with the factory golden image.  Continue?');
+async function triggerForcedUpdate(versionStr) {
+    const confirmed = await xConfirm('Update process begins in ~7 seconds and takes 2-3 minutes, includes re-boots.  Do not interfere.  Web interface will then be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI.  The Software Update sub-tab in Cloud Features will then show the new version #.  If process fails, you may try again with better internet.  If the whole thing bricks, you may start fresh with the factory golden image.  Continue?');
     if (confirmed) {
         kickOffAppWebUpdate(versionStr);  // No-op in browser; in iOS app downloads matching web bundle in parallel
-        // Suppress the prompt modal from re-rendering on subsequent CSV2 ticks
-        // while the update is in flight. 6 minutes = headroom for the 2-3 min
-        // typical OTA + reboot, then fall back to the prompt if it didn't take.
-        forcedUpdateInProgressUntil = Date.now() + 6 * 60 * 1000;
-        // Immediately re-render the modal as "in progress" so the user gets
-        // feedback before the next CSV2 tick (~5 s away).
-        const overlay = document.getElementById('forced-update-overlay');
-        if (overlay) {
-            overlay.innerHTML = `
-              <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
-                  <div style="margin-bottom: 12px; text-align:center; font-weight: bold; font-size: 16px;">
-                      Update in progress…
-                  </div>
-                  <p style="margin: 8px 0 4px 0; font-size: 15px;">
-                      Downloading firmware v<strong>${versionStr}</strong> and rebooting.
-                  </p>
-                  <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
-                      Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux, or fully close and reopen the app on mobile. A regular refresh may show stale cached files.
-                  </p>
-                  <p style="margin-top: 12px; font-size: 11px; color: #888;">
-                      Do not power-cycle the device during the update.
-                  </p>
-              </div>`;
-        }
+        // showUpdateInProgressOverlay sets forcedUpdateInProgressUntil (suppresses the prompt modal
+        // re-rendering on CSV2 ticks for 6 min) and renders "in progress" immediately so the user
+        // gets feedback before the next CSV2 tick (~5 s away).
+        showUpdateInProgressOverlay(versionStr);
 
         const form = document.createElement('form');
         form.action = buildURL('/get');
@@ -5088,7 +5057,7 @@ function updateAllEchosOptimized(data) {
         { key: 'FastSetpointRiseRate', id: 'FastSetpointRiseRate_echo', transform: v => (v / 100).toFixed(1) },
         { key: 'FastSetpointRiseWindowMs', id: 'FastSetpointRiseWindowMs_echo', transform: v => v },
         { key: 'FastSetpointRiseHeadroomV', id: 'FastSetpointRiseHeadroomV_echo', transform: v => (v / 100).toFixed(2) },
-        // cvPlantK / cvPlantTau / cvPlantL + the ω slider are rendered in updateCvGainModeUI() (drag-guarded).
+        // cvPlantK + the ω slider are rendered in updateCvGainModeUI() (drag-guarded).
         // cvComputedKp/Ki have no echo — cvFitStatus shows committed K_dc→Kp/Ki (JS-computed); CSV3 still carries them.
         { key: 'cvCrossover',       id: 'cvRespS_echo',           transform: v => Math.round(4 / ((v / 100) || 0.2)) },  // ω_c(rad/s)→settle seconds = 4/ω_c
         { key: 'cvPiZero',          id: 'cvPiZero_echo',          transform: v => (v / 100).toFixed(2) },
@@ -5307,7 +5276,7 @@ function handleAlternatorToggle(checkbox) {
 
     // Turning ON requires unlocked system
     if (isGoingOn && isLocked) {
-        // alert("Settings must be unlocked to turn alternator ON");   // i find this intrusive
+        // xAlert("Settings must be unlocked to turn alternator ON");   // i find this intrusive
         checkbox.checked = false;
         return false;
     }
@@ -5365,7 +5334,12 @@ const resetReasonLookup = {
     8: "Unknown reset",
     9: "Other watchdog",
     10: "SDIO reset",
-    11: "Scheduled maintenance restart"
+    11: "Scheduled maintenance restart",
+    12: "Power glitch (supply transient)",
+    13: "CPU lockup (double exception)",
+    14: "USB reset",
+    15: "JTAG reset",
+    16: "eFuse error"
 };
 
 
@@ -5533,7 +5507,7 @@ async function handleVesselInfoSave(event) {
 
     const selectedOrientation = form.querySelector('input[name="imuMountOrientation"]:checked');
     if (!selectedOrientation) {
-        alert('Please select a mounting orientation');
+        xAlert('Please select a mounting orientation');
         return;
     }
 
@@ -5563,7 +5537,7 @@ async function handleVesselInfoSave(event) {
     const _oldV = parseInt(window._nominalStored, 10);
     const _newV = vesselData.battery_voltage;
     if ((_newV === 12 || _newV === 24 || _newV === 48) && (_oldV === 12 || _oldV === 24 || _oldV === 48)
-        && _newV !== _oldV && !confirmVoltageRescale(_oldV, _newV)) {
+        && _newV !== _oldV && !(await confirmVoltageRescale(_oldV, _newV))) {
         return;  // user cancelled — leave the form unsaved
     }
 
@@ -5644,14 +5618,12 @@ const BATTDEF_FROM_STORED = {
 };
 const BATTDEF_MODE_NAMES = ['No Float (idle)', 'Voltage Float', 'Zero-Current Float'];
 
-// battSrc: BatteryCurrentSource (0 = INA228 shunt). Zero-current float regulates on the fast
-// INA battery-current channel, so a Victron-sourced install gets idle instead for lithium.
-function deriveBatteryDefaults(type, capAh, sysV, battSrc) {
+function deriveBatteryDefaults(type, capAh, sysV) {
     // bulkV/absV are deliberately conservative: LiFePO4 13.9 V ≈ high-90s% SoC with far less cell
     // stress than 14.4+; lead chemistries stay at the gentle end of full absorption (14.4) because
     // going LOWER chronically undercharges them (sulfation) — that's the conservative choice there.
     const T = {
-        lifepo4:   { bulkV: 13.9, absV: 13.9, floatV: null, durH: null, rebulkV: 13.1, socBlock: 90, socAllow: 80, tailC: 0.05, tailPct: 5, chgDetV: 13.8, limC: 0.50, cold: 1, peukert: 1.02, chgEff: 98, vAlmHi: 14.8, vAlmLo: 12.0, socAlm: 10 },
+        lifepo4:   { bulkV: 13.9, absV: 13.9, floatV: null, durH: null, rebulkV: 13.1, socBlock: 90, socAllow: 80, tailC: 0.05, tailPct: 5, chgDetV: 13.8, limC: 0.50, cold: 1, peukert: 1.05, chgEff: 99, vAlmHi: 14.8, vAlmLo: 11.9, socAlm: 10 },
         agm:       { bulkV: 14.4, absV: 14.4, floatV: 13.6, durH: 8,    rebulkV: 12.5, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.2, limC: 0.25, cold: 0, peukert: 1.10, chgEff: 93, vAlmHi: 15.0, vAlmLo: 11.8, socAlm: 40 },
         lead_acid: { bulkV: 14.4, absV: 14.4, floatV: 13.4, durH: 8,    rebulkV: 12.4, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.1, limC: 0.13, cold: 0, peukert: 1.25, chgEff: 88, vAlmHi: 15.2, vAlmLo: 11.5, socAlm: 40 }
     }[type];
@@ -5659,7 +5631,9 @@ function deriveBatteryDefaults(type, capAh, sysV, battSrc) {
     const kV = (sysV === 24) ? 2 : (sysV === 48) ? 4 : 1;   // 12V-equivalent voltages scale by class
     const C = (isFinite(capAh) && capAh > 0) ? capAh : 0;
     const r1 = v => Math.round(v * 10) / 10, r2 = v => Math.round(v * 100) / 100;
-    const useFloat = (type === 'lifepo4') ? ((battSrc === 0) ? 2 : 0) : 1;
+    // Lithium proposal is No Float: a full LFP bank wants the charge source to step aside, not hold
+    // a setpoint. Zero-Current Float stays available in Setup for owners who want house loads carried.
+    const useFloat = (type === 'lifepo4') ? 0 : 1;
 
     const rows = [];
     rows.push({ param: 'BulkVoltage', label: 'Bulk Voltage (V)', value: r2(T.bulkV * kV) });
@@ -5726,13 +5700,12 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt) {
         if (!firstSave && !battChanged) return;
         if (!currentAdminPassword) return;
 
-        // Current values from the device (raw NVS strings; hardware tier included for BatteryCurrentSource)
+        // Current values from the device (raw NVS strings)
         const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword) + '&includeHardware=1'), {}, 10000);
         if (!r.ok) return;
         const cfg = (await r.json()).config || {};
-        const battSrc = (cfg.BatteryCurrentSource !== undefined) ? (parseInt(cfg.BatteryCurrentSource, 10) || 0) : 0;
 
-        const der = deriveBatteryDefaults(type, Number(vessel.battery_capacity_ah), Number(vessel.battery_voltage), battSrc);
+        const der = deriveBatteryDefaults(type, Number(vessel.battery_capacity_ah), Number(vessel.battery_voltage));
         if (!der) return;
 
         let unchanged = 0;
@@ -5804,6 +5777,87 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt) {
     } catch (e) {
         diagLog('battery defaults proposal failed:', e);
     }
+}
+
+// ===== Themed alert/confirm (dark modal shell) =====
+// Replaces every native xAlert()/await xConfirm() in the app. One lazily-created overlay; concurrent
+// requests queue behind _xDlgQueue so a second dialog can never clobber the first's resolver.
+// xConfirm resolves true ONLY on an explicit OK click. Unlike native confirm, these do not
+// block the JS thread — callers await them.
+let _xDlgQueue = Promise.resolve();
+function _xDlgShow(msg, opts) {
+    const o = opts || {};
+    let ov = document.getElementById('xdlg-overlay');
+    if (!ov) {
+        ov = document.createElement('div');
+        ov.id = 'xdlg-overlay';
+        ov.style.cssText = 'display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:11000; align-items:center; justify-content:center;';
+        ov.innerHTML = '<div style="background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 60px); display:flex; flex-direction:column;">'
+            + '<div style="padding:10px 16px 9px; border-bottom:1px solid #333; background:#252525; border-radius:8px 8px 0 0;">'
+            + '<span id="xdlg-title" style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;"></span></div>'
+            + '<div style="padding:16px 20px 18px; overflow-y:auto;">'
+            + '<div id="xdlg-msg" style="font-size:13px; line-height:1.5; color:#ccc; white-space:pre-line; overflow-wrap:break-word;"></div>'
+            + '<input id="xdlg-input" type="text" style="display:none; width:100%; margin-top:12px; background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:7px 10px; font-size:14px; box-sizing:border-box;">'
+            + '<div id="xdlg-btns" style="display:flex; gap:10px; margin-top:16px;"></div>'
+            + '</div></div>';
+        document.body.appendChild(ov);
+    }
+    return new Promise(resolve => {
+        document.getElementById('xdlg-title').textContent = o.title || (o.confirm ? 'Confirm' : 'Notice');
+        document.getElementById('xdlg-msg').textContent = String(msg);
+        const btns = document.getElementById('xdlg-btns');
+        btns.innerHTML = '';
+        const inp = document.getElementById('xdlg-input');
+        inp.style.display = o.prompt ? 'block' : 'none';
+        inp.value = '';
+        let settled = false;
+        const done = v => { if (settled) return; settled = true; ov.style.display = 'none'; resolve(v); };
+        if (o.confirm) {
+            const cancel = document.createElement('button');
+            cancel.textContent = o.cancelText || 'Cancel';
+            cancel.style.cssText = 'flex:1; background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:5px; padding:9px 16px; cursor:pointer; font-size:13px;';
+            cancel.onclick = () => done(o.prompt ? null : false);
+            btns.appendChild(cancel);
+        }
+        const okB = document.createElement('button');
+        okB.textContent = o.okText || 'OK';
+        okB.style.cssText = 'flex:1; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:5px; padding:9px 16px; cursor:pointer;';
+        okB.onclick = () => done(o.prompt ? inp.value : true);
+        btns.appendChild(okB);
+        ov.style.display = 'flex';
+        if (o.prompt) inp.focus(); else okB.focus();
+    });
+}
+// Dark panel wrapper for the firmware-update overlay states (forced + manual paths).
+function fuPanel(inner) {
+    return `
+          <div style="background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box;">
+            <div style="padding:10px 16px 9px; border-bottom:1px solid #333; background:#252525; border-radius:8px 8px 0 0;">
+              <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Firmware Update</span>
+            </div>
+            <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; text-align:center;">${inner}</div>
+          </div>`;
+}
+function xAlert(msg, title) {
+    const p = _xDlgQueue.then(() => _xDlgShow(msg, { title: title }));
+    _xDlgQueue = p.then(() => { }, () => { });
+    return p;
+}
+function xPrompt(msg, opts) {
+    const p = _xDlgQueue.then(() => _xDlgShow(msg, Object.assign({ confirm: true, prompt: true }, opts || {})));
+    _xDlgQueue = p.then(() => { }, () => { });
+    return p;
+}
+function xConfirm(msg, opts) {
+    const p = _xDlgQueue.then(() => _xDlgShow(msg, Object.assign({ confirm: true }, opts || {})));
+    _xDlgQueue = p.then(() => { }, () => { });
+    return p;
+}
+// For inline onsubmit handlers: an async dialog can't block a native submit, so always return
+// false and re-submit programmatically on OK (form.submit() bypasses onsubmit — no loop).
+function xConfirmSubmit(form, msg) {
+    xConfirm(msg).then(ok => { if (ok) form.submit(); });
+    return false;
 }
 
 // ===== First-boot SoC seed popup =====
@@ -5961,7 +6015,7 @@ function handleProfileUpdate(event) {
     event.preventDefault();
 
     if (!currentAdminPassword) {
-        alert("Please unlock settings first");
+        xAlert("Please unlock settings first");
         return;
     }
 
@@ -6031,19 +6085,19 @@ function handleProfileUpdate(event) {
 }
 
 // Handle delete all data button
-function handleDeleteAllData() {
+async function handleDeleteAllData() {
     if (!currentAdminPassword) {
-        alert("Please unlock settings first");
+        xAlert("Please unlock settings first");
         return;
     }
 
-    if (!confirm('WARNING: This permanently deletes your cloud account and ALL associated cloud data including history, profile, and statistics. This CANNOT be undone.\n\nYour hardware device will continue working locally, but all cloud features are reset.\n\nType DELETE in the next prompt to confirm.')) {
+    if (!await xConfirm('WARNING: This permanently deletes your cloud account and ALL associated cloud data including history, profile, and statistics. This CANNOT be undone.\n\nYour hardware device will continue working locally, but all cloud features are reset.\n\nType DELETE in the next prompt to confirm.')) {
         return;
     }
 
-    const confirmation = prompt('Type DELETE to confirm:');
+    const confirmation = await xPrompt('Type DELETE to confirm:');
     if (confirmation !== 'DELETE') {
-        alert('Deletion cancelled');
+        xAlert('Deletion cancelled');
         return;
     }
 
@@ -6064,33 +6118,32 @@ function handleDeleteAllData() {
         }))
         .then(({ httpStatus, data, raw }) => {
             if (data.success) {
-                alert('Your account and all cloud data were deleted. Your device keeps working locally; cloud features have been reset.');
-                location.reload();
+                xAlert('Your account and all cloud data were deleted. Your device keeps working locally; cloud features have been reset.').then(() => location.reload());
             } else {
-                alert('Error: ' + (data.error || (raw && raw.trim()) || `HTTP ${httpStatus}` || 'Deletion failed'));
+                xAlert('Error: ' + (data.error || (raw && raw.trim()) || `HTTP ${httpStatus}` || 'Deletion failed'));
             }
         })
         .catch(err => {
-            alert('Network error: ' + err.message);
+            xAlert('Network error: ' + err.message);
         });
 }
 
-function resetThermalPID() {
-    if (!confirm('Reset the temperature controller? Its integrator and filter will be cleared and rebuilt.')) return;
+async function resetThermalPID() {
+    if (!await xConfirm('Reset the temperature controller? Its integrator and filter will be cleared and rebuilt.')) return;
     fetch(buildURL('/resetThermalPID'), { method: 'POST' })
         .then(r => r.ok ? console.log('Thermal PID reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
-function resetInnerPID() {
-    if (!confirm('Reset the output current controller? Its integrator will be zeroed and field output will ramp back up from zero under the slew limit.')) return;
+async function resetInnerPID() {
+    if (!await xConfirm('Reset the output current controller? Its integrator will be zeroed and field output will ramp back up from zero under the slew limit.')) return;
     fetch(buildURL('/resetInnerPID'), { method: 'POST' })
         .then(r => r.ok ? console.log('Output current PID reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
-function resetVoltageLoop() {
-    if (!confirm('Reset the voltage controller integrator? The voltage loop will rebuild from zero.')) return;
+async function resetVoltageLoop() {
+    if (!await xConfirm('Reset the voltage controller integrator? The voltage loop will rebuild from zero.')) return;
     fetch(buildURL('/resetVoltageLoop'), { method: 'POST' })
         .then(r => r.ok ? console.log('Voltage loop reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
@@ -6229,8 +6282,8 @@ function commitTuningScore() {
         });
 }
 
-function resetTuningLog() {
-    if (!confirm('Reset all tuning scores and live windows?')) return;
+async function resetTuningLog() {
+    if (!await xConfirm('Reset all tuning scores and live windows?')) return;
     fetch(buildURL('/resettuninglog'), { method: 'POST' })
         .then(() => fetchTuningLog())
         .catch(() => {});
@@ -6238,8 +6291,8 @@ function resetTuningLog() {
 
 // Manual reset for the Control Accuracy Scores panel. Clears all three loops' since-reset
 // accumulators on the device; the cells fall to dashes until fresh authority time accrues.
-function resetAccuracyScores() {
-    if (!confirm('Reset the Control Accuracy scores (RMS + worst overshoot for all three loops)?')) return;
+async function resetAccuracyScores() {
+    if (!await xConfirm('Reset the Control Accuracy scores (RMS + worst overshoot for all three loops)?')) return;
     fetch(buildURL('/resetAccuracyScores'), { method: 'POST' }).catch(() => {});
 }
 
@@ -6502,8 +6555,8 @@ function renderCVTuningLog(data) {
     }).join('');
 }
 
-function resetCVTuningLog() {
-    if (!confirm('Reset all CV tuning records?')) return;
+async function resetCVTuningLog() {
+    if (!await xConfirm('Reset all CV tuning records?')) return;
     fetch(buildURL('/resetcvtuninglog'), { method: 'POST' })
         .then(() => fetchCVTuningLog())
         .catch(() => {});
@@ -6576,8 +6629,8 @@ function renderSystemIDLog(data) {
     }).join('');
 }
 
-function resetSystemIDLog() {
-    if (!confirm('Reset all Plant Delay (SystemID) records?')) return;
+async function resetSystemIDLog() {
+    if (!await xConfirm('Reset all Plant Delay (SystemID) records?')) return;
     fetch(buildURL('/resetsystemidlog'), { method: 'POST' })
         .then(() => fetchSystemIDLog())
         .catch(() => {});
@@ -6728,12 +6781,12 @@ function renderTuningSweepLog(data) {
     }).join('');
 }
 
-function resetSysidSweepLog() {
-    if (!confirm('Reset all Sine Sweep history records?')) return;
+async function resetSysidSweepLog() {
+    if (!await xConfirm('Reset all Sine Sweep history records?')) return;
     fetch(buildURL('/resetsysidsweeplog'), { method: 'POST' }).then(() => fetchSysidSweepLog()).catch(() => {});
 }
-function resetTuningSweepLog() {
-    if (!confirm('Reset all Sine Sweep score log records?')) return;
+async function resetTuningSweepLog() {
+    if (!await xConfirm('Reset all Sine Sweep score log records?')) return;
     fetch(buildURL('/resettuningsweeplog'), { method: 'POST' }).then(() => fetchTuningSweepLog()).catch(() => {});
 }
 
@@ -7054,22 +7107,22 @@ function setCVAmpsRange(minVal, maxVal) {
     if (cvTuningPlot) cvTuningPlot.setScale('amps', { min: mn, max: mx });
 }
 
-function resetVoltageProtectionCounters() {
-    if (!confirm('Reset all voltage & current protection counters? Fast-overvoltage, excess-current, hardware overvoltage, hard overcurrent, spike, and sensor-disagreement counts will be cleared.')) return;
+async function resetVoltageProtectionCounters() {
+    if (!await xConfirm('Reset all voltage & current protection counters? Fast-overvoltage, excess-current, hardware overvoltage, hard overcurrent, spike, and sensor-disagreement counts will be cleared.')) return;
     fetch(buildURL('/resetVoltageProtectionCounters'), { method: 'POST' })
         .then(r => r.ok ? console.log('Voltage protection counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
-function resetThermalProtectionCounters() {
-    if (!confirm('Reset thermal protection event counters? Critical-temperature, sustained-temperature, and stale-sensor counts will be cleared.')) return;
+async function resetThermalProtectionCounters() {
+    if (!await xConfirm('Reset thermal protection event counters? Critical-temperature, sustained-temperature, and stale-sensor counts will be cleared.')) return;
     fetch(buildURL('/resetThermalProtectionCounters'), { method: 'POST' })
         .then(r => r.ok ? console.log('Thermal protection counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
-function resetTempTaskCounters() {
-    if (!confirm('Reset DS18B20 sensor health counters? All read/CRC/fail counts will be cleared.')) return;
+async function resetTempTaskCounters() {
+    if (!await xConfirm('Reset DS18B20 sensor health counters? All read/CRC/fail counts will be cleared.')) return;
     fetch(buildURL('/resetTempTaskCounters'), { method: 'POST' })
         .then(r => r.ok ? console.log('TempTask counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
@@ -7425,12 +7478,12 @@ async function loadConfigSharingInIframe() {
 function _configShareHandleMessage(e) {
     if (e.origin !== 'https://supabase-nine-ashy.vercel.app') return;
     if (!e.data || e.data.type !== 'LOAD_CONFIG_TO_DEVICE' || !e.data.config) return;
-    if (!currentAdminPassword) { alert('Please unlock settings first'); return; }
+    if (!currentAdminPassword) { xAlert('Please unlock settings first'); return; }
     const label = e.data.name ? ('"' + e.data.name + '"') : 'this shared configuration';
     const txt = JSON.stringify(e.data.config);
     cfgDiffPreview(txt, 0, label)
         .then(body => { if (body) _cfgPostImport(body, 0); })
-        .catch(err => alert('Preview failed: ' + (err && err.message ? err.message : err)));
+        .catch(err => xAlert('Preview failed: ' + (err && err.message ? err.message : err)));
 }
 window.addEventListener('message', _configShareHandleMessage);
 
@@ -7467,13 +7520,13 @@ function handleResetLatch() {
 
 
 //Factory Reset Logic
-function factoryReset() {
+async function factoryReset() {
     if (!currentAdminPassword) {
-        alert("You must be logged in to perform a factory reset.");
+        xAlert("You must be logged in to perform a factory reset.");
         return;
     }
-    const confirmation = confirm(
-        "⚠️ FACTORY RESET WARNING ⚠️\n\n" +
+    const confirmation = await xConfirm(
+        "FACTORY RESET WARNING\n\n" +
         "This will restore settings to factory defaults.\n" +
         "Device will restart.\n" +
         "All your settings will be lost.\n\n" +
@@ -7501,7 +7554,7 @@ function factoryReset() {
         })
         .then(text => {
             if (text.trim() === "OK") {
-                alert("Factory reset complete!\n\nThe device will restart.\nPage will reload in 5 seconds.");
+                xAlert("Factory reset complete!\n\nThe device will restart.\nPage will reload in 5 seconds.");
                 setTrackedTimeout(() => {
                     window.location.reload();
                 }, 5000);
@@ -7514,12 +7567,12 @@ function factoryReset() {
 
             // Timeout or network error means the device is resetting (expected behavior)
             if (err.message === 'Request timeout' || err.message.includes('Failed to fetch')) {
-                alert("Factory reset complete!\n\nThe device is restarting.\n\nPage will reload in some seconds.");
+                xAlert("Factory reset complete!\n\nThe device is restarting.\n\nPage will reload in some seconds.");
                 setTrackedTimeout(() => {
                     window.location.reload();
                 }, 8000);
             } else {
-                alert("Error during factory reset:\n\n" + err.message);
+                xAlert("Error during factory reset:\n\n" + err.message);
                 button.disabled = false;
                 button.textContent = 'Restore Defaults';
                 button.style.backgroundColor = '#555555';
@@ -7549,7 +7602,7 @@ function updateInlineStatus(isConnected) {
 //Reset buttons
 function resetParameter(parameterName) {
     if (!currentAdminPassword) {
-        alert("Please unlock settings first");
+        xAlert("Please unlock settings first");
         return;
     }
 
@@ -9199,11 +9252,11 @@ function setNewPassword() {
 
 function triggerWeatherUpdate() {
     if (!currentAdminPassword) {
-        alert("Please unlock settings first");
+        xAlert("Please unlock settings first");
         return;
     }
     if (window._debugData && window._debugData.fieldActiveStatus > 0) {
-        alert("The field must be disabled before updating weather data.");
+        xAlert("The field must be disabled before updating weather data.");
         return;
     }
 
@@ -9639,7 +9692,7 @@ function submitSimpleParam(paramName, val) {
 // newV/oldV and re-derives the hard-shutdown trip. This warns first with an old→new preview (read
 // from the live echo values) and returns false if the user cancels, so the save can be aborted.
 // oldV/newV are 12/24/48; window._nominalStored holds the last-loaded class (set from the vessel fetch).
-function confirmVoltageRescale(oldV, newV) {
+async function confirmVoltageRescale(oldV, newV) {
     const ratio = newV / oldV;
     const fmt = n => Number.isFinite(n) ? n.toFixed(2) : '?';
     const line = (label, echoId) => {
@@ -9671,7 +9724,7 @@ function confirmVoltageRescale(oldV, newV) {
         + dline('Duty ramp rate', 'DutyRampRate_echo', '%/s') + '\n\n'
         + 'It rescales from the CURRENT values, so if you already entered real ' + newV
         + 'V setpoints by hand, press Cancel.\n\nContinue and save?';
-    return confirm(msg);
+    return await xConfirm(msg);
 }
 
 // Level Zero: the offsets are averaged over ~2s on the device before they echo back, so show a
@@ -10056,34 +10109,42 @@ window.addEventListener("load", function () {
         // firmware wipes the knee tracker and flags the Min% floor commissioning step for re-run.
         // Warn first — if the user is only editing Cap (A)/(kW) or Min% cells, no breakpoint moved
         // and this never fires.
+        const markPending = () => {
+            dirtyInputs.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.classList.add('table-input-pending');
+                    pendingTableValues.set(id, {
+                        value: el.value,
+                        deadlineMs: Date.now() + 3000
+                    });
+                }
+            });
+
+            learningTableHasChanges = false;
+            dirtyInputs.clear();
+
+            const saveBtn = document.getElementById('learning-table-save-button');
+            if (saveBtn) saveBtn.style.display = 'none';
+
+            setTableStatus('learning-table-status', 'Saving...');
+        };
+
         const rpmBreakpointEdited = Array.from(dirtyInputs).some(id => id.startsWith('rpmTableRPMPoints'));
         if (rpmBreakpointEdited) {
-            const ok = confirm(
+            e.preventDefault();
+            const form = e.target;
+            xConfirm(
                 'You changed an RPM breakpoint.\n\n' +
                 'The learned Min% floors were measured at the old RPMs, so they will be CLEARED and ' +
                 'the Min% floor commissioning step will be flagged for re-run.\n\n' +
-                'Save this change?');
-            if (!ok) { e.preventDefault(); return false; }
+                'Save this change?').then(ok => {
+                    if (ok) { markPending(); form.submit(); }
+                });
+            return false;
         }
 
-        dirtyInputs.forEach(id => {
-            const el = document.getElementById(id);
-            if (el) {
-                el.classList.add('table-input-pending');
-                pendingTableValues.set(id, {
-                    value: el.value,
-                    deadlineMs: Date.now() + 3000
-                });
-            }
-        });
-
-        learningTableHasChanges = false;
-        dirtyInputs.clear();
-
-        const saveBtn = document.getElementById('learning-table-save-button');
-        if (saveBtn) saveBtn.style.display = 'none';
-
-        setTableStatus('learning-table-status', 'Saving...');
+        markPending();
     });
 
     document.getElementById('fuel-table-form').addEventListener('submit', function (e) {
@@ -12193,32 +12254,29 @@ max-width: 100%;     /* allow full width on mobile */
 
 
 
-function handleResetLearningTable() {
-    const confirmation = confirm(
-        "⚠️ RESET LEARNING TABLE ⚠️\n\n" +
+async function handleResetLearningTable(form) {
+    const confirmation = await xConfirm(
+        "RESET LEARNING TABLE\n\n" +
         "This will reset all learned and user-entered values to defaults.\n" +
         "Are you sure you want to continue?"
     );
 
-    if (!confirmation) {
-        return false;
-    }
+    if (!confirmation) return;
 
     // CRITICAL: Force re-initialization on next CSVData3
     window.learningTableInitialized = false;
     window.minDutyInitialized = false;
     window.resetLearningTableUI();
-    return true;
+    form.submit();
 }
 
-function handleClearBuffer() {
-    const confirmation = confirm(
-        "⚠️ CLEAR UPLOAD BUFFER ⚠️\n\n" +
+async function handleClearBuffer(form) {
+    if (await xConfirm(
+        "CLEAR UPLOAD BUFFER\n\n" +
         "This will delete all queued sensor uploads waiting to sync to the cloud.\n\n" +
         "Use this if you have corrupted data or want to clear failed uploads.\n\n" +
         "Are you sure?"
-    );
-    return confirmation;
+    )) form.submit();
 }
 
 // Zero a set of dashboard fields AND invalidate both update caches so the next
@@ -12241,7 +12299,7 @@ function resetDisplayValuesAndCaches(ids) {
 
 function handleResetPerfCounters() {
     if (!currentAdminPassword) {
-        alert("Please unlock settings first");
+        xAlert("Please unlock settings first");
         return;
     }
 
@@ -12275,7 +12333,7 @@ function handleResetPerfCounters() {
 }
 
 function handleResetAccelSession() {
-    if (!currentAdminPassword) { alert("Please unlock settings first"); return; }
+    if (!currentAdminPassword) { xAlert("Please unlock settings first"); return; }
     const params = new URLSearchParams({ password: currentAdminPassword, ResetAccelSession: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(() => {
@@ -12290,9 +12348,9 @@ function handleResetAccelSession() {
         .catch(err => diagError('Reset accel session failed:', err));
 }
 
-function handleResetAccelLifetime() {
-    if (!currentAdminPassword) { alert("Please unlock settings first"); return; }
-    if (!confirm("Reset ALL lifetime motion stats? This clears max heel/pitch, slam records, and capsize/pitchpole counts from the device's saved memory. Cannot be undone.")) return;
+async function handleResetAccelLifetime() {
+    if (!currentAdminPassword) { xAlert("Please unlock settings first"); return; }
+    if (!await xConfirm("Reset ALL lifetime motion stats? This clears max heel/pitch, slam records, and capsize/pitchpole counts from the device's saved memory. Cannot be undone.")) return;
     const params = new URLSearchParams({ password: currentAdminPassword, ResetAccelLifetime: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(() => {
@@ -12306,12 +12364,11 @@ function handleResetAccelLifetime() {
         .catch(err => diagError('Reset accel lifetime failed:', err));
 }
 
-function handleClearOverheatHistory() {
-    const confirmation = confirm(
-        "⚠️ CLEAR OVERHEAT HISTORY ⚠️\n\n" +
+async function handleClearOverheatHistory(form) {
+    if (await xConfirm(
+        "CLEAR OVERHEAT HISTORY\n\n" +
         "This will reset all overheat counters, timestamps, and accumulated safe time to zero.\n\n"
-    );
-    return confirmation;
+    )) form.submit();
 }
 
 function updateLearningTableHighlight(data) {
@@ -12386,7 +12443,7 @@ function resizeLivePlotsOnShow() {
 
 function showMainTab(tabName) {
     if (tabName === 'cloudfeatures' && !currentAdminPassword) {
-        alert('Please unlock settings first to access Cloud Features');
+        xAlert('Please unlock settings first to access Cloud Features');
         return;
     }
 
@@ -12394,7 +12451,7 @@ function showMainTab(tabName) {
     if (tabName !== 'settings' && !vesselInfoComplete) {
         // Only alert if user is actively trying to switch (not on initial load)
         if (document.getElementById(tabName)) {
-            alert('Please complete Vessel Info in Setup tab first');
+            xAlert('Please complete Vessel Info in Setup tab first');
         }
         showMainTab('settings');
         showSubTab('settings', 'vessel-info');
@@ -12448,14 +12505,14 @@ function showMainTab(tabName) {
 
 function showRegistrationRequiredModal(featureName) {
     const message = `Please complete Registration first to access ${featureName}.  If you've already registered, try waiting a few seconds for the Registration info to populate before switching subtabs`;
-    alert(message);
+    xAlert(message);
 }
 
 function showSubTab(parentTab, subTabName, evt = null) {
 
     // Block all subtabs except Setup > Vessel Info until vessel info complete
     if (!vesselInfoComplete && !(parentTab === 'settings' && subTabName === 'vessel-info')) {
-        alert('Please complete Vessel Info in Setup tab first');
+        xAlert('Please complete Vessel Info in Setup tab first');
         showMainTab('settings');
         showSubTab('settings', 'vessel-info');
         return;
@@ -12604,6 +12661,18 @@ function showAltTab(group, panelId) {
             }
         });
 
+}
+
+// Paired shortcuts for the CV-Mode voltage setpoint and the Voltage-loop tuning tab,
+// which are edited back-to-back during tuning.
+function goToVoltageTuning() {
+    showMainTab('tuning');
+    showSubTab('tuning', 'voltage');
+}
+function goToCVMode() {
+    showMainTab('settings');
+    showSubTab('settings', 'alternator');
+    showAltTab('primary', 'alt-panel-vt-mode');
 }
 
 // Frozen page response stuff
@@ -12806,7 +12875,7 @@ function validateFuelTable() {
     }
 
     if (errors.length > 0) {
-        alert('Fuel Table Validation Error:\n\n' + errors.join('\n'));
+        xAlert('Fuel Table Validation Error:\n\n' + errors.join('\n'));
         return false;
     }
 
@@ -12851,7 +12920,7 @@ function validateLearningTable() {
     }
 
     if (errors.length > 0) {
-        alert('Learning Table Validation Error:\n\n' + errors.join('\n'));
+        xAlert('Learning Table Validation Error:\n\n' + errors.join('\n'));
         return false;
     }
     return true;
@@ -12892,7 +12961,7 @@ function setupInputValidation() {
 //Dynamic adjustment factors
 function resetDynamicShuntGain() {
     if (!currentAdminPassword) {
-        alert("Please unlock settings first");
+        xAlert("Please unlock settings first");
         return;
     }
     updatePasswordFields();
@@ -12910,7 +12979,7 @@ function resetDynamicShuntGain() {
 
 function resetDynamicAltZero() {
     if (!currentAdminPassword) {
-        alert("Please unlock settings first");
+        xAlert("Please unlock settings first");
         return;
     }
     updatePasswordFields();
@@ -12927,7 +12996,7 @@ function resetDynamicAltZero() {
 }
 
 
-// Small cloud-state badge on the Charging-System Health + Speed (boat performance) panels. Uses signals the
+// Small cloud-state badge on the Charging System Health + Speed (boat performance) panels. Uses signals the
 // dashboard already has — currentMode (AP=1) and the CloudFeatures toggle. Local-only states are grey;
 // cloud-on is green. (A "synced N ago" upgrade would need a firmware sync-timestamp — not wired yet.)
 function updateCloudStatus() {
@@ -13209,7 +13278,7 @@ function warnHighVoltageOpenLoop(modeName) {
     const nsv = parseInt(window._nominalStored, 10) || 12;
     if (nsv <= 12) return;
     const mult = nsv / 12;
-    alert('⚠ ' + modeName + ' on a ' + nsv + 'V system\n\n'
+    xAlert(modeName + ' on a ' + nsv + 'V system\n\n'
         + modeName + ' commands field duty directly, bypassing the current-limiting loop. At ' + nsv
         + 'V each duty-percent drives about ' + mult + '× the field current of a 12V system, so a '
         + 'duty that is safe at 12V can over-current the field here.\n\n'
@@ -15496,11 +15565,7 @@ function getEchoNumber(id) {
 }
 
 function showValidationError(message) {
-    alert(message);
-}
-
-function showValidationWarning(message) {
-    return confirm(message + '\n\nProceed anyway?');
+    xAlert(message);
 }
 
 function validateBatterySettings(proposedChanges) {
@@ -15651,14 +15716,17 @@ function validateAndSubmitBatteryNumber(form, fieldName) {
     }
 
     if (result.warning) {
-        if (!showValidationWarning(result.warning)) return false;
+        xConfirm(result.warning + '\n\nProceed anyway?').then(ok => {
+            if (ok) { form.submit(); submitMessage(); }
+        });
+        return false;
     }
 
     submitMessage();
     return true;
 }
 
-function validateAndSubmitBatteryToggle(checkbox, fieldName) {
+async function validateAndSubmitBatteryToggle(checkbox, fieldName) {
     const proposedValue = checkbox.checked ? 1 : 0;
     const result = validateBatterySettings({ [fieldName]: proposedValue });
 
@@ -15669,7 +15737,7 @@ function validateAndSubmitBatteryToggle(checkbox, fieldName) {
     }
 
     if (result.warning) {
-        if (!showValidationWarning(result.warning)) {
+        if (!(await xConfirm(result.warning + '\n\nProceed anyway?'))) {
             checkbox.checked = !checkbox.checked;
             return false;
         }
@@ -16202,7 +16270,7 @@ function turnOffActiveTest() {
     if (!test) return;
     if (test === 'sysid') { abortSystemIDTest(); return; }
     const pw = currentAdminPassword;
-    if (!pw) { alert('Enter your password first.'); return; }
+    if (!pw) { xAlert('Enter your password first.'); return; }
     const paramMap = { curr: 'TuningMode', cv: 'CVTuningMode' };
     const param = paramMap[test];
     if (!param) return;
@@ -16228,13 +16296,13 @@ function checkCVTestGate(checkbox) {
     const conflict = getActiveTestKey();
     if (conflict && conflict !== 'cv') {
         checkbox.checked = false;
-        alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
+        xAlert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
         return false;
     }
     const voltageStages = [CS_ABSORPTION, CS_FLOAT, CS_MAINTAIN, CS_TARGET_V];
     if (!voltageStages.includes(gLastChargeStage)) {
         checkbox.checked = false;
-        alert('Waveform Generator requires voltage-controlled mode.\n\nThe CV loop is only active in ABSORPTION, FLOAT, MAINTAIN, or TARGET V. In BULK the voltage loop has no authority and the test produces no useful data.\n\nEnter a voltage-controlled stage, then enable the test.');
+        xAlert('Waveform Generator requires voltage-controlled mode.\n\nThe CV loop is only active in ABSORPTION, FLOAT, MAINTAIN, or TARGET V. In BULK the voltage loop has no authority and the test produces no useful data.\n\nEnter a voltage-controlled stage, then enable the test.');
         return false;
     }
 
@@ -16252,7 +16320,7 @@ function checkCVTestGate(checkbox) {
             const stepTarget = absV + amplitude;
             if (stepTarget > bulkV) {
                 checkbox.checked = false;
-                alert(
+                xAlert(
                     `Waveform Generator blocked: the HIGH-phase target (${stepTarget.toFixed(2)} V) exceeds BulkVoltage (${bulkV.toFixed(2)} V).\n\n` +
                     `The charging stage machine runs continuously during this test. Stepping the voltage target above BulkVoltage can cause a stage transition that cuts the output mid-test.\n\n` +
                     `Reduce Wave Amplitude, raise BulkVoltage, or use TARGET V mode (which suppresses the stage machine) to run this step test safely.`
@@ -16445,14 +16513,14 @@ function _setTestBtnRunning(running) {
 // arm the generator and run continuously until Stop; 2 sine sweep arms then fires the closed-loop
 // frequency sweep. Pressing again while running (Stop Test) disarms.
 function tuningToggleTest() {
-    if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
+    if (!currentAdminPassword) { xAlert("Please unlock settings first."); return; }
     // Already running → this press is a Stop.
     if (parseInt(getField("TuningMode") ?? 0) === 1) { tuningStopTest(); return; }
 
     // Another loop's test must not be running.
     const conflict = getActiveTestKey();
     if (conflict && conflict !== 'curr') {
-        alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
+        xAlert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
         return;
     }
 
@@ -16602,7 +16670,7 @@ function renderTuningBode(data) {
 
 function openSystemIDModal() {
     if (!currentAdminPassword) {
-        alert("Please unlock settings first.");
+        xAlert("Please unlock settings first.");
         return;
     }
     // Reset panel position to default top-right on each open
@@ -16822,7 +16890,7 @@ function confirmSystemIDStart() {
             }
         })
         .catch(err => {
-            alert("Failed to send start command: " + err);
+            xAlert("Failed to send start command: " + err);
         });
 }
 
@@ -16979,7 +17047,7 @@ function sysidStartProgressPoll() {
 
         if (elapsed > maxWaitMs) {
             clearInterval(sysidPollInterval); sysidPollInterval = null;
-            alert("Plant Delay test timed out after " + (elapsed / 1000).toFixed(0) + "s. Check the Console tab for details.");
+            xAlert("Plant Delay test timed out after " + (elapsed / 1000).toFixed(0) + "s. Check the Console tab for details.");
             closeSystemIDModal();
         }
     }, pollMs);
@@ -17474,11 +17542,11 @@ function commissionPrimaryAction() {
 // at the end, or the network dropped between the last step and Finish). Sends commissionDone=1 to
 // persist the new tune and flip the badge to COMMISSIONED — without reopening the wizard or reverting.
 function commissionCommitUncommitted() {
-    if (!currentAdminPassword) { alert('Unlock settings first (enter the admin password).'); return; }
+    if (!currentAdminPassword) { xAlert('Unlock settings first (enter the admin password).'); return; }
     cxGet('commissionDone=1').then(() => {
         cxLastState = 2;
         renderCommissionStatus(2, CX_PHASES.length, cxLastMask);   // phase=length clears the ▶ marker
-    }).catch(e => alert('Finish failed: ' + e));
+    }).catch(e => xAlert('Finish failed: ' + e));
 }
 // Wizard navigation honouring the plan: next selected stage in 1..last, or -1 if none remain.
 function cxNextSelected(from) { for (let i = from + 1; i < CX_PHASES.length; i++) if (cxPlan[i]) return i; return -1; }
@@ -17501,6 +17569,30 @@ function cxNextBtn(markDone = true, primary = true) {
     const label = (nx === -1) ? 'Finish' : ('Next: ' + CX_PHASES[nx] + ' →');
     const cls = primary ? 'btn-primary btn-sm' : 'btn-secondary btn-sm';
     return '<button onclick="cxAdvance(' + markDone + ')" class="' + cls + '">' + label + '</button>';
+}
+// ── Clean-pass chaining across the cruise-hold stretch (Field curve → Plant fit → Verify) ──
+// These stages share one held engine speed, so when a result is CLEAN the primary button applies
+// it AND starts the next stage's test in one press (instead of Apply → Next → Run). Only the
+// stages in CX_AUTORUN are ever auto-started — Disturbances needs a drop to idle and CV plant fit
+// has its own load-steady precondition, so a human press stays required there. Any warning or
+// marginal result falls back to the plain Apply primary and today's manual flow.
+const CX_AUTORUN = { 2: () => cxPlantStart(false), 3: () => cxVerifyStart() };
+// applyFn = global apply-function name; it must accept (run) and call cxAdvanceRun() when true.
+function cxApplyRunBtn(applyFn, clean) {
+    const nx = cxNextSelected(cx.phase);
+    if (clean && CX_AUTORUN[nx])
+        return '<button onclick="' + applyFn + '(true)" class="btn-primary btn-sm">Apply &amp; run ' + CX_PHASES[nx] + ' →</button> ' +
+               '<button onclick="' + applyFn + '()" class="btn-secondary btn-sm">Apply only</button>';
+    return '<button onclick="' + applyFn + '()" class="btn-primary btn-sm">Apply</button>';
+}
+// cxAdvance(true) plus an immediate start of the next stage's test.
+function cxAdvanceRun() {
+    const nx = cxNextSelected(cx.phase);
+    cxGet('commissionStageDone=' + cx.phase).finally(() => {
+        if (nx === -1) { cxFinish(); return; }
+        cxGoto(nx);
+        if (CX_AUTORUN[nx]) CX_AUTORUN[nx]();
+    });
 }
 
 function cxStopPoll() { if (cxPollTimer) { clearInterval(cxPollTimer); cxPollTimer = null; } }
@@ -17599,7 +17691,7 @@ function cxGet(params) {
 }
 
 function openCommissionModal() {
-    if (!currentAdminPassword) { alert('Unlock settings first (enter the admin password).'); return; }
+    if (!currentAdminPassword) { xAlert('Unlock settings first (enter the admin password).'); return; }
     // In-session resume: if a flow is already underway, reopen exactly where it was.
     if (!cx) cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false };
     document.getElementById('commission-modal-overlay').style.display = 'block';
@@ -17740,7 +17832,7 @@ function cxPrepRefresh() {
 function cxStart() {
     // commissionStart snapshots the tune + marks Prep done; jump to the first selected stage
     // (or finish immediately if the plan is Prep-only).
-    cxGet('commissionStart=1').then(() => { const nx = cxNextSelected(0); if (nx === -1) cxFinish(); else cxGoto(nx); }).catch(e => alert('Start failed: ' + e));
+    cxGet('commissionStart=1').then(() => { const nx = cxNextSelected(0); if (nx === -1) cxFinish(); else cxGoto(nx); }).catch(e => xAlert('Start failed: ' + e));
 }
 
 // ── Step 2 · Field curve — duty→amps map + saturation knee ───────────────────
@@ -17765,8 +17857,8 @@ function cxRenderField(b) {
     }
     if (!cx.fieldRunning && !r) body += '<p style="font-size:15px;line-height:1.5;"><strong>Raise engine speed to something within normal cruising range, press Run, and keep it roughly steady until the test finishes — best effort is fine, it doesn\'t have to be perfect.</strong></p><button onclick="cxFieldStart()" class="btn-primary" style="width:100%;padding:9px;">Run field-% ramp</button>';
     else if (!cx.fieldRunning && r) {
-        // One primary action: Apply until applied, then the advance button. Re-run stays secondary.
-        const action = cx.fieldApplied ? cxNextBtn(true) : '<button onclick="cxFieldApply()" class="btn-primary btn-sm">Apply</button>';
+        // One primary action: clean result → Apply & run next (cxApplyRunBtn); applied → advance.
+        const action = cx.fieldApplied ? cxNextBtn(true) : cxApplyRunBtn('cxFieldApply', r.ok && !r.ceilLimited);
         body += '<div style="margin-top:12px;">' + action + ' <button onclick="cxFieldStart()" class="btn-secondary btn-sm">Re-run</button></div>';
     }
     b.innerHTML = body;
@@ -17794,14 +17886,14 @@ function cxFieldStart() {
                 }
             }).catch(() => { });
         }, 1500);
-    }).catch(e => { cx.fieldRunning = false; alert('Field ramp start failed: ' + e); commissionRender(); });
+    }).catch(e => { cx.fieldRunning = false; xAlert('Field ramp start failed: ' + e); commissionRender(); });
 }
-function cxFieldApply() {
+function cxFieldApply(run = false) {
     const r = cx.fieldResult; if (!r) return;
     cxGet('SystemIDStabilizeAmps=' + r.propStabA.toFixed(1))
         .then(() => cxGet('SystemIDStepAmplitude=' + r.propStepPct.toFixed(2)))
-        .then(() => { cx.fieldApplied = true; commissionRender(); })
-        .catch(e => alert('Apply failed: ' + e));
+        .then(() => { cx.fieldApplied = true; if (run) cxAdvanceRun(); else commissionRender(); })
+        .catch(e => xAlert('Apply failed: ' + e));
 }
 
 // ── Step 8 · Min% floor — GUIDED onset-knee sweeps at 3 DESCENDING RPMs → Min% column ──
@@ -17823,8 +17915,9 @@ function cxRenderKnee(b) {
     const anchors = cx.kneeAnchors || [];
     const NSTEP = CX_KNEE_STEPS.length;
     const step = anchors.length;          // 0..2 = next guided capture; >=3 = review & approve
-    let body = '<p style="font-size:15px;line-height:1.5;">In this step you\'ll hold three speeds while the regulator ' +
-        'searches for the onset knee (where the field begins to produce an output current).</p>';
+    let body = '<p style="font-size:15px;line-height:1.5;">In this final step you\'ll hold three speeds, starting at your highest ' +
+        'working speed now that the engine is warm, while the regulator searches for the onset knee ' +
+        '(where the field begins to produce an output current).</p>';
 
     // Progress dots — done (✓), current (highlighted), pending.
     let dots = '';
@@ -17908,7 +18001,7 @@ function cxKneeStart() {
                     cxStopPoll();
                     if (j.ok && j.kneeDuty > 0) {         // good point → commit and advance to next step
                         cxGet('addKneeAnchor=1').then(() => { cx.kneeRunning = false; cxKneeRefresh(); })
-                            .catch(e => { cx.kneeRunning = false; alert('Add failed: ' + e); commissionRender(); });
+                            .catch(e => { cx.kneeRunning = false; xAlert('Add failed: ' + e); commissionRender(); });
                     } else {                              // no clean onset → record nothing, let them retry
                         cx.kneeRunning = false; cx.kneeNoOnset = true; cx.kneeCeilLimited = !!j.ceilLimited; commissionRender();
                     }
@@ -17919,10 +18012,10 @@ function cxKneeStart() {
                 }
             }).catch(() => { });
         }, 1500);
-    }).catch(e => { cx.kneeRunning = false; alert('Automatic current sweep start failed: ' + e); commissionRender(); });
+    }).catch(e => { cx.kneeRunning = false; xAlert('Automatic current sweep start failed: ' + e); commissionRender(); });
 }
-function cxKneeApply() { cxGet('applyKneeCurve=1').then(() => { cx.kneeApplied = true; commissionRender(); }).catch(e => alert('Apply failed: ' + e)); }
-function cxKneeRestart() { cxGet('clearKneeAnchors=1').then(() => { cx.kneeApplied = false; cx.kneeNoOnset = false; cx.kneeCeilLimited = false; cx.kneeAbort = null; cx.kneeFitResid = undefined; cx.kneeFitWorstIdx = -1; cxKneeRefresh(); }).catch(e => alert('Clear failed: ' + e)); }
+function cxKneeApply() { cxGet('applyKneeCurve=1').then(() => { cx.kneeApplied = true; commissionRender(); }).catch(e => xAlert('Apply failed: ' + e)); }
+function cxKneeRestart() { cxGet('clearKneeAnchors=1').then(() => { cx.kneeApplied = false; cx.kneeNoOnset = false; cx.kneeCeilLimited = false; cx.kneeAbort = null; cx.kneeFitResid = undefined; cx.kneeFitWorstIdx = -1; cxKneeRefresh(); }).catch(e => xAlert('Clear failed: ' + e)); }
 function cxKneeRefresh() {
     fetch(buildURL('/kneesweep.json')).then(r => r.json()).then(j => {
         cx.kneeAnchors = j.anchors || [];
@@ -17944,10 +18037,11 @@ function cxRenderPlant(b) {
             'Proposed <strong>Kp ' + fit.Kp.toFixed(3) + '</strong>, <strong>Ki ' + fit.Ki.toFixed(3) + '</strong>; filters τ/3=' + Math.round(fit.tauMs / 3) + ' ms, voltage τ=' + Math.round(fit.tauMs) + ' ms.' +
             (cx.plantApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>';
     }
-    if (!cx.plantRunning && !fit) body += '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine back to a typical cruising speed, hold, and press Run.</strong></p><button onclick="cxPlantStart(false)" class="btn-primary" style="width:100%;padding:9px;">Run plant sine sweep</button>';
+    // Speed instruction tracks the plan: after the Field curve the engine is already at cruise.
+    if (!cx.plantRunning && !fit) body += '<p style="font-size:15px;line-height:1.5;"><strong>' + (cxPlan[1] ? 'Keep the engine steady at the same cruising speed and press Run.' : 'Bring the engine to a typical cruising speed, hold, and press Run.') + '</strong></p><button onclick="cxPlantStart(false)" class="btn-primary" style="width:100%;padding:9px;">Run plant sine sweep</button>';
     else if (!cx.plantRunning && fit && fit.ok) {
-        // One primary action: Apply until applied, then the advance button. Re-run stays secondary.
-        const action = cx.plantApplied ? cxNextBtn(true) : '<button onclick="cxPlantApply()" class="btn-primary btn-sm">Apply</button>';
+        // One primary action: clean fit → Apply & run next (cxApplyRunBtn); applied → advance.
+        const action = cx.plantApplied ? cxNextBtn(true) : cxApplyRunBtn('cxPlantApply', true);
         body += '<div style="margin-top:12px;">' + action + ' <button onclick="cxPlantStart(false)" class="btn-secondary btn-sm">Re-run</button></div>';
     }
     b.innerHTML = body;
@@ -17964,8 +18058,8 @@ function cxPlantStart(wide) {
             cxPollTimer = setInterval(() => {
                 waited += 1.5;
                 fetch(buildURL('/sysidbode')).then(r => r.json()).then(j => {
-                    if (j.aborted) { cxStopPoll(); cx.plantRunning = false; alert('Plant sweep aborted — a protection fired during the test (see console). Re-run once charging resumes.'); commissionRender(); return; }
-                    if (waited > 240 && !j.active && !j.ready) { cxStopPoll(); cx.plantRunning = false; alert('Plant sweep never reported starting (browser timeout, not a firmware error). Confirm you are in AUTO mode with the engine turning; open the Console tab to see if the regulator rejected the request, then run again.'); commissionRender(); return; }
+                    if (j.aborted) { cxStopPoll(); cx.plantRunning = false; xAlert('Plant sweep aborted — a protection fired during the test (see console). Re-run once charging resumes.'); commissionRender(); return; }
+                    if (waited > 240 && !j.active && !j.ready) { cxStopPoll(); cx.plantRunning = false; xAlert('Plant sweep never reported starting (browser timeout, not a firmware error). Confirm you are in AUTO mode with the engine turning; open the Console tab to see if the regulator rejected the request, then run again.'); commissionRender(); return; }
                     if (j.ready && !j.active) {
                         cxStopPoll();
                         const pts = j.pts;
@@ -17984,9 +18078,9 @@ function cxPlantStart(wide) {
                     }
                 }).catch(() => { });
             }, 1500);
-        }).catch(e => { cx.plantRunning = false; alert('Sweep start failed: ' + e); commissionRender(); });
+        }).catch(e => { cx.plantRunning = false; xAlert('Sweep start failed: ' + e); commissionRender(); });
 }
-function cxPlantApply() {
+function cxPlantApply(run = false) {
     const f = cx.fit; if (!f || !f.ok) return;
     const tcFast = Math.max(1, Math.round(f.tauMs / 3)), tcSlow = Math.max(1, Math.round(f.tauMs));
     cxGet('PidKp=' + f.Kp.toFixed(4))
@@ -17994,8 +18088,8 @@ function cxPlantApply() {
         .then(() => cxGet('InputFilterTC=' + tcFast))
         .then(() => cxGet('OutputPIDFilterTC=' + tcFast))
         .then(() => cxGet('VoltageFilterTC=' + tcSlow))
-        .then(() => { cx.plantApplied = true; commissionRender(); })
-        .catch(e => alert('Apply failed: ' + e));
+        .then(() => { cx.plantApplied = true; if (run) cxAdvanceRun(); else commissionRender(); })
+        .catch(e => xAlert('Apply failed: ' + e));
 }
 
 // ── Step 4 · Verify — closed-loop stability check ────────────────────────────
@@ -18010,7 +18104,7 @@ function cxRenderVerify(b) {
             (v.pass ? '<span style="color:#5a5;">Passed — loop is stable.</span>' : '<span style="color:#f0a500;">Peak gain above 1.15 — loop is too aggressive.</span>') + '</div>' +
             (v.pass ? '' : '<button onclick="cxDetune()" class="btn-primary btn-sm">Detune 20% &amp; re-verify</button>');
     }
-    if (!cx.verifyRunning && !cx.verify) body += '<p style="font-size:15px;line-height:1.5;"><strong>Keep holding a cruising engine speed and press Run.</strong></p><button onclick="cxVerifyStart()" class="btn-primary" style="width:100%;padding:9px;">Run closed-loop verify</button>';
+    if (!cx.verifyRunning && !cx.verify) body += '<p style="font-size:15px;line-height:1.5;"><strong>' + ((cxPlan[1] || cxPlan[2]) ? 'Keep the engine steady at the same cruising speed and press Run.' : 'Bring the engine to a typical cruising speed, hold, and press Run.') + '</strong></p><button onclick="cxVerifyStart()" class="btn-primary" style="width:100%;padding:9px;">Run closed-loop verify</button>';
     else if (!cx.verifyRunning && cx.verify) {
         // cxVerifyDone leaves closed-loop tuning (TuningMode=0) before advancing, so it builds the
         // advance button inline instead of cxNextBtn. Pass → advance is the one primary action;
@@ -18050,7 +18144,7 @@ function cxVerifyStart() {
                     }
                 }).catch(() => { });
             }, 1500);
-        }).catch(e => { cx.verifyRunning = false; alert('Verify start failed: ' + e); commissionRender(); });
+        }).catch(e => { cx.verifyRunning = false; xAlert('Verify start failed: ' + e); commissionRender(); });
 }
 function cxDetune() {
     const kp = sysidFitKp * 0.8, ki = sysidFitKi * 0.8;
@@ -18216,7 +18310,8 @@ function cxRenderCVPlant(b) {
                 '<button onclick="cxCVFitDownload()" class="btn-secondary btn-sm">Download raw data</button>';
         }
     }
-    if (!cx.cvFitRunning && !f) body += '<p style="font-size:15px;line-height:1.5;"><strong>Hold a steady cruising RPM and press Run.</strong> The test briefly steps the charge current and measures how the battery responds, then proposes the voltage-loop gains.</p>' +
+    // After the Disturbances sweep the engine could be anywhere in the band — bring it back to cruise.
+    if (!cx.cvFitRunning && !f) body += '<p style="font-size:15px;line-height:1.5;"><strong>' + (cxPlan[4] ? 'Bring the engine back up to a steady cruising speed, hold, and press Run.' : 'Hold a steady cruising speed and press Run.') + '</strong> The test briefly steps the charge current and measures how the battery responds, then proposes the voltage-loop gains.</p>' +
         '<p style="font-size:13px;color:#f0a500;line-height:1.45;">⚠️ Don\'t switch other loads on or off during the test (inverter, thrusters, fridge, windlass…) — it spoils the reading.</p>' +
         '<button onclick="cxCVPlantStart()" class="btn-primary" style="width:100%;padding:9px;">Run CV plant fit</button>';
     else if (!cx.cvFitRunning && f) {
@@ -18255,7 +18350,7 @@ function cxCVPlantStart() {
     const fail = e => {
         cx.cvFitDone = true; if (cvFitCapture) cvFitCapture.active = false; cx.cvFitRunning = false;
         cxGet('tuningSquareAbrupt=0&TuningMode=0').catch(() => { });
-        alert('CV plant fit failed: ' + e); commissionRender();
+        xAlert('CV plant fit failed: ' + e); commissionRender();
     };
     commissionRender();
     cmd(BASE_A).then(async () => {
@@ -18295,13 +18390,11 @@ function cxCVPlantApply() {
     const f = cx.cvFit; if (!f || !f.ok) return;
     // Store the measured finite-horizon gain K20 (raw V/A at the pack) into cvPlantK; recomputeCvGains()
     // applies the 12V-block normalization + the exact PI magnitude condition and switches CV gains to Auto.
-    // cvPlantTau/cvPlantL are retired (write 0); the confidence record lives in the cvfit.csv download.
+    // The fit confidence record lives in the cvfit.csv download.
     cxGet('cvPlantK=' + f.K20.toFixed(5))
-        .then(() => cxGet('cvPlantTau=0'))
-        .then(() => cxGet('cvPlantL=0'))
         .then(() => cxGet('cvGainMode=1'))
         .then(() => { cx.cvApplied = true; commissionRender(); })
-        .catch(e => alert('Apply failed: ' + e));
+        .catch(e => xAlert('Apply failed: ' + e));
 }
 
 // Full fit diagnostics → dashboard Console tab (appendConsoleLine, so they ride along in Download Logs / the
@@ -18329,7 +18422,7 @@ function cxCVFitLog(f, m) {
 // Captured browser-side (the fit runs in the browser), offered as a download named cvfit.csv.
 function cxCVFitDownload() {
     const s = cx.cvFitLastSamples, f = cx.cvFit, m = cx.cvFitMarks || {};
-    if (!s || !s.length) { alert('No fit data captured yet.'); return; }
+    if (!s || !s.length) { xAlert('No fit data captured yet.'); return; }
     let txt = '';
     if (f && f.ok) {
         txt += '# cvfit confidence record\n';
@@ -18359,7 +18452,7 @@ function cxRenderMatrix(b) {
     // (25% of the cap-table max ≤2000 RPM) through resTest for the whole sweep — ripple scales with
     // current, so the table is only comparable across RPM at one amperage.
     const lvl = cxMatrixLevelA();
-    const sweepInstr = '<p style="font-size:15px;line-height:1.5;"><strong>Map ripple across your RPM range with this Space-Invaders-style game.</strong> After pressing Start, sit at idle ~10 s while the wizard detects your idle speed. It then holds the alternator at a fixed test current' + (lvl > 0 ? ' (~' + Math.round(lvl) + ' A)' : '') + ' for the whole sweep — keep big electrical loads steady, and pause ~6 s at each speed. You can stop as soon as the wizard confirms the worst-ripple speed is pinned down — no need to clear every target.</p>';
+    const sweepInstr = '<p style="font-size:15px;line-height:1.5;"><strong>Map ripple across your RPM range with this Space-Invaders-style game.</strong> After pressing Start, bring the engine down to idle and sit there ~10 s while the wizard detects your idle speed. It then holds the alternator at a fixed test current' + (lvl > 0 ? ' (~' + Math.round(lvl) + ' A)' : '') + ' for the whole sweep — keep big electrical loads steady, and pause ~6 s at each speed. You can stop as soon as the wizard confirms the worst-ripple speed is pinned down — no need to clear every target.</p>';
     if (cx.matrixOn) {
         // Sweep-in-progress view is the "RPM Invaders" game (cxGame* below): y-axis = RPM, one
         // invader per required 50-RPM bin, killed when its bin lands in /famatrix.csv. The ripple
@@ -18370,7 +18463,7 @@ function cxRenderMatrix(b) {
             '<canvas id="cxGame" style="display:block; width:100%; height:400px; background:#161618; border-radius:6px;"></canvas>' +
             '<div id="cxGameToast" style="position:absolute; left:50%; transform:translateX(-50%); top:12px; background:rgba(240,80,60,.92); color:#fff; font-size:12px; font-weight:600; padding:4px 12px; border-radius:12px; opacity:0; transition:opacity .25s; pointer-events:none; white-space:nowrap;"></div>' +
             '</div>' +
-            '<div style="font-size:11px; color:#888; margin:8px 0 2px;">Measured filtered ripple per bin (sanity check) — <span style="color:#2ec4b6;">alternator</span> / <span style="color:#f0a500;">battery</span></div>' +
+            '<div style="font-size:11px; color:#888; margin:8px 0 2px;">Measured filtered ripple vs engine speed, idle at left — <span style="color:#2ec4b6;">alternator</span> / <span style="color:#f0a500;">battery</span> · solid = confirmed, hollow = unconfirmed single reading</div>' +
             '<canvas id="cxGameRip" style="display:block; width:100%; height:90px; background:#161618; border-radius:6px;"></canvas>' +
             '<div id="cx-cov" style="margin:10px 0;">Coverage: checking…</div>' +
             // Disabled until the poll's confidence gate (cxSweepConfidence) is satisfied — clicking early only
@@ -18412,7 +18505,7 @@ function cxMatrixLevelA() {
 }
 function cxMatrixStart() {
     const levelA = cxMatrixLevelA();
-    if (!(levelA > 1)) { alert('RPM/Amps table looks empty — the sweep needs it to size the held test current.'); return; }
+    if (!(levelA > 1)) { xAlert('RPM/Amps table looks empty — the sweep needs it to size the held test current.'); return; }
     cxShowTab('plots', 'displays');   // watch current on Plots ▸ Short Term
     cx.matrixOn = true; cx.matrixLevelA = levelA; cx.matrixIdle = 0;
     cx.rtestState = undefined; cx.rtest = null; cx.rtestOn = false; cx.rtestRpm = 0;  // re-sweep → re-check resonance
@@ -18451,7 +18544,8 @@ function cxMatrixStart() {
 // so a mostly-flat range stops after a coarse sweep instead of grinding every bin. Safe because: a gap is
 // never wider than CX_SWEEP_MAX_GAP bins (=150 RPM = CX_RT_BAND), so even a peak at a gap's far edge is
 // inside the resonance-check green band; and no unswept hole is left touching an already-hot bin. The user
-// can always keep clearing targets to fill more. Operates on committed ALT bins only (batt rides along).
+// can always keep clearing targets to fill more. Coverage/gaps walk committed ALT bins; the worst-spot
+// pick and the pending-above-committed block span both detectors (mirrors the cxRtestInit pick).
 const CX_SWEEP_MIN_BINS = 6;    // committed bins needed before "flat" is trustworthy
 const CX_SWEEP_MAX_GAP  = 3;    // max consecutive uncommitted bins between anchors (×50 = 150 RPM = CX_RT_BAND)
 const CX_SWEEP_HOT_FRAC = 0.7;  // a gap bordered by ≥ this × peak is a suspected-peak neighborhood → must fill
@@ -18459,25 +18553,34 @@ function cxSweepConfidence(rows) {
     const lo = cxGame.binLo || CX_GAME_BIN_LO, hi = CX_GAME_BIN_HI, w = CX_GAME_BIN_W;
     const total = Math.round((hi - lo) / w);
     const val = {};                         // committed alt value per band bin (absent = not committed)
+    // Coverage/gap walking runs on committed ALT bins; the worst-spot pick spans BOTH detectors'
+    // committed values so the verdict names the same RPM cxRtestInit will run the current-check at.
     let covered = 0, maxV = 0, maxRpm = -1;
-    for (const p of rows) if (p.altSt === 2 && p.rpm >= lo && p.rpm < hi) {
-        val[p.rpm] = p.alt; covered++;
-        if (p.alt > maxV) { maxV = p.alt; maxRpm = p.rpm; }
+    for (const p of rows) if (p.rpm >= lo && p.rpm < hi) {
+        if (p.altSt === 2) {
+            val[p.rpm] = p.alt; covered++;
+            if (p.alt > maxV) { maxV = p.alt; maxRpm = p.rpm; }
+        }
+        if (p.battSt === 2 && p.batt > maxV) { maxV = p.batt; maxRpm = p.rpm; }
     }
     if (covered < CX_SWEEP_MIN_BINS)
-        return { ok: false, covered, total, reason: 'clear a few more targets across the range to build a baseline' };
+        return { ok: false, covered, total, maxRpm, want: new Set(), reason: 'clear a few more targets across the range to build a baseline' };
     // Walk the band; each run of uncommitted bins (a gap) must be narrow AND not border a hot bin.
+    // `want` collects every bin the gate is waiting on — the game renders those as priority targets.
     let ok = true, gapStart = -1, prevVal = -1, reason = '';
+    const want = new Set();
     const flush = (endRpm, rightVal) => {
         if (gapStart < 0) return;
         const gapBins = Math.round((endRpm - gapStart) / w);
         const midRpm = gapStart + Math.floor(gapBins / 2) * w;
         if (gapBins > CX_SWEEP_MAX_GAP) {
             if (ok) reason = 'a wide unswept gap near ~' + midRpm + ' RPM needs filling'; ok = false;
+            want.add(midRpm);   // filling the middle splits the gap; the set recomputes every poll
         } else {
             const border = Math.max(prevVal < 0 ? 0 : prevVal, rightVal < 0 ? 0 : rightVal);
             if (maxV > 0 && border >= CX_SWEEP_HOT_FRAC * maxV) {
                 if (ok) reason = 'an unswept spot next to the hot zone at ~' + midRpm + ' RPM needs filling'; ok = false;
+                for (let r = gapStart; r < endRpm; r += w) want.add(r);
             }
         }
     };
@@ -18491,9 +18594,25 @@ function cxSweepConfidence(rows) {
     if (ok && maxRpm > lo) {
         const leftOk = val[maxRpm - w] != null || maxRpm - w <= lo;   // floor bin (idle−50) may be unreachable → counts as an edge
         const rightOk = val[maxRpm + w] != null || maxRpm + w >= hi;
-        if (!leftOk || !rightOk) { ok = false; reason = 'hold ~' + maxRpm + ' RPM again to bracket the worst spot'; }
+        if (!leftOk || !rightOk) {
+            ok = false; reason = 'hold ~' + maxRpm + ' RPM again to bracket the worst spot';
+            if (!leftOk) want.add(maxRpm - w);
+            if (!rightOk) want.add(maxRpm + w);
+        }
     }
-    return { ok, covered, total, reason };
+    // A pending single-window reading ABOVE every committed value is exactly "something significant
+    // likely missed": one more pause there either commits it (the true worst — the current-check must
+    // run there) or replaces it (a transient, refuted). Never green while one is outstanding.
+    let pMax = 0, pRpm = -1;
+    for (const p of rows) if (p.rpm >= lo && p.rpm < hi) {
+        const pv = Math.max(p.altSt === 1 ? p.alt : 0, p.battSt === 1 ? p.batt : 0);
+        if (pv > pMax) { pMax = pv; pRpm = p.rpm; }
+    }
+    if (pMax > maxV && pRpm >= 0) {
+        if (ok) reason = 'an unconfirmed reading at ~' + (pRpm + w / 2) + ' RPM is higher than anything confirmed — pause there again to confirm or refute it';
+        ok = false; want.add(pRpm);
+    }
+    return { ok, covered, total, maxRpm, want, reason };
 }
 function cxMatrixPoll() {
     // Keepalive: the game holds the fixed test current through resTest — refresh the 8 s deadman on
@@ -18511,10 +18630,11 @@ function cxMatrixPoll() {
         // no unswept gap could hide a bigger peak. Batt commits ride along and are not gated on.
         const conf = cxSweepConfidence(rows);
         cx.matrixCov = conf.ok;
+        cxGame.want = conf.want;   // priority-target bins → rendered as pulsing gold invaders
         const el = document.getElementById('cx-cov');
         if (el) el.innerHTML = conf.ok
-            ? 'Coverage: <strong style="color:#5a5;">worst spot located — nothing significant likely missed.</strong> ' + conf.covered + '/' + conf.total + ' bins swept. Stop here, or keep clearing targets to fill in more.'
-            : 'Coverage: <strong style="color:#f0a500;">' + conf.covered + '/' + conf.total + ' bins</strong> — ' + conf.reason + '. Pause ~6 s on each.';
+            ? 'Coverage: <strong style="color:#5a5;">worst spot located' + (conf.maxRpm >= 0 ? ' at ~' + (conf.maxRpm + CX_GAME_BIN_W / 2) + ' RPM' : '') + ' — nothing significant likely missed.</strong> ' + conf.covered + '/' + conf.total + ' bins swept. Stop here, or keep clearing targets to fill in more.'
+            : 'Coverage: <strong style="color:#f0a500;">' + conf.covered + '/' + conf.total + ' bins</strong> — ' + conf.reason + '.' + (conf.want.size ? ' Go for the gold targets.' : '') + ' Pause ~6 s on each.';
         const doneBtn = document.getElementById('cx-sweep-done'); if (doneBtn) doneBtn.disabled = !cx.matrixCov;
     }).catch(() => { });
 }
@@ -18678,6 +18798,7 @@ function cxGameDraw(c, t, rpm, curKey, dt) {
         g.strokeStyle = '#242428'; g.beginPath(); g.moveTo(axisX, y); g.lineTo(w - 6, y); g.stroke();
         g.fillStyle = '#666'; g.fillText(gv, axisX - 5, y);
     }
+    g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('RPM', 6, 6);
     // current-bin band highlight
     if (curKey >= 0 && !cxGame.bins[curKey].covered) {
         g.fillStyle = 'rgba(46,196,182,0.07)';
@@ -18721,8 +18842,11 @@ function cxGameDraw(c, t, rpm, curKey, dt) {
         const bin = cxGame.bins[k];
         if (bin.covered) continue;
         const cy = yOf(+k + CX_GAME_BIN_W / 2), hot = +k === curKey;
+        // Priority target: the confidence gate is waiting on exactly this bin (cxSweepConfidence.want)
+        // → gold, pulsing, haloed. Everything else stays grey so the valuable kills stand out.
+        const want = !hot && cxGame.want && cxGame.want.has(+k);
         const wob = Math.sin(t * 2 + bin.wob) * 1.5;
-        const col = bin.pendT ? '#fff' : hot ? '#f0a500' : '#8a8a92';
+        const col = bin.pendT ? '#fff' : hot ? '#f0a500' : want ? '#ffd24a' : '#8a8a92';
         const px = Math.max(1.1, (binPx - 3) / 9), iw = 11 * px, ih = 8 * px;
         const drawInv = (xOff, alpha) => {
             g.globalAlpha = alpha; g.fillStyle = col;
@@ -18731,9 +18855,14 @@ function cxGameDraw(c, t, rpm, curKey, dt) {
             g.globalAlpha = 1;
         };
         const baseA = cx.matrixCov ? 0.4 : 0.85;                          // gate satisfied → remaining bins optional, dimmed
-        drawInv(-iw * 0.75, hot ? 1 : baseA);                             // left monster (dies on commit)
-        if (!bin.pend) drawInv(iw * 0.75, hot ? 1 : baseA);               // right monster (dies on pending)
+        const a = hot ? 1 : want ? 0.75 + 0.25 * Math.sin(t * 5 + bin.wob) : baseA;
+        drawInv(-iw * 0.75, a);                                           // left monster (dies on commit)
+        if (!bin.pend) drawInv(iw * 0.75, a);                             // right monster (dies on pending)
         else if (bin.regrowT > 0) drawInv(iw * 0.75, 0.2 + 0.4 * Math.abs(Math.sin(t * 10)));  // disagree regrow flicker
+        if (want) {
+            g.strokeStyle = 'rgba(255,210,74,' + (0.35 + 0.25 * Math.sin(t * 5 + bin.wob)).toFixed(2) + ')';
+            g.beginPath(); g.arc(tgtX + wob, cy, binPx * 0.95, 0, 6.283); g.stroke();
+        }
         if (bin.charge > 0.02) {
             g.strokeStyle = '#f0a500'; g.lineWidth = 2;
             g.beginPath(); g.arc(tgtX + wob, cy, binPx * 0.75, -Math.PI / 2, -Math.PI / 2 + bin.charge * 6.283);
@@ -18768,26 +18897,54 @@ function cxGameRipDraw() {
         g.fillText('No ripple committed yet — values appear here as pauses are admitted', w / 2, h / 2);
         return;
     }
-    const padL = 30, padR = 8, padT = 8, padB = 4;
+    const padL = 30, padR = 8, padT = 8, padB = 15;
     const xLo = 400, xHi = 2100;   // matches the game's default RPM span
     const yMax = Math.max(0.5, ...rip.map(p => Math.max(p.alt, p.batt))) * 1.15;
-    const X = r => padL + (r + CX_GAME_BIN_W / 2 - xLo) / (xHi - xLo) * (w - padL - padR);
+    const Xr = r => padL + (r - xLo) / (xHi - xLo) * (w - padL - padR);   // raw RPM → x
+    const X = r => Xr(r + CX_GAME_BIN_W / 2);                            // bin lo → bin-center x
     const Y = v => (h - padB) - v / yMax * (h - padT - padB);
+    // x-axis = RPM (same span as the game's y-axis, idle at the left)
+    g.fillStyle = '#666'; g.textAlign = 'center'; g.textBaseline = 'bottom';
+    for (let r = 500; r <= 2000; r += 500) {
+        const x = Xr(r);
+        g.strokeStyle = '#242428'; g.beginPath(); g.moveTo(x, padT); g.lineTo(x, h - padB); g.stroke();
+        g.fillText(r === 2000 ? '2000 RPM' : r, x, h - 1);
+    }
     g.strokeStyle = '#242428'; g.beginPath(); g.moveTo(padL, Y(yMax / 1.15)); g.lineTo(w - padR, Y(yMax / 1.15)); g.stroke();
     g.fillStyle = '#666'; g.textAlign = 'right'; g.textBaseline = 'middle';
     g.fillText((yMax / 1.15).toFixed(1) + 'A', padL - 3, Y(yMax / 1.15));
     for (const ser of [['alt', '#2ec4b6', 'altSt'], ['batt', '#f0a500', 'battSt']]) {
         const pts = rip.filter(p => p[ser[0]] > 0).sort((a, b) => a.rpm - b.rpm);
         if (!pts.length) continue;
+        // Line + solid dots = confirmed (agree-twice) values ONLY. A pending single-window value
+        // draws as a hollow ring off the line so it can't masquerade as measured data — the wizard's
+        // worst-spot pick ignores it.
+        const conf = pts.filter(p => p[ser[2]] === 2);
         g.strokeStyle = ser[1]; g.globalAlpha = 0.5; g.beginPath();
-        pts.forEach((p, i) => { const x = X(p.rpm), y = Y(p[ser[0]]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+        conf.forEach((p, i) => { const x = X(p.rpm), y = Y(p[ser[0]]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
         g.stroke(); g.globalAlpha = 1;
-        g.fillStyle = ser[1];
         for (const p of pts) {
-            g.globalAlpha = (p[ser[2]] === 2) ? 1 : 0.35;   // pending = dimmed, committed = solid
-            g.beginPath(); g.arc(X(p.rpm), Y(p[ser[0]]), 2.2, 0, 7); g.fill();
+            const x = X(p.rpm), y = Y(p[ser[0]]);
+            g.beginPath();
+            if (p[ser[2]] === 2) { g.fillStyle = ser[1]; g.arc(x, y, 2.2, 0, 7); g.fill(); }
+            else { g.strokeStyle = ser[1]; g.arc(x, y, 2.8, 0, 7); g.stroke(); }
         }
-        g.globalAlpha = 1;
+    }
+    // Mark the worst committed bin across BOTH detectors — the same pick cxRtestInit runs the
+    // current-check at, and the RPM the coverage verdict names.
+    let worst = null, wv = 0;
+    for (const p of rip) {
+        if (p.altSt === 2 && p.alt > wv) { wv = p.alt; worst = p; }
+        if (p.battSt === 2 && p.batt > wv) { wv = p.batt; worst = p; }
+    }
+    if (worst) {
+        const x = X(worst.rpm);
+        g.strokeStyle = '#f0584f'; g.setLineDash([3, 3]);
+        g.beginPath(); g.moveTo(x, padT); g.lineTo(x, h - padB); g.stroke(); g.setLineDash([]);
+        g.fillStyle = '#f0584f'; g.textBaseline = 'top';
+        const flip = x > w * 0.72;
+        g.textAlign = flip ? 'right' : 'left';
+        g.fillText('worst ~' + (worst.rpm + CX_GAME_BIN_W / 2) + ' RPM', x + (flip ? -4 : 4), padT - 4);
     }
 }
 
@@ -19079,14 +19236,24 @@ function drawRippleThreshPlot(canvasId, cfg) {
     }
     g.fillStyle = '#aaa'; g.textAlign = 'center'; g.fillText('operating current (A)', padL + plotW / 2, cssH - 4);
     g.save(); g.translate(11, padT + plotH / 2); g.rotate(-Math.PI / 2); g.fillText('amps', 0, 0); g.restore();
-    // Threshold line(s): floor → %/A ramp → ceiling.
+    // Threshold line(s): floor → %/A ramp → ceiling. Labels clamp to the right edge (they're long
+    // enough to overflow a phone-width canvas) and sit above the line's value at the label's END,
+    // so the monotonic ramp can never rise through the text.
+    let lastLabelY = 1e9;
     fracLines.forEach(fl => {
         g.strokeStyle = fl.color; g.lineWidth = 2; g.setLineDash([]);
         g.beginPath();
         for (let px = 0; px <= plotW; px++) { const I = px / plotW * xMax, y = Efrac(fl.frac, I); if (px === 0) g.moveTo(sx(I), sy(y)); else g.lineTo(sx(I), sy(y)); }
         g.stroke();
         const Il = Math.min(xMax * 0.55, fl.frac > 0 ? ceil / fl.frac : xMax);
-        g.fillStyle = fl.color; g.textAlign = 'left'; g.fillText(fl.label, sx(Il) + 3, sy(Efrac(fl.frac, Il)) - 3);
+        g.fillStyle = fl.color; g.textAlign = 'left';
+        const lw = g.measureText(fl.label).width;
+        const lx = Math.max(padL + 2, Math.min(sx(Il) + 3, padL + plotW - lw - 2));
+        const Iend = ((lx + lw - padL) / plotW) * xMax;
+        let ly = Math.max(padT + 10, sy(Efrac(fl.frac, Iend)) - 4);
+        if (lastLabelY - ly < 12) ly = lastLabelY - 12;
+        lastLabelY = ly;
+        g.fillText(fl.label, lx, ly);
     });
     // Measured ripple fit: solid within the tested span, dashed on extrapolation, dots at the 3 levels.
     if (hasFit) {
@@ -19098,7 +19265,10 @@ function drawRippleThreshPlot(canvasId, cfg) {
         if (iHi < xMax) { g.beginPath(); g.moveTo(sx(iHi), sy(rip(iHi))); g.lineTo(sx(xMax), sy(rip(xMax))); g.stroke(); }
         g.setLineDash([]); g.fillStyle = '#dc5050';
         for (let k = 0; k < rf.n; k++) { g.beginPath(); g.arc(sx(rf.i[k]), sy(rf.pk[k]), 4, 0, 2 * Math.PI); g.fill(); }
-        g.textAlign = 'left'; g.fillText('measured ripple @ ' + Math.round(rf.rpm) + ' RPM', sx(iLo), Math.max(padT + 10, sy(rip(iHi)) - 6));
+        g.textAlign = 'left';
+        const rl = 'measured and extrapolated ripple';
+        const rlx = Math.max(padL + 2, Math.min(sx(iLo), padL + plotW - g.measureText(rl).width - 2));
+        g.fillText(rl, rlx, Math.max(padT + 10, sy(rip(iHi)) - 6));
     }
     if (cfg.verdictId) { const vd = document.getElementById(cfg.verdictId); if (vd) vd.innerHTML = rippleVerdict(rf, bindE, xMax); }
 }
@@ -19120,8 +19290,8 @@ function renderRipplePlots() {
     drawRippleThreshPlot('rippleThreshPlotAlt', {
         title: 'Alternator (G3)', color: '#4a9eff',
         floor: pField('IExcessFloorA', 'IExcessFloorA_echo'), ceil: pField('IExcessCeilA', 'IExcessCeilA_echo'),
-        fracLines: [{ frac: fracCV, label: 'near-target ' + Math.round(fracCV * 100) + '%', color: '#4a9eff' },
-                    { frac: fracBulk, label: 'bulk ' + Math.round(fracBulk * 100) + '%', color: '#f0a500' }],
+        fracLines: [{ frac: fracCV, label: 'protection threshold near voltage target', color: '#4a9eff' },
+                    { frac: fracBulk, label: 'protection threshold in bulk', color: '#f0a500' }],
         ripFit: rf.alt, xMax: rippleXmax('rippleXmaxAlt'), verdictId: 'rippleVerdictAlt'
     });
 }
@@ -19130,10 +19300,10 @@ function renderRipplePlots() {
 // No compute, no apply, no ÷2πfτ. Shows the same Protections crossing-plot inline with a verdict so
 // the operator can confirm their over-current settings clear the ripple this alternator actually produces.
 function cxRenderThresh(b) {
-    let body = '<p style="font-size:15px;line-height:1.5;">Do your over-current settings clear the ripple this alternator actually produces? The plot below (also permanent on <strong>Settings ▸ Alternator ▸ Protections</strong>) draws your trip thresholds against the ripple just measured. Any red band = a current where the detector would false-trip. Nothing is written here.</p>';
+    let body = '<p style="font-size:15px;line-height:1.5;">Normal ripple plotted with your protection thresholds — make sure the normal ripple stays below the thresholds at all currents. A red band marks where the detector would false-trip.</p>';
     body += '<canvas id="cxThreshPlotAlt" style="width:100%;height:220px;margin-top:8px;background:#161616;border-radius:6px;display:block;"></canvas>' +
             '<div id="cxThreshVerdictAlt" style="font-size:12px;color:#bbb;margin-top:6px;line-height:1.5;"></div>';
-    body += '<p style="font-size:12px;color:#999;margin-top:10px;">To change a threshold, edit it in <strong>Settings ▸ Alternator ▸ Protections</strong> — the plots there redraw live as you type.</p>';
+    body += '<p style="font-size:12px;color:#999;margin-top:10px;">Nothing is written on this step. If a threshold needs changing, you can do that later in <strong>Settings ▸ Alternator ▸ Protections</strong> — the same plot lives there and redraws live as you type.</p>';
     body += '<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:12px;color:#aaa;">Applied settings</summary>' +
         '<div style="font-size:12px;color:#bbb;line-height:1.6;margin-top:6px;">' + cxAppliedSummary() + '</div></details>';
     if (cxNextSelected(cx.phase) === -1)
@@ -19146,8 +19316,8 @@ function cxRenderThresh(b) {
         drawRippleThreshPlot('cxThreshPlotAlt', {
             title: 'Alternator (G3)', color: '#4a9eff',
             floor: getEchoNumber('IExcessFloorA_echo'), ceil: getEchoNumber('IExcessCeilA_echo'),
-            fracLines: [{ frac: fracCV, label: 'near-target ' + Math.round(fracCV * 100) + '%', color: '#4a9eff' },
-                        { frac: fracBulk, label: 'bulk ' + Math.round(fracBulk * 100) + '%', color: '#f0a500' }],
+            fracLines: [{ frac: fracCV, label: 'protection threshold near voltage target', color: '#4a9eff' },
+                        { frac: fracBulk, label: 'protection threshold in bulk', color: '#f0a500' }],
             ripFit: rf.alt, xMax: 150, verdictId: 'cxThreshVerdictAlt'
         });
     });
@@ -19168,15 +19338,15 @@ function cxFinish() {
     cxGet('commissionDone=1').then(() => {
         const _ALL = (1 << COMMISSION_STEPS.length) - 1;
         const allDone = (cxLastMask & _ALL) === _ALL;
-        if (!allDone) alert('Selected steps saved. Some steps are still pending — the badge shows what remains.');
+        if (!allDone) xAlert('Selected steps saved. Some steps are still pending — the badge shows what remains.');
         closeCommissionModal(); cx = null; cxPlanUserSet = false;   // re-default the plan next time
         showMainTab('tuning'); showSubTab('tuning', 'commissioning');   // land on the Commissioning checklist when the wizard finishes
-    }).catch(e => alert('Finish failed: ' + e));
+    }).catch(e => xAlert('Finish failed: ' + e));
 }
-function commissionAbort() {
-    if (!confirm('Abort commissioning and revert all settings to the pre-commissioning snapshot?')) return;
+async function commissionAbort() {
+    if (!await xConfirm('Abort commissioning and revert all settings to the pre-commissioning snapshot?')) return;
     cxStopPoll();
-    cxGet('commissionAbort=1').then(() => { alert('Reverted to pre-commissioning settings.'); closeCommissionModal(); cx = null; cxPlanUserSet = false; }).catch(e => alert('Abort failed: ' + e));
+    cxGet('commissionAbort=1').then(() => { xAlert('Reverted to pre-commissioning settings.'); closeCommissionModal(); cx = null; cxPlanUserSet = false; }).catch(e => xAlert('Abort failed: ' + e));
 }
 
 // The eight wizard steps, mirrored from CX_PHASES, with a one-line plain-English purpose.
@@ -19281,12 +19451,12 @@ function renderCommissionStatus(state, phase, mask) {
 // state→0, phase→0) and reopen the wizard fresh at Prep. From a COMMISSIONED device there is no
 // snapshot to revert (it was discarded on Finish), so the current good tune simply stays as the
 // new starting point and is snapshotted again when the fresh run begins.
-function commissionClearAndRestart() {
-    if (!currentAdminPassword) { alert('Unlock settings first (enter the admin password).'); return; }
+async function commissionClearAndRestart() {
+    if (!currentAdminPassword) { xAlert('Unlock settings first (enter the admin password).'); return; }
     const msg = (cxLastState === 2)
         ? 'Clear the commissioned mark and start the setup wizard over?\n\nThe wizard restarts from the beginning, using your current settings as the starting point. Nothing is permanently changed until you finish — use "Abort and revert all" to restore your starting settings at any point. Closing the wizard with the X just pauses it and keeps your progress so you can resume later.'
         : 'Clear commissioning progress and revert all settings to the pre-commissioning snapshot, then start over?';
-    if (!confirm(msg)) return;
+    if (!await xConfirm(msg)) return;
     cxStopPoll();
     cxGet('commissionAbort=1').then(() => {
         cx = null;                 // drop any stale in-session state
@@ -19297,12 +19467,12 @@ function commissionClearAndRestart() {
         cxLastState = 0; cxLastPhase = 0; cxLastMask = 0;
         renderCommissionStatus(0, 0, 0);
         openCommissionModal();     // reopen fresh at Prep (user re-confirms Start there)
-    }).catch(e => alert('Clear failed: ' + e));
+    }).catch(e => xAlert('Clear failed: ' + e));
 }
 
 function applySysidBodeFilters() {
-    if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
-    if (sysidFitTauMs <= 0) { alert("No plant fit available — re-run the sweep."); return; }
+    if (!currentAdminPassword) { xAlert("Please unlock settings first."); return; }
+    if (sysidFitTauMs <= 0) { xAlert("No plant fit available — re-run the sweep."); return; }
     const tcFast = encodeURIComponent(Math.max(1, Math.round(sysidFitTauMs / 3)));
     const tcSlow = encodeURIComponent(Math.max(1, Math.round(sysidFitTauMs)));
     const pw = encodeURIComponent(currentAdminPassword);
@@ -19316,8 +19486,8 @@ function applySysidBodeFilters() {
 // "Apply PID seed" — write the IMC starting Kp/Ki to the current loop. A starting point;
 // the user refines with the square-wave tuner. Kd left untouched (PI seed).
 function applySysidPidSeed() {
-    if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
-    if (!(sysidFitKp > 0)) { alert("No PID seed available — re-run the sweep."); return; }
+    if (!currentAdminPassword) { xAlert("Please unlock settings first."); return; }
+    if (!(sysidFitKp > 0)) { xAlert("No PID seed available — re-run the sweep."); return; }
     const pw = encodeURIComponent(currentAdminPassword);
     const kp = encodeURIComponent(sysidFitKp.toFixed(4));
     const ki = encodeURIComponent(sysidFitKi.toFixed(4));
@@ -19328,7 +19498,7 @@ function applySysidPidSeed() {
 }
 
 function applySystemIDResults() {
-    if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
+    if (!currentAdminPassword) { xAlert("Please unlock settings first."); return; }
     // PID feedback and the filtered-amps display get plant/3 to preserve phase margin
     // inside the control loop. (iExcess no longer uses InputFilterTC — it has its own EMA on
     // IExcessTau, sized by belt resonance, not plant delay — so this only sets the display
@@ -21176,7 +21346,7 @@ function buildFaScopeCsv(d) {
 
 // Export the currently-shown scope capture as CSV (header + raw + boxcar-16 filtered).
 function downloadFaScopeCsv() {
-    if (!fastScopeData || !fastScopeData.count) { alert('No scope capture yet — wait a few seconds for the first capture.'); return; }
+    if (!fastScopeData || !fastScopeData.count) { xAlert('No scope capture yet — wait a few seconds for the first capture.'); return; }
     const csv = buildFaScopeCsv(fastScopeData);
     const dt = new Date(), p = n => String(n).padStart(2, '0');
     const stamp = dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()) + ' ' + p(dt.getHours()) + '-' + p(dt.getMinutes()) + '-' + p(dt.getSeconds());
@@ -21251,9 +21421,9 @@ function buildFaFlipPageCsv(pg) {
 
 // Per-page CSV export of the currently-shown flipbook waveform (item 8).
 function downloadFaFlipPageCsv() {
-    if (!fastFlipPages || fastFlipSelected < 0) { alert('Select a flipbook page first.'); return; }
+    if (!fastFlipPages || fastFlipSelected < 0) { xAlert('Select a flipbook page first.'); return; }
     const pg = fastFlipPages[fastFlipSelected];
-    if (!pg || !pg.used) { alert('That flipbook page is empty.'); return; }
+    if (!pg || !pg.used) { xAlert('That flipbook page is empty.'); return; }
     const csv = buildFaFlipPageCsv(pg);
     const d = new Date(), p = n => String(n).padStart(2, '0');
     const stamp = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + '-' + p(d.getMinutes()) + '-' + p(d.getSeconds());
@@ -21316,7 +21486,7 @@ function faUpdatePauseBtn(value) {
     }
 }
 function faAnomPauseToggle() {
-    if (!currentAdminPassword) { alert('Please unlock settings first'); return; }
+    if (!currentAdminPassword) { xAlert('Please unlock settings first'); return; }
     const next = _faAnomPause ? 0 : 1;
     pendingToggles.set('faAnomPause', { desiredValue: next, baseRev: lastSeenRev });
     faUpdatePauseBtn(next);
@@ -21755,7 +21925,7 @@ function bhwPoll() {
 function bhwStart() {
   const btn = document.getElementById('bhw-start-btn');
   if (btn) btn.disabled = true;   // prevent double-fire; bhwPoll flips to the run pane once state==1
-  bhwGet('BatteryHealthTest=1').then(() => setTimeout(bhwPoll, 400)).catch(e => alert('Start failed: ' + e));
+  bhwGet('BatteryHealthTest=1').then(() => setTimeout(bhwPoll, 400)).catch(e => xAlert('Start failed: ' + e));
 }
 function bhwAbort() { bhwGet('bhAbort=1').then(() => setTimeout(bhwPoll, 300)).catch(() => { }); }
 function bhwRestart() { bhw.pane = 'pre'; bhw.startedAt = 0; bhw.renderedPane = null; bhwRender(); }
@@ -21961,42 +22131,97 @@ function pollBatteryHealth() {
   }).catch(() => { });
 }
 
-// Capacity health: X = date (sparse), Y = capacity %. Filled marker = high confidence, hollow = low.
-function drawBhCapDate(pts) {
-  const c = document.getElementById('bhCapCanvas');
-  if (!c) return;
-  const ctx = c.getContext('2d');
-  const W = c.width, H = c.height;
-  ctx.clearRect(0, 0, W, H);
-  const padL = 44, padR = 12, padT = 12, padB = 28;
-  ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, H - padB); ctx.lineTo(W - padR, H - padB); ctx.stroke();
-  if (!pts || pts.length === 0) return;
-  let minT = Infinity, maxT = -Infinity, minY = Infinity, maxY = -Infinity;
-  pts.forEach(p => { const t = p.epoch || 0; minT = Math.min(minT, t); maxT = Math.max(maxT, t); minY = Math.min(minY, p.pct); maxY = Math.max(maxY, p.pct); });
-  if (maxT === minT) maxT = minT + 1;
-  minY = Math.min(minY, 80); maxY = Math.max(maxY, 100);   // always show 100% reference
-  const X = t => padL + (t - minT) / (maxT - minT) * (W - padL - padR);
-  const Y = v => (H - padB) - (v - minY) / (maxY - minY) * (H - padT - padB);
-  ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
-  for (let g = 0; g <= 4; g++) {
-    const v = minY + (maxY - minY) * g / 4, yy = Y(v);
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillText(v.toFixed(0) + '%', padL - 4, yy + 3);
+// Capacity health plot (uPlot, house style): X = date, Y = capacity %. Filled dot = high
+// confidence, hollow = low. Dashed connector only — the gaps between points are real (weeks apart).
+let bhCapPlot = null;
+let bhCapPts = [];
+let bhCapYManual = null;
+try { bhCapYManual = JSON.parse(localStorage.getItem('bhCapY') || 'null'); } catch (e) { }
+
+function bhCapData() {
+  const xs = [], all = [], hi = [], lo = [];
+  for (const p of bhCapPts) {
+    xs.push(p.epoch || 0);
+    all.push(p.pct);
+    hi.push(p.conf ? p.pct : null);
+    lo.push(p.conf ? null : p.pct);
   }
-  ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
-  const fmt = t => { if (!t) return '—'; const d = new Date(t * 1000); return (d.getMonth() + 1) + '/' + d.getDate(); };
-  ctx.fillText(fmt(minT), padL, H - 8); ctx.fillText(fmt(maxT), W - padR, H - 8);
-  // faint dashed connector — the gaps between points are real (weeks apart), don't imply daily data
-  ctx.strokeStyle = 'rgba(79,163,255,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]); ctx.beginPath();
-  pts.forEach((p, i) => { const px = X(p.epoch || minT), py = Y(p.pct); if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); });
-  ctx.stroke(); ctx.setLineDash([]);
-  pts.forEach(p => {
-    const px = X(p.epoch || minT), py = Y(p.pct);
-    ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2);
-    if (p.conf) { ctx.fillStyle = '#4fa3ff'; ctx.fill(); }
-    else { ctx.strokeStyle = '#4fa3ff'; ctx.lineWidth = 1.5; ctx.stroke(); }
+  return [xs, all, hi, lo];
+}
+
+function bhCapYRange() {
+  if (bhCapYManual) return bhCapYManual;
+  let mn = Infinity, mx = -Infinity;
+  for (const p of bhCapPts) { if (p.pct < mn) mn = p.pct; if (p.pct > mx) mx = p.pct; }
+  if (!isFinite(mn)) return [80, 105];
+  mn = Math.min(mn, 80); mx = Math.max(mx, 100);
+  const pad = Math.max(1, (mx - mn) * 0.08);
+  return [mn - pad, mx + pad];
+}
+
+function buildBhCapPlot() {
+  const el = document.getElementById('bhCapPlot');
+  if (!el || typeof uPlot === 'undefined') return;
+  el.innerHTML = '';
+  el.style.position = 'relative';
+  const opts = {
+    width: Math.max(el.clientWidth, 320),
+    height: 220,
+    padding: [30, 8, 0, 0],   // top inset clears the auto checkbox
+    series: [
+      { label: 'date' },
+      { label: 'capacity', stroke: 'rgba(58,123,213,0.5)', width: 1, dash: [4, 4], points: { show: false } },
+      { label: 'measured', stroke: '#3a7bd5', paths: () => null, points: { show: true, size: 7, stroke: '#3a7bd5', width: 1.5, fill: '#3a7bd5' } },
+      { label: 'low confidence', stroke: '#3a7bd5', paths: () => null, points: { show: true, size: 7, stroke: '#3a7bd5', width: 1.5, fill: '#fff' } },
+    ],
+    scales: {
+      y: { auto: false, range: () => bhCapYRange() },
+    },
+    axes: [
+      { grid: { show: true } },
+      { scale: 'y', grid: { show: true }, side: 3, values: (u, t) => t.map(v => v + '%') },
+    ],
+    legend: { show: false },
+    cursor: { drag: { x: false, y: false } },
+    hooks: {
+      draw: [u => {
+        const y = u.valToPos(100, 'y', true);   // 100% baseline reference
+        if (y >= u.bbox.top && y <= u.bbox.top + u.bbox.height) {
+          const ctx = u.ctx; ctx.save();
+          ctx.strokeStyle = '#cde'; ctx.setLineDash([4, 4]);
+          ctx.beginPath(); ctx.moveTo(u.bbox.left, y); ctx.lineTo(u.bbox.left + u.bbox.width, y); ctx.stroke();
+          ctx.restore();
+        }
+      }]
+    }
+  };
+  bhCapPlot = new uPlot(opts, bhCapData(), el);
+  new ResizeObserver(() => {
+    if (bhCapPlot) bhCapPlot.setSize({ width: Math.max(el.clientWidth, 320), height: 220 });
+  }).observe(el);
+  const asDiv = document.createElement('div');
+  asDiv.className = 'autoscale-ctrl';
+  asDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;align-items:center;gap:3px;font-size:11px;opacity:0.6;';
+  asDiv.innerHTML = '<input type="checkbox" id="autoscale-bhcap-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-bhcap-cb" style="cursor:pointer;user-select:none;">auto</label>';
+  el.appendChild(asDiv);
+  const asCb = document.getElementById('autoscale-bhcap-cb');
+  asCb.checked = (bhCapYManual == null);
+  asCb.addEventListener('change', e => {
+    if (e.target.checked) { bhCapYManual = null; localStorage.removeItem('bhCapY'); }
+    else if (bhCapPlot) { bhCapYManual = [bhCapPlot.scales.y.min, bhCapPlot.scales.y.max]; localStorage.setItem('bhCapY', JSON.stringify(bhCapYManual)); }
+    if (bhCapPlot) bhCapPlot.redraw();
   });
+  attachYAxisEdit(bhCapPlot, [{
+    scale: 'y', decimals: 0,
+    apply: (mn, mx) => { bhCapYManual = [mn, mx]; asCb.checked = false; localStorage.setItem('bhCapY', JSON.stringify(bhCapYManual)); bhCapPlot.redraw(); }
+  }]);
+}
+
+function drawBhCapDate(pts) {
+  bhCapPts = pts || [];
+  if (!document.getElementById('bhCapPlot')) return;
+  if (!bhCapPlot) { buildBhCapPlot(); if (!bhCapPlot) return; }
+  bhCapPlot.setData(bhCapData());
 }
 
 const CAP_OCV_DEFAULT = [13.6, 13.4, 13.3, 13.2, 13.1, 13.0, 12.9, 12.8, 12.5, 12.0, 10.0];
@@ -22031,5 +22256,154 @@ setInterval(() => {
   const e = document.getElementById('bh_status');
   if (e && e.offsetParent !== null) pollBatteryHealth();
 }, 3000);
+
+// ── Resonance & Ripple Map heatmap (Live Data → Diag) ──
+// Fixed learnable envelope (500–4000 RPM × 5–105 A) so a fresh device reads as a
+// mostly-empty map that fills in over time; extends if learned cells fall outside.
+let rippleMapCells = null;
+let rippleMapHover = null;
+let rippleMapObsHooked = false;
+const RIPPLEMAP_RAMP_LIGHT = ['#e4f4f3', '#b9e2e0', '#8bcfcc', '#59b8b3', '#2b9a94', '#0b6f6a', '#054240'];
+const RIPPLEMAP_RAMP_DARK = ['#123433', '#1c4b49', '#276460', '#348079', '#4b9e97', '#6fc3bc', '#a5e8e2'];
+
+function rippleMapThemeDark() {
+    const m = (getComputedStyle(document.body).backgroundColor || '').match(/\d+/g);
+    if (!m) return false;
+    return (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]) < 128;
+}
+
+function drawRippleMap() {
+    const canvas = document.getElementById('ripplemap-canvas');
+    if (!canvas || canvas.offsetParent === null) return;
+    fetch(buildURL('/famatrix.csv'), { cache: 'no-cache' }).then(r => r.text()).then(txt => {
+        const rows = txt.trim().split('\n');
+        rows.shift();
+        rippleMapCells = rows.filter(Boolean).map(l => {
+            const c = l.split(',');
+            return { rpmLo: +c[0], ampLo: +c[1], windows: +c[2], pkpk: +c[3], f1: +c[4], a1: +c[5] };
+        });
+        rippleMapRender();
+        if (!rippleMapObsHooked && typeof ResizeObserver !== 'undefined') {
+            rippleMapObsHooked = true;
+            let t = null;
+            new ResizeObserver(() => { clearTimeout(t); t = setTimeout(rippleMapRender, 150); })
+                .observe(canvas.parentElement);
+            canvas.addEventListener('pointermove', rippleMapPointer);
+            canvas.addEventListener('pointerdown', rippleMapPointer);
+            canvas.addEventListener('pointerleave', () => { rippleMapHover = null; rippleMapRender(); rippleMapInfoDefault(); });
+        }
+        rippleMapInfoDefault();
+    }).catch(() => { });
+}
+
+function rippleMapFrame() {
+    const RPW = 50, APW = 20;
+    let rpmMin = 500, rpmMax = 4000, ampMin = 5, ampMax = 105;
+    for (const c of (rippleMapCells || [])) {
+        rpmMin = Math.min(rpmMin, c.rpmLo); rpmMax = Math.max(rpmMax, c.rpmLo + RPW);
+        ampMin = Math.min(ampMin, c.ampLo); ampMax = Math.max(ampMax, c.ampLo + APW);
+    }
+    return { RPW, APW, rpmMin, rpmMax, ampMin, ampMax,
+        cols: Math.round((rpmMax - rpmMin) / RPW), rows: Math.round((ampMax - ampMin) / APW) };
+}
+
+function rippleMapGeom() {
+    const canvas = document.getElementById('ripplemap-canvas');
+    const f = rippleMapFrame();
+    const cssW = Math.min(canvas.parentElement.clientWidth || 560, 800);
+    const padL = 34, padR = 16, padT = 30, padB = 26;
+    const cw = (cssW - padL - padR) / f.cols;
+    const ch = Math.max(18, Math.min(30, cw * 3));
+    return { f, cssW, cssH: padT + f.rows * ch + padB, padL, padT, cw, ch };
+}
+
+function rippleMapInfoDefault() {
+    const info = document.getElementById('ripplemap-info');
+    if (!info || !rippleMapCells) return;
+    const f = rippleMapFrame();
+    info.textContent = rippleMapCells.length
+        ? rippleMapCells.length + ' of ' + (f.cols * f.rows) + ' operating points learned — tap a square for its numbers'
+        : 'No cells learned yet — the map fills in as the engine runs at different speeds and loads.';
+}
+
+function rippleMapRender() {
+    const canvas = document.getElementById('ripplemap-canvas');
+    if (!canvas || !rippleMapCells) return;
+    const g = rippleMapGeom(), f = g.f;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = g.cssW * dpr; canvas.height = g.cssH * dpr;
+    canvas.style.height = g.cssH + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    const dark = rippleMapThemeDark();
+    const ramp = dark ? RIPPLEMAP_RAMP_DARK : RIPPLEMAP_RAMP_LIGHT;
+    const cs = getComputedStyle(document.body);
+    const muted = (cs.getPropertyValue('--text-muted') || '').trim() || '#888';
+    const maxPk = Math.max(0.01, ...rippleMapCells.map(c => c.pkpk));
+    const byKey = {};
+    for (const c of rippleMapCells) byKey[c.rpmLo + '_' + c.ampLo] = c;
+
+    for (let i = 0; i < f.cols; i++) {
+        for (let j = 0; j < f.rows; j++) {
+            const rpmLo = f.rpmMin + i * f.RPW, ampLo = f.ampMin + j * f.APW;
+            const x = g.padL + i * g.cw, y = g.padT + (f.rows - 1 - j) * g.ch;
+            const c = byKey[rpmLo + '_' + ampLo];
+            if (c) ctx.fillStyle = ramp[Math.min(ramp.length - 1, Math.round((c.pkpk / maxPk) * (ramp.length - 1)))];
+            else ctx.fillStyle = dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)';
+            ctx.fillRect(x + 0.5, y + 0.5, Math.max(0.5, g.cw - 1), g.ch - 1);
+        }
+    }
+    if (rippleMapHover) {
+        const i = Math.round((rippleMapHover.rpmLo - f.rpmMin) / f.RPW);
+        const j = Math.round((rippleMapHover.ampLo - f.ampMin) / f.APW);
+        ctx.strokeStyle = dark ? '#a5e8e2' : '#054240';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(g.padL + i * g.cw + 0.75, g.padT + (f.rows - 1 - j) * g.ch + 0.75, g.cw - 1.5, g.ch - 1.5);
+    }
+    ctx.fillStyle = muted;
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    for (let r = Math.ceil(f.rpmMin / 500) * 500; r <= f.rpmMax; r += 500)
+        ctx.fillText(String(r), g.padL + ((r - f.rpmMin) / f.RPW) * g.cw, g.padT + f.rows * g.ch + 12);
+    ctx.fillText('RPM', g.padL + (f.cols * g.cw) / 2, g.padT + f.rows * g.ch + 24);
+    ctx.textAlign = 'right';
+    for (let j = 0; j <= f.rows; j++)
+        ctx.fillText(String(f.ampMin + j * f.APW), g.padL - 5, g.padT + (f.rows - j) * g.ch + 3);
+    ctx.save();
+    ctx.translate(9, g.padT + (f.rows * g.ch) / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText('Amps', 0, 0);
+    ctx.restore();
+    const lw = 12, lbl = maxPk.toFixed(1) + ' A pk-pk';
+    const lx = g.cssW - 6 - ctx.measureText(lbl).width - 4 - ramp.length * lw;
+    for (let k = 0; k < ramp.length; k++) { ctx.fillStyle = ramp[k]; ctx.fillRect(lx + k * lw, 8, lw - 1, 8); }
+    ctx.fillStyle = muted;
+    ctx.textAlign = 'right';
+    ctx.fillText('0', lx - 4, 15);
+    ctx.textAlign = 'left';
+    ctx.fillText(lbl, lx + ramp.length * lw + 4, 15);
+}
+
+function rippleMapPointer(ev) {
+    const canvas = document.getElementById('ripplemap-canvas');
+    if (!canvas || !rippleMapCells) return;
+    const g = rippleMapGeom(), f = g.f;
+    const r = canvas.getBoundingClientRect();
+    const i = Math.floor((ev.clientX - r.left - g.padL) / g.cw);
+    const j = f.rows - 1 - Math.floor((ev.clientY - r.top - g.padT) / g.ch);
+    const info = document.getElementById('ripplemap-info');
+    if (i < 0 || i >= f.cols || j < 0 || j >= f.rows) { rippleMapHover = null; rippleMapRender(); rippleMapInfoDefault(); return; }
+    const rpmLo = f.rpmMin + i * f.RPW, ampLo = f.ampMin + j * f.APW;
+    const c = rippleMapCells.find(x => x.rpmLo === rpmLo && x.ampLo === ampLo);
+    rippleMapHover = { rpmLo, ampLo };
+    rippleMapRender();
+    if (info) info.textContent = c
+        ? rpmLo + '–' + (rpmLo + f.RPW) + ' RPM × ' + ampLo + '–' + (ampLo + f.APW) + ' A — ripple ' + c.pkpk.toFixed(2)
+          + ' A pk-pk · top tone ' + c.f1.toFixed(0) + ' Hz @ ' + c.a1.toFixed(2) + ' A · ' + c.windows + ' windows'
+        : rpmLo + '–' + (rpmLo + f.RPW) + ' RPM × ' + ampLo + '–' + (ampLo + f.APW) + ' A — not learned yet';
+}
+
+setTimeout(drawRippleMap, 1500);
 
 /* XREG_END */

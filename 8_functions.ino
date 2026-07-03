@@ -907,8 +907,6 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "AutoShuntGainCorrection", NK_AutoShuntGainCorrection, 2 },
   { "BatteryVoltage", NK_BatteryVoltage, 2 },
   { "cvPlantK", NK_cvPlantK, 2 },
-  { "cvPlantTau", NK_cvPlantTau, 2 },
-  { "cvPlantL", NK_cvPlantL, 2 },
   { "CommissionTempF", NK_CommissionTempF, 2 },
   { "systemIDPlantTauMs", NK_sysidPlantTau, 2 },
   { "ripFitAlt", NK_ripFitAlt, 2 },

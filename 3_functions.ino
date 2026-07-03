@@ -981,8 +981,6 @@ enum Csv3Index {
   CSV3_cvGainMode,              // CV gain mode: 0=Manual, 1=Auto (lambda-based)
   CSV3_EXTRA1,                  // reserved placeholder — sends 0
   CSV3_cvPlantK,                // measured plant gain K (V/A); ×10000
-  CSV3_cvPlantTau,              // measured rise time tau (s); ×100
-  CSV3_cvPlantL,                // measured dead time L (s); ×100
   CSV3_cvComputedKp,            // Auto-computed Kp (12V-equiv); ×100
   CSV3_cvComputedKi,            // Auto-computed Ki (12V-equiv); ×100
   CSV3_cvCrossover,             // CV crossover ω_c (rad/s); ×100
@@ -5118,18 +5116,6 @@ void setupServer() {
       resTestTargetA = request->getParam("resTestTargetA")->value().toFloat();
       resTestLastCmdMs = millis();  // keepalive refresh (deadman)
     }
-    if (request->hasParam("cvPlantTau")) {
-      foundParameter = true;
-      cvPlantTau = request->getParam("cvPlantTau")->value().toFloat();
-      settingWrite(NK_cvPlantTau, String(cvPlantTau, 3).c_str());
-      recomputeCvGains();
-    }
-    if (request->hasParam("cvPlantL")) {
-      foundParameter = true;
-      cvPlantL = request->getParam("cvPlantL")->value().toFloat();
-      settingWrite(NK_cvPlantL, String(cvPlantL, 3).c_str());
-      recomputeCvGains();
-    }
     // No VoltageKd handler — voltage loop has no D term.
     if (request->hasParam("SlopeBleedThresh")) {
       foundParameter = true;
@@ -7189,7 +7175,17 @@ void SendWifiData() {
   static bool bootLineSent = false;
   if (!bootLineSent && events.count() > 0) {
     bootLineSent = true;
-    queueConsoleMessageF("BOOTED firmware v%s (reset: %s)", FIRMWARE_VERSION, resetReasonName());
+    queueConsoleMessageF("BOOTED firmware v%s (reset: %s | esp=%d rtc0=%d rtc1=%d)",
+                         FIRMWARE_VERSION, resetReasonName(), g_rawResetEsp, g_rawResetRtc0, g_rawResetRtc1);
+    if (g_blackBoxPrevValid) {
+      queueConsoleMessageF("BLACKBOX: up=%lus IBV=%.2fV duty=%.1f%% RPM=%d amps=%.1f altT=%dF mode=%u stage=%u loop=%.1fms heap=%ldKB",
+                           (unsigned long)(g_blackBoxPrev.upMillis / 1000UL), g_blackBoxPrev.ibv,
+                           g_blackBoxPrev.duty, (int)g_blackBoxPrev.rpm, g_blackBoxPrev.measAmps,
+                           (int)g_blackBoxPrev.altTempF, g_blackBoxPrev.sysMode, g_blackBoxPrev.chargeStage,
+                           g_blackBoxPrev.maxLoopUs / 1000.0f, (long)g_blackBoxPrev.minHeapKB);
+    } else {
+      queueConsoleMessage("BLACKBOX: RTC RAM lost - true power interruption preceded this boot");
+    }
   }
 
   // PRIORITY 1: CSVData
@@ -8084,8 +8080,6 @@ void SendWifiData() {
                                "%d,"  // cvGainMode
                                "%d,"  // CSV3_EXTRA1 (reserved placeholder)
                                "%d,"  // cvPlantK
-                               "%d,"  // cvPlantTau
-                               "%d,"  // cvPlantL
                                "%d,"  // cvComputedKp
                                "%d,"  // cvComputedKi
                                "%d,"  // cvCrossover
@@ -8420,8 +8414,6 @@ void SendWifiData() {
                                (int)cvGainMode,                                 // CSV3_cvGainMode (0=Manual, 1=Auto λ-based)
                                0,                                              // CSV3_EXTRA1 (reserved placeholder)
                                SafeInt(cvPlantK, 10000),                        // CSV3_cvPlantK (measured plant gain V/A, ×10000)
-                               SafeInt(cvPlantTau, 100),                        // CSV3_cvPlantTau (measured rise time s, ×100)
-                               SafeInt(cvPlantL, 100),                          // CSV3_cvPlantL (measured dead time s, ×100)
                                SafeInt(cvComputedKp, 100),                      // CSV3_cvComputedKp (Auto-computed Kp 12V-equiv, ×100)
                                SafeInt(cvComputedKi, 100),                      // CSV3_cvComputedKi (Auto-computed Ki 12V-equiv, ×100)
                                SafeInt(cvCrossover, 100),                       // CSV3_cvCrossover (crossover ω_c rad/s, ×100)

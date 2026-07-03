@@ -1631,16 +1631,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     cvPlantK = settingRead(NK_cvPlantK).toFloat();
   }
   if (settingExists(NK_ripFitAlt))  ripFitDecode(settingRead(NK_ripFitAlt),  ripFitAlt);   // measured ripple projection (§3.3); absent → nPts=0 → plot shows threshold only
-  if (!settingExists(NK_cvPlantTau)) {
-    settingWrite(NK_cvPlantTau, String(cvPlantTau, 3).c_str());
-  } else {
-    cvPlantTau = settingRead(NK_cvPlantTau).toFloat();
-  }
-  if (!settingExists(NK_cvPlantL)) {
-    settingWrite(NK_cvPlantL, String(cvPlantL, 3).c_str());
-  } else {
-    cvPlantL = settingRead(NK_cvPlantL).toFloat();
-  }
   // CommissionTempF — board temp stamped when the CV plant fit was applied; reference for the battery-
   // temp gain derate. No default write: absence = never commissioned = no derate (stays NaN).
   if (settingExists(NK_CommissionTempF)) {

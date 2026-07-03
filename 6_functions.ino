@@ -97,8 +97,8 @@ float clamp_f(float x, float lo, float hi) {
 // this stays well below the polarization pole (~0.7 rad/s) and the dead-time limit, so we never
 // need to measure them. ω_target/ρ are bench-tuned by disturbance-rejection (no protection trips), NOT
 // to match any prior hand tune — they are the user-adjustable settings cvCrossover / cvPiZero (Tuning ▸
-// Voltage; defaults 0.20 / 0.70). cvPlantTau/cvPlantL are still captured for diagnostics
-// but no longer drive the gains.
+// Voltage; defaults 0.20 / 0.70). cvPlantTau/cvPlantL were fully removed 2026-07-03 (NVS keys
+// retired — see 2_functions.ino); the fit confidence record lives in the cvfit.csv download.
 
 // computeCvTempScale — battery-temperature gain derate factor (see the globals block in Xregulator.ino).
 // Board temp (ambientTemp, °F) is a proxy for battery temp; the battery's internal resistance — which IS

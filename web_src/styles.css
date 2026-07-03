@@ -854,6 +854,38 @@ input[type="submit"]:hover {
   background: rgba(0, 0, 0, 0.09);
 }
 
+/* Cross-navigation shortcut link — jumps between the CV Mode voltage setpoint
+   (Setup -> Alternator) and the Voltage-loop tuning tab, which are edited
+   back-to-back during a tuning session. Tonal-teal to match the button system. */
+.xnav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  text-decoration: none;
+  background: rgba(0, 161, 154, 0.10);
+  color: #00867f;
+  border: 1px solid rgba(0, 161, 154, 0.28);
+  transition: background .15s, box-shadow .15s;
+}
+.xnav-link:hover {
+  background: rgba(0, 161, 154, 0.18);
+  box-shadow: 0 2px 6px rgba(0, 161, 154, 0.25);
+}
+.xnav-link .xnav-arrow {
+  font-size: 1.1em;
+  line-height: 1;
+}
+.dark-mode .xnav-link {
+  background: rgba(0, 161, 154, 0.18);
+  color: #4fd6ce;
+}
+
 /* The Plant Delay (sysid) modal, the Test Active floating panel, and the
    Commissioning orchestrator panel are hardcoded dark panels, so their
    .btn-secondary buttons must stay legible even when the app is in light mode
