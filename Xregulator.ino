@@ -2902,26 +2902,85 @@ bool tuningParamChanged = false;             // set by server handlers when a tu
 volatile bool manualCommitTuningRequested = false;   // set by UI commit button
 volatile bool manualCommitCVTuningRequested = false; // set by UI commit button
 
-// ===== Control Accuracy Scores (accumulate-since-reset). Auto-reset right after each successful
-// config-snapshot upload (≈daily in production), plus a manual Reset button on the dashboard.
-// Per loop we keep RMS tracking error +
-// worst damaging overshoot, in physical units, counted ONLY while the loop holds control authority
-// (its actuator is off both rails) and has held it past a settle time — so a loop is never blamed
-// for conditions it cannot act on (cold alternator, low RPM, another limiter in charge).
+// ===== Control Accuracy Scores v3 — challenge-episode scoring. Full design:
+// Working Markdown Docs/CONTROL_ACCURACY_V3_EPISODE_SPEC.md. Electrical loops score only
+// discrete deviation episodes (steady-state dwell contributes nothing); thermal keeps the
+// v2 while-binding RMS (pinned at the limit IS continuous challenge). Auto-reset after each
+// successful config-snapshot upload (globals only — a live episode carries across, so a
+// failure spanning the daily boundary lands in the next window); manual Reset clears everything.
 // errAccum/timeAccum are DOUBLE on purpose: a float32 running sum silently STOPS growing once it
 // passes ~a day of accumulated time (the per-tick dt drops below the float ULP and rounds away).
 struct AccuracyScore {
-  double   errAccum;        // Σ(e²·dt) — squared tracking error integrated over authority time
-  double   timeAccum;       // Σ dt while the loop held authority
+  double   errAccum;        // Σ(e²·dt) over committed episodes (thermal: over binding time)
+  double   timeAccum;       // Σ dt of the same — the RMS denominator ("scored seconds")
   float    worstOver;       // worst single excursion in the damaging direction (physical units)
-  uint32_t bindingStartMs;  // millis() the authority condition last went true (0 = not binding)
+  uint32_t bindingStartMs;  // thermal only: millis() binding went true (0 = not binding)
 };
 AccuracyScore accCurrent = {};  // inner current loop — error/overshoot in amps
-AccuracyScore accVoltage = {};  // CV voltage loop — error/overshoot in volts (displayed mV)
+AccuracyScore accVoltage = {};  // CV voltage loop — error/overshoot in 12V-equiv volts (displayed mV)
 AccuracyScore accThermal = {};  // thermal loop — error/overshoot in °F
 
-const uint32_t ACC_SETTLE_CURRENT_MS = 100;     // current loop reacts in ~200 ms → tiny post-slew settle; slew gate (setpointCommand≈setpointLimited) already excludes commanded steps, so this only clears the slew-boundary residual
-const uint32_t ACC_SETTLE_VOLTAGE_MS = 2000;    // CV loop settles in seconds
+// Live episode buffer — accumulates locally while a deviation episode is ACTIVE; only a
+// COMMIT folds it into the AccuracyScore globals (a VOID discards it, counted by reason).
+struct AccEpisode {
+  uint8_t  state;        // 0 = idle, 1 = active
+  int8_t   sign;         // active episode side: +1 = damaging (over), -1 = under
+  int8_t   enterSign;    // side currently being debounced toward opening (or flip while active)
+  uint8_t  enterTicks;   // consecutive ticks beyond the entry band on enterSign's side
+  uint16_t samples;      // valid ACTIVE ticks — maturity gate for commit-on-trip
+  uint32_t exitStartMs;  // error inside exit band since (0 = not exiting)
+  double   errAccum;     // episode-local Σe²dt
+  double   timeAccum;    // episode-local Σdt
+  float    peak;         // max excursion in the episode's sign direction
+};
+AccEpisode epCur = {};
+AccEpisode epVolt = {};
+
+enum AccVoidReason : uint8_t {
+  ACC_VOID_RAIL = 0,       // actuator rail in the direction the episode needed (physics)
+  ACC_VOID_CEILING = 1,    // Icv pinned at the current ceiling (voltage under-episode: no headroom)
+  ACC_VOID_ENGINE = 2,     // engine stopped mid-episode
+  ACC_VOID_MODE = 3,       // mode/stage/CV exit mid-episode
+  ACC_VOID_CMDZERO = 4,    // commanded current dropped to ~0 (deliberate, not a tracking failure)
+  ACC_VOID_PROT_UNREL = 5, // protection fired but episode direction unrelated to the trip cause
+  ACC_VOID_SENSOR = 6,     // ADS/INA cross-check failed at trip — attribution unknown
+  ACC_VOID_GAP = 7,        // scorer tick gap (scheduler stall / early-return period)
+  ACC_VOID_TARGETSTEP = 8, // immature voltage episode interrupted by a target step
+  ACC_VOID_MANUAL = 9,     // cleared by manual reset
+  ACC_VOID_REASONS = 10
+};
+struct AccLoopStats {
+  uint32_t episodes;                 // committed episodes since reset
+  double   eligibleSec;              // seconds the loop's authority conditions held
+  uint16_t voids[ACC_VOID_REASONS];  // discarded episodes by reason
+};
+AccLoopStats accCurStats = {};
+AccLoopStats accVoltStats = {};
+uint32_t accThermSessions = 0;       // thermal containment sessions (binding-settled rising edges)
+double   accThermEligibleSec = 0.0;  // seconds the thermal binding condition held (pre-settle)
+
+float    accCurRef = 0.0f;           // current-loop achievable reference (lagged setpointLimited)
+bool     accCurRefSeeded = false;    // reseed ref to the PV on eligibility (re)gain
+uint32_t accScorerLastMs = 0;        // last tick the electrical scorer ran — raw-gap detection
+uint8_t  accVRegime = 0;             // voltage regimes: 0 = off, 1 = arrival, 2 = regulation
+bool     accVArrFromBelow = true;    // arrival direction: true = climbing to target
+uint32_t accVArrSettleStartMs = 0;   // |err| inside exit band since (arrival → regulation settle)
+float    accVPrevTargetV = 0.0f;     // previous-tick ChargingVoltageTarget for step detection
+bool     accVAwRecovPrev = false;    // previous-tick g_cvAwRecovering for falling-edge → arrival
+
+const float    ACC_CUR_REF_TAU_S = 0.10f;        // expected-response envelope, NOT a tuning knob (spec §4.1)
+const float    ACC_CUR_ENTER_A = 3.0f;
+const float    ACC_CUR_EXIT_A = 1.5f;
+const uint32_t ACC_CUR_EXIT_HOLD_MS = 500;
+const float    ACC_V_ENTER_V = 0.100f;           // voltage bands in 12V-equivalent volts
+const float    ACC_V_EXIT_V = 0.050f;
+const uint32_t ACC_V_EXIT_HOLD_MS = 1000;
+const float    ACC_V_STEP_V = 0.050f;            // per-tick target delta that counts as a step (temp-comp drift stays far below)
+const uint8_t  ACC_ENTER_DEBOUNCE_TICKS = 2;
+const uint16_t ACC_MATURE_TICKS = 2;             // min ACTIVE samples before an interrupting event may commit
+const uint32_t ACC_GAP_VOID_MS = 250;            // raw scorer-tick gap that voids live episodes
+const float    ACC_XSENS_BAND_V = 0.5f;          // ADS-vs-INA agreement at a trip (12V-equiv; ADS round-robin lags ~30 ms)
+const uint32_t ACC_SETTLE_VOLTAGE_MS = 2000;    // arrival → regulation settle (CV settles in seconds)
 const uint32_t ACC_SETTLE_THERMAL_MS = 120000;  // thermal loop: minutes — require sustained binding
 
 // === CV Loop Tuning Score System ===
@@ -3160,10 +3219,12 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 // oscillation (belt resonance, stator imbalance, rectifier ripple) to ~0 before the
 // threshold is applied.
 // See Working Markdown Docs/iExcess_Redesign_Spec.md and CV_Loop_Dev_Summary.md.
-float IExcessFrac     = 0.10f;   // CV threshold as fraction of setpointLimited (0.10 → 5A at a 50A command). Scales with frame size.
-float IExcessFracBulk = 0.15f;   // BULK threshold as fraction of i_ceiling_pre_ov (looser — tolerate command-vs-actual error far from the voltage limit).
-float IExcessFloorA   = 5.0f;    // A — min threshold; guards the low-command / depressed-setpoint case where the fraction would shrink below the residual. Floors are operator-owned — commissioning never writes one.
-float IExcessCeilA    = 25.0f;   // A — max threshold (bulk / alternator detector); guards against too-loose on very large commands.
+float IExcessFrac     = 0.10f;   // shared trip-line SLOPE (A per A of command); commissioning sets it to the measured ripple slope. E = clamp(floor, frac·cmd + base, ceil).
+float IExcessFracBulk = 0.15f;   // CC-detector slope; the UI keeps it equal to IExcessFrac so the CV and CC trip lines stay parallel. Differs from CV only on an uncommissioned device.
+float IExcessBaseA    = 0.0f;    // A — trip-line intercept (CV base). 0 = through-origin. Commissioning sets it to ripple-at-idle + Safety Margin, lifting the line above the measured ripple.
+float IExcessCcOffsetA = 0.0f;   // A — the CC trip line sits this far above the CV line (parallel offset). 0 = coincident with CV.
+float IExcessFloorA   = 5.0f;    // A — trip-line floor; it never dips below this even at tiny commands.
+float IExcessCeilA    = 25.0f;   // A — trip-line ceiling; it never rises above this on very large commands.
 float BattCurrentLimitA = 100.0f;  // A — max battery charge current (G4). Ceiling on the alternator-amp command = limit + measured house-load offset; requires the INA228 battery shunt as Battery Current Source. 0 = disabled.
 float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst-case (idle) belt resonance; one fixed value covers the whole RPM range. dt-aware alpha.
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (scale-aware).
@@ -3175,18 +3236,6 @@ float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed r
 float AwRecoverRate = 0.1f;      // HARDCODED, not user-adjustable. cv_I_aw_cap recovery rate (fraction of MaxTableValue/s) after fastOV clears. Only exercised on cold CV re-entry (MANUAL→AUTO, idle→bulk, post-shutdown). CSV3 slot CSV3_reserved_AwRecoverRate held for future use.
 uint16_t AwSeedProtectMs = 150;  // ms to suppress AwBleed + CC-tracker after any bumpless seed fires; 0=disabled
 // --- Recovery over-ramp restraint (inner output-current PID up-integration) ---
-// Kills the self-inflicted second iExcess fire: as RPM falls back through the alt cut-in band the
-// inner integral over-ramps duty (velocity lag on a falling plant), current overshoots command at
-// idle with battV under target, detector re-fires. Restrains only up-integration while a sustained
-// under-current (the falling-plant fingerprint) has accumulated; down stays full-rate.
-bool RecovAwEnable = true;       // master enable; inert on a fresh device because RecovAwArmAs ships high (see below)
-float RecovAwArmAs = 40.0f;      // A·s of accumulated under-current to arm. Ships high so an uncommissioned unit behaves as today; the Phase-B sizing test lowers it to the measured descent envelope. Size-dependent (scales with alt current) — commissioned per install.
-float RecovAwUpGain = 0.3f;      // up-integration scale while armed (1=off, 0=freeze). 0 would break the error<=0 self-disarm (frozen integral never kills steady-state error) — stay above it.
-uint16_t RecovAwMaxMs = 8000;    // backstop only; normal disarm is condition-based (inner error<=0). Sized >= throttled catch-up time, else a premature disarm re-ignites the over-ramp.
-float recovAwArmAccumAs = 0.0f;  // leaky ∫max(0,pidError)dt = the inner integral's own up-climb ÷ Ki
-bool recovAwArmed = false;
-uint32_t recovAwArmStartMs = 0;
-const float RECOV_AW_LEAK_TAU_S = 1.5f; // accumulator bleeds to ~0 over this when not under-current, so only a sustained descent (not brief filtered dips) reaches RecovAwArmAs
 float FastSetpointRiseRate = 8.0f;       // multiplier on normal setpoint rise slew during post-protection recovery window
 uint32_t FastSetpointRiseWindowMs = 5000; // hard upper bound (ms) on how long the fast-rise window stays open after any protection releases
 float FastSetpointRiseHeadroomV = 0.2f;  // V below ChargingVoltageTarget at which fast-rise is allowed; gate closes once IBV climbs into target - this margin
@@ -3637,7 +3686,7 @@ float TempPIDFilterAlpha = 0.2f;    // IIR smoothing for DS18B20 (0=frozen, 1=ra
 // Thermistor filter alpha is hardcoded 0.02f in the tempPID_tick IIR filter — not user-configurable
 // Runtime state — expose via telemetry
 double tempPIDInput_d = 77.0;        // PID process variable (°F) = max(projected, present) — projected = filtered + slope × lookahead
-double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF (real damage limit)
+double tempPIDSetpoint_d = 0.0;      // effectiveSetpoint: limit −7°F (slope buffer full) or −20°F blind warmup
 bool tempPIDActive = false;          // true when temperature PID is in AUTO
 bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempFilterUpdate()
 bool thermalIntegratorReleased = false;  // false until PRESENT temp first reaches the regulation setpoint; while false the up-driving dI is held off (P + projection dP alone handle the approach — prevents approach windup overshoot)
@@ -3804,17 +3853,14 @@ struct PidLogEntry {
   // ── iExcess (Group 3 alternator / Group 4 battery) detector tuning traces ─────────────────────────────
   float mExcessEma;            // g_mExcessEma — time-averaged signed current excess over command (A)
   float iExcessThreshold;      // g_iExcessThreshold — computed fire threshold E (A)
-  // ── Recovery over-ramp restraint traces ──────────────────────────────────
-  float recovAwScale;          // applied inner-integral up-scale (1.0=off, else RecovAwUpGain when armed)
-  float recovAwAccumAs;        // leaky under-current accumulator toward RecovAwArmAs (A·s)
-};                   // 148 bytes — naturally aligned, no implicit holes
+};                   // 140 bytes — naturally aligned, no implicit holes
 
 struct PidDLState {
   int count;
   int oldest;
   int row;
   bool done;
-  char line[1024];  // MUST hold the largest single row intact: comment block=715B, header≈510B (43 cols).
+  char line[1024];  // MUST hold the largest single row intact: comment block=715B, header≈480B (41 cols).
                     // snprintf truncation is NOT harmless here — it eats the row's trailing '\n', gluing
                     // that row onto the next one in the download. Grow this whenever a column or comment
                     // line is added.
@@ -3847,11 +3893,11 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 // CV / Voltage Tuner Log
 // Logs every CH1 sample (fresh CH1 arrives 5–25ms apart, assume ~30ms) — no internal rate limiter.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
-// 42 bytes/entry × 6000 entries = 252 KB PSRAM → ~28 sec at full rate.
+// 51 bytes/entry × 6000 entries = 306 KB PSRAM → ~28 sec at full rate.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// STRUCT  (42 bytes, offsets below match JS parser exactly)
+// STRUCT  (51 bytes, offsets below match JS parser exactly)
 // ---------------------------------------------------------------------------
 //
 //  offset  field            scale      notes
@@ -3921,10 +3967,8 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t inaIntervalMs;           // ina_last_ms at log time — INA228 read freshness (ms)
   int16_t slopeBleedAmps_x1000;    // cv_I drain applied this voltage loop tick (A × 1000); 0 on non-VL ticks
   uint8_t capReason;               // which layer set fastOvCap this tick: 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk
-  int16_t recovAwScale_x100;       // recovery over-ramp restraint: applied inner up-integration scale × 100 (100 = off)
-  int16_t recovAwAccumAs_x10;      // recovery restraint: leaky under-current accumulator toward RecovAwArmAs × 10 (A·s)
 };
-static_assert(sizeof(CvLogEntry) == 55, "CvLogEntry must be 55 bytes");
+static_assert(sizeof(CvLogEntry) == 51, "CvLogEntry must be 51 bytes");
 
 
 struct CvBinDLState {

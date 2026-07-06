@@ -58,10 +58,8 @@ enum Csv1Index {
   CSV1_mExcessEmaPeak,   // iExcess: per-CSV1-frame peak averaged excess (A ×10) — live sparkline
   CSV1_iExcessThreshMin, // iExcess: per-CSV1-frame min fire threshold E (A ×10) — live sparkline
   CSV1_protEventMask,    // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
-  CSV1_recovAwScale,     // recovery over-ramp restraint: applied up-integration scale (×100; 100=off, else RecovAwUpGain) — tuning trace
-  CSV1_recovAwAccumAs,   // recovery restraint: leaky under-current accumulator toward RecovAwArmAs (A·s ×10) — tuning trace
 
-  CSV1_FIELD_COUNT  // = 43
+  CSV1_FIELD_COUNT  // = 41
 };
 
 enum Csv2Index {
@@ -638,6 +636,18 @@ enum Csv2Index {
 
   CSV2_cvTempDerateScale, // live battery-temp gain derate multiplier on the active CV gains; ×1000
 
+  // Control Accuracy v3 episode coverage (spec: CONTROL_ACCURACY_V3_EPISODE_SPEC.md). Counts +
+  // seconds so the UI can distinguish "0 episodes over hours of eligible time" from "never eligible".
+  CSV2_accCurEp,      // committed episodes since reset, current loop
+  CSV2_accVoltEp,     // committed episodes since reset, voltage loop
+  CSV2_accThermSess,  // thermal containment sessions since reset
+  CSV2_accCurEligS,   // seconds current-loop authority conditions held
+  CSV2_accVoltEligS,  // seconds CV was engaged
+  CSV2_accThermEligS, // seconds thermal binding condition held (pre-settle)
+  CSV2_accCurScorS,   // scored seconds (RMS denominator, incl. live episode), current
+  CSV2_accVoltScorS,  // scored seconds, voltage
+  CSV2_accThermScorS, // scored seconds, thermal
+
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
 
@@ -1006,10 +1016,8 @@ enum Csv3Index {
   CSV3_ripDriftPct,             // command-travel gate slope (% of mean, ×10) — command gate only since §11
   CSV3_SocAlarmLow,             // low-SoC alarm threshold (%, integer); 0 = disabled
   CSV3_battMaxMode,             // battery V/I plot sampling: 0 = window mean, 1 = max-magnitude
-  CSV3_RecovAwEnable,           // recovery over-ramp restraint master switch (0/1)
-  CSV3_RecovAwArmAs,            // arm threshold: accumulated under-current (A·s ×10)
-  CSV3_RecovAwUpGain,           // up-integration scale while armed (×100; 100 = off)
-  CSV3_RecovAwMaxMs,            // restraint backstop time limit (ms, integer)
+  CSV3_IExcessBaseA,            // over-current trip-line intercept / CV base (A ×10)
+  CSV3_IExcessCcOffsetA,        // CC trip line offset above CV (A ×10)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -2015,9 +2023,7 @@ void setupServer() {
                 "voltLoopIntervalMs,"
                 "inaIntervalMs,"
                 "mExcessEma,"
-                "iExcessThreshold,"
-                "recovAwScale,"
-                "recovAwAccumAs\n");
+                "iExcessThreshold\n");
 
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
 
@@ -2052,8 +2058,7 @@ void setupServer() {
                 "%u,%u,"          // flags, ovFlags
                 "%.2f,%.3f,"      // dBcur_dt, battI
                 "%d,%d,%d,"       // ch1IntervalMs, voltLoopIntervalMs, inaIntervalMs
-                "%.3f,%.3f,"     // mExcessEma, iExcessThreshold (A)
-                "%.3f,%.3f\n",   // recovAwScale (×1), recovAwAccumAs (A·s)
+                "%.3f,%.3f\n",     // mExcessEma, iExcessThreshold (A)
                 (unsigned long)e.ts,
                 (unsigned)e.chargeStageDisplay,
                 (unsigned)e.TargetVoltageMode,
@@ -2094,9 +2099,7 @@ void setupServer() {
                 (int)e.voltLoopIntervalMs,
                 (int)e.inaIntervalMs,
                 e.mExcessEma,
-                e.iExcessThreshold,
-                e.recovAwScale,
-                e.recovAwAccumAs);
+                e.iExcessThreshold);
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
             }
 
@@ -2349,19 +2352,6 @@ void setupServer() {
   // Auto Min% learning ("knee tracker") state: knobs + live status + per-bin learned floors.
   server.on("/kneeLearnState", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", kneeLearnStateJson());
-  });
-  // Recovery-restraint commissioning: live state + captured uncut over-ramp envelope + current knobs.
-  // The propose-and-confirm math lives in the UI (like the CV plant fit / knee learner).
-  server.on("/recovawtest.json", HTTP_GET, [](AsyncWebServerRequest *request) {
-    char buf[320];
-    snprintf(buf, sizeof(buf),
-             "{\"active\":%d,\"state\":%u,\"peakA\":%.2f,\"underAs\":%.2f,\"latencyMs\":%lu,"
-             "\"threshA\":%.2f,\"enable\":%d,\"armAs\":%.1f,\"upGain\":%.2f,\"maxMs\":%u}",
-             recovAwCommissionActive ? 1 : 0, (unsigned)recovAwTestState,
-             recovAwTestPeakEma, recovAwTestArmAsAtCross, (unsigned long)recovAwTestLatencyMs,
-             recovAwTestThreshAtCross, RecovAwEnable ? 1 : 0,
-             RecovAwArmAs, RecovAwUpGain, (unsigned)RecovAwMaxMs);
-    request->send(200, "application/json", buf);
   });
   // First-boot SoC seed record for the commissioning popup; ack=1 once the user pressed Finish.
   server.on("/socseed", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -5159,28 +5149,6 @@ void setupServer() {
       resTestTargetA = request->getParam("resTestTargetA")->value().toFloat();
       resTestLastCmdMs = millis();  // keepalive refresh (deadman)
     }
-    // Recovery-restraint commissioning: arm the suspend-and-measure harness (=1, also the deadman keepalive)
-    // or disarm (=0). A re-arm while already active is treated as keepalive so it never clobbers a capture.
-    else if (request->hasParam("recovAwCommission")) {
-      foundParameter = true;
-      bool arm = (request->getParam("recovAwCommission")->value().toInt() != 0);
-      if (arm) {
-        if (!recovAwCommissionActive) {
-          recovAwTestState = 1;
-          recovAwCommissionFire1Ms = 0;
-          recovAwTestPeakEma = 0.0f;
-          recovAwTestArmAsAtCross = 0.0f;
-          recovAwTestLatencyMs = 0;
-          recovAwTestThreshAtCross = 0.0f;
-          recovAwCommissionActive = true;
-          queueConsoleMessage("Recovery-restraint commission ARMED — do the worst-case throttle chop; fire #1 cuts normally, fire #2 is suspended & measured (OV+OC stay live)");
-        }
-        recovAwCommissionLastCmdMs = millis();
-      } else {
-        recovAwCommissionActive = false;
-        queueConsoleMessage("Recovery-restraint commission disarmed");
-      }
-    }
     // No VoltageKd handler — voltage loop has no D term.
     if (request->hasParam("SlopeBleedThresh")) {
       foundParameter = true;
@@ -5451,6 +5419,22 @@ void setupServer() {
       queueConsoleMessageF("IExcess threshold ceiling set to: %.1fA", IExcessCeilA);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
+    if (request->hasParam("IExcessBaseA")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessBaseA")->value();
+      IExcessBaseA = constrain(inputMessage.toFloat(), 0.0f, 40.0f);
+      settingWrite(NK_IExcessBaseA, String(IExcessBaseA, 1).c_str());
+      queueConsoleMessageF("IExcess trip-line base set to: %.1fA", IExcessBaseA);
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("IExcessCcOffsetA")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessCcOffsetA")->value();
+      IExcessCcOffsetA = constrain(inputMessage.toFloat(), 0.0f, 40.0f);
+      settingWrite(NK_IExcessCcOffsetA, String(IExcessCcOffsetA, 1).c_str());
+      queueConsoleMessageF("IExcess CC offset set to: %.1fA above CV", IExcessCcOffsetA);
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
     // Max battery charge current (G4). Ceiling on the alternator command = limit + measured
     // house-load offset; requires the INA228 battery shunt. 0 disables the feature.
     if (request->hasParam("BattCurrentLimitA")) {
@@ -5529,33 +5513,6 @@ void setupServer() {
       settingWrite(NK_AwSeedProtectMs, String(AwSeedProtectMs).c_str());
       queueConsoleMessageF("AW seed protect window set to: %u ms", (unsigned)AwSeedProtectMs);
       if (CVTuningMode) cvTuningParamChanged = true;
-    }
-    if (request->hasParam("RecovAwEnable")) {
-      foundParameter = true;
-      RecovAwEnable = (request->getParam("RecovAwEnable")->value().toInt() != 0);
-      settingWrite(NK_RecovAwEnable, String((int)RecovAwEnable).c_str());
-      queueConsoleMessageF("Recovery over-ramp restraint: %s", RecovAwEnable ? "ON" : "OFF");
-    }
-    if (request->hasParam("RecovAwArmAs")) {
-      foundParameter = true;
-      inputMessage = request->getParam("RecovAwArmAs")->value();
-      RecovAwArmAs = constrain(inputMessage.toFloat(), 1.0f, 500.0f);
-      settingWrite(NK_RecovAwArmAs, String(RecovAwArmAs, 1).c_str());
-      queueConsoleMessageF("Recovery restraint arm threshold set to: %.1f A-s", RecovAwArmAs);
-    }
-    if (request->hasParam("RecovAwUpGain")) {
-      foundParameter = true;
-      inputMessage = request->getParam("RecovAwUpGain")->value();
-      RecovAwUpGain = constrain(inputMessage.toFloat(), 0.0f, 1.0f);
-      settingWrite(NK_RecovAwUpGain, String(RecovAwUpGain, 2).c_str());
-      queueConsoleMessageF("Recovery restraint up-integration gain set to: %.2f", RecovAwUpGain);
-    }
-    if (request->hasParam("RecovAwMaxMs")) {
-      foundParameter = true;
-      inputMessage = request->getParam("RecovAwMaxMs")->value();
-      RecovAwMaxMs = (uint16_t)constrain(inputMessage.toInt(), 500, 30000);
-      settingWrite(NK_RecovAwMaxMs, String(RecovAwMaxMs).c_str());
-      queueConsoleMessageF("Recovery restraint time limit set to: %u ms", (unsigned)RecovAwMaxMs);
     }
     if (request->hasParam("KHard")) {
       foundParameter = true;
@@ -6544,13 +6501,14 @@ void setupServer() {
     bool testActive = (TuningMode && tuningScore.toggleCount > 0);
     float ts = (tuningScore.activeTimeSec > 0.0f)
                  ? (tuningScore.errorAccum / tuningScore.activeTimeSec) : 0.0f;
-    // "live" now carries the since-reset Control Accuracy score for this loop: [RMS error (A),
-    // worst over-current (A), 0, 0]. (The old 4 ISE windows are gone — 4-slot shape kept for the
-    // tuning UI parser.)
+    // "live" carries the since-reset Control Accuracy score for this loop, PROVISIONAL (committed
+    // episodes + live episode buffer): [RMS error (A), worst over-current (A), 0, 0]. (4-slot
+    // shape kept for the tuning UI parser.)
     pos += snprintf(buf + pos, 10240 - pos,
       "],\"live\":[%.2f,%.2f,%.2f,%.2f],"
       "\"ts\":%.2f,\"tt\":%d,\"ta\":%d}",
-      accScoreRms(accCurrent.errAccum, accCurrent.timeAccum), accCurrent.worstOver, 0.0f, 0.0f,
+      accScoreRms(accCurrent.errAccum + epCur.errAccum, accCurrent.timeAccum + epCur.timeAccum),
+      fmaxf(accCurrent.worstOver, (epCur.state && epCur.sign > 0) ? epCur.peak : 0.0f), 0.0f, 0.0f,
       ts, (int)tuningScore.toggleCount, testActive ? 1 : 0);
 
     // Chunked send — only one TCP-MSS chunk (~1.5 KB) lands on the internal heap.
@@ -6887,12 +6845,14 @@ void setupServer() {
                         + cvTuningScore.totalLowUndershootVs)
              / cvTuningScore.activeTimeSec;
     }
-    // "live" now carries the since-reset Control Accuracy score for the CV loop: [RMS error (mV),
-    // worst over-voltage (mV), 0, 0]. (4-slot shape kept for the tuning UI parser.)
+    // "live" carries the since-reset Control Accuracy score for the CV loop, PROVISIONAL (committed
+    // episodes + live episode buffer): [RMS error (mV), worst over-voltage (mV), 0, 0]. (4-slot
+    // shape kept for the tuning UI parser.)
     pos += snprintf(buf + pos, (pos >= 32768 ? 0 : 32768 - pos),
       "],\"live\":[%.0f,%.0f,%.0f,%.0f],"
       "\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
-      accScoreRms(accVoltage.errAccum, accVoltage.timeAccum) * 1000.0f, accVoltage.worstOver * 1000.0f, 0.0f, 0.0f,  // mV
+      accScoreRms(accVoltage.errAccum + epVolt.errAccum, accVoltage.timeAccum + epVolt.timeAccum) * 1000.0f,
+      fmaxf(accVoltage.worstOver, (epVolt.state && epVolt.sign > 0) ? epVolt.peak : 0.0f) * 1000.0f, 0.0f, 0.0f,  // mV
       cvts, (int)cvTuningScore.scoredHighCount, cvTestActive ? 1 : 0);
 
     // Chunked send: only ~1.5 KB per chunk lands on the internal heap. bufPtr is
@@ -6917,7 +6877,10 @@ void setupServer() {
     cvTuningScore        = {};
     cvTuningParamChanged = false;
     if (cvTuningLog) memset(cvTuningLog, 0, 50 * sizeof(CVTuningRecord));
-    accVoltage = {};  // clear the CV loop's Control Accuracy score too
+    accVoltage = {};  // clear the CV loop's Control Accuracy score too (incl. live episode + stats)
+    epVolt = {};
+    accVoltStats = {};
+    accVRegime = 0;
     pendingSaveCVTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
@@ -6929,16 +6892,49 @@ void setupServer() {
     tuningScore       = {};
     tuningParamChanged = false;
     if (tuningLog) memset(tuningLog, 0, 50 * sizeof(TuningRecord));
-    accCurrent = {};  // clear the inner current loop's Control Accuracy score too
+    accCurrent = {};  // clear the inner current loop's Control Accuracy score too (incl. live episode + stats)
+    epCur = {};
+    accCurStats = {};
+    accCurRefSeeded = false;
     pendingSaveTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
 
-  // Manual "Reset" button under the Control Accuracy Scores panel. Zeros all three loops'
-  // since-reset accumulators. (They also auto-reset after each config-snapshot upload.)
+  // Manual "Reset" button under the Control Accuracy Scores panel. Clears committed accumulators,
+  // coverage stats AND live episode buffers. (The daily post-snapshot auto-reset passes false so a
+  // live episode carries across the window boundary.)
   server.on("/resetAccuracyScores", HTTP_POST, [](AsyncWebServerRequest *request) {
-    resetAccuracyScores();
+    resetAccuracyScores(true);
     request->send(200, "text/plain", "OK");
+  });
+
+  // Control Accuracy v3 diagnostics — live episode state + voids by reason, fetched on demand by
+  // the panel's expander (kept out of CSV2 to bound field growth). Void order matches AccVoidReason.
+  server.on("/accstate", HTTP_GET, [](AsyncWebServerRequest *request) {
+    char buf[768];
+    int p = snprintf(buf, sizeof(buf),
+                     "{\"reasons\":[\"rail\",\"ceiling\",\"engine_stop\",\"mode_exit\",\"cmd_zero\","
+                     "\"prot_unrelated\",\"sensor_suspect\",\"sample_gap\",\"target_step\",\"manual_reset\"],"
+                     "\"cur\":{\"active\":%d,\"sign\":%d,\"epSec\":%.1f,\"epPeak\":%.2f,\"episodes\":%u,"
+                     "\"eligibleS\":%.0f,\"scoredS\":%.1f,\"voids\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]},",
+                     (int)epCur.state, (int)epCur.sign, (float)epCur.timeAccum, epCur.peak,
+                     accCurStats.episodes, (float)accCurStats.eligibleSec,
+                     (float)(accCurrent.timeAccum + epCur.timeAccum),
+                     accCurStats.voids[0], accCurStats.voids[1], accCurStats.voids[2], accCurStats.voids[3],
+                     accCurStats.voids[4], accCurStats.voids[5], accCurStats.voids[6], accCurStats.voids[7],
+                     accCurStats.voids[8], accCurStats.voids[9]);
+    p += snprintf(buf + p, sizeof(buf) - p,
+                  "\"volt\":{\"active\":%d,\"sign\":%d,\"regime\":%u,\"epSec\":%.1f,\"epPeakMv\":%.0f,"
+                  "\"episodes\":%u,\"eligibleS\":%.0f,\"scoredS\":%.1f,\"voids\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]},"
+                  "\"therm\":{\"sessions\":%u,\"eligibleS\":%.0f,\"scoredS\":%.1f}}",
+                  (int)epVolt.state, (int)epVolt.sign, (unsigned)accVRegime, (float)epVolt.timeAccum,
+                  epVolt.peak * 1000.0f, accVoltStats.episodes, (float)accVoltStats.eligibleSec,
+                  (float)(accVoltage.timeAccum + epVolt.timeAccum),
+                  accVoltStats.voids[0], accVoltStats.voids[1], accVoltStats.voids[2], accVoltStats.voids[3],
+                  accVoltStats.voids[4], accVoltStats.voids[5], accVoltStats.voids[6], accVoltStats.voids[7],
+                  accVoltStats.voids[8], accVoltStats.voids[9],
+                  accThermSessions, (float)accThermEligibleSec, (float)accThermal.timeAccum);
+    request->send(200, "application/json", buf);
   });
 
   server.on("/resetsystemidlog", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -7321,7 +7317,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +2: recovAwScale, recovAwAccumAs
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -7365,9 +7361,7 @@ void SendWifiData() {
                                SafeInt(g_iExcessThreshold, 10), // CSV1_iExcessThreshold — fire threshold E (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_mExcessEmaPeak : g_mExcessEma, 10),       // CSV1_mExcessEmaPeak (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_iExcessThreshWinMin : g_iExcessThreshold, 10), // CSV1_iExcessThreshMin (A ×10)
-                               SafeInt(protMask),               // CSV1_protEventMask — protection-event bits this frame
-                               SafeInt(currentPID.GetIntegralUpScale(), 100), // CSV1_recovAwScale (×100; 100=off)
-                               SafeInt(recovAwArmAccumAs, 10)   // CSV1_recovAwAccumAs (A·s ×10)
+                               SafeInt(protMask)               // CSV1_protEventMask — protection-event bits this frame
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
@@ -7565,7 +7559,9 @@ void SendWifiData() {
                                // +2: Core-0 HTTPS task cloud op time (last/worst, ms)
                                "%d,%d,"
                                // +1: live battery-temp CV gain derate multiplier (×1000)
-                               "%d",
+                               "%d,"
+                               // +9: Control Accuracy v3 coverage (3 episode/session counts, 3 eligible s, 3 scored s)
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -8091,10 +8087,12 @@ void SendWifiData() {
                                SafeInt(best_upwind_vmg_alltime, 100),      // CSV2_BestUpwindVmgAT   (kts ×100)
                                SafeInt(longest_gale_duration_hours_alltime, 100), // CSV2_LongestGaleAT (hr ×100)
                                // Control Accuracy Scores (since last reset). RMS error + worst overshoot per loop.
-                               SafeInt(accScoreRms(accCurrent.errAccum, accCurrent.timeAccum), 100),     // CSV2_accCurRms   (A ×100)
-                               SafeInt(accCurrent.worstOver, 100),        // CSV2_accCurPeak  (A ×100)
-                               SafeInt(accScoreRms(accVoltage.errAccum, accVoltage.timeAccum), 1000),    // CSV2_accVoltRms  (V→mV)
-                               SafeInt(accVoltage.worstOver, 1000),       // CSV2_accVoltPeak (V→mV)
+                               // Electrical values are PROVISIONAL: committed episodes + the live episode buffer,
+                               // so the panel can't show a clean zero while a deviation is in progress.
+                               SafeInt(accScoreRms(accCurrent.errAccum + epCur.errAccum, accCurrent.timeAccum + epCur.timeAccum), 100),  // CSV2_accCurRms (A ×100)
+                               SafeInt(fmaxf(accCurrent.worstOver, (epCur.state && epCur.sign > 0) ? epCur.peak : 0.0f), 100),  // CSV2_accCurPeak (A ×100)
+                               SafeInt(accScoreRms(accVoltage.errAccum + epVolt.errAccum, accVoltage.timeAccum + epVolt.timeAccum), 1000),  // CSV2_accVoltRms (V→mV)
+                               SafeInt(fmaxf(accVoltage.worstOver, (epVolt.state && epVolt.sign > 0) ? epVolt.peak : 0.0f), 1000),  // CSV2_accVoltPeak (V→mV)
                                SafeInt(accScoreRms(accThermal.errAccum, accThermal.timeAccum), 100),     // CSV2_accThermRms (°F ×100)
                                SafeInt(accThermal.worstOver, 100),        // CSV2_accThermPeak (°F ×100)
                                SafeInt(getCpuFrequencyMhz()),             // CSV2_cpuFreqMhz   (MHz ×1)
@@ -8108,7 +8106,16 @@ void SendWifiData() {
                                SafeInt(csv2SendWorstUs),                  // CSV2_csv2SendWorst  (µs)
                                SafeInt(httpsUploadLastMs),                // CSV2_httpsUpload_win -> Core-0 cloud op LAST (ms)
                                SafeInt(httpsUploadWorstMs),               // CSV2_httpsUpload_ses -> Core-0 cloud op WORST since reset (ms)
-                               SafeInt(cvTempDerateScale, 1000)           // CSV2_cvTempDerateScale -> battery-temp gain derate multiplier (×1000)
+                               SafeInt(cvTempDerateScale, 1000),          // CSV2_cvTempDerateScale -> battery-temp gain derate multiplier (×1000)
+                               (int)accCurStats.episodes,                 // CSV2_accCurEp
+                               (int)accVoltStats.episodes,                // CSV2_accVoltEp
+                               (int)accThermSessions,                     // CSV2_accThermSess
+                               (int)accCurStats.eligibleSec,              // CSV2_accCurEligS
+                               (int)accVoltStats.eligibleSec,             // CSV2_accVoltEligS
+                               (int)accThermEligibleSec,                  // CSV2_accThermEligS
+                               (int)(accCurrent.timeAccum + epCur.timeAccum),   // CSV2_accCurScorS (incl. live episode)
+                               (int)(accVoltage.timeAccum + epVolt.timeAccum),  // CSV2_accVoltScorS (incl. live episode)
+                               (int)accThermal.timeAccum                  // CSV2_accThermScorS
     );
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
@@ -8215,10 +8222,8 @@ void SendWifiData() {
                                "%d,"  // ripDriftPct
                                "%d,"  // SocAlarmLow
                                "%d,"  // battMaxMode
-                               "%d,"  // RecovAwEnable
-                               "%d,"  // RecovAwArmAs
-                               "%d,"  // RecovAwUpGain
-                               "%d",  // RecovAwMaxMs
+                               "%d,"  // IExcessBaseA
+                               "%d",  // IExcessCcOffsetA
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8554,10 +8559,8 @@ void SendWifiData() {
                                SafeInt(ripDriftPct, 10),                        // CSV3_ripDriftPct (% ×10)
                                SafeInt(SocAlarmLow),                            // CSV3_SocAlarmLow (%, integer; 0 = disabled)
                                SafeInt(battMaxMode),                            // CSV3_battMaxMode (0 = Average, 1 = Max)
-                               (int)RecovAwEnable,                              // CSV3_RecovAwEnable (0/1)
-                               SafeInt(RecovAwArmAs, 10),                       // CSV3_RecovAwArmAs (A·s ×10)
-                               SafeInt(RecovAwUpGain, 100),                     // CSV3_RecovAwUpGain (×100; 100 = off)
-                               (int)RecovAwMaxMs                                // CSV3_RecovAwMaxMs (ms, integer)
+                               SafeInt(IExcessBaseA, 10),                       // CSV3_IExcessBaseA — ×10, 1 decimal
+                               SafeInt(IExcessCcOffsetA, 10)                    // CSV3_IExcessCcOffsetA — ×10, 1 decimal
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

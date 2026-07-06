@@ -241,8 +241,6 @@ const CSV1_FIELDS = [
     "mExcessEmaPeak",    // iExcess: per-frame peak averaged excess (A ×10) — live sparkline
     "iExcessThreshMin",  // iExcess: per-frame min fire threshold E (A ×10) — live sparkline
     "protEventMask",     // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
-    "recovAwScale",      // recovery over-ramp restraint: applied up-integration scale (×100; 100=off) — tuning trace
-    "recovAwAccumAs",    // recovery restraint: leaky under-current accumulator toward RecovAwArmAs (A·s ×10) — tuning trace
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -789,6 +787,16 @@ const CSV2_FIELDS = [
     "httpsUpload_win", // Core-0 HTTPS task cloud op time, LAST (ms — plain ms, NOT ft_ so no /1000)
     "httpsUpload_ses", // Core-0 HTTPS task cloud op time, WORST since reset (ms)
     "cvTempDerateScale", // live battery-temp CV gain derate multiplier; ×1000
+    // Control Accuracy v3 episode coverage — distinguishes "0 episodes over hours" from "never eligible"
+    "accCurEp",       // committed episodes since reset, current loop
+    "accVoltEp",      // committed episodes since reset, voltage loop
+    "accThermSess",   // thermal containment sessions since reset
+    "accCurEligS",    // seconds current-loop authority conditions held
+    "accVoltEligS",   // seconds CV was engaged
+    "accThermEligS",  // seconds thermal binding condition held
+    "accCurScorS",    // scored seconds (RMS denominator, incl. live episode), current
+    "accVoltScorS",   // scored seconds, voltage
+    "accThermScorS",  // scored seconds, thermal
 ];
 
 // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). Sits between CSV1 (10 Hz)
@@ -2580,10 +2588,8 @@ const CSV3_FIELDS = [
     "ripDriftPct",                   // command-travel gate slope (% of mean, ×10)
     "SocAlarmLow",                   // low-SoC alarm threshold (%, integer); 0 = disabled
     "battMaxMode",                   // battery V/I plot sampling: 0 = window mean, 1 = max-magnitude
-    "RecovAwEnable",                 // recovery over-ramp restraint master switch (0/1)
-    "RecovAwArmAs",                  // arm threshold: accumulated under-current (A·s ×10)
-    "RecovAwUpGain",                 // up-integration scale while armed (×100; 100 = off)
-    "RecovAwMaxMs",                  // restraint backstop time limit (ms, integer)
+    "IExcessBaseA",                  // over-current trip-line intercept / CV base (A ×10)
+    "IExcessCcOffsetA",              // CC trip line offset above CV (A ×10)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5103,6 +5109,8 @@ function updateAllEchosOptimized(data) {
         { key: 'IExcessFracBulk', id: 'IExcessFracBulk_echo', transform: v => (v / 10).toFixed(1) },  // ×1000 → % of ceiling
         { key: 'IExcessFloorA', id: 'IExcessFloorA_echo', transform: v => (v / 10).toFixed(1) },      // ×10 → A
         { key: 'IExcessCeilA', id: 'IExcessCeilA_echo', transform: v => (v / 10).toFixed(1) },        // ×10 → A (alternator detector)
+        { key: 'IExcessBaseA', id: 'IExcessBaseA_echo', transform: v => (v / 10).toFixed(1) },        // ×10 → A (trip-line intercept / CV base)
+        { key: 'IExcessCcOffsetA', id: 'IExcessCcOffsetA_echo', transform: v => (v / 10).toFixed(1) },// ×10 → A (CC line offset above CV)
         { key: 'BattCurrentLimitA', id: 'BattCurrentLimitA_echo', transform: v => (v / 10).toFixed(1) }, // ×10 → A (battery charge current ceiling; 0 = disabled)
         { key: 'IExcessTau', id: 'IExcessTau_echo', transform: v => Math.round(v) },                  // raw ms
         { key: 'IExcessRelFrac', id: 'IExcessRelFrac_echo', transform: v => (v / 10).toFixed(1) },    // ×1000 → % of threshold
@@ -5142,10 +5150,6 @@ function updateAllEchosOptimized(data) {
         { key: 'KHard',             id: 'KHard_echo',             transform: v => (v / 10).toFixed(1) },
         { key: 'ReseedFrac',        id: 'ReseedFrac_echo',        transform: v => (v / 100).toFixed(2) },
         { key: 'AwSeedProtectMs',   id: 'AwSeedProtectMs_echo',   transform: v => v },
-        { key: 'RecovAwEnable',     id: 'RecovAwEnable_echo',     transform: v => v == 1 ? 'ON' : 'OFF' },
-        { key: 'RecovAwArmAs',      id: 'RecovAwArmAs_echo',      transform: v => (v / 10).toFixed(1) },
-        { key: 'RecovAwUpGain',     id: 'RecovAwUpGain_echo',     transform: v => (v / 100).toFixed(2) },
-        { key: 'RecovAwMaxMs',      id: 'RecovAwMaxMs_echo',      transform: v => v },
         { key: 'FastSetpointRiseRate', id: 'FastSetpointRiseRate_echo', transform: v => (v / 100).toFixed(1) },
         { key: 'FastSetpointRiseWindowMs', id: 'FastSetpointRiseWindowMs_echo', transform: v => v },
         { key: 'FastSetpointRiseHeadroomV', id: 'FastSetpointRiseHeadroomV_echo', transform: v => (v / 100).toFixed(2) },
@@ -5681,13 +5685,24 @@ async function handleVesselInfoSave(event) {
             // sequence (each waits for the previous to close — never stacked).
             const _orientChanged = _prevOrient !== null && isFinite(_prevOrient)
                 && _prevOrient !== vesselData.imu_mount_orientation;
+            // A ✕-dismiss from a pre-flash session lives in sessionStorage and would mute a
+            // factory-fresh device's popup in a reused tab — a true first save re-arms it.
+            if (result.firstSave === true) sessionStorage.removeItem('socSeedDismissed');
             (_orientChanged
                 ? xAlert('Because the mounting orientation changed, the saved level reference (Level Zero) no longer matches how the device sits, and heel/pitch will read wrong until it is recaptured.\n\nWith the boat sitting level, press Zero Now in the Vessel Info section to re-zero.', 'Re-do Level Zero')
                 : Promise.resolve())
                 .then(() => maybeProposeBatteryDefaults(vesselData, _prevBatt, result.firstSave === true))  // async, never blocks the save result
-                // Factory-fresh device: the firmware runs its deferred SoC seed on this save, so once
-                // the defaults modal resolves, re-fetch /socseed and show the commissioning estimate.
-                .then(() => setTimeout(() => { _socSeedData = null; socSeedMaybeAutoOpen(); }, 1000));
+                // Factory-fresh device: the firmware runs its deferred SoC seed on Core 1 some time
+                // after this save responds, so poll /socseed until the snapshot lands (a single
+                // fixed delay raced the Core-1 write and could miss the popup forever).
+                .then(async () => {
+                    for (let i = 0; i < 6; i++) {
+                        await new Promise(res => setTimeout(res, 1000));
+                        _socSeedData = null;
+                        await socSeedMaybeAutoOpen();
+                        if (_socSeedData && _socSeedData.snap) break;
+                    }
+                });
 
         } else {
             throw new Error(result.error || 'Save failed');
@@ -5812,6 +5827,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword) + '&includeHardware=1'), {}, 10000);
         if (!r.ok) { _battDefSkipNote('Could not read the current device settings (HTTP ' + r.status + '), so the recommended battery defaults were skipped. Review them any time under Setup &rarr; Battery.'); return; }
         const cfg = (await r.json()).config || {};
+        const battSrc = ('BatteryCurrentSource' in cfg) ? parseInt(cfg.BatteryCurrentSource, 10) : 0;  // 0 = INA228
 
         const der = deriveBatteryDefaults(type, Number(vessel.battery_capacity_ah), Number(vessel.battery_voltage));
         if (!der) return;
@@ -6407,11 +6423,54 @@ async function resetTuningLog() {
         .catch(() => {});
 }
 
-// Manual reset for the Control Accuracy Scores panel. Clears all three loops' since-reset
-// accumulators on the device; the cells fall to dashes until fresh authority time accrues.
+// Manual reset for the Control Accuracy Scores panel. Clears all three loops' committed
+// accumulators, coverage stats AND live episode buffers on the device; the cells fall to
+// dashes until a fresh challenge episode is scored.
 async function resetAccuracyScores() {
     if (!await xConfirm('Reset the Control Accuracy scores (RMS + worst overshoot for all three loops)?')) return;
     fetch(buildURL('/resetAccuracyScores'), { method: 'POST' }).catch(() => {});
+}
+
+// Episode diagnostics expander: fetches /accstate on open and renders live episode state +
+// discarded ("voided") episode counts by reason. On-demand only — kept out of CSV2.
+function fetchAccState() {
+    const el = document.getElementById('accStateBody');
+    if (!el) return;
+    el.textContent = 'Loading…';
+    fetch(buildURL('/accstate'))
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+            if (!d) { el.textContent = 'Not available.'; return; }
+            const reasonLabels = {
+                rail: 'actuator at rail (no authority that direction)',
+                ceiling: 'current ceiling reached (no headroom)',
+                engine_stop: 'engine stopped',
+                mode_exit: 'mode or stage exited',
+                cmd_zero: 'commanded current dropped to zero',
+                prot_unrelated: 'protection fired, unrelated direction',
+                sensor_suspect: 'sensor disagreement at protection trip',
+                sample_gap: 'control-tick gap (stall)',
+                target_step: 'voltage target stepped (immature episode)',
+                manual_reset: 'manual reset'
+            };
+            const liveLine = (L, isVolt) => !L.active ? 'none'
+                : (L.sign > 0 ? 'over' : 'under') + '-episode, '
+                  + (isVolt ? (L.epPeakMv.toFixed(0) + ' mV peak') : (L.epPeak.toFixed(2) + ' A peak'))
+                  + ', ' + L.epSec.toFixed(1) + 's so far';
+            const voidsOf = L => d.reasons
+                .map((r, i) => L.voids[i] > 0 ? (reasonLabels[r] || r) + ': ' + L.voids[i] : null)
+                .filter(Boolean).join('\n      ') || 'none';
+            const regimeName = ['idle (CV off)', 'arrival (settling toward target)', 'regulation'][d.volt.regime] || '?';
+            el.textContent =
+                'Current loop\n   live episode: ' + liveLine(d.cur, false)
+                + '\n   discarded episodes:\n      ' + voidsOf(d.cur)
+                + '\n\nVoltage loop — ' + regimeName
+                + '\n   live episode: ' + liveLine(d.volt, true)
+                + '\n   discarded episodes:\n      ' + voidsOf(d.volt)
+                + '\n\nThermal loop\n   containment sessions: ' + d.therm.sessions
+                + ', scored ' + d.therm.scoredS.toFixed(0) + 's of ' + d.therm.eligibleS.toFixed(0) + 's eligible';
+        })
+        .catch(() => { el.textContent = 'Not available.'; });
 }
 
 function commitCVTuningScore() {
@@ -6544,14 +6603,16 @@ function fetchCVTuningLog() {
 }
 
 // Control Accuracy cell: divide the raw CSV value by `scale`, write it with `unit` and `decimals`,
-// and color green/orange/red by its thresholds (compared in display units). v <= 0 → dash, muted
-// ("no qualifying data scored yet"). Caches the last render on the element so it's scope-independent.
-function accScoreCell(elId, raw, scale, unit, decimals, greenMax, orangeMax, muted) {
+// and color green/orange/red by its thresholds (compared in display units). Dash rule keys on
+// scoredS (the RMS denominator), NOT the value: scoredS 0 → "—" (never observed under challenge),
+// while scoredS > 0 with value 0 renders 0 in green ("challenged and clean" — e.g. a thermal peak
+// that never crossed the limit). Caches the last render on the element so it's scope-independent.
+function accScoreCell(elId, raw, scale, unit, decimals, greenMax, orangeMax, muted, scoredS) {
     const el = document.getElementById(elId);
     if (!el || raw === undefined) return;
-    const v = raw / scale;
+    const v = Math.max(0, raw / scale);
     let txt, color;
-    if (!(v > 0)) { txt = '—'; color = 'var(--text-muted)'; }
+    if (!(scoredS > 0)) { txt = '—'; color = 'var(--text-muted)'; }
     else if (muted) { txt = v.toFixed(decimals) + unit; color = 'var(--text-muted)'; }
     else {
         txt = v.toFixed(decimals) + unit;
@@ -6562,6 +6623,19 @@ function accScoreCell(elId, raw, scale, unit, decimals, greenMax, orangeMax, mut
     el.dataset.stamp = stamp;
     el.textContent = txt;
     el.style.color = color;
+}
+
+// Coverage sub-line under each Control Accuracy row: "N episodes · Xs scored · Yh eligible".
+function accCovLine(elId, count, countWord, scoredS, eligS) {
+    const el = document.getElementById(elId);
+    if (!el || count === undefined) return;
+    const fmtT = s => !(s > 0) ? '0s' : (s < 90 ? Math.round(s) + 's'
+        : (s < 5400 ? (s / 60).toFixed(1) + 'm' : (s / 3600).toFixed(1) + 'h'));
+    const txt = count + ' ' + countWord + (count === 1 ? '' : 's') + ' · '
+        + fmtT(scoredS) + ' scored · ' + fmtT(eligS) + ' eligible';
+    if (el.dataset.stamp === txt) return;
+    el.dataset.stamp = txt;
+    el.textContent = txt;
 }
 
 function renderCVTuningLog(data) {
@@ -9608,7 +9682,6 @@ function updateTogglesFromData(data) {
         }
         updateCheckbox("HardwarePresent_checkbox", data.hardwarePresent, "hardwarePresent");
         updateCheckbox("OvGroup1Enable_checkbox", data.OvGroup1Enable, "OvGroup1Enable");
-        updateCheckbox("RecovAwEnable_checkbox", data.RecovAwEnable, "RecovAwEnable");
         updateCheckbox("OvGroup2Enable_checkbox", data.OvGroup2Enable, "OvGroup2Enable");
         updateCheckbox("cvHelpersEnabled_checkbox", data.cvHelpersEnabled, "cvHelpersEnabled");
         updateCheckbox("vTgtRampEnable_checkbox", data.vTgtRampEnable, "vTgtRampEnable");
@@ -11645,18 +11718,33 @@ window.addEventListener("load", function () {
                 }
             }
 
-            // Control Accuracy Scores (always-on, fed off CSV2). Six color-coded cells: RMS error +
-            // worst overshoot per loop, in physical units. Current/thermal are ×100 in CSV2, voltage
-            // is already in mV. Thresholds are in display units (A, mV, °F) — tune on the bench.
-            accScoreCell('accCurRms',    data.accCurRms,    100, ' A',  2, 3,  5);
-            accScoreCell('accCurPeak',   data.accCurPeak,   100, ' A',  2, 2,  5, true);  // greyed: single-sample peak is too easily polluted by one bad reading
-            accScoreCell('accVoltRms',   data.accVoltRms,     1, ' mV', 0, 200, 300);
-            accScoreCell('accVoltPeak',  data.accVoltPeak,    1, ' mV', 0, 100, 150);
-            accScoreCell('accThermRms',  data.accThermRms,  100, ' °F', 1, 10,  15);
+            // Control Accuracy Scores v3 (always-on, fed off CSV2). Values are provisional
+            // (committed episodes + live episode). Current/thermal are ×100 in CSV2, voltage is
+            // already in mV. Dash keys on scored seconds, not the value, so "challenged and clean"
+            // reads 0 in green instead of dash. Thresholds in display units — placeholders until a
+            // bench day of v3 episode data (episode-conditional RMS runs higher than v2's).
+            const accCurS   = parseFloat(data.accCurScorS)   || 0;
+            const accVoltS  = parseFloat(data.accVoltScorS)  || 0;
+            const accThermS = parseFloat(data.accThermScorS) || 0;
+            accScoreCell('accCurRms',    data.accCurRms,    100, ' A',  2, 3,  5, false, accCurS);
+            accScoreCell('accCurPeak',   data.accCurPeak,   100, ' A',  2, 2,  5, true,  accCurS);  // greyed: single-sample peak is too easily polluted by one bad reading
+            accScoreCell('accVoltRms',   data.accVoltRms,     1, ' mV', 0, 200, 300, false, accVoltS);
+            accScoreCell('accVoltPeak',  data.accVoltPeak,    1, ' mV', 0, 100, 150, false, accVoltS);
+            accScoreCell('accThermRms',  data.accThermRms,  100, ' °F', 1, 10,  15, false, accThermS);
             // Worst over-temp: red once the peak reaches the over-temp shutdown trip (limit + TempWarnExcess,
             // default 2°F) — if it shut down, it's red. Orange from half that. Tracks the live warn-excess.
+            // Denominator is total accumulated time (thermal peak is tracked unconditionally), so any
+            // uptime shows a number; use eligible+scored as "observed" proxy.
             const thermWarnF = (window._tempWarnExcessF > 0) ? window._tempWarnExcessF : 2.0;
-            accScoreCell('accThermPeak', data.accThermPeak, 100, ' °F', 1, thermWarnF * 0.5, thermWarnF);
+            const thermObsS = Math.max(accThermS, parseFloat(data.accThermEligS) || 0);
+            accScoreCell('accThermPeak', data.accThermPeak, 100, ' °F', 1, thermWarnF * 0.5, thermWarnF, false,
+                         (parseFloat(data.accThermPeak) > 0) ? Math.max(thermObsS, 1) : thermObsS);
+            accCovLine('accCurCov',   parseInt(data.accCurEp)     || 0, 'episode',
+                       accCurS,   parseFloat(data.accCurEligS)  || 0);
+            accCovLine('accVoltCov',  parseInt(data.accVoltEp)    || 0, 'episode',
+                       accVoltS,  parseFloat(data.accVoltEligS) || 0);
+            accCovLine('accThermCov', parseInt(data.accThermSess) || 0, 'session',
+                       accThermS, parseFloat(data.accThermEligS) || 0);
 
             // Update GPS display and manual entry form visibility
             if (data.LatitudeNMEA !== undefined && data.LongitudeNMEA !== undefined) {
@@ -12655,6 +12743,10 @@ function showMainTab(tabName) {
             header.classList.add('permanent-header-sticky');
         }
     }
+
+    // Main-tab clicks that don't re-enter showSubTab (sub-tab already active) would otherwise
+    // keep the previous tab's scroll offset; reset to the top.
+    window.scrollTo(0, 0);
 }
 
 
@@ -12695,10 +12787,10 @@ function showSubTab(parentTab, subTabName, evt = null) {
     const contentEl = document.getElementById(`${parentTab}-${subTabName}`);
     if (contentEl) {
         contentEl.classList.add('active');
-        // Cross-links live at the bottom of long pages; without this the window keeps its
-        // scroll offset and lands the user at the bottom of the destination sub-tab.
-        contentEl.scrollIntoView({ block: 'start', behavior: 'auto' });
     }
+    // Reset to the top on every sub-tab switch; otherwise the window keeps the prior scroll
+    // offset (a cross-link low on a long page would land you at the destination's bottom).
+    window.scrollTo(0, 0);
 
     // A chart revealed by this sub-tab switch (e.g. Tuning > Current/Voltage) was built at width 0
     // while hidden — size it immediately instead of waiting on its debounced ResizeObserver.
@@ -13623,11 +13715,11 @@ const SINFO = {
         ['Compared to', svTargetV()],
     ],
     IExcessFrac: () => [
-        ['Signal', 'smoothed current excess vs ' + svv('IExcessFrac_echo', '%') + ' of the live current command, clamped to the Floor / Ceiling'],
+        ['Signal', 'smoothed current excess vs the trip line (' + svv('IExcessFrac_echo', '%') + ' of command + ' + svv('IExcessBaseA_echo', 'A') + ' base), clamped to the Floor / Ceiling'],
         ['Source', S_ADS_ALT + ' — near-target regime, picked by the Strict Band'],
         ['Filter', sIETau()],    ],
     IExcessFracBulk: () => [
-        ['Signal', 'smoothed alternator-current excess vs ' + svv('IExcessFracBulk_echo', '%') + ' of the live ceiling'],
+        ['Signal', 'smoothed alternator-current excess vs the trip line (' + svv('IExcessFrac_echo', '%') + ' of ceiling + ' + svv('IExcessBaseA_echo', 'A') + ' base + ' + svv('IExcessCcOffsetA_echo', 'A') + ' CC offset)'],
         ['Ceiling', 'RPM-table cap (auto-learned table, Setup ▸ Alternator) minus any thermal / warm-up derate, never above the Command Limit'],
         ['Source', S_ADS_ALT],
         ['Filter', sIETau()],
@@ -15987,7 +16079,7 @@ function updateFloatVisibility(pendingVal) {
 // ===========================================================================
 
 const CV_LOG_HEADER_SIZE = 36;
-const CV_LOG_ENTRY_SIZE = 55;  // 51 + recovAwScale_x100 (int16) + recovAwAccumAs_x10 (int16)
+const CV_LOG_ENTRY_SIZE = 51;
 
 // ---------------------------------------------------------------------------
 // parseCvBin(buf)
@@ -16054,8 +16146,6 @@ function parseCvBin(buf) {
     const slopeBleedAmps = new Array(count);
     const capReason = new Array(count);
     const iExcessBulk = new Array(count);
-    const recovAwScale = new Array(count);
-    const recovAwAccumAs = new Array(count);
 
     const tsBase = view.getUint32(CV_LOG_HEADER_SIZE, true);
 
@@ -16094,8 +16184,6 @@ function parseCvBin(buf) {
         inaInterval[i] = view.getInt16(b + 46, true);
         slopeBleedAmps[i] = view.getInt16(b + 48, true) / 1000.0;
         capReason[i] = view.getUint8(b + 50);
-        recovAwScale[i] = view.getInt16(b + 51, true) / 100.0;
-        recovAwAccumAs[i] = view.getInt16(b + 53, true) / 10.0;
         iExcess[i] = (f >> 5) & 1;
         loadDumpActive[i] = (f >> 6) & 1;
     }
@@ -16110,7 +16198,6 @@ function parseCvBin(buf) {
         rpm, battV_filt, iMeas_filt, ch1Interval, cvDSlope, iExcess, battI,
         dBcur_dt, loadDumpActive, awState, voltLoopInterval, inaInterval,
         slopeBleedAmps, capReason, iExcessBulk,
-        recovAwScale, recovAwAccumAs,
     };
 }
 
@@ -16159,7 +16246,6 @@ function cvBinToCsv(d, csv3) {
         'cvDSlope_Vps', 'awState',
         'voltLoopInterval_ms', 'inaInterval_ms',
         'slopeBleedAmps_A', 'capReason',
-        'recovAwScale', 'recovAwAccumAs',
     ].join(','));
 
     for (let i = 0; i < d.count; i++) {
@@ -16181,7 +16267,6 @@ function cvBinToCsv(d, csv3) {
             d.cvDSlope[i].toFixed(4), d.awState[i],
             d.voltLoopInterval[i], d.inaInterval[i],
             d.slopeBleedAmps[i].toFixed(4), d.capReason[i],
-            d.recovAwScale[i].toFixed(2), d.recovAwAccumAs[i].toFixed(1),
         ].join(','));
     }
 
@@ -17828,8 +17913,8 @@ function cxFinePrint(phase) {
     case 2: return 'Open-loop sine sweep on field duty identifies the plant (time constant τ, gain, dead time) and proposes the PI gains and filter time constants. This characterizes the alternator\'s own field→current behavior, so it runs on <strong>alternator current</strong> — the same signal the inner loop regulates in every mode. Wave floor and step size carry over from the Field curve step\'s proposal (the Plant Delay tab). The sweep frequency range is fixed at <strong>0.5–20 Hz</strong> (0.3–30 Hz on an auto-widen retry).';
     case 3: return 'Closed-loop sine sweep — passes when the peak closed-loop gain stays ≤ 1.15 (no resonant peak). The parameters are computed from the plant fit and field curve. This verifies the inner current loop on alternator current — the signal it regulates in every mode.';
     case 4: return 'Records the low-frequency disturbance at each engine speed into a map; you can stop as soon as the worst-ripple speed is pinned down and no unswept gap could hide a bigger peak — no need to cover every speed. During the sweep the wizard holds the alternator at a <strong>fixed test current</strong> (25% of your RPM/Amps table max) and captures the <strong>measured filtered ripple</strong> (the same IExcessTau-averaged signal each over-current detector trips on) per RPM bin, for both the alternator and battery detectors — a value only commits when two readings at that speed agree, so a throttle transient can\'t poison the table. The optional current-check then commands 3 current levels at the worst-ripple RPM and fits ripple = a0 + a1·I per detector. This produces the <strong>measured-ripple projection</strong> only — it never sets a threshold. Review it against your settings in the next step and on the Protections ripple plots.';
-    case 5: return 'A read-only review — nothing is written here. It draws each over-current detector\'s trip threshold <code>max(Min, %·current, Max)</code> (from the Min/%/Max you set in <strong>Protections</strong>) against the ripple just measured in Step 5, for both the <strong>alternator (bulk)</strong> and <strong>battery (CV)</strong> detectors. Any current where the measured ripple crosses above your threshold is shaded red — the detector would false-trip there; raise that detector\'s floor (or accept it). The floor/ceiling/% are yours to set; commissioning only measures the ripple. The identical plots live permanently on Settings ▸ Alternator ▸ Protections and redraw live as you edit.';
-    case 6: return 'Commands one bounded current step (~6–40 A, auto-sized for ~300 mV) through the already-tuned current loop and records how battery voltage responds to the current measured at the battery shunt, measuring the <strong>finite-horizon gain K20</strong> (the rise at a fixed 20 s horizon with the slow charge ramp removed — a charging battery never plateaus, so there is nothing to settle to). The voltage-loop gains follow from K20 via the exact PI magnitude condition, Ki = ρ·Kp, and the CV gain source switches to Auto on Apply. All confidence checks are advisory — they warn but never block; only "no measurement" prevents Apply. The fit runs locally in this app — no internet. Only over-voltage hard-shutdown is active; keep all other battery loads constant during the test.';
+    case 5: return 'Sets the over-current trip line from the ripple measured in Step 5. The trip line is <code>Slope·current + CV base</code>, floored and capped: Slope is set to the measured ripple slope and CV base to ripple-at-idle + the Safety Margin, so the line runs parallel to the ripple that margin above it. The CC (current-limited) line runs the same slope, the CC offset above CV. Any current where the ripple would cross the line is shaded red. These are the exact G3 settings on Settings ▸ Alternator ▸ Protections — editing here writes them live. No fit yet (Step 5 skipped) → set them by hand.';
+    case 6: return 'Commands one bounded current step (~6–40 A, auto-sized for ~300 mV) through the already-tuned current loop and records how battery voltage responds to the current measured at the battery shunt, measuring the <strong>finite-horizon gain K20</strong> (the rise at a fixed 20 s horizon with the slow charge ramp removed). The voltage-loop gains follow from K20 via the exact PI magnitude condition, Ki = ρ·Kp, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
     default: return '';
   }
 }
@@ -17872,70 +17957,6 @@ function cxShowTab(main, sub) {
 function cxGet(params) {
     const pw = encodeURIComponent(currentAdminPassword || '');
     return fetch(buildURL('/get?' + params + '&password=' + pw));
-}
-
-// ===== Recovery-restraint auto-sizing (Protections -> Recovery panel) =====
-// Arms the firmware suspend-and-measure harness, polls the captured uncut over-ramp envelope,
-// and proposes the three restraint knobs (propose-and-confirm; never auto-applies).
-let recovAwPollTimer = null, recovAwKeepaliveTimer = null, recovAwProposed = null;
-function recovAwCommissionArm() {
-    if (!currentAdminPassword) { xAlert('Unlock settings first (enter the admin password).'); return; }
-    cxGet('recovAwCommission=1').catch(() => { });
-    const st = document.getElementById('recovAwTestStatus'); if (st) st.textContent = 'armed — do the chop';
-    const res = document.getElementById('recovAwTestResult'); if (res) res.style.display = 'none';
-    if (recovAwKeepaliveTimer) clearInterval(recovAwKeepaliveTimer);
-    recovAwKeepaliveTimer = setInterval(() => cxGet('recovAwCommission=1').catch(() => { }), 3000);  // < 8 s deadman
-    if (recovAwPollTimer) clearInterval(recovAwPollTimer);
-    recovAwPollTimer = setInterval(recovAwPoll, 1000);
-}
-function recovAwCommissionStop() {
-    cxGet('recovAwCommission=0').catch(() => { });
-    if (recovAwKeepaliveTimer) { clearInterval(recovAwKeepaliveTimer); recovAwKeepaliveTimer = null; }
-    if (recovAwPollTimer) { clearInterval(recovAwPollTimer); recovAwPollTimer = null; }
-    const st = document.getElementById('recovAwTestStatus'); if (st) st.textContent = 'stopped';
-}
-function recovAwPoll() {
-    fetch(buildURL('/recovawtest.json')).then(r => r.json()).then(d => {
-        const labels = ['idle', 'armed — do the chop', 'fire #1 caught — watching over-ramp',
-                        'measuring uncut peak…', 'measured — protection resumed'];
-        const st = document.getElementById('recovAwTestStatus');
-        if (st) st.textContent = d.active ? (labels[d.state] || 'idle') : (d.state >= 3 ? 'measured' : 'stopped');
-        // Results appear once the over-ramp crosses (state 3, peak still growing) and finalize at state 4.
-        if (d.state >= 3) {
-            const res = document.getElementById('recovAwTestResult'); if (res) res.style.display = 'block';
-            const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-            set('recovAwPeak', d.peakA.toFixed(1));
-            set('recovAwThresh', d.threshA.toFixed(1));
-            set('recovAwUnder', d.underAs.toFixed(1));
-            set('recovAwLat', d.latencyMs);
-            // Proposals (heuristic; operator confirms + bench-verifies):
-            //  Arm  = half the pre-overshoot under-current, so it arms before the over-ramp forms
-            //  Rate = throttle that brings the ~linear over-ramp peak comfortably under the fire threshold (never 0)
-            //  Limit= secondary latency stretched for the slower throttled catch-up, so a premature release can't re-ignite
-            const armAs = Math.max(3, +(0.5 * d.underAs).toFixed(1));
-            let gain = (d.peakA > d.threshA) ? (0.7 * d.threshA / d.peakA) : 1.0;  // peak <= thresh => no over-ramp => no restraint needed
-            gain = Math.min(1, Math.max(0.15, +gain.toFixed(2)));
-            const maxMs = Math.min(30000, Math.max(3000, Math.round(d.latencyMs * 2 / gain / 500) * 500));
-            recovAwProposed = { RecovAwArmAs: armAs, RecovAwUpGain: gain, RecovAwMaxMs: maxMs };
-            set('recovAwPropArm', armAs); set('recovAwPropGain', gain); set('recovAwPropMax', maxMs);
-        }
-        if (d.state >= 4 && recovAwKeepaliveTimer) {  // measured — stop refreshing so the deadman ends the harness and the restraint re-activates
-            clearInterval(recovAwKeepaliveTimer); recovAwKeepaliveTimer = null;
-        }
-        if (!d.active) {  // firmware auto-disarmed (deadman or window) — stop polling; the result display persists
-            if (recovAwPollTimer) { clearInterval(recovAwPollTimer); recovAwPollTimer = null; }
-            if (recovAwKeepaliveTimer) { clearInterval(recovAwKeepaliveTimer); recovAwKeepaliveTimer = null; }
-        }
-    }).catch(() => { });
-}
-function recovAwApplyProposed() {
-    if (!recovAwProposed) return;
-    const p = recovAwProposed;
-    // Disarm the harness in the same request so the restraint re-activates immediately with the new values.
-    cxGet(`recovAwCommission=0&RecovAwArmAs=${p.RecovAwArmAs}&RecovAwUpGain=${p.RecovAwUpGain}&RecovAwMaxMs=${p.RecovAwMaxMs}&RecovAwEnable=1`)
-        .then(() => xAlert('Restraint settings applied. Verify on the next chop that only one over-current fires.'))
-        .catch(() => { });
-    if (recovAwKeepaliveTimer) { clearInterval(recovAwKeepaliveTimer); recovAwKeepaliveTimer = null; }
 }
 
 function openCommissionModal() {
@@ -19478,7 +19499,7 @@ function cxRtFinish() {
                     p[0].toFixed(3), p[1].toFixed(3), p[2].toFixed(3), n].join(',');
         };
         cxGet('ripFitAlt=' + encodeURIComponent(enc(fa.a0, fa.a1, q => q.ia || 0, q => q.pa || 0, pts.length)))
-            .then(() => { cxRipFit = null; loadRipFit(() => renderRipplePlots()); });  // refresh the Protections plot
+            .then(() => { cxRipFit = null; if (cx) cx.thr = null; loadRipFit(() => renderRipplePlots()); });  // new fit → refresh plots + re-arm the Step-6 recommendation
     } else {
         const iLo = fa.lo, iHi = fa.hi;
         cx.rtestState = 'failed';
@@ -19535,9 +19556,10 @@ function drawRippleThreshPlot(canvasId, cfg) {
     // Settings may not have arrived yet (echo shows '?') → sane fallbacks so the plot is never NaN-broken.
     const floor = isFinite(cfg.floor) ? cfg.floor : 0;
     const ceil = isFinite(cfg.ceil) && cfg.ceil > 0 ? cfg.ceil : 1e6;
-    const fracLines = cfg.fracLines.filter(fl => isFinite(fl.frac) && fl.frac > 0);
-    const Efrac = (frac, I) => Math.max(floor, Math.min(frac * I, ceil));
-    const bindE = I => fracLines.length ? Math.min.apply(null, fracLines.map(fl => Efrac(fl.frac, I))) : floor;  // lowest line = first to false-trip
+    // Affine trip line per detector: E = clamp(floor, slope·I + base, ceil). base 0 = through-origin (legacy).
+    const lines = (cfg.lines || []).filter(l => isFinite(l.slope) && isFinite(l.base));
+    const E = (l, I) => Math.max(floor, Math.min(l.slope * I + l.base, ceil));
+    const bindE = I => lines.length ? Math.min.apply(null, lines.map(l => E(l, I))) : floor;  // lowest line = first to false-trip
     const rf = cfg.ripFit, hasFit = rf && rf.n > 0;
     const rip = I => rf.a0 + rf.a1 * I;
     let yMax = floor;
@@ -19566,26 +19588,26 @@ function drawRippleThreshPlot(canvasId, cfg) {
         g.strokeStyle = '#262626'; g.beginPath(); g.moveTo(padL, sy(yv)); g.lineTo(padL + plotW, sy(yv)); g.stroke();
         g.fillStyle = '#888'; g.textAlign = 'right'; g.fillText(yv + '', padL - 5, sy(yv) + 4);
     }
-    g.fillStyle = '#aaa'; g.textAlign = 'center'; g.fillText('operating current (A)', padL + plotW / 2, cssH - 4);
-    g.save(); g.translate(11, padT + plotH / 2); g.rotate(-Math.PI / 2); g.fillText('amps', 0, 0); g.restore();
-    // Threshold line(s): floor → %/A ramp → ceiling. Labels clamp to the right edge (they're long
+    g.fillStyle = '#aaa'; g.textAlign = 'center'; g.fillText('Nominal Alternator Current', padL + plotW / 2, cssH - 4);
+    g.save(); g.translate(11, padT + plotH / 2); g.rotate(-Math.PI / 2); g.fillText('Ripple Amps', 0, 0); g.restore();
+    // Threshold line(s): floor → slope ramp → ceiling. Labels clamp to the right edge (they're long
     // enough to overflow a phone-width canvas) and sit above the line's value at the label's END,
     // so the monotonic ramp can never rise through the text.
     let lastLabelY = 1e9;
-    fracLines.forEach(fl => {
-        g.strokeStyle = fl.color; g.lineWidth = 2; g.setLineDash([]);
+    lines.forEach(l => {
+        g.strokeStyle = l.color; g.lineWidth = 2; g.setLineDash([]);
         g.beginPath();
-        for (let px = 0; px <= plotW; px++) { const I = px / plotW * xMax, y = Efrac(fl.frac, I); if (px === 0) g.moveTo(sx(I), sy(y)); else g.lineTo(sx(I), sy(y)); }
+        for (let px = 0; px <= plotW; px++) { const I = px / plotW * xMax, y = E(l, I); if (px === 0) g.moveTo(sx(I), sy(y)); else g.lineTo(sx(I), sy(y)); }
         g.stroke();
-        const Il = Math.min(xMax * 0.55, fl.frac > 0 ? ceil / fl.frac : xMax);
-        g.fillStyle = fl.color; g.textAlign = 'left';
-        const lw = g.measureText(fl.label).width;
+        const Il = xMax * 0.6;
+        g.fillStyle = l.color; g.textAlign = 'left';
+        const lw = g.measureText(l.label).width;
         const lx = Math.max(padL + 2, Math.min(sx(Il) + 3, padL + plotW - lw - 2));
         const Iend = ((lx + lw - padL) / plotW) * xMax;
-        let ly = Math.max(padT + 10, sy(Efrac(fl.frac, Iend)) - 4);
+        let ly = Math.max(padT + 10, sy(E(l, Iend)) - 4);
         if (lastLabelY - ly < 12) ly = lastLabelY - 12;
         lastLabelY = ly;
-        g.fillText(fl.label, lx, ly);
+        g.fillText(l.label, lx, ly);
     });
     // Measured ripple fit: solid within the tested span, dashed on extrapolation, dots at the 3 levels.
     if (hasFit) {
@@ -19595,12 +19617,20 @@ function drawRippleThreshPlot(canvasId, cfg) {
         g.setLineDash([5, 5]);
         if (iLo > 0) { g.beginPath(); g.moveTo(sx(0), sy(rip(0))); g.lineTo(sx(iLo), sy(rip(iLo))); g.stroke(); }
         if (iHi < xMax) { g.beginPath(); g.moveTo(sx(iHi), sy(rip(iHi))); g.lineTo(sx(xMax), sy(rip(xMax))); g.stroke(); }
-        g.setLineDash([]); g.fillStyle = '#14b8af';
+        g.setLineDash([]); g.fillStyle = '#e6e6e6';
         for (let k = 0; k < rf.n; k++) { g.beginPath(); g.arc(sx(rf.i[k]), sy(rf.pk[k]), 4, 0, 2 * Math.PI); g.fill(); }
-        g.textAlign = 'left';
-        const rl = 'measured and extrapolated ripple';
+        g.fillStyle = '#14b8af'; g.textAlign = 'left';
+        const rl = 'Linear Fit';
         const rlx = Math.max(padL + 2, Math.min(sx(iLo), padL + plotW - g.measureText(rl).width - 2));
         g.fillText(rl, rlx, Math.max(padT + 10, sy(rip(iHi)) - 6));
+        // Safety-margin gap: dashed vertical between the ripple fit and the binding (CV) trip line at mid-range.
+        const Im = xMax * 0.5, yR = sy(rip(Im)), yC = sy(bindE(Im));
+        if (Math.abs(yR - yC) > 10) {
+            g.strokeStyle = '#2ec4b6'; g.lineWidth = 1; g.setLineDash([2, 2]);
+            g.beginPath(); g.moveTo(sx(Im), yR); g.lineTo(sx(Im), yC); g.stroke(); g.setLineDash([]);
+            g.fillStyle = '#2ec4b6'; g.textBaseline = 'middle';
+            g.fillText((bindE(Im) - rip(Im)).toFixed(0) + ' A margin', sx(Im) + 5, (yR + yC) / 2); g.textBaseline = 'alphabetic';
+        }
     }
     if (cfg.verdictId) { const vd = document.getElementById(cfg.verdictId); if (vd) vd.innerHTML = rippleVerdict(rf, bindE, xMax); }
 }
@@ -19618,40 +19648,155 @@ function renderRipplePlots() {
     const cv = document.getElementById('rippleThreshPlotAlt');
     if (!cv || cv.offsetParent === null) return;   // not mounted / tab hidden → skip (redraws on show)
     const rf = cxRipFit || {};
-    const fracCV = pField('IExcessFrac', 'IExcessFrac_echo') / 100, fracBulk = pField('IExcessFracBulk', 'IExcessFracBulk_echo') / 100;
+    // One Slope field drives both firmware slopes (CV + CC kept equal), so both plot lines share it.
+    const slope = pField('IExcessFrac', 'IExcessFrac_echo') / 100;
+    const baseA = pField('IExcessBaseA', 'IExcessBaseA_echo'), ccOff = pField('IExcessCcOffsetA', 'IExcessCcOffsetA_echo');
     drawRippleThreshPlot('rippleThreshPlotAlt', {
         title: 'Alternator (G3)', color: '#4a9eff',
         floor: pField('IExcessFloorA', 'IExcessFloorA_echo'), ceil: pField('IExcessCeilA', 'IExcessCeilA_echo'),
-        fracLines: [{ frac: fracCV, label: 'protection threshold near voltage target', color: '#4a9eff' },
-                    { frac: fracBulk, label: 'protection threshold in bulk', color: '#f0a500' }],
+        lines: [{ slope: slope, base: baseA, label: 'CV threshold', color: '#4a9eff' },
+                { slope: slope, base: baseA + ccOff, label: 'CC threshold', color: '#f0a500' }],
         ripFit: rf.alt, xMax: rippleXmax('rippleXmaxAlt'), verdictId: 'rippleVerdictAlt'
     });
 }
+// Protections ▸ G3 Slope Set — one field drives both firmware slopes (CV + CC) so the lines stay parallel.
+function protApplySlope() {
+    const el = document.getElementById('protSlopeInput'); const v = el ? parseFloat(el.value) : NaN;
+    if (!isFinite(v)) { xAlert('Enter a slope percent first.'); return; }
+    const s = Math.min(50, Math.max(2, v));
+    cxGet('IExcessFrac=' + s.toFixed(1) + '&IExcessFracBulk=' + s.toFixed(1)).then(() => setTimeout(renderRipplePlots, 400)).catch(() => {});
+}
+// Protections ▸ G3 Safety-Margin Set — derives the parallel trip line from the measured ripple fit:
+// slope = ripple slope, CV base = ripple-at-idle + margin. Needs a Step-5 current-check fit.
+function protApplyMargin() {
+    const el = document.getElementById('protMarginInput'); const m = el ? parseFloat(el.value) : NaN;
+    if (!isFinite(m)) { xAlert('Enter a margin in amps first.'); return; }
+    const doApply = () => {
+        const rf = cxRipFit && cxRipFit.alt;
+        if (!rf || !(rf.n > 0)) { xAlert('No measured ripple yet — run Commissioning ▸ Step 5 (current-check) first, or set the Slope and CV base directly.'); return; }
+        const base = Math.min(40, Math.max(0, rf.a0 + m)), slope = Math.min(50, Math.max(2, rf.a1 * 100));
+        cxGet('IExcessBaseA=' + base.toFixed(1) + '&IExcessFrac=' + slope.toFixed(1) + '&IExcessFracBulk=' + slope.toFixed(1)).then(() => setTimeout(renderRipplePlots, 400)).catch(() => {});
+    };
+    if (!cxRipFit) loadRipFit(doApply); else doApply();
+}
 
-// ── Step 6 · Thresholds — READ-ONLY review (§6) ──────────────────────────────
-// No compute, no apply, no ÷2πfτ. Shows the same Protections crossing-plot inline with a verdict so
-// the operator can confirm their over-current settings clear the ripple this alternator actually produces.
+// ── Step 6 · Current Threshold Setting — sets the affine over-current trip line (G3) ─────────
+// The measured ripple fit (a0 + a1·I) drives the recommendation: slope = a1, CV base = a0 + margin, so
+// the CV trip line runs parallel to the ripple the Safety Margin above it; the CC line is the same slope,
+// IExcessCcOffsetA above CV. Writes IExcessFrac+FracBulk (kept equal → parallel), Base, CcOffset, Floor,
+// Ceil — the same settings mirrored on Protections ▸ G3. Path B: no measured fit → hand-set only, no margin.
+const CX_THR_LIMS = { slope: [2, 50], base: [0, 40], ccoff: [0, 40], floor: [1, 20], ceil: [5, 80], margin: [0, 25] };
+function cxThrClamp(k, v) { const L = CX_THR_LIMS[k]; return Math.min(L[1], Math.max(L[0], v)); }
+function cxThrLegItem(color, label, dot, dash) {
+    const sw = dot ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';vertical-align:middle;margin-right:5px;"></span>'
+                   : '<span style="display:inline-block;width:16px;border-top:' + (dash ? '2px dashed ' : '3px solid ') + color + ';vertical-align:middle;margin-right:5px;"></span>';
+    return '<span>' + sw + label + '</span>';
+}
+function cxThrAdvField(key, label, step) {
+    return '<div><label style="display:block;font-size:11px;color:#a7b0af;margin-bottom:3px;">' + label + '</label>' +
+           '<input type="number" id="cxThr_' + key + '" step="' + step + '" oninput="cxThrAdvInput(\'' + key + '\',this.value)" onchange="cxThrWrite([\'' + key + '\'])" ' +
+           'style="width:100%;background:#161616;border:1px solid #383838;border-radius:6px;color:#ddd;padding:6px 8px;font-size:14px;"></div>';
+}
 function cxRenderThresh(b) {
-    let body = '<p style="font-size:15px;line-height:1.5;">Check that ripple will not exceed protection thresholds. False trip (problem) areas will be shown in red bands. Adjust the thresholds later in Settings ▸ Alternator ▸ Protections, where this graph will reappear.</p>';
-    body += '<canvas id="cxThreshPlotAlt" style="width:100%;height:220px;margin-top:8px;background:#161616;border-radius:6px;display:block;"></canvas>' +
-            '<div id="cxThreshVerdictAlt" style="font-size:12px;color:#bbb;margin-top:6px;line-height:1.5;"></div>';
-    body += '<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:12px;color:#aaa;">Applied settings</summary>' +
-        '<div style="font-size:12px;color:#bbb;line-height:1.6;margin-top:6px;">' + cxAppliedSummary() + '</div></details>';
-    if (cxNextSelected(cx.phase) === -1)
-        body += '<p style="font-size:12px;color:#999;margin-top:12px;">Finishing discards the pre-commissioning snapshot and clears the warning badge.</p>';
-    body += '<div style="margin-top:12px;">' + cxNextBtn(true) + '</div>';
+    let body = '<h2 style="font-size:15px;font-weight:600;margin:0 0 4px;">Current Threshold Setting</h2>' +
+        '<p style="font-size:13px;color:#b7b7b7;margin:0 0 12px;line-height:1.5;">Adjust the margin such that the thresholds clear the measured ripple. A 5 amp margin works well for most installations.</p>' +
+        '<div id="cxThrNoFit"></div>' +
+        '<div id="cxThrMarginRow" style="display:flex;align-items:center;gap:12px;margin:8px 0 14px;">' +
+          '<label style="font-size:14px;font-weight:600;min-width:96px;">Safety Margin</label>' +
+          '<input type="range" id="cxThrMargin" min="0" max="25" step="1" value="5" oninput="cxThrMarginInput(this.value)" onchange="cxThrWrite([\'slope\',\'base\'])" style="flex:1;accent-color:#14b8af;">' +
+          '<span id="cxThrMarginVal" style="min-width:52px;text-align:right;font-weight:600;color:#2ec4b6;">5 A</span>' +
+        '</div>' +
+        '<canvas id="cxThreshPlotAlt" style="width:100%;height:230px;background:#161616;border-radius:6px;display:block;"></canvas>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:6px 14px;font-size:11px;margin-top:7px;color:#9a9a9a;">' +
+          cxThrLegItem('#e6e6e6', 'measured datapoints', true) + cxThrLegItem('#7a8290', 'Linear Fit', false, true) +
+          cxThrLegItem('#4a9eff', 'CV threshold', false) + cxThrLegItem('#f0a500', 'CC threshold', false) +
+        '</div>' +
+        '<details style="margin-top:12px;border-top:1px solid #2c2c2c;padding-top:8px;"><summary style="cursor:pointer;font-size:13px;color:#9fb0af;">Advanced</summary>' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;margin-top:10px;">' +
+            cxThrAdvField('slope', 'Slope (% of command)', '0.5') + cxThrAdvField('base', 'CV base (A)', '0.5') +
+            cxThrAdvField('floor', 'Floor (A)', '0.5') + cxThrAdvField('ceil', 'Ceiling (A)', '1') +
+            cxThrAdvField('ccoff', 'CC offset above CV (A)', '0.5') +
+          '</div></details>' +
+        '<div style="margin-top:16px;">' + cxNextBtn(true) + '</div>';
     b.innerHTML = body;
-    loadRipFit(() => {
-        const rf = cxRipFit || {};
-        const fracCV = getEchoNumber('IExcessFrac_echo') / 100, fracBulk = getEchoNumber('IExcessFracBulk_echo') / 100;
-        drawRippleThreshPlot('cxThreshPlotAlt', {
-            title: 'Alternator (G3)', color: '#4a9eff',
-            floor: getEchoNumber('IExcessFloorA_echo'), ceil: getEchoNumber('IExcessCeilA_echo'),
-            fracLines: [{ frac: fracCV, label: 'protection threshold near voltage target', color: '#4a9eff' },
-                        { frac: fracBulk, label: 'protection threshold in bulk', color: '#f0a500' }],
-            ripFit: rf.alt, xMax: 150, verdictId: 'cxThreshVerdictAlt'
-        });
+    loadRipFit(() => { cxThrInit(); cxThrDraw(); });
+}
+// Seed wizard-local state from the fit + current device settings; on first entry apply the margin-5
+// recommendation (slope = ripple slope, base = ripple-at-idle + 5) and persist it so Next alone suffices.
+function cxThrInit() {
+    const rf = (cxRipFit && cxRipFit.alt && cxRipFit.alt.n > 0) ? cxRipFit.alt : null;
+    if (!cx.thr) cx.thr = {};
+    const st = cx.thr; st.rf = rf;
+    const dNum = (id, dflt) => { const v = getEchoNumber(id); return isFinite(v) ? v : dflt; };
+    if (st.floor == null) st.floor = dNum('IExcessFloorA_echo', 5);
+    if (st.ceil == null) st.ceil = dNum('IExcessCeilA_echo', 25);
+    if (st.ccoff == null) st.ccoff = dNum('IExcessCcOffsetA_echo', 0);
+    if (!st.init) {
+        if (rf) {
+            st.margin = 5;
+            st.slope = cxThrClamp('slope', rf.a1 * 100);   // firmware stores slope as % of command
+            st.base = cxThrClamp('base', rf.a0 + st.margin);
+            st.init = true;
+            cxThrWrite(['slope', 'base']);
+        } else {
+            st.margin = null;
+            st.slope = dNum('IExcessFrac_echo', 10);
+            st.base = dNum('IExcessBaseA_echo', 0);
+            st.init = true;
+        }
+    }
+    const noFit = !rf;
+    const mr = document.getElementById('cxThrMarginRow'); if (mr) mr.style.display = noFit ? 'none' : 'flex';
+    const nf = document.getElementById('cxThrNoFit');
+    if (nf) nf.innerHTML = noFit ? '<div style="font-size:13px;color:#e0a03a;background:#2a2620;border-radius:6px;padding:8px 10px;margin-bottom:12px;line-height:1.5;">No ripple measurement yet — run the Step 5 current-check for a recommendation, or set the trip line by hand below.</div>' : '';
+    const ms = document.getElementById('cxThrMargin'); if (ms && st.margin != null) ms.value = st.margin;
+    const mv = document.getElementById('cxThrMarginVal'); if (mv && st.margin != null) mv.textContent = st.margin + ' A';
+    cxThrReflectAdv();
+}
+function cxThrReflectAdv() {
+    const st = cx.thr;
+    ['slope', 'base', 'floor', 'ceil', 'ccoff'].forEach(k => {
+        const el = document.getElementById('cxThr_' + k);
+        if (el && document.activeElement !== el) el.value = Math.round(st[k] * 10) / 10;
     });
+}
+function cxThrMarginInput(v) {
+    const st = cx.thr; if (!st || !st.rf) return;
+    st.margin = cxThrClamp('margin', parseFloat(v) || 0);
+    st.base = cxThrClamp('base', st.rf.a0 + st.margin);
+    st.slope = cxThrClamp('slope', st.rf.a1 * 100);
+    const mv = document.getElementById('cxThrMarginVal'); if (mv) mv.textContent = st.margin + ' A';
+    cxThrReflectAdv(); cxThrDraw();
+}
+function cxThrAdvInput(key, v) {
+    const st = cx.thr; if (!st) return;
+    st[key] = cxThrClamp(key, parseFloat(v) || 0);
+    cxThrDraw();
+}
+function cxThrDraw() {
+    const st = cx.thr; if (!st) return;
+    // Widen the x-axis for large alternators so the measured points aren't pinned to the right edge.
+    let xMax = 150;
+    if (st.rf && st.rf.n > 0) { const iHi = Math.max.apply(null, st.rf.i.slice(0, st.rf.n)); if (iHi * 1.2 > xMax) xMax = Math.ceil(iHi * 1.2 / 10) * 10; }
+    drawRippleThreshPlot('cxThreshPlotAlt', {
+        title: '', color: '#4a9eff', floor: st.floor, ceil: st.ceil,
+        lines: [{ slope: st.slope / 100, base: st.base, label: 'CV threshold', color: '#4a9eff' },
+                { slope: st.slope / 100, base: st.base + st.ccoff, label: 'CC threshold', color: '#f0a500' }],
+        ripFit: st.rf, xMax: xMax
+    });
+}
+// Persist the named fields to G3. 'slope' writes both firmware slopes (CV + CC) so the lines stay parallel.
+function cxThrWrite(keys) {
+    const st = cx.thr; if (!st) return;
+    const q = [];
+    keys.forEach(k => {
+        if (k === 'slope') { q.push('IExcessFrac=' + st.slope.toFixed(1)); q.push('IExcessFracBulk=' + st.slope.toFixed(1)); }
+        else if (k === 'base') q.push('IExcessBaseA=' + st.base.toFixed(1));
+        else if (k === 'ccoff') q.push('IExcessCcOffsetA=' + st.ccoff.toFixed(1));
+        else if (k === 'floor') q.push('IExcessFloorA=' + st.floor.toFixed(1));
+        else if (k === 'ceil') q.push('IExcessCeilA=' + st.ceil.toFixed(1));
+    });
+    if (q.length) cxGet(q.join('&')).catch(() => {});
 }
 
 function cxAppliedSummary() {
@@ -19937,7 +20082,7 @@ window.addEventListener('load', function () {
   applyFilter();
 
   // Ripple-vs-threshold plots (§4): live threshold redraw on every keystroke, fixed measured-ripple overlay.
-  ['IExcessFloorA', 'IExcessCeilA', 'IExcessFrac', 'IExcessFracBulk'].forEach(n => {
+  ['IExcessFloorA', 'IExcessCeilA', 'IExcessFrac', 'IExcessBaseA', 'IExcessCcOffsetA'].forEach(n => {
     const el = panel.querySelector('input[name="' + n + '"]');
     if (el) el.addEventListener('input', renderRipplePlots);
   });
@@ -19952,7 +20097,7 @@ window.addEventListener('load', function () {
   if (typeof MutationObserver !== 'undefined') {
     let deb = null;
     const mo = new MutationObserver(() => { clearTimeout(deb); deb = setTimeout(renderRipplePlots, 120); });
-    ['IExcessFloorA_echo', 'IExcessCeilA_echo', 'IExcessFrac_echo', 'IExcessFracBulk_echo'].forEach(id => {
+    ['IExcessFloorA_echo', 'IExcessCeilA_echo', 'IExcessFrac_echo', 'IExcessBaseA_echo', 'IExcessCcOffsetA_echo'].forEach(id => {
       const e = document.getElementById(id); if (e) mo.observe(e, { childList: true, characterData: true, subtree: true });
     });
   }

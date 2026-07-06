@@ -193,6 +193,8 @@ bool fsRemove(const char *path) {
 #define NK_BattCurrentLimitA "BattCurLimA"
 #define NK_IExcessFrac "IExcessFrac"
 #define NK_IExcessFracBulk "IExcessFrcBlk"
+#define NK_IExcessBaseA "IExcessBaseA"
+#define NK_IExcessCcOffsetA "IExcessCcOffA"
 #define NK_IExcessKBleed "IExcessKBleed"
 #define NK_IExcessRelFrac "IExcessRelFrac"
 #define NK_IExcessReseedFrac "IExcessResedFrc"
@@ -262,10 +264,6 @@ bool fsRemove(const char *path) {
 #define NK_RebulkCurrent_A "RebulkCurrent_A"
 #define NK_RebulkVoltage "RebulkVoltage"
 #define NK_ReseedFrac "ReseedFrac"
-#define NK_RecovAwEnable "RecovAwEnable"
-#define NK_RecovAwArmAs "RecovAwArmAs"
-#define NK_RecovAwUpGain "RecovAwUpGain"
-#define NK_RecovAwMaxMs "RecovAwMaxMs"
 #define NK_SLAM_THRESHOLD_G "SLAMTHRESHOLDG"
 #define NK_SOC_AllowRebulk_percent "SOCAllwRblkprcn"
 #define NK_SOC_BlockRebulk_percent "SOCBlckRblkprcn"
@@ -529,11 +527,14 @@ void commissionSnapshot() {
   // 13th field = HiLow (charge-rate mode). Captured so an abort/reboot restores the mode too —
   // a commissioning run must never strand the user in the wrong mode. Older 12-field snapshots
   // are still accepted on restore (the mode is simply left untouched).
+  // Fields 14/15 = IExcessBaseA/CcOffsetA — the affine trip-line the Thresholds step now writes, so an
+  // abort reverts them too. Prep rewrites this snapshot at the start of every run, so a device can never
+  // restore stale pre-affine values into these slots.
   snprintf(buf, sizeof(buf),
-           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d",
+           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d,%.1f,%.1f",
            PidKp, PidKi, InputFilterTC, OutputPIDFilterTC, VoltageFilterTC,
            IExcessTau, IExcessFloorA, IExcessCeilA, IExcessFrac, IExcessFracBulk,
-           SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow);
+           SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow, IExcessBaseA, IExcessCcOffsetA);
   settingWrite(NK_commissionSnap, buf);
   // The Min% floor table + knee tracker don't fit this positional CSV (10 floats × 3 + bools), so
   // they are backed up separately as "bk_*" blobs. Keeps an abort able to revert the Min% step too.
@@ -544,11 +545,11 @@ void commissionSnapshot() {
 bool commissionRestore() {
   if (!settingExists(NK_commissionSnap)) return false;
   String s = settingRead(NK_commissionSnap);
-  float v[14];
-  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
+  float v[16];
+  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
                  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
-                 &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13]);
-  if (n < 12) return false;  // accept 12 (legacy) / 13 (+HiLow); a legacy 14th field (retired battery iExcess floor) parses but is ignored
+                 &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14]);
+  if (n < 12) return false;  // accept 12 (legacy) / 13 (+HiLow) / 15 (+IExcessBaseA,CcOffsetA)
   PidKp = v[0];                  settingWrite(NK_PidKp, String(PidKp, 4).c_str());
   PidKi = v[1];                  settingWrite(NK_PidKi, String(PidKi, 4).c_str());
   InputFilterTC = v[2];          settingWrite(NK_InputFilterTC, String(InputFilterTC, 2).c_str());
@@ -571,6 +572,9 @@ bool commissionRestore() {
       loadCapTablesForMode(HiLow);
     }
   }
+  // Affine trip-line intercept + CC offset (14th/15th fields). Absent in pre-affine snapshots — leave as-is.
+  if (n >= 14) { IExcessBaseA = v[13];     settingWrite(NK_IExcessBaseA, String(IExcessBaseA, 1).c_str()); }
+  if (n >= 15) { IExcessCcOffsetA = v[14]; settingWrite(NK_IExcessCcOffsetA, String(IExcessCcOffsetA, 1).c_str()); }
   recomputeCcGains();  // re-apply CC gains live (normalized to BATTERY_VOLTAGE)
   commissionRestoreMinPct();      // revert the Min% floor table + knee tracker (also clears the backup)
   settingRemove(NK_commissionSnap);
@@ -763,10 +767,6 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/RebulkCurrent_A.txt", NK_RebulkCurrent_A },
   { "/RebulkVoltage.txt", NK_RebulkVoltage },
   { "/ReseedFrac.txt", NK_ReseedFrac },
-  { "/RecovAwEnable.txt", NK_RecovAwEnable },
-  { "/RecovAwArmAs.txt", NK_RecovAwArmAs },
-  { "/RecovAwUpGain.txt", NK_RecovAwUpGain },
-  { "/RecovAwMaxMs.txt", NK_RecovAwMaxMs },
   { "/SLAM_THRESHOLD_G.txt", NK_SLAM_THRESHOLD_G },
   { "/SOC_AllowRebulk_percent.txt", NK_SOC_AllowRebulk_percent },
   { "/SOC_BlockRebulk_percent.txt", NK_SOC_BlockRebulk_percent },
@@ -3079,6 +3079,10 @@ bool buildConfigPayload() {
   // the 6 columns (acc_cur_rms_a, acc_cur_peak_a, acc_volt_rms_mv, acc_volt_peak_mv,
   // acc_therm_rms_f, acc_therm_peak_f) MUST exist in device_state_daily before this firmware ships,
   // or the whole daily snapshot 500s.
+  // v3 SEMANTICS BREAK (fw > 0.0.46): values are episode-conditional (committed challenge episodes
+  // only — no steady-state dwell in the RMS denominator), NOT trend-continuous with v2 rows.
+  // Filter fleet trends on this row's firmware_version_int. Uploads stay committed-only by design
+  // (a live episode carries into the next window; the dashboard shows it provisionally).
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
     ",\"acc_cur_rms_a\":%.2f,\"acc_cur_peak_a\":%.2f,"
     "\"acc_volt_rms_mv\":%.0f,\"acc_volt_peak_mv\":%.0f,"
@@ -3225,7 +3229,8 @@ done_headers_cfg:
     queueConsoleMessage("Config snapshot uploaded");
     // Tumbling window: start the next Control Accuracy measurement fresh so each daily snapshot is
     // one independent sample. Reset only AFTER a confirmed upload — never lose unreported data.
-    resetAccuracyScores();
+    // false = keep any live episode: it carries across the boundary and commits into the new window.
+    resetAccuracyScores(false);
   } else if (httpCode > 0) {
     snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Config upload failed HTTP %d", httpCode);
     queueConsoleMessage(messageBuffer);
@@ -3815,23 +3820,6 @@ volatile uint32_t resTestLastCmdMs = 0;       // deadman: browser refreshes this
 volatile bool resTestReleasing = false;
 #define RES_TEST_DEADMAN_MS 8000UL            // > the browser's ~3 s keepalive; catches a closed/crashed wizard
 
-// Recovery-restraint commissioning (Phase B): catch the FIRST iExcess normally, then suspend ONLY the
-// iExcess re-arm for a bounded window so the uncut over-ramp can be measured to size the restraint knobs.
-// Hardware OV, fast OV, and the HardOCTripAmps trip stay live throughout (separate code paths). Deadman-
-// guarded exactly like resTest. State: 0 idle, 1 armed (waiting for fire #1), 2 watching (fire #1 seen,
-// over-ramp building), 3 measuring (over-ramp crossed E — re-arm suspended across the WHOLE overshoot,
-// tracking the true peak), 4 measured (over-ramp decayed below the release hysteresis — the inner loop
-// self-corrected, so protection resumes and results freeze). Suppression spans states 2/3 only, not 4.
-volatile bool recovAwCommissionActive = false;
-volatile uint32_t recovAwCommissionLastCmdMs = 0;   // deadman keepalive
-volatile uint32_t recovAwCommissionFire1Ms = 0;     // millis of fire #1 (latency reference)
-volatile uint8_t  recovAwTestState = 0;
-volatile float    recovAwTestPeakEma = 0.0f;        // peak uncut over-ramp mExcessEma (A)
-volatile float    recovAwTestArmAsAtCross = 0.0f;   // recovAwArmAccumAs at the would-be fire #2 (pre-overshoot under-current, A·s)
-volatile uint32_t recovAwTestLatencyMs = 0;         // fire #1 -> would-be fire #2 latency (ms)
-volatile float    recovAwTestThreshAtCross = 0.0f;  // detector threshold E at the crossing (A) — proves the two fires aren't threshold-separable
-#define RECOV_AW_COMMISSION_WINDOW_MS 12000UL       // bounded uncut window measured from fire #1; > any real secondary-fire latency
-#define RECOV_AW_COMMISSION_DEADMAN_MS 8000UL       // same as resTest: catches a closed/crashed wizard
 
 // Fold forensics (diagnostic ring, RAM-only): snapshots the window behind every ripTab fold event so
 // a phantom table value stays traceable without a live CSV log — the "why won't this bin settle"

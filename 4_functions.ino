@@ -1866,6 +1866,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     IExcessCeilA = settingRead(NK_IExcessCeilA).toFloat();
   }
+  if (!settingExists(NK_IExcessBaseA)) {
+    settingWrite(NK_IExcessBaseA, String(IExcessBaseA, 1).c_str());
+  } else {
+    IExcessBaseA = settingRead(NK_IExcessBaseA).toFloat();
+  }
+  if (!settingExists(NK_IExcessCcOffsetA)) {
+    settingWrite(NK_IExcessCcOffsetA, String(IExcessCcOffsetA, 1).c_str());
+  } else {
+    IExcessCcOffsetA = settingRead(NK_IExcessCcOffsetA).toFloat();
+  }
   if (!settingExists(NK_BattCurrentLimitA)) {
     settingWrite(NK_BattCurrentLimitA, String(BattCurrentLimitA, 1).c_str());
   } else {
@@ -1930,26 +1940,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_AwSeedProtectMs, String(AwSeedProtectMs).c_str());
   } else {
     AwSeedProtectMs = (uint16_t)settingRead(NK_AwSeedProtectMs).toInt();
-  }
-  if (!settingExists(NK_RecovAwEnable)) {
-    settingWrite(NK_RecovAwEnable, String((int)RecovAwEnable).c_str());
-  } else {
-    RecovAwEnable = (settingRead(NK_RecovAwEnable).toInt() != 0);
-  }
-  if (!settingExists(NK_RecovAwArmAs)) {
-    settingWrite(NK_RecovAwArmAs, String(RecovAwArmAs, 1).c_str());
-  } else {
-    RecovAwArmAs = settingRead(NK_RecovAwArmAs).toFloat();
-  }
-  if (!settingExists(NK_RecovAwUpGain)) {
-    settingWrite(NK_RecovAwUpGain, String(RecovAwUpGain, 2).c_str());
-  } else {
-    RecovAwUpGain = settingRead(NK_RecovAwUpGain).toFloat();
-  }
-  if (!settingExists(NK_RecovAwMaxMs)) {
-    settingWrite(NK_RecovAwMaxMs, String(RecovAwMaxMs).c_str());
-  } else {
-    RecovAwMaxMs = (uint16_t)settingRead(NK_RecovAwMaxMs).toInt();
   }
   if (!settingExists(NK_FastSetpointRiseRate)) {
     settingWrite(NK_FastSetpointRiseRate, String(FastSetpointRiseRate, 1).c_str());

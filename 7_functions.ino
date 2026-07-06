@@ -2333,8 +2333,6 @@ void cvLog_tick(uint32_t nowMs) {
   if (g_loadDumpActive)  e.flags |= (1 << 6);
 
   e.capReason = g_fastOvCapReason;  // which layer set the binding fastOvCap this tick
-  e.recovAwScale_x100  = (int16_t)lroundf((float)currentPID.GetIntegralUpScale() * 100.0f);  // restraint: applied up-scale (100 = off)
-  e.recovAwAccumAs_x10 = (int16_t)clamp_f(recovAwArmAccumAs * 10.0f, 0.0f, 32767.0f);         // restraint: under-current accumulator (A·s)
 
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;
