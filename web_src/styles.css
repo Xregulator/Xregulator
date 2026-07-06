@@ -1542,6 +1542,18 @@ input[type="submit"]:hover {
   white-space: nowrap;
 }
 
+/* Active-limit cue: solid teal pill on the figure's LABEL so the value never changes
+   weight/colour/size. Negative margin cancels the padding's width so the number column
+   (fixed 3.5em, next in the grid) never shifts when the pill appears. */
+.duo-lbl.limit-pill {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  border-radius: 6px;
+  padding: 1px 5px;
+  margin: -1px -5px;
+}
+
 .duo-num {
   font-size: 15px;
   font-weight: 700;
@@ -1652,16 +1664,20 @@ input[type="submit"]:hover {
     max-width: min(280px, calc(100vw - 32px));
   }
 
-  /* Pull absolutely-positioned reset/clear buttons back into their flex rows */
-  form[style*="left:100%"] {
-    position: static !important;
-    margin-left: 4px !important;
-  }
-
   /* RPM Cap Table mode toggles — wrap "Charge Rate" and "Limit by" onto separate lines */
   .cap-mode-row {
     flex-wrap: wrap;
     gap: 8px;
+  }
+}
+
+/* Pull absolutely-positioned reset/clear buttons back into their flex rows.
+   ≤760, not ≤480: the parent card is up to 600px wide, so a button hung at left:100%
+   still pokes past the viewport until roughly 760px. */
+@media (max-width: 760px) {
+  form[style*="left:100%"] {
+    position: static !important;
+    margin-left: 4px !important;
   }
 }
 
@@ -1960,6 +1976,13 @@ input[type="submit"]:hover {
 }
 
 
+/* Short main-tab labels on phones so all six tabs hold one row */
+.tab-label-short { display: none; }
+@media (max-width: 600px) {
+  .tab-label-full { display: none; }
+  .tab-label-short { display: inline; }
+}
+
 /* Main Tab Navigation */
 .main-tabs {
   display: flex;
@@ -1994,7 +2017,8 @@ input[type="submit"]:hover {
   background: var(--card-light);
   color: var(--accent);
   border-color: var(--accent);
-  border-bottom: 2px solid var(--card-light);
+  /* no bottom border: a light one miters diagonally into the teal left border,
+     notching the seam where the tab meets the panel's left edge */
   z-index: 2;
   position: relative;
 }
@@ -2236,6 +2260,10 @@ input:focus {
   border-radius: 9px;
 }
 .dark-mode .seg { background: rgba(255, 255, 255, 0.07); }
+/* Long segmented strips (plot time-window pills) wrap on the narrowest phones */
+@media (max-width: 420px) {
+  .seg { flex-wrap: wrap; }
+}
 .seg > button {
   border: 0;
   background: transparent;
@@ -2555,6 +2583,7 @@ hr {
   white-space: pre-wrap;
   border-radius: var(--radius);
   width: 100%;
+  box-sizing: border-box;
   height: 400px;
   margin: 0 auto;
 }
@@ -2807,6 +2836,16 @@ hr {
   .form-input form {
     flex-wrap: wrap;
     flex-shrink: 1;          /* override the desktop flex-shrink:0 so buttons can wrap */
+    min-width: 0;            /* without this, min-width:auto floors the form at its content width */
+  }
+
+  /* Control clusters (.form-row-wide: chip-button rows, card header rows) stay inline
+     and wrap; only plain label+input rows stack into a column. Without this, every
+     button in a wide row lands stretched on its own line. */
+  .form-row-wide {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
   }
 }
 
@@ -3646,6 +3685,7 @@ input:checked+.slider:before {
 
 .pri-card-content {
   width: 100%;
+  box-sizing: border-box;
   border: 3px solid transparent;
   border-radius: var(--radius);
   padding: 16px;
@@ -4378,7 +4418,7 @@ input:checked+.slider:before {
 
 #alt-panel-protections .protections-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
   gap: 10px;
 }
 #alt-panel-protections .protections-cards.empty {
@@ -4935,3 +4975,16 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
 }
 
 /* XREG_END */
+
+/* Phones: the six (short-labelled) main tabs always share one row — they shrink
+   instead of wrapping. Appended last so it beats the min-width rules above. */
+@media (max-width: 600px) {
+  .main-tabs { flex-wrap: nowrap; }
+  .main-tab {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-left: 4px;
+    padding-right: 4px;
+    white-space: nowrap;
+  }
+}

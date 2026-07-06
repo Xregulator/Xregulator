@@ -196,6 +196,22 @@ struct Episode {
     }
     return false;
   }
+
+  // Dwell seconds still needed before this episode can go steady: the largest per-axis shortfall of
+  // in-band data since dataStartMs. 0 once every axis has spanned its window (steadiness is then purely
+  // the in-band test); -1 with no eligible data. Only meaningful during the initial fill of a fresh run.
+  float settleRemainSec(uint32_t nowMs) {
+    if (!haveData) return -1.0f;
+    float rem = 0.0f;
+    for (int a = 0; a < NAXIS; a++) {
+      uint32_t win = (uint32_t)(cfg[a].steadySec * 1000.0f);
+      uint32_t winMax = (uint32_t)((dqCap[a] - 2) * EP_FEED_DT_MS);
+      if (win > winMax) win = winMax;
+      uint32_t el = (uint32_t)(nowMs - dataStartMs);
+      if (el < win) { float r = (win - el) / 1000.0f; if (r > rem) rem = r; }
+    }
+    return rem;
+  }
 };
 
 // Sparse support points (never a grid). Memory scales with the data, not the input volume —
@@ -563,7 +579,7 @@ float altPruneK       = 6.0f;    // cloud prune neighbor count (echoed; applied 
 float altRidgeFrac    = 0.10f;   // LWLR ridge fraction (× slope-block trace/NAXIS) — fit stability vs slope fidelity
 float altRiskThresh   = 0.15f;   // classifier risk above which an in-radius point shows "learning" instead of a %
 // High-field-low-output alert thresholds (independent safety net — see altHealth_tick):
-float altHiFieldPct   = 80.0f;   // field duty at/above this counts as high drive (%)
+float altHiFieldPct   = 80.0f;   // high-drive threshold as % of the live field ceiling (MaxDuty), so it works on 24/48V compressed spans
 float altLowOutAmps   = 10.0f;   // output at/below this counts as low (A)
 float altHiFieldSec   = 30.0f;   // both conditions must persist this long before the alert fires (s)
 
@@ -763,7 +779,7 @@ void altFold_tick(uint32_t nowMs) {
   // only the EMA filters + the episode detector feed.
   altLive_rpm = fRpm; altLive_exc = exc; altLive_amps = fAmps;
   altLive_vbus = fVbus; altLive_tF = tF; altLive_duty = fDuty;
-  altLiveValid = (!isnan(fRpm) && !isnan(exc) && !isnan(fVbus) && fVbus >= ALT_MIN_BATT_V);
+  altLiveValid = (!isnan(fRpm) && !isnan(exc) && !isnan(fVbus) && fVbus >= ALT_MIN_BATT_V * ((float)BATTERY_VOLTAGE / 12.0f));
   altLastFoldMs = nowMs;
 
   // Detection runs regardless of Pause / Reference Source: the trend (full-steady runs graded against
@@ -779,7 +795,7 @@ void altFold_tick(uint32_t nowMs) {
   // output-amps band) — all filtered, including the admission floors, so a single noise dip
   // can't act as a barrier that wipes the look-back ring mid-run.
   altEpisodeSyncCfg(fAmps);
-  bool eligible = (!isnan(fVbus) && fVbus >= ALT_MIN_BATT_V && fAmps >= altMinAmps && fDuty >= altMinDuty && fRpm >= 0);
+  bool eligible = (!isnan(fVbus) && fVbus >= ALT_MIN_BATT_V * ((float)BATTERY_VOLTAGE / 12.0f) && fAmps >= altMinAmps && fDuty >= altMinDuty && fRpm >= 0);
   altSessTempGate.feed(eligible, tF, nowMs, altThermDegF, altSessTempDwell());   // lighter (half-dwell) temp gate for the session plot
   RawSample<ALT_NAXIS> s;
   s.x[0] = fRpm; s.x[1] = fDuty; s.x[2] = fVbus; s.x[3] = tF; s.out = fAmps; s.tMs = nowMs;
@@ -1242,8 +1258,8 @@ bool buildAltHealthPayload(char *buf, size_t size) {
   if (!altPending || altPendingCount == 0 || authToken.isEmpty()) return false;
   time_t now_ts = time(NULL);
   int off = snprintf(buf, size,
-    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\",\"sys\":\"ALT\",\"pruneK\":%d,\"idwPower\":%.2f,",
-    device_id_hex, authToken.c_str(), formatTimestamp(now_ts), (int)altPruneK, altIdwPower);
+    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\",\"sys\":\"ALT\",\"pruneK\":%d,\"idwPower\":%.2f,\"sysV\":%u,",
+    device_id_hex, authToken.c_str(), formatTimestamp(now_ts), (int)altPruneK, altIdwPower, (unsigned)BATTERY_VOLTAGE);
   if (off < 0 || (size_t)off >= size) return false;
   if (altPendingSeededFrom.length()) {   // adopted import: tag the whole batch as borrowed provenance
     off += snprintf(buf + off, size - off, "\"seededFrom\":\"%s\",", altPendingSeededFrom.c_str());
@@ -1318,16 +1334,27 @@ void altFrontInit() {
   altFront2.init(altFrontBuf, ALT_FRONT_CAP);
   altFrontUp.init(altFrontUpBuf, ALT_FRONT_CAP);
   // axisScale ≈ the span of each axis that moves output a comparable amount (rationale + rebalance
-  // history: ALT_HEALTH_LWLR_ENGINE_SPEC.md). MUST match AXIS_SCALE in the update-alt-health edge fn.
+  // history: ALT_HEALTH_LWLR_ENGINE_SPEC.md). MUST match AXIS_SCALE in the update-alt-health edge fn
+  // — the Vbus scale is class-aware there via the payload's sysV field (excitation needs no scaling:
+  // it is physical field volts, and the MaxDuty class scaling keeps its range identical on any bank).
   altFront2.axisScale[0] = 25.0f;   // RPM
   altFront2.axisScale[1] = 0.2f;    // excitation (temp-normalized field volts)
-  altFront2.axisScale[2] = 0.1f;    // Vbus
+  altFront2.axisScale[2] = 0.1f;    // Vbus at 12V — class-corrected by altApplyClassScales() once BATTERY_VOLTAGE is loaded
   altFront2.axisScale[3] = 5.0f;    // tempF
   for (int a = 0; a < ALT_NAXIS; a++) altFrontUp.axisScale[a] = altFront2.axisScale[a];   // same metric for the borrowed surface
   queueConsoleMessageF("AltFront init: cap %d pts, ring %d, %.1fKB PSRAM",
     ALT_FRONT_CAP, ALT_EP_RING_CAP,
     (float)((size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>) +
             (size_t)(ALT_FRONT_CAP + ALT_PENDING_CAP) * sizeof(FrontPoint<ALT_NAXIS>)) / 1024.0f);
+}
+
+// Vbus cell size per-cell-equivalent across bank classes (0.4V @48V ≡ 0.1V @12V). Separate from
+// altFrontInit because that runs BEFORE InitSystemSettings loads BATTERY_VOLTAGE; also re-run on a
+// live class change (applyNominalVoltageChange). Scales are interpretation-only — stored points keep
+// raw coordinates. The update-alt-health edge fn mirrors this via the upload payload's sysV field.
+void altApplyClassScales() {
+  altFront2.axisScale[2] = 0.1f * ((float)BATTERY_VOLTAGE / 12.0f);
+  altFrontUp.axisScale[2] = altFront2.axisScale[2];
 }
 
 // ---- 1 Hz tick (NOT the fold) — THE evaluator/classifier cadence, plus live telemetry + settings
@@ -1376,8 +1403,10 @@ void altHealth_tick(uint32_t nowMs) {
   // unlearned territory where the gauge says "learning"). Self-clears when either condition lifts.
   {
     static uint32_t hiFieldSinceMs = 0;
+    // altHiFieldPct reads as % of the live field ceiling (MaxDuty), not absolute duty — absolute
+    // 80% is unreachable on 24/48V banks where the ceiling is ~50/25%, deadening the alert.
     bool cond = foldFresh && altLiveValid
-                && altLive_duty >= altHiFieldPct && altLive_amps <= altLowOutAmps;
+                && altLive_duty >= altHiFieldPct * (ccDutyCeiling() / 100.0f) && altLive_amps <= altLowOutAmps;
     if (!cond) {
       hiFieldSinceMs = 0; altHiFieldAlert = false;
     } else {
@@ -1592,7 +1621,7 @@ void perfFold_tick(uint32_t nowMs) {
     aws = perfSimTws; awa = perfSimTwa; pitch = perfSimPitch; rpm = perfSimRpm;
     spd = (perfSpeedSrc >= 1.5f) ? perfSimSog : perfSimStw; haveSpd = true;
   } else {
-    if (IS_STALE(IDX_APPARENT_WIND_SPEED) || isnan(ApparentWindSpeedNMEA) || isnan(ApparentWindAngleNMEA)) { perfSteady = false; return; }
+    if (IS_STALE(IDX_APPARENT_WIND_SPEED) || isnan(ApparentWindSpeedNMEA) || isnan(ApparentWindAngleNMEA)) { perfSteady = false; perfSettleSec = -1.0f; return; }
     aws = ApparentWindSpeedNMEA; awa = ApparentWindAngleNMEA;
     pitch = imu_pitch_deg; rpm = RPM;
     if (perfSpeedSrc >= 1.5f) { haveSpd = !IS_STALE(IDX_SOG_NMEA); spd = SOGNMEA; }
@@ -1616,8 +1645,8 @@ void perfFold_tick(uint32_t nowMs) {
     perfLiveSrc = src; perfLiveValid = (haveSpd && aws >= perfMinWindSpeed); motorLiveValid = false;
   }
 
-  if (hardwarePresent != 1 && perfSimMode < 0.5f) { perfSteady = false; return; }   // display only
-  if (perfPaused >= 0.5f) { perfSteady = false; return; }                           // paused: no learning
+  if (hardwarePresent != 1 && perfSimMode < 0.5f) { perfSteady = false; perfSettleSec = -1.0f; return; }   // display only
+  if (perfPaused >= 0.5f) { perfSteady = false; perfSettleSec = -1.0f; return; }                           // paused: no learning
 
   // ── data-maturity hours: time spent actually moving in each mode (only while learning) ──
   if (perfDtMs > 0 && spd >= perfMinBoatSpeed) {
@@ -1673,6 +1702,12 @@ void perfFold_tick(uint32_t nowMs) {
 
   // steady-run indicator: the active mode's Episode is currently accumulating eligible samples
   perfSteady = motoring ? (motorEpisode.count > 0) : (sailEpisode.count > 0);
+  {
+    bool aelig = motoring ? motorElig : sailElig;
+    perfSettleSec = !aelig ? -1.0f
+                   : perfSteady ? 0.0f
+                   : (motoring ? motorEpisode.settleRemainSec(nowMs) : sailEpisode.settleRemainSec(nowMs));
+  }
 }
 // ---- NMEA SIMULATOR (bench testing, no boat) ----
 // Writes ONLY to dedicated perfSim* vars (never the real NMEA/RPM/IMU globals) so it can't
@@ -1768,6 +1803,7 @@ static float plf_syncAgo()  { if (lastBoatPerfSyncEpoch <= 0 || !timeIsSynced) r
                               time_t n = time(NULL); return (n > (time_t)lastBoatPerfSyncEpoch) ? (float)(n - (time_t)lastBoatPerfSyncEpoch) : 0.0f; }
 static float plf_sailHours(){ return (float)(perfSailSeconds / 3600.0); }   // data-maturity hours
 static float plf_steady()   { return (float)perfSteady; }                   // in a steady-run right now
+static float plf_settleSec(){ return perfSettleSec; }                       // dwell s remaining; 0 settled, -1 idle
 static float plf_state()    { return (float)perfState; }    // 0 MEASURED, 1 ESTIMATED, 2 LEARNING_EDGE, 3 NO_REFERENCE
 static PerfLiveField PERF_LIVE[] = {
   {"valid", plf_valid}, {"ws", plf_ws}, {"wa", plf_wa}, {"spd", plf_spd},
@@ -1775,13 +1811,13 @@ static PerfLiveField PERF_LIVE[] = {
   {"coverage", plf_coverage}, {"ptCount", plf_ptCount}, {"source", plf_source},
   {"paused", plf_paused},
   {"sim", plf_sim}, {"syncAgoS", plf_syncAgo},
-  {"sailHours", plf_sailHours}, {"steady", plf_steady},
+  {"sailHours", plf_sailHours}, {"steady", plf_steady}, {"settleSec", plf_settleSec},
   {"state", plf_state},
 };
 static const size_t PERF_LIVE_COUNT = sizeof(PERF_LIVE) / sizeof(PERF_LIVE[0]);
 
 static void perfSendLive() {
-  char buf[224];
+  char buf[256];
   int off = 0;
   for (size_t i = 0; i < PERF_LIVE_COUNT; i++)
     off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), PERF_LIVE[i].get());
@@ -1803,18 +1839,19 @@ static float pmlf_paused()   { return (perfPaused >= 0.5f) ? 1.0f : 0.0f; }
 static float pmlf_pitchStd() { return motorLive_pitch; }
 static float pmlf_motorHours() { return (float)(perfMotorSeconds / 3600.0); }   // data-maturity hours
 static float pmlf_steady()     { return (float)perfSteady; }                    // in a steady-run right now
+static float pmlf_settleSec()  { return perfSettleSec; }                        // dwell s remaining; 0 settled, -1 idle
 static float pmlf_state()      { return (float)motorState; }   // 0 MEASURED, 1 ESTIMATED, 2 LEARNING_EDGE, 3 NO_REFERENCE
 static PerfLiveField PERF_MOTOR_LIVE[] = {
   {"valid", pmlf_valid}, {"rpm", pmlf_rpm}, {"headwind", pmlf_headwind}, {"spd", pmlf_spd},
   {"best", pmlf_best}, {"pct", pmlf_pct}, {"src", pmlf_src},
   {"coverage", pmlf_coverage}, {"ptCount", pmlf_ptCount}, {"source", pmlf_source}, {"paused", pmlf_paused},
   {"pitchStd", pmlf_pitchStd},
-  {"motorHours", pmlf_motorHours}, {"steady", pmlf_steady},
+  {"motorHours", pmlf_motorHours}, {"steady", pmlf_steady}, {"settleSec", pmlf_settleSec},
   {"state", pmlf_state},
 };
 static const size_t PERF_MOTOR_LIVE_COUNT = sizeof(PERF_MOTOR_LIVE) / sizeof(PERF_MOTOR_LIVE[0]);
 static void perfSendMotorLive() {
-  char buf[224];
+  char buf[256];
   int off = 0;
   for (size_t i = 0; i < PERF_MOTOR_LIVE_COUNT; i++)
     off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), PERF_MOTOR_LIVE[i].get());
@@ -2296,6 +2333,8 @@ void cvLog_tick(uint32_t nowMs) {
   if (g_loadDumpActive)  e.flags |= (1 << 6);
 
   e.capReason = g_fastOvCapReason;  // which layer set the binding fastOvCap this tick
+  e.recovAwScale_x100  = (int16_t)lroundf((float)currentPID.GetIntegralUpScale() * 100.0f);  // restraint: applied up-scale (100 = off)
+  e.recovAwAccumAs_x10 = (int16_t)clamp_f(recovAwArmAccumAs * 10.0f, 0.0f, 32767.0f);         // restraint: under-current accumulator (A·s)
 
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;
@@ -3505,6 +3544,8 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint32_t ampN = 0;
   static uint32_t fcEaseStartMs = 0;  // EASE phase: gentle field ramp-down on exit
   static float    fcEaseFromDuty = 0.0f;
+  static uint32_t fcEaseInStartMs = 0;  // EASE-IN phase: gentle ramp from the operating duty to the sweep floor on entry
+  static float    fcEaseInFromDuty = 0.0f;
   static float    onsetBaseline = 0.0f;  // onset-mode: amps at the first settled step (below the knee)
   static float    onsetLastAbove = 0.0f; // onset fine-down: lowest duty still producing onset current
   static double   rpmSum = 0.0;          // onset-mode: RPM accumulated over the same settled window as amps
@@ -3567,7 +3608,16 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     ampSum = 0.0;
     ampN = 0;
     rpmSum = 0.0;
-    phase = 1;
+    // Ease the field DOWN from the live charging duty to the sweep floor over FIELDCURVE_EASE_MS instead of
+    // snapping (the ramp runs under GOV_BYPASS_SLEW, so an un-eased entry is an instant drop). Only when
+    // coming down — a start at/below the floor (already rested) enters the sweep directly.
+    if (lastAppliedDuty > stepDuty) {
+      fcEaseInFromDuty = lastAppliedDuty;
+      fcEaseInStartMs = nowMs;
+      phase = 4;
+    } else {
+      phase = 1;
+    }
     fieldCurveActive = 1;
     if (fieldCurveOnsetMode)
       queueConsoleMessageF("Min%% knee: ramping from %.1f%% @ %.0f RPM, stop at first onset (step %.1f%%, dwell %lums)",
@@ -3768,7 +3818,7 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 
   // ── EASE-OUT ──────────────────────────────────────────────────────────────
   if (phase == 2) {
-    float frac = (float)(nowMs - fcEaseStartMs) / 1500.0f;
+    float frac = (float)(nowMs - fcEaseStartMs) / FIELDCURVE_EASE_MS;
     if (frac >= 1.0f) {
       fieldCurveActive = 0;
       fieldCurveLastEndMs = millis();
@@ -3777,6 +3827,23 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       return false;
     }
     dutyOut = fcEaseFromDuty + (FIELDCURVE_DUTY_START - fcEaseFromDuty) * frac;
+    return true;
+  }
+
+  // ── EASE-IN ────────────────────────────────────────────────────────────────
+  // Gentle ramp from the live operating duty down to the sweep floor before the first dwell begins.
+  // The dwell clock (stepStartMs) is (re)started only when the ease finishes, so no settle window
+  // opens until the field has arrived.
+  if (phase == 4) {
+    float frac = (float)(nowMs - fcEaseInStartMs) / FIELDCURVE_EASE_MS;
+    if (frac >= 1.0f) {
+      dutyOut = stepDuty;
+      stepStartMs = nowMs;
+      ampSum = 0.0; ampN = 0; rpmSum = 0.0;
+      phase = 1;
+      return true;
+    }
+    dutyOut = fcEaseInFromDuty + (stepDuty - fcEaseInFromDuty) * frac;
     return true;
   }
 
@@ -3804,6 +3871,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
   static bool     tuningEaseActive = false;   // post-sweep setpoint ease-down
   static uint32_t tuningEaseStartMs = 0;
   static float    tuningEaseFromA = 0.0f;
+  const float     TUNING_EASE_REST_A = 3.0f;  // sweep-exit ease target: low rest current the field glides to before release
 
   float f;
   if (tuningWaveform == 2) {
@@ -3828,16 +3896,17 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
     }
     if (!tuningSweepActive) {
       if (tuningEaseActive) {
-        // Post-sweep: ease the current setpoint down to the wave floor over ~1.5 s so the field
-        // comes off gently. Otherwise it holds at the sweep center and the still-high current reads
-        // as an over-current the instant TuningMode releases and protections re-arm. Hold
-        // tuningSweepDone false until the ease finishes so the dashboard waits it out.
-        float frac = (float)(nowMs - tuningEaseStartMs) / 1500.0f;
-        if (frac >= 1.0f) { tuningEaseActive = false; tuningSweepDone = true; out = (float)tuningWaveFloor; }
-        else out = tuningEaseFromA + ((float)tuningWaveFloor - tuningEaseFromA) * frac;
+        // Post-sweep: ease the setpoint all the way down to a low rest current over ~2 s (easing only to
+        // the wave floor left the floor→release drop abrupt). A still-high current when TuningMode releases
+        // reads as an over-current once protections re-arm. tuningSweepDone stays false until the ease ends.
+        float frac = (float)(nowMs - tuningEaseStartMs) / 2000.0f;
+        if (frac >= 1.0f) { tuningEaseActive = false; tuningSweepDone = true; out = TUNING_EASE_REST_A; }
+        else out = tuningEaseFromA + (TUNING_EASE_REST_A - tuningEaseFromA) * frac;
         return;
       }
-      out = baseA;   // idle hold at midpoint until a sweep is requested / after done
+      // Hold at the eased rest current after a sweep (not back at the center) so it doesn't pop up before
+      // the dashboard releases TuningMode; hold at center before any sweep so a Run swings cleanly.
+      out = tuningSweepDone ? TUNING_EASE_REST_A : baseA;
       return;
     }
     f = freqList[segIdx];
@@ -3861,7 +3930,9 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
     float rpmNow = (float)RPM;
     if (rpmNow < tuningSweepRpmMin) tuningSweepRpmMin = rpmNow;
     if (rpmNow > tuningSweepRpmMax) tuningSweepRpmMax = rpmNow;
-    if (dutyCycle <= MinDuty + 0.5f || dutyCycle >= 99.5f) tuningSweepDutyRailed = true;
+    // High rail is the live ceiling (MaxDuty ~50%@24V / ~25%@48V) — a fixed 99.5 could never
+    // fire there and a clipped sweep would be accepted as a valid plant fit.
+    if (dutyCycle <= MinDuty + 0.5f || dutyCycle >= ccDutyCeiling() - 0.5f) tuningSweepDutyRailed = true;
     // Integer-cycle window: settle 1 cycle, then accumulate over a WHOLE number of drive
     // periods so the lock-in's negative-frequency leakage term cancels exactly (and the
     // reference sin/cos sums go to ~0, keeping the DC correction clean). The raw hold

@@ -22,6 +22,15 @@ static inline void serialPrintlnNB(const char *msg) {
   if ((size_t)Serial.availableForWrite() >= n + 2) Serial.println(msg);
 }
 
+// Every protection fire / shutdown collapses the inner integrator to 0, so the recovery over-ramp
+// restraint must re-arm fresh during the ensuing recovery (arming during the descent is what kills
+// the second iExcess fire). Clear its accumulator + latch alongside each ResetIntegratorTo(0.0).
+static inline void recovAwReset() {
+  recovAwArmed = false;
+  recovAwArmAccumAs = 0.0f;
+  currentPID.SetIntegralUpScale(1.0);  // restraint off until re-armed; keeps GetIntegralUpScale() truthful in MANUAL/fault
+}
+
 void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason);
 // ==================== FIELD CONTROL HELPER FUNCTION DECLARATIONS ====================
 // Snapshot builder
@@ -194,15 +203,21 @@ void applyCcOutputLimits() {
 // triggered from the Vessel Info save (BATTERY_VOLTAGE is the sole source of truth). Call AFTER
 // setting BATTERY_VOLTAGE = newV. When the class actually changes it persists the new class to NVS
 // (NK_BatteryVoltage — authoritative; vessel_info.json is only a mirror), then rescales the PERSISTED
-// charge-voltage profile by newV/oldV (Bulk/Float/Absorption/Rebulk/Target/Charged/alarms), re-derives
-// the hard-shutdown trip (newBulk + 0.3) and refreshes the INA228 hardware OV limit. Writing the class
-// and the rescaled profile to NVS in the SAME call (synchronously) keeps them atomic: if
+// charge-voltage profile by newV/oldV (Bulk/Float/Absorption/Rebulk/Target/Charged/alarms), the
+// volt-domain protection/helper margins and V/s rates (OV margins, disagreement threshold, iExcess
+// arm margin, fast-rise headroom, slope-bleed thresh/prox, target ramps, rest-settle gate, CV wave
+// amplitude, alt-health Vbus band), re-derives
+// the hard-shutdown trip (newBulk + 0.3×class) and refreshes the INA228 hardware OV limit. Writing the
+// class and the rescaled profile to NVS in the SAME call (synchronously) keeps them atomic: if
 // vessel_info.json (LittleFS, formatOnFail) is ever lost, NVS still holds a consistent
 // class+profile pair, so the overvoltage trips can't strand at the wrong voltage. It always re-derives
 // both control loops' normalized gains. It also rescales the field-duty knobs (knee margin/step/
-// maxfloor + DutyRampRate + MaxDuty/Max Field %) in place by oldV/newV and persists them, so they
-// stay WYSIWYG in real duty-% / %/s (the live paths do not multiply by 12/Vbatt at use; nothing
-// reads BATTERY_VOLTAGE at duty-clamp time). Currents/times/gains are voltage-independent.
+// maxfloor + DutyRampRate + DutySlowRampRate + MaxDuty/Max Field % + MinDuty + alt-health duty
+// band/floor) and the amp-per-volt gains
+// (KHard, SlopeBleedK — bank resistance rises with class, so the same per-cell excess needs the same
+// amp response) in place by oldV/newV and persists them, so they stay WYSIWYG in real per-bus units
+// (the live paths do not multiply by 12/Vbatt at use; nothing reads BATTERY_VOLTAGE at duty-clamp
+// time). Currents/times/normalized gains are voltage-independent.
 void applyNominalVoltageChange(int oldV, int newV) {
   if (newV != oldV && oldV > 0 && (newV == 12 || newV == 24 || newV == 48)) {
     settingWrite(NK_BatteryVoltage, String(newV).c_str());  // persist class FIRST, same transaction as the profile below
@@ -215,7 +230,21 @@ void applyNominalVoltageChange(int oldV, int newV) {
     ChargedVoltage_Scaled = (int)lroundf(ChargedVoltage_Scaled * ratio);
     VoltageAlarmHigh      *= ratio;
     VoltageAlarmLow       *= ratio;
-    AlternatorHardShutdownV = BulkVoltage + 0.3f;
+    // Headroom scales with class so the OV ladder keeps its order (G2 clamp at target+OvMeasMarginV
+    // < G1 predictive at target+OvPredMarginV < hard shutdown) — all per-cell-equivalent.
+    AlternatorHardShutdownV = BulkVoltage + 0.3f * ((float)newV / 12.0f);
+    OvMeasMarginV             *= ratio;
+    OvPredMarginV             *= ratio;
+    VoltageDisagreeThreshold  *= ratio;
+    IExcessArmMarginV         *= ratio;
+    FastSetpointRiseHeadroomV *= ratio;
+    SlopeBleedProxV           *= ratio;
+    SlopeBleedThresh          *= ratio;  // V/s
+    vTgtRampUp                *= ratio;  // V/s
+    vTgtRampDn                *= ratio;  // V/s
+    capSettleRateMv10         *= ratio;  // mV/10min rest-settle gate
+    cvWaveAmplitudeV          *= ratio;  // CV waveform-test step height
+    altVbusTol                *= ratio;  // alt-health bus-voltage steadiness band
     // Knee duty-domain knobs are stored in REAL duty-% for the bus, so rescale them by the INVERSE
     // ratio (oldV/newV): a 5% margin at 12V becomes 1.25% at 48V. Persist so the dashboard box shows
     // the new value — the math is visible, never hidden behind a runtime multiply.
@@ -224,12 +253,28 @@ void applyNominalVoltageChange(int oldV, int newV) {
     kneeStepPct     *= dutyRatio;
     kneeMaxFloorPct *= dutyRatio;
     DutyRampRate    *= dutyRatio;
+    DutySlowRampRate *= dutyRatio;
     MaxDuty          = (int)lroundf(MaxDuty * dutyRatio);  // Max Field %: real per-bus cap, scales down on higher banks
+    MinDuty         *= dutyRatio;  // field floor: float, keeps sub-1% resolution on higher banks
+    KHard           *= dutyRatio;  // A per V of OV excess
+    SlopeBleedK     *= dutyRatio;  // A per V/s of slope
+    altDutyTolPct   *= dutyRatio;  // alt-health field-duty steadiness band
+    altMinDuty      *= dutyRatio;  // alt-health admission duty floor
     settingWrite(NK_kneeMarginPct,   String(kneeMarginPct, 2).c_str());
     settingWrite(NK_kneeStepPct,     String(kneeStepPct, 2).c_str());
     settingWrite(NK_kneeMaxFloorPct, String(kneeMaxFloorPct, 2).c_str());
     settingWrite(NK_DutyRampRate,    String(DutyRampRate, 1).c_str());
+    settingWrite(NK_DutySlowRampRate, String(DutySlowRampRate, 2).c_str());
     settingWrite(NK_MaxDuty,         String(MaxDuty).c_str());
+    settingWrite(NK_MinDuty,         String(MinDuty, 2).c_str());
+    settingWrite(NK_KHard,           String(KHard, 1).c_str());
+    settingWrite(NK_SlopeBleedK,     String(SlopeBleedK, 1).c_str());
+    // Alt-health registry knobs persist under their registry names (NVS key = name), and the
+    // CV wave amplitude under its 15-char NK_ key.
+    settingWrite("altVbusTol",    String(altVbusTol, 4).c_str());
+    settingWrite("altDutyTolPct", String(altDutyTolPct, 4).c_str());
+    settingWrite("altMinDuty",    String(altMinDuty, 4).c_str());
+    settingWrite(NK_cvWaveAmplitudeV, String(cvWaveAmplitudeV, 2).c_str());
     settingWrite(NK_BulkVoltage, String(BulkVoltage, 2).c_str());
     settingWrite(NK_FloatVoltage, String(FloatVoltage, 2).c_str());
     settingWrite(NK_AbsorptionVoltage, String(AbsorptionVoltage, 2).c_str());
@@ -239,11 +284,22 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_VoltageAlarmHigh, String(VoltageAlarmHigh, 2).c_str());
     settingWrite(NK_VoltageAlarmLow, String(VoltageAlarmLow, 2).c_str());
     settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
+    settingWrite(NK_OvMeasMarginV, String(OvMeasMarginV, 3).c_str());
+    settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
+    settingWrite(NK_VoltageDisagreeThreshold, String(VoltageDisagreeThreshold, 2).c_str());
+    settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
+    settingWrite(NK_FastSetpointRiseHeadroomV, String(FastSetpointRiseHeadroomV, 2).c_str());
+    settingWrite(NK_SlopeBleedProxV, String(SlopeBleedProxV, 2).c_str());
+    settingWrite(NK_SlopeBleedThresh, String(SlopeBleedThresh, 3).c_str());
+    settingWrite(NK_vTgtRampUp, String(vTgtRampUp, 3).c_str());
+    settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
+    settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str());
     updateINA228OvervoltageThreshold();
   }
   recomputeCvGains();  // always re-derive the normalized active gains for the (possibly) new class
   recomputeCcGains();
   applyCcOutputLimits();  // ceiling tracks the new class so the PID limit + anti-windup stay correct
+  altApplyClassScales();  // alt-health Vbus cell size tracks the class (stored points keep raw coords)
 }
 
 int clamp_i(int x, int lo, int hi) {
@@ -412,7 +468,9 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
   currentPID.SetMode(MANUAL);
   pidOutput = 0.0;
   currentPID.ResetIntegratorTo(0.0);
+  recovAwReset();
   setpointLimited = 0.0f;
+  ctrlLimiter = 0;
   shutdownPhase = SHUTDOWN_PHASE_4;
   shutdownPhaseEntryMs = tick.nowMs;
   prevMode = MODE_CRITICAL_RAMP;
@@ -516,6 +574,7 @@ void enter_sys_auto() {
 // handleLimpHome — Emergency limp-home path. Bypasses all safeties except INA228.
 // Call only when LimpHome==1. Caller returns immediately after.
 void handleLimpHome(uint32_t currentMillis, const TickSnapshot &tick) {
+  ctrlLimiter = 0;
   if (OnOff == 0) {
     digitalWrite(4, LOW);
     gpio4IsLow = true;
@@ -563,6 +622,7 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
 
   uTargetAmps = 0;
   setpointLimited = 0.0f;
+  ctrlLimiter = 0;
 
   if (exitingNormal) {
     shutdownPhase = SHUTDOWN_PHASE_1;
@@ -703,6 +763,7 @@ void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float 
   voltageControlActive = false;
   uTargetAmps = 0;
   setpointLimited = 0.0f;
+  ctrlLimiter = 0;
   shutdownPhase = SHUTDOWN_PHASE_NONE;   // so a later real shutdown starts its ramp fresh from here
 
   const float vNorm = 12.0f / fmaxf(1.0f, (float)BATTERY_VOLTAGE);
@@ -891,9 +952,12 @@ void commitCVTuningRecord() {
   rec.worstOvershootV = cvTuningScore.worstOvershootV;
   rec.activeTimeSec = cvTuningScore.activeTimeSec;
   // ISE/T: (HIGH ISE + LOW re-overshoot ISE + LOW undershoot ISE) ÷ total active time, ×1000.
-  // HIGH overshoot above 25mV dead-band weighted ×4; LOW undershoot weighted ×0.15 with time ramp.
+  // HIGH overshoot above the class-scaled dead-band weighted ×cvKOvershoot; LOW undershoot ×0.15
+  // with time ramp. ÷ class ratio² (the integrators are V²-domain) so the score and its
+  // good<10/<20 dashboard bands read 12V-equivalent on 24/48V banks.
+  float scoreNorm = (12.0f / (float)BATTERY_VOLTAGE) * (12.0f / (float)BATTERY_VOLTAGE);
   rec.score = (rec.activeTimeSec > 0.0f)
-                ? (1000.0f * (cvTuningScore.totalIntegratedOvershootVs + cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
+                ? (1000.0f * scoreNorm * (cvTuningScore.totalIntegratedOvershootVs + cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
                    / rec.activeTimeSec)
                 : 0.0f;
   rec.fastOvFires = cvTuningScore.fastOvFires;
@@ -940,7 +1004,7 @@ void commitCVTuningRecord() {
   rec.worstLowOvV = cvTuningScore.worstLowOvV;
   rec.worstLowUndershootV = cvTuningScore.worstLowUndershootV;
   rec.lowScore = (rec.activeTimeSec > 0.0f)
-                   ? (1000.0f * (cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
+                   ? (1000.0f * scoreNorm * (cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
                       / rec.activeTimeSec)
                    : 0.0f;
 
@@ -1396,6 +1460,7 @@ void AdjustFieldLearnMode() {
     currentPID.SetMode(MANUAL);
     pidOutput = 0.0;
     currentPID.ResetIntegratorTo(0.0);
+    recovAwReset();
     lastAppliedDuty = 0.0f;
     setpointInitialized = false;
     // Restore AUTOMATIC so Compute() resumes; otherwise the UI "Reset Inner PID"
@@ -1486,7 +1551,9 @@ void AdjustFieldLearnMode() {
     if (voltageControlActive) {  // Groups 1/2 target-relative; gated only on voltageControlActive
       const float TD_PRED = TdPred;
       const float V_HARD = ChargingVoltageTarget + OvPredMarginV;
-      const float PRED_GUARD = 0.06f;
+      // Arm-proximity window scales with class: at 48V dV/dt is ~4× so a fixed 0.06V window
+      // could be crossed inside one tick, defeating the predictive layer entirely.
+      const float PRED_GUARD = 0.06f * ((float)BATTERY_VOLTAGE / 12.0f);
 
       float Vpred = IBV + TD_PRED * fmaxf(0.0f, dvdt);
       g_fastOvVpred = Vpred;
@@ -1561,6 +1628,7 @@ void AdjustFieldLearnMode() {
     // reaching MinDuty in 1–2 inner PID cycles. PID stays in AUTOMATIC —
     // recovery rebuilds from integrator=0 once fastOV clears.
     currentPID.ResetIntegratorTo(0.0);
+    recovAwReset();
     queueConsoleMessageF("FastOV hard #%lu: V=%.2fV target=%.2fV — inner PID integrator reset",
                          (unsigned long)g_fastOvHardCount, IBV, ChargingVoltageTarget);
   }
@@ -1705,9 +1773,10 @@ void AdjustFieldLearnMode() {
   }
 
   // Major overvoltage: bypass slew for fast field collapse.
-  // Triggers when battery is 0.5V above the hard-shutdown threshold — by this point the
-  // fault path is already ramping; this just removes the slew limit so the ramp is instant.
-  if (tick.currentBatteryVoltage > (tick.alternatorHardShutdownV + 0.5f)) {
+  // Triggers when battery is 0.5V (per-cell-scaled by class) above the hard-shutdown threshold —
+  // by this point the fault path is already ramping; this just removes the slew limit so the
+  // ramp is instant.
+  if (tick.currentBatteryVoltage > (tick.alternatorHardShutdownV + 0.5f * ((float)BATTERY_VOLTAGE / 12.0f))) {
     govMode = GOV_BYPASS_SLEW;
   }
   // Voltage sensor failure: bypass slew
@@ -1717,14 +1786,15 @@ void AdjustFieldLearnMode() {
 
   // CV overshoot: bypass duty slew so the output current PID can drop field current without the
   // governor rate limit holding it back. Triggered by fastOvClampActive, latched until battV is
-  // back within 0.02 V of target (anti-chatter), CV stages only.
+  // back within 0.02 V (per-cell-scaled by class — unscaled it sits at the 48V noise floor and
+  // releases erratically) of target (anti-chatter), CV stages only.
   // Rationale + "do not revert" history: CV_Loop_Dev_Summary.md (govBypass latch section).
   {
     static bool cvGovBypassLatch = false;
     if (voltageControlActive) {
       if (fastOvClampActive) {
         cvGovBypassLatch = true;
-      } else if (IBV < ChargingVoltageTarget + 0.02f) {
+      } else if (IBV < ChargingVoltageTarget + 0.02f * ((float)BATTERY_VOLTAGE / 12.0f)) {
         cvGovBypassLatch = false;
       }
       if (cvGovBypassLatch) {
@@ -1887,6 +1957,7 @@ void AdjustFieldLearnMode() {
   bool sysIDJustStarted = !prevSysIDRunning && sysIDRunning;
   bool sysIDJustCompleted = prevSysIDRunning && !sysIDRunning;
   prevSysIDRunning = sysIDRunning;
+  if (sysIDRunning) ctrlLimiter = 0;
 
   // ── Snapshot on test start (fires once, first tick sysIDRunning goes true) ──
   // All pre-test values are still clean at this point — the override block below
@@ -2006,6 +2077,20 @@ void AdjustFieldLearnMode() {
         queueConsoleMessage("Resonance current-check auto-released (no command refresh)");
       }
 
+      // Recovery-restraint commissioning: auto-disarm on a dead wizard, or once the bounded uncut window
+      // has elapsed since fire #1. Results are kept for /recovawtest.json after disarm.
+      if (recovAwCommissionActive) {
+        bool dead = (millis() - recovAwCommissionLastCmdMs > RECOV_AW_COMMISSION_DEADMAN_MS);
+        bool windowDone = (recovAwCommissionFire1Ms != 0) &&
+                          (millis() - recovAwCommissionFire1Ms > RECOV_AW_COMMISSION_WINDOW_MS);
+        if (dead || windowDone) {
+          recovAwCommissionActive = false;
+          queueConsoleMessageF("Recovery-restraint commission ended (%s): peak=%.1fA armAtCross=%.1fA-s latency=%lums",
+                               dead ? "no refresh" : "window done",
+                               recovAwTestPeakEma, recovAwTestArmAsAtCross, (unsigned long)recovAwTestLatencyMs);
+        }
+      }
+
       if (batteryHealthTestActive) {
         // Active DCIR step generator. Soft protections (G1/G2 + CV/bulk iExcess) are deliberately
         // dropped during the test via the !batteryHealthTestActive gates so the step actually
@@ -2030,6 +2115,7 @@ void AdjustFieldLearnMode() {
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                        TEST_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
         voltageControlActive = false;
+        ctrlLimiter = 0;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                        : g_pidI_filtered;
         pidInput = (double)targetCurrent;
@@ -2058,6 +2144,7 @@ void AdjustFieldLearnMode() {
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                        TEST_ENTRY_RATE_A, resFallRate, actualDtSec);
         voltageControlActive = false;
+        ctrlLimiter = 0;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                        : g_pidI_filtered;
         pidInput = (double)targetCurrent;
@@ -2100,6 +2187,9 @@ void AdjustFieldLearnMode() {
           tuningScore.inScoringWindow = false;
           float baseA = (float)tuningWaveFloor + waveAmplitude * 0.5f;   // midpoint; swings tuningWaveFloor .. tuningWaveFloor+waveAmplitude
           float ampA  = waveAmplitude * 0.5f;
+          // A fresh sweep now starts from the low rest current the prior sweep eased to — re-arm the slewed
+          // entry so a back-to-back Run doesn't slam up to the swing center.
+          if (tuningWaveform == 2 && tuningSweepRequested) tuningEntryRamped = false;
           tuningSineStep(tick.nowMs, actualDtSec, tuningSinePhase, baseA, ampA, MeasuredAmps, setpointCommand);
           // Entry: ease up from the rest floor to the live sine at the FIXED conservative test rate, with
           // duty slew still engaged (govMode bypass is gated on g_tuningEntrySettled). The rising ramp meets
@@ -2180,6 +2270,7 @@ void AdjustFieldLearnMode() {
           }
         }
         voltageControlActive = false;
+        ctrlLimiter = 0;
 
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                        : g_pidI_filtered;
@@ -2228,7 +2319,7 @@ void AdjustFieldLearnMode() {
           // the re-enable wipe sets thermalSlopeBufFull=false → the setpoint drops to limit-20 for
           // 60s the instant tuning exits (TuningMode→0 turns off suppressWarmupMargin), derating
           // the field right after a test. We have a live trend, so the loop is NOT blind — keep
-          // the projection and stay at limit-5.
+          // the projection and stay at limit-7.
           thermalPreserveSlopeOnResume = true;
           tuningScore = {};  // discard accumulator — commit is always manual
           tuningSquareAbrupt = false;  // never let the abrupt-step bypass leak past a tuning session
@@ -2319,6 +2410,7 @@ void AdjustFieldLearnMode() {
             loadOffsetFilt += a * (instLoad - loadOffsetFilt);
           }
         }
+        bool battCeilBinding = false;  // battery charge-current ceiling won the min-select this tick (banner limiter code 4)
         if (BattCurrentLimitA > 0.0f && BatteryCurrentSource == 0 && ShuntResistanceMicroOhm > 0) {
           float battCeilAlt = BattCurrentLimitA + fmaxf(0.0f, loadOffsetFilt);
           // Console note when the battery limit is the binding ceiling AND output is actually riding it
@@ -2328,6 +2420,7 @@ void AdjustFieldLearnMode() {
           static uint32_t battCeilLastMsgMs = 0;
           if (battCeilAlt < uTargetAmps) {
             uTargetAmps = battCeilAlt;
+            battCeilBinding = true;
             if (MeasuredAmps > battCeilAlt - 5.0f) {
               if (battCeilBindStartMs == 0) battCeilBindStartMs = currentMillis;
               else if ((uint32_t)(currentMillis - battCeilBindStartMs) > 5000UL
@@ -2420,28 +2513,69 @@ void AdjustFieldLearnMode() {
               float alpha  = actualDtSec / (tauSec + actualDtSec);
               mExcessEma  += alpha * ((ieActual - setpointLimited) - mExcessEma);  // setpointLimited = previous tick — acceptable
 
+              // Commissioning: track the uncut over-ramp peak while the fire is suspended (states 2/3).
+              if (recovAwCommissionActive && (recovAwTestState == 2 || recovAwTestState == 3) && !iExcessActive) {
+                recovAwTestPeakEma = fmaxf(recovAwTestPeakEma, mExcessEma);
+              }
+              // Measurement complete: the uncut over-ramp has decayed back below the release hysteresis —
+              // the inner loop self-corrected the overshoot (negative error drives full-rate down-integration,
+              // and falling RPM drops plant gain the same direction, so it can't run away). Freeze results and
+              // RESUME normal protection (state 4 = done → no longer suppresses), so the field runs uncut only
+              // for the ~150-300 ms excursion, not the whole window.
+              if (recovAwCommissionActive && recovAwTestState == 3 && mExcessEma < E * IExcessRelFrac) {
+                recovAwTestState = 4;
+                queueConsoleMessageF("Recovery commission: over-ramp measured — peak=%.1fA over cmd (thr=%.1fA); protection resumed, Apply when ready",
+                                     recovAwTestPeakEma, recovAwTestThreshAtCross);
+              }
+
               // Rising edge — fire once.
               if (!iExcessActive && mExcessEma > E) {
-                cv_I_aw_cap = cv_I;         // cap the bumpless tracker ceiling to pre-event level — prevents current-limited rewind
-                g_iExcessCount++;
-                // Collapse inner PID integrator (same as hard-OV reset) — without it duty authority
-                // is only innerKp × measured current, weak from low setpoints. See CV_Loop_Dev_Summary.md.
-                currentPID.ResetIntegratorTo(0.0);
-                queueConsoleMessageF("iExcess #%lu: excess=%.1fA over %.1fA cmd — inner PID integrator reset",
-                                     (unsigned long)g_iExcessCount, mExcessEma, setpointLimited);
-                // One-shot cv_I drain on the rising edge. IExcessKBleed = 0: snap cv_I to zero
-                // (deepest starting point for recovery). > 0: subtract K_bleed × averaged-excess ×
-                // dtSec from cv_I once. Both zero the current COMMAND in one tick (1e9 fall-rate
-                // override on setpointLimited); the duty collapses via the inner-PID reset above.
-                // Sustained per-tick drain for the rest of the event comes from awBleedAmpS in the
-                // bumpless tracker block. Final reseed is the unified falling-edge reseed when ALL
-                // protections clear. The IExcessKBleed knob only sets post-event recovery depth.
-                if (IExcessKBleed <= 0.0f) {
-                  cv_I = 0.0f;
+                // Commissioning suspend: after fire #1, suspend the re-arm for the WHOLE overshoot (states 2
+                // and 3) so the true uncut peak develops (tracked above); DO NOT cut. Record the crossing
+                // metrics ONCE, on the first crossing (2 -> 3). Hardware OV, fast OV, and the HardOCTripAmps
+                // trip stay live (separate paths) as the safety net; the excursion self-corrects (see state-4).
+                if (recovAwCommissionActive && (recovAwTestState == 2 || recovAwTestState == 3)) {
+                  if (recovAwTestState == 2) {
+                    recovAwTestArmAsAtCross  = recovAwArmAccumAs;   // pre-overshoot accumulated under-current
+                    recovAwTestThreshAtCross = E;
+                    recovAwTestLatencyMs     = currentMillis - recovAwCommissionFire1Ms;
+                    recovAwTestState         = 3;                   // measuring uncut peak until it decays (state 4)
+                    queueConsoleMessageF("Recovery commission: fire #2 caught & SUSPENDED — thr=%.1fA under=%.1fA-s @ %lums; measuring uncut peak (OV+OC live)",
+                                         E, recovAwArmAccumAs, (unsigned long)recovAwTestLatencyMs);
+                  }
+                  // else state==3: keep suppressing (no fire) so the excursion peaks and decays on its own
                 } else {
-                  cv_I = fmaxf(0.0f, cv_I - IExcessKBleed * mExcessEma * actualDtSec);
+                  cv_I_aw_cap = cv_I;         // cap the bumpless tracker ceiling to pre-event level — prevents current-limited rewind
+                  g_iExcessCount++;
+                  // Collapse inner PID integrator (same as hard-OV reset) — without it duty authority
+                  // is only innerKp × measured current, weak from low setpoints. See CV_Loop_Dev_Summary.md.
+                  currentPID.ResetIntegratorTo(0.0);
+                  recovAwReset();
+                  queueConsoleMessageF("iExcess #%lu: excess=%.1fA over %.1fA cmd — inner PID integrator reset",
+                                       (unsigned long)g_iExcessCount, mExcessEma, setpointLimited);
+                  // One-shot cv_I drain on the rising edge. IExcessKBleed = 0: snap cv_I to zero
+                  // (deepest starting point for recovery). > 0: subtract K_bleed × averaged-excess ×
+                  // dtSec from cv_I once. Both zero the current COMMAND in one tick (1e9 fall-rate
+                  // override on setpointLimited); the duty collapses via the inner-PID reset above.
+                  // Sustained per-tick drain for the rest of the event comes from awBleedAmpS in the
+                  // bumpless tracker block. Final reseed is the unified falling-edge reseed when ALL
+                  // protections clear. The IExcessKBleed knob only sets post-event recovery depth.
+                  if (IExcessKBleed <= 0.0f) {
+                    cv_I = 0.0f;
+                  } else {
+                    cv_I = fmaxf(0.0f, cv_I - IExcessKBleed * mExcessEma * actualDtSec);
+                  }
+                  iExcessActive = true;
+                  // Commissioning: this normal fire is fire #1 — start watching for the suppressed fire #2.
+                  if (recovAwCommissionActive && recovAwTestState == 1) {
+                    recovAwCommissionFire1Ms = currentMillis;
+                    recovAwTestState         = 2;
+                    recovAwTestPeakEma       = 0.0f;
+                    recovAwTestArmAsAtCross  = 0.0f;
+                    recovAwTestLatencyMs     = 0;
+                    queueConsoleMessage("Recovery commission: fire #1 caught normally — watching the recovery over-ramp");
+                  }
                 }
-                iExcessActive = true;
               }
 
               // While latched: re-apply the proportional cap and hold govBypass each tick;
@@ -2541,6 +2675,7 @@ void AdjustFieldLearnMode() {
                 cv_I_aw_cap = cv_I;         // cap bumpless tracker ceiling to pre-event level
                 g_iExcessCount++;           // shared iExcess trip counter (Group 3 alternator + Group 4 battery)
                 currentPID.ResetIntegratorTo(0.0);
+                recovAwReset();
                 queueConsoleMessageF("iExcess (bulk) #%lu: excess=%.1fA over %.1fA ceiling — inner PID integrator reset",
                                      (unsigned long)g_iExcessCount, mExcessEmaBulk, i_ceiling_pre_ov);
                 if (IExcessKBleed <= 0.0f) {
@@ -2634,6 +2769,7 @@ void AdjustFieldLearnMode() {
                 // down at ~40%/s instead of reaching MinDuty in 1-2 cycles. Load dump is
                 // the most catastrophic over-current, so it gets the fastest field collapse.
                 currentPID.ResetIntegratorTo(0.0);
+                recovAwReset();
                 g_loadDumpCount++;
                 queueConsoleMessageF("Load dump #%lu detected — output cut, inner PID integrator reset (dBcur/dt=%.0f A/s)",
                                      (unsigned long)g_loadDumpCount, g_dBcur_dt);
@@ -2830,9 +2966,11 @@ void AdjustFieldLearnMode() {
         // The commanded target lives in ChargingVoltageTargetReq (set THIS tick by stage logic /
         // TargetVoltageMode / MaintainMode above, and by updateChargingStage()). We rate-limit the REAL
         // ChargingVoltageTarget toward it at vTgtRampUp / vTgtRampDn (V/s). ChargingVoltageTarget is what
-        // BOTH the CV PI error AND the *relative* over-voltage protections read, so a commanded DROP
-        // (absorption→float, manual lower) glides down instead of stepping — fast-OV / iExcess don't
-        // trip on a deliberate target change.
+        // BOTH the CV PI error AND the *relative* over-voltage protections read. A commanded DROP
+        // (absorption→float, manual lower) collapses in one tick through the dead band far above
+        // battery voltage — the field is already saturated (current-limited) there, so the target's
+        // value is inert — then glides the final approach at vTgtRampDn so fast-OV / iExcess don't
+        // trip as measured converges on the new target.
         //   Protections still fire at the same speed relative to whatever the target currently is —
         //   this only limits how fast the target itself may move. The ABSOLUTE backstops are fully
         //   independent of the target: AlternatorHardShutdownV (software hard-cut) and the INA228
@@ -2852,6 +2990,15 @@ void AdjustFieldLearnMode() {
           float step = (vTgtRampUp > 0.0f) ? (vTgtRampUp * actualDtSec) : 1.0e9f;
           ChargingVoltageTarget = fminf(ChargingVoltageTargetReq, ChargingVoltageTarget + step);
         } else if (ChargingVoltageTargetReq < ChargingVoltageTarget) {
+          // Snap-to-proximity: collapse the inert dead band in one tick, but never below the
+          // commanded setpoint (fmaxf) nor below IBV+margin — so measured stays under target and the
+          // relative OV protections can't trip. vTgtRampDn then owns the final approach. Self-arming:
+          // fires only while target >> measured (saturated); stays disengaged once measured is near
+          // target, which is exactly the delicate absorption→float-on-a-full-battery case.
+          float fastFloor = IBV + 0.2f * ((float)BATTERY_VOLTAGE / 12.0f);
+          if (ChargingVoltageTarget > fastFloor) {
+            ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, fastFloor);
+          }
           float step = (vTgtRampDn > 0.0f) ? (vTgtRampDn * actualDtSec) : 1.0e9f;
           ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, ChargingVoltageTarget - step);
         }
@@ -2875,7 +3022,7 @@ void AdjustFieldLearnMode() {
           if ((cvRiseGovEnable || g_autoTestActive) && ChargingVoltageTarget > voltageTargetSlewed + 0.01f) {
             float icvHi_gov = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
             float e_needed = (icvHi_gov - cv_I) / VoltageKp_active;
-            e_needed = fmaxf(e_needed, 0.02f);
+            e_needed = fmaxf(e_needed, 0.02f * ((float)BATTERY_VOLTAGE / 12.0f));  // min target lead, per-cell-scaled
             voltageTargetSlewed = fminf(ChargingVoltageTarget,
                                         IBV + e_needed);  // raw INA228 — no filter lag on governor
           } else {
@@ -2960,6 +3107,7 @@ void AdjustFieldLearnMode() {
           } else {
             cv_I_aw_cap = fminf(cv_I_aw_cap + awRecoverAmpS * actualDtSec, (float)MaxTableValue);
           }
+          g_cvAwRecovering = (cv_I_aw_cap < (float)MaxTableValue - 0.5f);  // post-trip hold-down in progress
 
           float icvHi_bt = fminf(clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue), cv_I_aw_cap);
           if (!voltageControlActive) {
@@ -3022,7 +3170,11 @@ void AdjustFieldLearnMode() {
                 vPrevCV = getFiltV();
               } else {
                 float vNow = getFiltV();
-                if (dtSec > 0.001f) cvDSlope = constrain((vNow - vPrevCV) / dtSec, -4.0f, 4.0f);
+                // Sanity clamp scales with class: real 48V slopes reach ~4× the 12V ceiling, and a
+                // saturated cvDSlope understates the drive into the slope bleed (or never crosses a
+                // bank-appropriate SlopeBleedThresh at all).
+                float slopeCeil = 4.0f * ((float)BATTERY_VOLTAGE / 12.0f);
+                if (dtSec > 0.001f) cvDSlope = constrain((vNow - vPrevCV) / dtSec, -slopeCeil, slopeCeil);
                 rollUpdate(ROLL_CVSLOPE, cvDSlope);   // slope-bleed gate-tuning readout
                 vPrevCV = vNow;
               }
@@ -3099,7 +3251,8 @@ void AdjustFieldLearnMode() {
           float e_high = IBV - highTarget;  // raw INA228 — no filter lag on tuning score
           float e_scored, w_high;
           if (e_high > 0.0f) {
-            e_scored = fmaxf(0.0f, e_high - CV_HIGH_DEADBAND_V);  // dead-band: first 25mV of overshoot is free
+            // dead-band (per-cell-scaled by class): the first 25mV(×class) of overshoot is free
+            e_scored = fmaxf(0.0f, e_high - CV_HIGH_DEADBAND_V * ((float)BATTERY_VOLTAGE / 12.0f));
             w_high = cvKOvershoot;
           } else {
             e_scored = e_high;  // approach (undershoot during rise) scored normally, no dead-band
@@ -3111,7 +3264,7 @@ void AdjustFieldLearnMode() {
 
           if (!cvTuningScore.phaseSettled) {
             float vErr = fabsf(IBV - highTarget);  // raw INA228 — settle detection on true voltage
-            if (vErr <= CV_SETTLE_V_THRESH) {
+            if (vErr <= CV_SETTLE_V_THRESH * ((float)BATTERY_VOLTAGE / 12.0f)) {
               if (++cvTuningScore.consecutiveInBand >= cvConsecutiveReads) {
                 cvTuningScore.phaseSettled = true;
                 cvTuningScore.totalSettlingTimeSec +=
@@ -3154,7 +3307,7 @@ void AdjustFieldLearnMode() {
 
           if (!cvTuningScore.lowPhaseSettled) {
             float vErr = fabsf(IBV - lowTarget);  // raw INA228 — settle detection on true voltage
-            if (vErr <= CV_SETTLE_V_THRESH) {
+            if (vErr <= CV_SETTLE_V_THRESH * ((float)BATTERY_VOLTAGE / 12.0f)) {
               if (++cvTuningScore.lowConsecInBand >= cvConsecutiveReads) {
                 cvTuningScore.lowPhaseSettled = true;
                 cvTuningScore.totalLowSettlingTimeSec +=
@@ -3217,7 +3370,43 @@ void AdjustFieldLearnMode() {
         pidInput = (double)targetCurrent;
         pidSetpoint = (double)setpointLimited;
         pidError = setpointLimited - targetCurrent;
+
+        // Recovery over-ramp restraint. pidError>0 == under-current == the integral climbing
+        // (outputSum moves by exactly effectiveKi*error), so ∫max(0,pidError)dt IS that climb ÷ Ki.
+        // Leaky: charge on under-current, bleed when caught up, so only a sustained falling-plant
+        // descent (not a brief slew-limited command step) reaches RecovAwArmAs. Disarm is
+        // condition-based (current caught command); RecovAwMaxMs is only a backstop.
+        if (pidError > 0.0f) recovAwArmAccumAs += pidError * actualDtSec;
+        else                 recovAwArmAccumAs -= recovAwArmAccumAs * (actualDtSec / RECOV_AW_LEAK_TAU_S);
+        if (recovAwArmAccumAs < 0.0f) recovAwArmAccumAs = 0.0f;
+        if (!recovAwArmed && recovAwArmAccumAs >= RecovAwArmAs) {
+          recovAwArmed = true;
+          recovAwArmStartMs = currentMillis;
+        } else if (recovAwArmed &&
+                   (pidError <= 0.0f || (currentMillis - recovAwArmStartMs) >= (uint32_t)RecovAwMaxMs)) {
+          recovAwArmed = false;
+          recovAwArmAccumAs = 0.0f;
+        }
+        // Commissioning forces the restraint inert (scale 1.0) so the uncut over-ramp is measured raw;
+        // the accumulator above still charges so we capture the pre-overshoot under-current.
+        currentPID.SetIntegralUpScale((RecovAwEnable && recovAwArmed && !recovAwCommissionActive) ? (double)RecovAwUpGain : 1.0);
         currentPID.Compute();
+
+        // Banner limiter code (→ CSV4/NavStream): which constraint owns the current command this tick.
+        // 0 none — mid-slew in either direction (on a commanded step-DOWN MeasuredAmps lags above
+        // setpointLimited, which reads as "tracking" and would blink a spurious limiter tint),
+        // machine-saturated (output can't reach the setpoint, so the alternator itself is the
+        // limit), zero-current command, or CV square-wave tuning.
+        {
+          bool zeroCmd = (MaintainMode == 1 || zeroFloatActive);
+          bool slewing = (fabsf(setpointLimited - setpointCommand) > 0.5f);
+          bool tracking = (MeasuredAmps >= setpointLimited - fmaxf(3.0f, 0.10f * setpointLimited));
+          if (CVTuningMode || zeroCmd || slewing || !tracking)    ctrlLimiter = 0;
+          else if (voltageControlActive && Icv < icvCeil - 0.5f)  ctrlLimiter = 3;
+          else if (battCeilBinding)                               ctrlLimiter = 4;
+          else if (thermalPenaltyAmps > 0.5f)                     ctrlLimiter = 2;
+          else                                                    ctrlLimiter = 1;
+        }
       }
 
     } else {
@@ -3226,6 +3415,7 @@ void AdjustFieldLearnMode() {
       lastVoltageControlActive = false;  // keep tracker in sync so AUTO re-entry from MANUAL fires the bumpless CV seed
       uTargetAmps = 0;
       setpointLimited = 0.0f;
+      ctrlLimiter = 0;
       pidInput = (double)((OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                          : g_pidI_filtered);
     }  // end of MANUAL mode else
@@ -3276,24 +3466,33 @@ void AdjustFieldLearnMode() {
     innerTermD = (float)currentPID.GetDterm();
 
     // Inner current loop Control Accuracy score — authority gate: the field actuator must be
-    // actively modulating (duty off both rails — not pinned at 0% nor 100%), no protection owning
-    // the output, past the startup ramp, and genuinely commanding current. A duty pinned at 100%
-    // means we can't make more current (low RPM / out of headroom), so that gap is not a tuning
-    // fault and isn't counted.
+    // actively modulating (duty off both REAL rails), no protection owning the output, past the
+    // startup ramp, and genuinely commanding current. The rails are the PID's actual bounds, not a
+    // hardcoded 0/100: the true ceiling is ccDutyCeiling() (=MaxDuty, ~50%@24V / 25%@48V and any
+    // user Max Field %), and the floor is max(MinDuty, rpmMinDuty). Pinned at either means we can't
+    // move current in that direction (out of field headroom / RPM floor), so the gap is physics, not
+    // a tuning fault, and isn't counted. The rail margin is 1% of the usable span (floored at 0.1
+    // duty) so it excludes the anti-windup-pinned state without going dead on compressed spans
+    // (48V ceiling ~25%, or Max Field % set near the RPM floor), where a fixed ±1 could leave no
+    // satisfiable window and the score would never accumulate.
     // Slew gate (setpointCommand ≈ setpointLimited): while the slew-limited command is still
-    // travelling toward a new target (up to SetpointRiseRate/SetpointFallRate per sec), MeasuredAmps
-    // lags the moving command — on a commanded step-DOWN that lag reads as tens of amps of phantom
+    // travelling toward a new target (up to SetpointRiseRate/SetpointFallRate per sec), the PV lags
+    // the moving command — on a commanded step-DOWN that lag reads as tens of amps of phantom
     // "over-current" that is physics, not tuning. Scoring is suppressed for the whole slew, then
     // held only ACC_SETTLE_CURRENT_MS (100 ms) after the command settles — short enough that a
     // genuinely slow or ringing loop (the current loop should settle in ~200 ms) is still caught.
     {
+      float dutyFloor = fmaxf(MinDuty, tick.rpmMinDuty);
+      float railMargin = fmaxf(0.1f, 0.01f * (ccDutyCeiling() - dutyFloor));
       bool binding = !g_fastOvClampActive && !inStartupRamp
-                     && dutyCycle > 1.0f && dutyCycle < 99.0f
+                     && dutyCycle > dutyFloor + railMargin && dutyCycle < ccDutyCeiling() - railMargin
                      && setpointLimited > 2.0f
                      && fabsf(setpointCommand - setpointLimited) <= 2.0f;  // command caught up — not mid-slew
       if (accBindingReady(accCurrent.bindingStartMs, binding, tick.nowMs, ACC_SETTLE_CURRENT_MS)) {
-        // Score against the same signal the inner loop regulates: alternator current.
-        float accPv = MeasuredAmps;
+        // Score the exact signal the PID nulls (pidError = setpointLimited − targetCurrent). This is
+        // the OutputPIDSigSrc-selected current — EMA-filtered by default — NOT raw MeasuredAmps: the
+        // ripple the EMA removes is not something the loop chases, so scoring raw inflates RMS by it.
+        float accPv = targetCurrent;
         float err  = setpointLimited - accPv;          // A; positive = under target
         float over = accPv - setpointLimited;          // over-current side (damaging)
         accScoreAdd(accCurrent.errAccum, accCurrent.timeAccum, accCurrent.worstOver, err, over > 0.0f ? over : 0.0f, actualDtSec);
@@ -3303,7 +3502,10 @@ void AdjustFieldLearnMode() {
     // CV voltage loop Control Accuracy score — authority gate: voltage is genuinely the binding
     // constraint, i.e. the CV PID output Icv is off both rails — above zero and strictly below the
     // current ceiling uTargetAmps (if Icv is pinned at the ceiling we're current-limited, not
-    // voltage-regulating). No protection clamp. Held 2 s before scoring (ACC_SETTLE_VOLTAGE_MS).
+    // voltage-regulating). No protection clamp, and NOT mid-recovery: g_cvAwRecovering is true while
+    // the anti-windup cap is still climbing back after a trip, when the loop deliberately holds
+    // current below target — Icv sits mid-range and IBV lags under target by design, which would
+    // otherwise score as a large phantom under-voltage. Held 2 s before scoring (ACC_SETTLE_VOLTAGE_MS).
     // Target-step mirror of the current loop's slew gate: ChargingVoltageTarget steps instantly on
     // a stage transition (e.g. absorption→float), so right after a step-DOWN IBV sits above the new
     // target for the few ticks before Icv collapses below the binding floor — phantom over-voltage
@@ -3317,9 +3519,12 @@ void AdjustFieldLearnMode() {
       }
     }
     if (voltageControlActive) {
-      bool binding = !g_fastOvClampActive && Icv > 0.5f && Icv < (uTargetAmps - 0.5f);
+      bool binding = !g_fastOvClampActive && !g_cvAwRecovering && Icv > 0.5f && Icv < (uTargetAmps - 0.5f);
       if (accBindingReady(accVoltage.bindingStartMs, binding, tick.nowMs, ACC_SETTLE_VOLTAGE_MS)) {
-        float vErr  = IBV - ChargingVoltageTarget;     // V (raw INA228); positive = overvoltage
+        // Scored in 12V-EQUIVALENT volts (÷ class ratio) so every published mV figure (CSV2,
+        // /cvtuninglog live, cloud acc_volt_* columns) and the fixed dashboard color bands stay
+        // per-cell-comparable across 12/24/48V systems.
+        float vErr  = (IBV - ChargingVoltageTarget) * (12.0f / (float)BATTERY_VOLTAGE);  // 12V-equiv V; positive = overvoltage
         float vOver = vErr > 0.0f ? vErr : 0.0f;       // over-voltage side (battery-damaging)
         accScoreAdd(accVoltage.errAccum, accVoltage.timeAccum, accVoltage.worstOver, vErr, vOver, actualDtSec);
       }
@@ -5468,7 +5673,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // Approach gate: released the first time PRESENT temp (not the projection) reaches setpoint;
   // until then dI is held off (FF handles the approach). Winding a hold before there is one to
   // hold caused the ~2.5× overbuild + deep post-peak sag.
-  if (!thermalIntegratorReleased && tempNowPid >= (activeTempLimit - 5.0f)) {
+  if (!thermalIntegratorReleased && tempNowPid >= (activeTempLimit - 7.0f)) {
     thermalIntegratorReleased = true;
     queueConsoleMessageF("TempPID: integrator released — present temp %.1f°F reached setpoint", tempNowPid);
   }
@@ -5664,6 +5869,8 @@ void pidLog_tick(uint32_t nowMs) {
   e.pad2 = 0;
   e.mExcessEma = g_mExcessEma;             // iExcess detector traces — averaged excess vs its
   e.iExcessThreshold = g_iExcessThreshold; // computed fire threshold E (both A), for offline tuning
+  e.recovAwScale = (float)currentPID.GetIntegralUpScale();  // restraint traces — applied up-scale (1.0=off)
+  e.recovAwAccumAs = recovAwArmAccumAs;    // and the leaky under-current accumulator (A·s), for offline sizing
 
   pidLogHead = (pidLogHead + 1) % PID_LOG_SIZE;
   if (pidLogCount < PID_LOG_SIZE) pidLogCount++;

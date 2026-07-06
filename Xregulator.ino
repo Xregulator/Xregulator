@@ -305,6 +305,7 @@ static float perfLive_ws = 0, perfLive_wa = 0, perfLive_spd = 0, perfLive_best =
 static float perfLive_pitch = 0, perfLive_pct = 0;
 static bool  perfLiveValid = false;
 static bool  perfSteady = false;    // currently inside a steady-run (sail OR motor episode accumulating) — live indicator
+static float perfSettleSec = -1.0f; // dwell seconds remaining before the active episode banks; 0 = settled, -1 = not eligible
 static uint8_t perfLiveSrc = 0;     // 1 STW, 2 SOG
 static float motorLive_rpm = 0, motorLive_hw = 0, motorLive_spd = 0, motorLive_best = 0, motorLive_pct = 0, motorLive_pitch = 0;
 static bool  motorLiveValid = false;
@@ -556,6 +557,7 @@ float imu_slam_peak_lifetime = 0;
 
 // --- MOUNTING ORIENTATION ---
 uint8_t imuMountOrientation = 0;  // 0-3, persisted via /vessel_info.json on LittleFS
+bool vesselInfoSaved = false;  // /vessel_info.json exists — until then IMU metrics and the first-boot SoC seed hold off (orientation/chemistry unknown)
 
 // --- COMPLEMENTARY FILTER STATE ---
 float cf_heel = 0;   // Filtered heel angle
@@ -1018,6 +1020,7 @@ static SystemIDResumeState g_sysIDResume;
 #define FIELDCURVE_DUTY_STEP  2.0f      // duty increment per step (%)
 #define FIELDCURVE_ONSET_FINE_STEP 0.25f // onset sweep: fine step backing DOWN to refine the coarse knee (%)
 #define FIELDCURVE_DWELL_MS   1500UL    // settle dwell per step (ms) — >5τ for any realistic field
+#define FIELDCURVE_EASE_MS    1500.0f   // ease-in/out ramp between the operating duty and the sweep floor (ms)
 struct FieldCurvePoint { float duty; float amps; };
 FieldCurvePoint *fieldCurveBuf = nullptr;     // ps_malloc'd on first run, never freed
 int   fieldCurveCount = 0;                     // points captured this run
@@ -1139,7 +1142,7 @@ float ChargingVoltageTarget = 0;                 // This becomes active target �
                                                  // ChargingVoltageTargetReq by the slew in AdjustFieldLearnMode).
 float ChargingVoltageTargetReq = 0;              // Instantaneous DESIRED target (set each tick by stage logic /
                                                  // TargetVoltageMode / MaintainMode). ChargingVoltageTarget ramps to it.
-float VoltageHardwareLimit = BulkVoltage + 0.1;  // could make this a setting later, but this should be decently safe
+float VoltageHardwareLimit = BulkVoltage + 0.3;  // boot placeholder; updateINA228OvervoltageThreshold() derives the real limit (Bulk + 0.3×class)
 bool inBulkStage = true;
 
 // System voltage class (12/24/48V) lives in BATTERY_VOLTAGE (set from Vessel Info). It is the sole
@@ -1418,7 +1421,7 @@ double speedAccumulator_AllTime = 0.0;    // kt·s (lifetime) — double
 float AvgVoltage_AllTime = 0.0f;
 
 
-String installId = "";  // NK_InstallId; browsers compare it to a stored copy to auto-clear console history after an NVS erase
+String installId = "";  // NK_InstallId; /installid serves it + "|" + FIRMWARE_VERSION — browsers auto-clear console history when either changes (NVS erase or reflash)
 
 //supabase authentications stuff
 String authToken = "";      // Stored auth token
@@ -2648,6 +2651,7 @@ GovernorMode govMode = GOV_NORMAL_SLEW;
 // Setpoint tracking
 float setpointLimited = 0.0f;
 float setpointCommand = 0.0f;   // pre-slew current command (Icv in CV, uTargetAmps in idle); global so the Control Accuracy score gate can see whether setpointLimited is still slewing toward it
+uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit
 bool setpointInitialized = false;
 
 // ===== LEARNING MODE CONTROL PARAMETERS =====
@@ -2924,13 +2928,13 @@ const uint32_t ACC_SETTLE_THERMAL_MS = 120000;  // thermal loop: minutes — req
 float cvWaveAmplitudeV = 0.30f;   // V — target rises by this during HIGH phase (LOW phase sits at the real target)
 int cvWavePeriodSec = 30;         // s — full period of the Waveform Generator wave (one LOW + one HIGH); each half-period = this / 2. Default matches the UI input minimum.
 float cvKOvershoot = 10.0f;       // penalty weight on integrated overshoot (user-exposed)
-uint8_t cvConsecutiveReads = 10;  // consecutive filtered reads within ±0.1V to declare settled (~1s at 100ms rate)
+uint8_t cvConsecutiveReads = 10;  // consecutive filtered reads within the class-scaled settle band (CV_SETTLE_V_THRESH) to declare settled (~1s at 100ms rate)
 int CVTuningMode = 0;             // 0=off, 1=on
 bool cvWaveExitWindDown = false;  // one-shot: set when the waveform test is turned off so the elevated target glides back to base via the down-slew instead of snapping (a snap would drop the target below the still-high actual voltage and trip fast-OV/iExcess)
 float cvBaseTarget = 0.0f;        // real ChargingVoltageTarget captured at test start; global so wave gen + scorer share it
 
-const float CV_SETTLE_V_THRESH    = 0.10f;   // V — settling threshold
-const float CV_HIGH_DEADBAND_V   = 0.025f;  // V — HIGH phase overshoot dead-band; below this is free
+const float CV_SETTLE_V_THRESH    = 0.10f;   // V at 12V — settling threshold; ×(BATTERY_VOLTAGE/12) at use
+const float CV_HIGH_DEADBAND_V   = 0.025f;  // V at 12V — HIGH phase overshoot dead-band, ×(BATTERY_VOLTAGE/12) at use; below this is free
 const float CV_LOW_GRACE_SEC     = 1.0f;    // s — grace period from LOW phase start before undershoot scoring begins
 const float CV_LOW_RAMP_SEC      = 10.0f;   // s — undershoot weight ramps 0→1 over this window after grace
 const float CV_UNDERSHOOT_SCALE  = 0.15f;   // undershoot ISE weight relative to overshoot ISE
@@ -3039,9 +3043,10 @@ float pidError = 0.0f;  // PID error for display (A)
 
 // =====================================================================================
 // === CV LOOP PARAMETERS — all tunable values consolidated here
-// === Note: fastOV thresholds (V_SOFT=+0.08V, V_HARD=+0.15V, PRED_GUARD=0.06V,
-// ===       TD_PRED=0.08s, HARD_CLAMP_HYST=0.08V) are local const float inside
-// ===       AdjustFieldLearnMode() in 6_functions.ino — not globals.
+// === Note: fastOV trip levels derive from settings inside AdjustFieldLearnMode() in
+// ===       6_functions.ino: G2 measured at target+OvMeasMarginV, G1 predictive at
+// ===       target+OvPredMarginV over horizon TdPred. Only PRED_GUARD (0.06V arm
+// ===       window, per-cell-scaled by class) remains a local const there.
 // =====================================================================================
 // --- Output current PID ---
 // PidKp/Ki/Kd are 12V-EQUIVALENT (normalized) gains — the same numbers work on 12/24/48V banks.
@@ -3139,7 +3144,6 @@ float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess
 float SlopeBleedProxV = 0.20f;      // V — proximity gate: bleed scales linearly from 0 (e >= ProxV) to full (e <= 0)
 bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "helpers" (asymmetric 7× KiDown unwind + slope-aware integrator bleed). ON = both active (reduce overshoot / speed OV recovery). OFF = symmetric plain PI, easier to tune/understand. Does NOT touch real OV protections.
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
-float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage target rises only
 // --- FastOV supervisor ---
 float KHard = 35.0f;  // A/V — OV cap slope (Group 1: Vpred > target+OvPredMarginV; Group 2: IBV > target+OvMeasMarginV)
 bool  OvGroup1Enable  = true;   // Group 1 — prediction-based cap enable (Vpred > target + OvPredMarginV)
@@ -3170,6 +3174,19 @@ float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any p
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
 float AwRecoverRate = 0.1f;      // HARDCODED, not user-adjustable. cv_I_aw_cap recovery rate (fraction of MaxTableValue/s) after fastOV clears. Only exercised on cold CV re-entry (MANUAL→AUTO, idle→bulk, post-shutdown). CSV3 slot CSV3_reserved_AwRecoverRate held for future use.
 uint16_t AwSeedProtectMs = 150;  // ms to suppress AwBleed + CC-tracker after any bumpless seed fires; 0=disabled
+// --- Recovery over-ramp restraint (inner output-current PID up-integration) ---
+// Kills the self-inflicted second iExcess fire: as RPM falls back through the alt cut-in band the
+// inner integral over-ramps duty (velocity lag on a falling plant), current overshoots command at
+// idle with battV under target, detector re-fires. Restrains only up-integration while a sustained
+// under-current (the falling-plant fingerprint) has accumulated; down stays full-rate.
+bool RecovAwEnable = true;       // master enable; inert on a fresh device because RecovAwArmAs ships high (see below)
+float RecovAwArmAs = 40.0f;      // A·s of accumulated under-current to arm. Ships high so an uncommissioned unit behaves as today; the Phase-B sizing test lowers it to the measured descent envelope. Size-dependent (scales with alt current) — commissioned per install.
+float RecovAwUpGain = 0.3f;      // up-integration scale while armed (1=off, 0=freeze). 0 would break the error<=0 self-disarm (frozen integral never kills steady-state error) — stay above it.
+uint16_t RecovAwMaxMs = 8000;    // backstop only; normal disarm is condition-based (inner error<=0). Sized >= throttled catch-up time, else a premature disarm re-ignites the over-ramp.
+float recovAwArmAccumAs = 0.0f;  // leaky ∫max(0,pidError)dt = the inner integral's own up-climb ÷ Ki
+bool recovAwArmed = false;
+uint32_t recovAwArmStartMs = 0;
+const float RECOV_AW_LEAK_TAU_S = 1.5f; // accumulator bleeds to ~0 over this when not under-current, so only a sustained descent (not brief filtered dips) reaches RecovAwArmAs
 float FastSetpointRiseRate = 8.0f;       // multiplier on normal setpoint rise slew during post-protection recovery window
 uint32_t FastSetpointRiseWindowMs = 5000; // hard upper bound (ms) on how long the fast-rise window stays open after any protection releases
 float FastSetpointRiseHeadroomV = 0.2f;  // V below ChargingVoltageTarget at which fast-rise is allowed; gate closes once IBV climbs into target - this margin
@@ -3397,6 +3414,10 @@ bool lockoutWasActive = false;
 float g_fastOvCurrentCap = 0.0f;   // live unified cap ceiling this tick (amps)
 volatile bool g_fastOvClampActive = false;  // true if ANY protection capped current this tick
 uint32_t g_fastOvClampCount = 0;   // rising-edge counter across all protections
+// True while the CV anti-windup cap has not yet recovered to full after a protection trip — i.e. the
+// loop is deliberately holding current below where free integration would put it, so voltage reading
+// under target is by-design recovery, not a tracking fault. Gates the CV accuracy score.
+volatile bool g_cvAwRecovering = false;
 
 float g_I_cap = 0.0f;  // RPM table current ceiling this tick (A); set each AUTO tick
 
@@ -3552,7 +3573,7 @@ uint32_t thermalSlopeLastPushMs = 0;  // gates slope buffer push to TempPIDInter
 // One-shot: set when the thermal PID is being re-enabled after a DORMANT-but-not-stale period
 // (TuningMode exit) where tempFilterUpdate() kept the slope buffer live the whole time. Tells
 // the re-enable path in tempPID_tick() to PRESERVE the slope buffer instead of clearing it, so
-// thermalSlopeBufFull stays true and the setpoint stays at limit-5 (no spurious limit-20 warmup
+// thermalSlopeBufFull stays true and the setpoint stays at limit-7 (no spurious limit-20 warmup
 // drop that would derate the field for 60s right after a test). NOT set on a true sensor gap —
 // there the trend really is stale and must be cleared. Consumed (reset) inside the re-enable path.
 bool thermalPreserveSlopeOnResume = false;
@@ -3783,14 +3804,17 @@ struct PidLogEntry {
   // ── iExcess (Group 3 alternator / Group 4 battery) detector tuning traces ─────────────────────────────
   float mExcessEma;            // g_mExcessEma — time-averaged signed current excess over command (A)
   float iExcessThreshold;      // g_iExcessThreshold — computed fire threshold E (A)
-};                   // 140 bytes — naturally aligned, no implicit holes
+  // ── Recovery over-ramp restraint traces ──────────────────────────────────
+  float recovAwScale;          // applied inner-integral up-scale (1.0=off, else RecovAwUpGain when armed)
+  float recovAwAccumAs;        // leaky under-current accumulator toward RecovAwArmAs (A·s)
+};                   // 148 bytes — naturally aligned, no implicit holes
 
 struct PidDLState {
   int count;
   int oldest;
   int row;
   bool done;
-  char line[1024];  // MUST hold the largest single row intact: comment block=715B, header≈477B (41 cols).
+  char line[1024];  // MUST hold the largest single row intact: comment block=715B, header≈510B (43 cols).
                     // snprintf truncation is NOT harmless here — it eats the row's trailing '\n', gluing
                     // that row onto the next one in the download. Grow this whenever a column or comment
                     // line is added.
@@ -3897,8 +3921,10 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t inaIntervalMs;           // ina_last_ms at log time — INA228 read freshness (ms)
   int16_t slopeBleedAmps_x1000;    // cv_I drain applied this voltage loop tick (A × 1000); 0 on non-VL ticks
   uint8_t capReason;               // which layer set fastOvCap this tick: 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk
+  int16_t recovAwScale_x100;       // recovery over-ramp restraint: applied inner up-integration scale × 100 (100 = off)
+  int16_t recovAwAccumAs_x10;      // recovery restraint: leaky under-current accumulator toward RecovAwArmAs × 10 (A·s)
 };
-static_assert(sizeof(CvLogEntry) == 51, "CvLogEntry must be 51 bytes");
+static_assert(sizeof(CvLogEntry) == 55, "CvLogEntry must be 55 bytes");
 
 
 struct CvBinDLState {
@@ -4285,6 +4311,36 @@ bool wifiNapActive = false;           // true while modem-sleep nap is active
 AsyncWebServer server(80);                  // Create AsyncWebServer object on port 80
 AsyncEventSource events("/events");         // Create an Event Source on /events
 unsigned long webgaugesinterval = 100;      // delay in ms between sensor updates on webpage
+// Per-CSV1-window aggregation for analog channels sampled faster than the ~100ms send interval,
+// so a plotted point is the window mean (anti-aliased) or peak instead of one aliased snapshot.
+// Methods, not free functions, so Arduino's auto-prototype pass doesn't reference WinAgg early.
+struct WinAgg {
+  float sum = 0.0f;
+  float maxMag = 0.0f;  // signed value of the largest-magnitude sample
+  uint16_t count = 0;
+  uint32_t winStartMs = 0;
+  void add(float v) {
+    // Self-expiring window: SendWifiData only resets these while an SSE client is connected —
+    // unbounded accumulation would wrap count (~5.5 min at 5 ms) and make the first
+    // post-reconnect point a gap-wide mean. 5× the send interval tolerates deferred sends.
+    uint32_t nowMs = millis();
+    if (count && (nowMs - winStartMs) > 5UL * webgaugesinterval) reset();
+    if (!count) winStartMs = nowMs;
+    sum += v;
+    count++;
+    if (fabsf(v) > fabsf(maxMag)) maxMag = v;
+  }
+  // fallback covers a window with no fresh sample (e.g. field off slows the INA228 below the send rate)
+  float value(bool useMax, float fallback) const {
+    if (!count) return fallback;
+    return useMax ? maxMag : sum / (float)count;
+  }
+  void reset() { sum = 0.0f; maxMag = 0.0f; count = 0; }
+};
+// IBV/Bcur ~5ms (INA228), aggAltCur = MeasuredAmps ~5-25ms (ADS1115 CH1). aggBattV/aggRpm/aggCh3
+// (ADS1115 CH0/CH2/CH3, ~30ms) are mean-only for cleaner plots — the Max toggle never touches them.
+WinAgg aggIbv, aggBcur, aggAltCur, aggBattV, aggRpm, aggCh3;
+bool battMaxMode = false;  // false = window mean (default), true = max-magnitude on the V/I traces it covers
 int plotTimeWindow = 60;                    // Plot time window in seconds
 
 // WiFi provisioning settings persist in NVS as NK_ssid / NK_pass
@@ -4790,6 +4846,7 @@ void setup() {
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "*");
 
   InitSystemSettings();       // load all settings from NVS (one-time LittleFS import sweep first).  If no keys exist, create them.
+  altApplyClassScales();      // alt-health Vbus cell size needs BATTERY_VOLTAGE — initAlternatorHealth ran before settings
   bhInitSettings();           // Battery Health: DCIR test config + persisted DCIR/capacity blobs
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
   loadTuningLog();            // restore last session's tuning records from LittleFS

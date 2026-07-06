@@ -283,6 +283,7 @@ numeric_cols = [
     "ovFlags", "dBcur_dt", "battI",
     "ch1IntervalMs", "voltLoopIntervalMs", "inaIntervalMs",
     "mExcessEma", "iExcessThreshold",   # iExcess detector: averaged excess vs fire threshold E (A)
+    "recovAwScale", "recovAwAccumAs",   # recovery over-ramp restraint: applied up-scale + under-current accumulator (added 2026-07-04)
 ]
 
 for col in numeric_cols:
@@ -847,6 +848,20 @@ if _have_iex:
                          transform=ax8.get_xaxis_transform(),
                          color="#ff8a80", alpha=0.25, step="pre",
                          label="iExcess fired/latched", zorder=1)
+
+    # Recovery over-ramp restraint overlay: the accumulator climbing toward RecovAwArmAs and the applied
+    # up-scale dropping below 1.0 line up with the mExcessEma over-ramp they exist to suppress. Right axis,
+    # guarded so pre-2026-07 logs (no columns) still render Plot 8.
+    if "recovAwScale" in df.columns and df["recovAwScale"].notna().any():
+        ax8r = ax8.twinx()
+        ax8r.plot(df["t_plot"], df["recovAwAccumAs"], color="#8e24aa", lw=1.3, ls="-.",
+                  label="recovAwAccumAs (A·s)", alpha=0.9, zorder=2)
+        ax8r.plot(df["t_plot"], df["recovAwScale"], color="#00897b", lw=1.2, ls=":",
+                  label="recovAwScale (×, 1=off)", alpha=0.85, zorder=2)
+        ax8r.axhline(1.0, color="#00897b", lw=0.5, ls=":", alpha=0.3)
+        ax8r.set_ylabel("restraint: accum (A·s) / scale (×)", color="#8e24aa")
+        _leg8r = ax8r.legend(loc="lower right", fontsize=9)
+        _leg8r.set_draggable(True)
 
     ax8.set_ylabel("Amps")
     ax8.grid(True, linestyle=":", alpha=0.4)

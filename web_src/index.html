@@ -117,7 +117,7 @@
       <div class="sensor-readings-tier">
         <!-- Battery + SOC -->
         <div class="reading-duo">
-          <span class="duo-lbl">Batt</span>
+          <span class="duo-lbl" id="lbl-voltage">Batt</span>
           <span class="duo-num"><span id="header-voltage">-</span></span>
           <span class="duo-unit">V</span>
           <span class="duo-lbl" onclick="socSeedOpen()" style="cursor:pointer;">SOC</span>
@@ -127,17 +127,17 @@
 
         <!-- Alt + Batt currents — 3-column grid keeps A's vertically aligned -->
         <div class="reading-duo">
-          <span class="duo-lbl">Alt</span>
+          <span class="duo-lbl" id="lbl-alt-current">Alt</span>
           <span class="duo-num"><span id="header-alt-current">-</span></span>
           <span class="duo-unit">A</span>
-          <span class="duo-lbl">Batt</span>
+          <span class="duo-lbl" id="lbl-batt-current">Batt</span>
           <span class="duo-num"><span id="header-batt-current">-</span></span>
           <span class="duo-unit">A</span>
         </div>
 
         <!-- Alt Temp: label above value row to save horizontal space -->
         <div class="reading-duo reading-duo-solo">
-          <span class="duo-lbl">Temp</span>
+          <span class="duo-lbl" id="lbl-alt-temp">Temp</span>
           <div class="duo-value-row">
             <span class="duo-num"><span id="header-alt-temp">-</span></span>
             <span class="duo-unit"><span class="temp-unit-label">°F</span></span>
@@ -202,13 +202,13 @@
   </div>
   <!-- Main Tab Navigation -->
   <div class="main-tabs">
-    <button class="main-tab" onclick="showMainTab('livedata')">Live Data</button>
+    <button class="main-tab" onclick="showMainTab('livedata')"><span class="tab-label-full">Live Data</span><span class="tab-label-short">Live</span></button>
     <button class="main-tab" onclick="showMainTab('settings')">Setup</button>
-    <button class="main-tab" onclick="showMainTab('tuning')">Tuning</button>
+    <button class="main-tab" onclick="showMainTab('tuning')"><span class="tab-label-full">Tuning</span><span class="tab-label-short">Tune</span></button>
     <button class="main-tab" onclick="showMainTab('plots')">Plots</button>
     <button class="main-tab" onclick="showMainTab('console')">Console</button>
     <!--<button class="main-tab" onclick="showMainTab('about-sourcecode')">Documentation</button> -->
-    <button class="main-tab" onclick="showMainTab('cloudfeatures')">Cloud Features</button>
+    <button class="main-tab" onclick="showMainTab('cloudfeatures')"><span class="tab-label-full">Cloud Features</span><span class="tab-label-short">Cloud</span></button>
   </div>
 
   <div id="settings" class="tab-content">
@@ -2022,7 +2022,7 @@
 
                 <hr />
               <div style="margin:10px 0 2px;">
-                <a class="xnav-link" onclick="goToVoltageTuning()">Tune the voltage loop &mdash; Tuning &rarr; Voltage <span class="xnav-arrow">&rarr;</span></a>
+                <a class="xnav-link" onclick="goToVoltageTuning()">Shortcut to CV tuning mode <span class="xnav-arrow">&rarr;</span></a>
               </div>
 
             </div>
@@ -2086,7 +2086,7 @@
 
                   <!-- "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet) -->
                   <article class="protections-param" data-groups="cl">
-                    <div class="protections-name" style="white-space: nowrap;">
+                    <div class="protections-name">
                       <span class="protections-tag g0">G0</span>
                       Command Limit (A) (<span id="MaxTableValue_echo" style="font-variant-numeric: tabular-nums;">?</span>) — OC trips at <span id="HardOCTripAmps_echo" style="font-variant-numeric: tabular-nums;">?</span>A
                       <span class="sinfo" data-sinfo="MaxTableValue" onclick="sinfoToggle(this)"></span>
@@ -2559,6 +2559,95 @@
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g4">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      Over-Ramp Restraint (<span id="RecovAwEnable_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">When on, restrains how fast the output-current integrator is allowed to climb during a recovery whenever measured current stays below command while the integrator keeps ramping up — the signature of the loop chasing a falling engine speed. This prevents the self-inflicted second over-current trip on the way back to idle. Off restores the classic (unrestrained) integrator.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="RecovAwEnable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('RecovAwEnable_checkbox', 'RecovAwEnable', 'RecovAwEnable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="RecovAwEnable" name="RecovAwEnable" type="number" value="" style="display:none;" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g4">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      Restraint Arm Threshold (A·s) (<span id="RecovAwArmAs_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much accumulated under-current must build up before the restraint engages: command minus measured current, integrated over time, in amp-seconds. The accumulator leaks back toward zero whenever current is at or above command, so only a sustained shortfall reaches this threshold. Higher engages only on a longer or deeper sustained shortfall; lower engages sooner.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="RecovAwArmAs" type="number" step="1" min="1" max="500" />
+                        <span class="protections-unit">A·s</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g4">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      Restrained Integration Rate (<span id="RecovAwUpGain_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How fast the integrator is still allowed to climb while the restraint is engaged, as a fraction of its normal rate. 1 means no restraint; lower means a slower climb. Avoid 0 (fully frozen): a frozen integrator can never catch command, so the restraint would never release on its own and would run to the time limit below.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="RecovAwUpGain" type="number" step="0.05" min="0" max="1" />
+                        <span class="protections-unit">×</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g4">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      Restraint Time Limit (ms) (<span id="RecovAwMaxMs_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard upper bound on how long the restraint can stay engaged. Normally it releases on its own the moment measured current catches command; this is only a backstop for the case where current never catches. Set it comfortably longer than the time the loop needs to settle after a trip, so a premature release cannot restart the over-ramp.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="RecovAwMaxMs" type="number" step="500" min="500" max="30000" />
+                        <span class="protections-unit">ms</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g4">
+                    <div class="protections-name">
+                      <span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      Restraint Auto-Sizing
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Measures the uncut recovery over-ramp on a real worst-case throttle chop, then proposes the three restraint settings above. Arm it, then do a hard throttle chop down through the alternator's steep speed band with the charge command near the top of its range. The first over-current trip fires normally; the second (the recovery over-ramp) is suspended and measured — over-voltage protection and the absolute hard-over-current trip stay live the whole time. Nothing changes until you press Apply.</span></span>
+                    </div>
+                    <div class="protections-edit-row" style="flex-wrap:wrap; gap:8px;">
+                      <button type="button" class="btn-primary" onclick="recovAwCommissionArm()">Arm</button>
+                      <button type="button" class="btn-secondary" onclick="recovAwCommissionStop()">Stop</button>
+                      <span id="recovAwTestStatus" class="protections-unit">idle</span>
+                    </div>
+                    <div id="recovAwTestResult" style="display:none; margin-top:6px; font-size:0.85em; line-height:1.5;">
+                      <div>Over-ramp peak <strong><span id="recovAwPeak">—</span></strong> A over command (fire threshold <span id="recovAwThresh">—</span> A)</div>
+                      <div>Pre-overshoot under-current <strong><span id="recovAwUnder">—</span></strong> A·s · secondary latency <strong><span id="recovAwLat">—</span></strong> ms</div>
+                      <div style="margin-top:4px;">Proposed — Arm <strong><span id="recovAwPropArm">—</span></strong> A·s, Rate <strong><span id="recovAwPropGain">—</span></strong> ×, Limit <strong><span id="recovAwPropMax">—</span></strong> ms
+                        <button type="button" class="btn-primary" style="margin-left:8px;" onclick="recovAwApplyProposed()">Apply</button>
+                      </div>
+                    </div>
                   </article>
 
                   <article class="protections-param" data-groups="g1 g2 g3 g4">
@@ -4506,7 +4595,7 @@
                 <p class="card-group-title" style="margin:12px 0 4px;">High-Field Alert</p>
                 <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Independent safety net: flags low output despite high field drive, even where the health gauge is still learning.</div>
                 <div class="form-row">
-                  <div class="form-label"><span>Alert: field drive at least (%) (<span id="altHiFieldPct_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-label"><span>Alert: field drive at least (% of Max Field) (<span id="altHiFieldPct_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField" onclick="sinfoToggle(this)"></span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -4798,6 +4887,35 @@
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
                     <input name="webgaugesinterval" type="number" step="10" min="50" max="2000" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Fast Channel Plot Sampling (<span id="battMaxMode_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">Several signals are measured far faster than the dashboard send rate,
+                      so each sent point can only represent one instant of that window. This selects what that point
+                      reports: Average takes the mean of the window (smoothed, anti-aliased); Max reports the
+                      largest-magnitude sample so brief peaks and spikes are not missed. Max applies to the battery
+                      voltage, battery current, and alternator current traces and readouts; the other averaged
+                      channels stay on the mean either way.
+                      <br><br>
+                      <b>Diagnostic.</b> Max makes those readouts show the window peak rather than the present value,
+                      and it corrupts the CV plant fit — use Average for normal operation and commissioning.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <select name="battMaxMode">
+                      <option value="0">Average</option>
+                      <option value="1">Max</option>
+                    </select>
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
@@ -5138,21 +5256,11 @@
                 Configuration Backup &amp; Sharing</summary>
 
               <div class="form-row">
-                <div class="form-label">Hardware settings (current sensor type, shunt resistance, amp polarity):
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">These
-                    describe this boat's physical installation, not the charge profile. Include them only when the
-                    file will go onto identical hardware — a backup of this regulator, or a sister vessel with the
-                    same sensors and wiring. Per-device calibration (sensor zero offsets) is never included either
-                    way.</span></span></div>
-                <div class="form-input">
-                  <label><input type="checkbox" id="configIncludeHardware" /> Include in export / send</label>
-                </div>
-              </div>
-
-              <hr />
-
-              <div class="form-row">
-                <div class="form-label">Save this regulator's complete configuration to a file:</div>
+                <div class="form-label">Save this regulator's complete configuration to a file:
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Saves
+                    every setting this regulator has — charge profile, tuning, RPM and fuel tables, and per-install
+                    hardware (sensor type, shunt resistance, polarity) and calibration. What to keep is decided when
+                    the file is loaded onto a regulator, not here.</span></span></div>
                 <div class="form-input">
                   <input type="button" value="Export Config from Regulator" class="btn-primary"
                     onclick="exportConfigDownload()" />
@@ -5168,6 +5276,7 @@
                     approve. Settings the file does not contain keep their current values. The regulator reboots to
                     apply; reconnect after about 30 seconds.</span></span></div>
                 <div class="form-input" style="flex-wrap: wrap; gap: 6px; justify-content: flex-end;">
+                  <label style="flex-basis: 100%; text-align: right;"><input type="checkbox" id="configIncludeHardware" /> Also apply this file's hardware settings (sensor type, shunt resistance, polarity) — identical hardware only</label>
                   <input type="file" id="importConfigFile" accept="application/json,.json" />
                   <input type="button" value="Send Config to Regulator" class="btn-secondary"
                     onclick="importConfigFromFile()" />
@@ -5178,10 +5287,10 @@
 
               <div class="form-row">
                 <div class="form-label">Share this configuration to the community library:
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Shares
-                    the charge profile and tuning only — hardware settings never leave the boat, because they
-                    describe this installation's sensors and wiring, not anything another boat could reuse.
-                    Submissions are reviewed before appearing publicly. Requires cloud registration.</span></span></div>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Uploads
+                    this regulator's full configuration for review. What ends up publicly shared is decided during
+                    review, not on the boat. Submissions are reviewed before appearing publicly. Requires cloud
+                    registration.</span></span></div>
                 <div class="form-input" style="flex-wrap: wrap; gap: 6px; justify-content: flex-end;">
                   <input type="text" id="shareConfigName" placeholder="Name" />
                   <input type="button" value="Share to Library" class="btn-secondary"
@@ -6402,7 +6511,7 @@
                   <button onclick="resetTuningLog()" class="btn-secondary" style="margin-left:auto; padding:3px 10px; font-size:0.85em;">Reset All</button>
                 </div>
 
-                <div id="testScoreRow" style="margin-bottom:8px; font-size:0.85em; display:none; white-space:nowrap; font-variant-numeric:tabular-nums;">
+                <div id="testScoreRow" style="margin-bottom:8px; font-size:0.85em; display:none; font-variant-numeric:tabular-nums;">
                   Active test — score: <strong id="currentTestScore">—</strong> &nbsp; toggles: <span id="testToggleCount">—</span>
                 </div>
 
@@ -6710,7 +6819,7 @@
                 <summary class="tuning-section-title">Live Plot View</summary>
 
                 <!-- Active test score banner -->
-                <div id="cvTestScoreRow" style="display:none; background:rgba(99,102,241,0.12); border:1px solid #6366f1; border-radius:6px; padding:8px 12px; margin:8px 0; font-size:0.88em; white-space:nowrap; font-variant-numeric:tabular-nums;">
+                <div id="cvTestScoreRow" style="display:none; background:rgba(99,102,241,0.12); border:1px solid #6366f1; border-radius:6px; padding:8px 12px; margin:8px 0; font-size:0.88em; font-variant-numeric:tabular-nums;">
                   <strong>Test active</strong> &mdash;
                   Current score: <strong id="cvCurrentTestScore">—</strong> &nbsp;|&nbsp;
                   Scored high cycles: <strong id="cvTestCycleCount">0</strong>
@@ -7047,7 +7156,7 @@
                 <summary class="tuning-section-title">Controller Parameters</summary>
 
                 <div style="margin:8px 0;">
-                  <a class="xnav-link" onclick="goToCVMode()">Voltage setpoint &amp; mode &mdash; Setup &rarr; Alternator &rarr; CV Mode <span class="xnav-arrow">&rarr;</span></a>
+                  <a class="xnav-link" onclick="goToCVMode()">Shortcut to Voltage Setpoint adjustment <span class="xnav-arrow">&rarr;</span></a>
                 </div>
 
                 <hr />
@@ -8528,8 +8637,9 @@
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
           <p class="card-group-title" style="margin:0;padding:0;border:0;white-space:normal;"><span>Speed
             <span id="perf-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span></span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Best-ever boat speed versus the wind (Sailing) or engine RPM (Motoring), corrected for sea state — how much the boat pitches. Predicts speed through the water, or GPS speed if no log. Curve = learned best; the "now" dot is your current speed — solid green while it is being recorded into the learned best (a steady run), hollow when conditions are too unsteady to record. A sustained drop below best = dirty bottom or adverse current.</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Best-ever boat speed versus the wind (Sailing) or engine RPM (Motoring), corrected for sea state — how much the boat pitches. Predicts speed through the water, or GPS speed if no log. Curve = learned best; the "now" dot is your current speed — green while it is being recorded into the learned best (a steady run), orange while conditions are still settling. A sustained drop below best = dirty bottom or adverse current.</span></span>
           </p>
+          <span id="perf-settle-chip" style="display:inline-flex;align-items:center;gap:6px;min-width:96px;justify-content:center;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;"></span>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <!-- Polar wind frame: apparent (native) vs true (display-layer transform). Sailing view only. -->
             <div class="cap-mode-toggle" id="perf-wind-toggle">
@@ -8583,12 +8693,6 @@
             <div id="perf-hours-label" style="font-size:12px;color:var(--text-muted);">sailing hours</div>
           </div>
         </div>
-        <!-- legend — the "now" dot encodes steady-state: solid = banking data into the front, hollow = not steady (not recorded) -->
-        <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i><span id="perf-legend-curve">best polar</span></span>
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:13px;height:13px;border-radius:50%;background:#5cb85c;border:2px solid #fff;box-shadow:0 0 0 1px #ccc;"></i>now &middot; capturing</span>
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:13px;height:13px;border-radius:50%;background:#fff;border:2px solid #999;"></i>now &middot; not steady</span>
-        </div>
         <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
           <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
           <div style="margin-top:8px;line-height:1.5;">
@@ -8605,6 +8709,12 @@
               records), or "learning" / "no reference" when there isn't enough recorded here to grade
               fairly (no number is shown). Two surfaces are learned independently: a sailing polar
               and a motoring speed-vs-RPM map.</p>
+            <p><b>Reading the plot.</b> The blue curve is the learned best. The moving dot is your
+              current speed for the conditions right now: it turns <b>green</b> once conditions have held
+              steady long enough that the point is being recorded into the best (a steady run), and
+              <b>orange</b> while conditions are still settling and nothing is being recorded yet. The
+              status by the title mirrors this — <b>Settling</b> with a countdown of the seconds left
+              before recording begins, then <b>Settled</b> once it does.</p>
             <p><b>Pruned in the cloud (optional).</b> About every
               15 minutes, engine off and system online, new points upload and the cloud <b>prunes</b> redundant
               interior points back to the envelope, then returns the cleaned set. </p>
@@ -9780,7 +9890,7 @@
                 </span>
               </span>
             </p>
-            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
+            <div style="display: grid; grid-template-columns: auto minmax(72px, 1fr) minmax(72px, 1fr); gap: 0; overflow-x: auto;">
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
                 <div style="padding: 6px 8px;"></div>
@@ -9815,7 +9925,7 @@
           <!-- SESSION INFO -->
           <div class="card-group">
             <p class="card-group-title">Session Info</p>
-            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
+            <div style="display: grid; grid-template-columns: auto minmax(72px, 1fr) minmax(72px, 1fr); gap: 0; overflow-x: auto;">
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
                 <div style="padding: 6px 8px;"></div>
@@ -9913,7 +10023,7 @@
                 </span>
               </span>
             </p>
-            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
+            <div style="display: grid; grid-template-columns: auto minmax(72px, 1fr) minmax(72px, 1fr); gap: 0; overflow-x: auto;">
 
               <!-- HEADER -->
               <div
@@ -11985,7 +12095,7 @@
         <hr />
         <div class="form-row">
           <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span style="white-space: nowrap;">GPS / Time Source (<span id="gpsTimeSourceMode_echo">?</span>) — live: <span id="liveSourceIndicator">?</span>:</span>
+            <span>GPS / Time Source (<span id="gpsTimeSourceMode_echo">?</span>) — live: <span id="liveSourceIndicator">?</span>:</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">
               ℹ️
               <span class="tooltip-box">

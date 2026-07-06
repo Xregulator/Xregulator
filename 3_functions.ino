@@ -58,8 +58,10 @@ enum Csv1Index {
   CSV1_mExcessEmaPeak,   // iExcess: per-CSV1-frame peak averaged excess (A ×10) — live sparkline
   CSV1_iExcessThreshMin, // iExcess: per-CSV1-frame min fire threshold E (A ×10) — live sparkline
   CSV1_protEventMask,    // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
+  CSV1_recovAwScale,     // recovery over-ramp restraint: applied up-integration scale (×100; 100=off, else RecovAwUpGain) — tuning trace
+  CSV1_recovAwAccumAs,   // recovery restraint: leaky under-current accumulator toward RecovAwArmAs (A·s ×10) — tuning trace
 
-  CSV1_FIELD_COUNT  // = 41
+  CSV1_FIELD_COUNT  // = 43
 };
 
 enum Csv2Index {
@@ -659,7 +661,8 @@ enum Csv4Index {
   CSV4_VictronCurrent,          // Victron battery current (A ×100)
   CSV4_currentFuelGPH,          // live fuel flow (gal/hr ×100)
   CSV4_currentNMPG,             // live fuel economy (naut mi/gal ×100)
-  CSV4_FIELD_COUNT  // = 17
+  CSV4_ctrlLimiter,             // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit — rides NavStream so the banner tint updates at ~500ms
+  CSV4_FIELD_COUNT  // = 18
 };
 
 enum Csv3Index {
@@ -1002,6 +1005,11 @@ enum Csv3Index {
   CSV3_ripDriftFloorA,          // shared floor: command-travel gate + stationarity mean-shift tolerance (A ×100)
   CSV3_ripDriftPct,             // command-travel gate slope (% of mean, ×10) — command gate only since §11
   CSV3_SocAlarmLow,             // low-SoC alarm threshold (%, integer); 0 = disabled
+  CSV3_battMaxMode,             // battery V/I plot sampling: 0 = window mean, 1 = max-magnitude
+  CSV3_RecovAwEnable,           // recovery over-ramp restraint master switch (0/1)
+  CSV3_RecovAwArmAs,            // arm threshold: accumulated under-current (A·s ×10)
+  CSV3_RecovAwUpGain,           // up-integration scale while armed (×100; 100 = off)
+  CSV3_RecovAwMaxMs,            // restraint backstop time limit (ms, integer)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -2007,7 +2015,9 @@ void setupServer() {
                 "voltLoopIntervalMs,"
                 "inaIntervalMs,"
                 "mExcessEma,"
-                "iExcessThreshold\n");
+                "iExcessThreshold,"
+                "recovAwScale,"
+                "recovAwAccumAs\n");
 
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
 
@@ -2042,7 +2052,8 @@ void setupServer() {
                 "%u,%u,"          // flags, ovFlags
                 "%.2f,%.3f,"      // dBcur_dt, battI
                 "%d,%d,%d,"       // ch1IntervalMs, voltLoopIntervalMs, inaIntervalMs
-                "%.3f,%.3f\n",    // mExcessEma, iExcessThreshold (A)
+                "%.3f,%.3f,"     // mExcessEma, iExcessThreshold (A)
+                "%.3f,%.3f\n",   // recovAwScale (×1), recovAwAccumAs (A·s)
                 (unsigned long)e.ts,
                 (unsigned)e.chargeStageDisplay,
                 (unsigned)e.TargetVoltageMode,
@@ -2083,7 +2094,9 @@ void setupServer() {
                 (int)e.voltLoopIntervalMs,
                 (int)e.inaIntervalMs,
                 e.mExcessEma,
-                e.iExcessThreshold);
+                e.iExcessThreshold,
+                e.recovAwScale,
+                e.recovAwAccumAs);
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
             }
 
@@ -2331,11 +2344,24 @@ void setupServer() {
     request->send(200, "application/json", altSchemaJson());
   });
   server.on("/installid", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/plain", installId);
+    request->send(200, "text/plain", installId + "|" + FIRMWARE_VERSION);
   });
   // Auto Min% learning ("knee tracker") state: knobs + live status + per-bin learned floors.
   server.on("/kneeLearnState", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", kneeLearnStateJson());
+  });
+  // Recovery-restraint commissioning: live state + captured uncut over-ramp envelope + current knobs.
+  // The propose-and-confirm math lives in the UI (like the CV plant fit / knee learner).
+  server.on("/recovawtest.json", HTTP_GET, [](AsyncWebServerRequest *request) {
+    char buf[320];
+    snprintf(buf, sizeof(buf),
+             "{\"active\":%d,\"state\":%u,\"peakA\":%.2f,\"underAs\":%.2f,\"latencyMs\":%lu,"
+             "\"threshA\":%.2f,\"enable\":%d,\"armAs\":%.1f,\"upGain\":%.2f,\"maxMs\":%u}",
+             recovAwCommissionActive ? 1 : 0, (unsigned)recovAwTestState,
+             recovAwTestPeakEma, recovAwTestArmAsAtCross, (unsigned long)recovAwTestLatencyMs,
+             recovAwTestThreshAtCross, RecovAwEnable ? 1 : 0,
+             RecovAwArmAs, RecovAwUpGain, (unsigned)RecovAwMaxMs);
+    request->send(200, "application/json", buf);
   });
   // First-boot SoC seed record for the commissioning popup; ack=1 once the user pressed Finish.
   server.on("/socseed", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -2925,9 +2951,13 @@ void setupServer() {
     IMU_DIST_BOW_FT = doc["imu_dist_bow_ft"];
     IMU_DIST_CL_FT = doc["imu_dist_cl_ft"];
     IMU_HEIGHT_WL_FT = doc["imu_height_wl_ft"];
-    // Defer file write to Core 1 — LittleFS open/write on Core 0 stalls SSE delivery
+    // Defer file write to Core 1 — LittleFS open/write on Core 0 stalls SSE delivery.
+    // firstSave = !vesselInfoSaved: true across reboots until a vessel_info.json exists; the client
+    // fires the battery-defaults proposal on it, immune to a stale pre-flash browser tab.
+    bool firstSave = !vesselInfoSaved;
     pendingSaveVesselInfo = true;
-    request->send(200, "application/json", "{\"success\":true}");
+    request->send(200, "application/json",
+                  String("{\"success\":true,\"firstSave\":") + (firstSave ? "true" : "false") + "}");
   });
   server.on("/get", HTTP_GET, [](AsyncWebServerRequest *request) {
     bool foundParameter = false;
@@ -3817,11 +3847,11 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("MinDuty")->value();
       settingWrite(NK_MinDuty, inputMessage.c_str());
-      MinDuty = inputMessage.toInt();
+      MinDuty = inputMessage.toFloat();
       if (pidInitialized) {
         currentPID.SetOutputLimits(MinDuty, MaxDuty);
       }
-      queueConsoleMessageF("Min Duty updated to: %d%%", MinDuty);
+      queueConsoleMessageF("Min Duty updated to: %.2f%%", MinDuty);
     }
     if (request->hasParam("LimpHome")) {
       foundParameter = true;
@@ -4055,6 +4085,12 @@ void setupServer() {
       } else if (imuZeroInProgress) {
         queueConsoleMessage("IMU ZERO: already in progress");
       } else {
+        // Adopt the form's selected mount orientation (RAM only — persisted by the Vessel Info
+        // save), so calibrating BEFORE the first save still captures offsets in the right frame.
+        if (request->hasParam("imuOrient")) {
+          int o = request->getParam("imuOrient")->value().toInt();
+          if (o >= 0 && o <= 3) imuMountOrientation = (uint8_t)o;
+        }
         // Start a fresh capture window; offsets are written when N samples collected
         imuZeroAxSum = imuZeroAySum = imuZeroAzSum = 0;
         imuZeroGxSum = imuZeroGySum = imuZeroGzSum = 0;
@@ -4461,6 +4497,13 @@ void setupServer() {
       settingWrite(NK_webgaugesinterval, String(newInterval).c_str());
       webgaugesinterval = newInterval;
       queueConsoleMessageF("Update interval set to: %dms", newInterval);
+    }
+    if (request->hasParam("battMaxMode")) {
+      foundParameter = true;
+      inputMessage = request->getParam("battMaxMode")->value();
+      battMaxMode = (inputMessage.toInt() != 0);
+      settingWrite(NK_battMaxMode, battMaxMode ? "1" : "0");
+      queueConsoleMessageF("Battery V/I plot sampling: %s", battMaxMode ? "Max" : "Average");
     }
     if (request->hasParam("BatteryCurrentSource")) {
       foundParameter = true;
@@ -5068,13 +5111,13 @@ void setupServer() {
     }
     if (request->hasParam("vTgtRampUp")) {  // CV voltage-target ramp UP rate (V/s); 0 = instant
       foundParameter = true;
-      vTgtRampUp = clamp_f(request->getParam("vTgtRampUp")->value().toFloat(), 0.0f, 5.0f);
+      vTgtRampUp = clamp_f(request->getParam("vTgtRampUp")->value().toFloat(), 0.0f, 5.0f * ((float)BATTERY_VOLTAGE / 12.0f));
       settingWrite(NK_vTgtRampUp, String(vTgtRampUp, 3).c_str());
       queueConsoleMessageF("CV target ramp up: %.3f V/s", vTgtRampUp);
     }
     if (request->hasParam("vTgtRampDn")) {  // CV voltage-target ramp DOWN rate (V/s); 0 = instant
       foundParameter = true;
-      vTgtRampDn = clamp_f(request->getParam("vTgtRampDn")->value().toFloat(), 0.0f, 5.0f);
+      vTgtRampDn = clamp_f(request->getParam("vTgtRampDn")->value().toFloat(), 0.0f, 5.0f * ((float)BATTERY_VOLTAGE / 12.0f));
       settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
       queueConsoleMessageF("CV target ramp down: %.3f V/s", vTgtRampDn);
     }
@@ -5115,6 +5158,28 @@ void setupServer() {
       foundParameter = true;
       resTestTargetA = request->getParam("resTestTargetA")->value().toFloat();
       resTestLastCmdMs = millis();  // keepalive refresh (deadman)
+    }
+    // Recovery-restraint commissioning: arm the suspend-and-measure harness (=1, also the deadman keepalive)
+    // or disarm (=0). A re-arm while already active is treated as keepalive so it never clobbers a capture.
+    else if (request->hasParam("recovAwCommission")) {
+      foundParameter = true;
+      bool arm = (request->getParam("recovAwCommission")->value().toInt() != 0);
+      if (arm) {
+        if (!recovAwCommissionActive) {
+          recovAwTestState = 1;
+          recovAwCommissionFire1Ms = 0;
+          recovAwTestPeakEma = 0.0f;
+          recovAwTestArmAsAtCross = 0.0f;
+          recovAwTestLatencyMs = 0;
+          recovAwTestThreshAtCross = 0.0f;
+          recovAwCommissionActive = true;
+          queueConsoleMessage("Recovery-restraint commission ARMED — do the worst-case throttle chop; fire #1 cuts normally, fire #2 is suspended & measured (OV+OC stay live)");
+        }
+        recovAwCommissionLastCmdMs = millis();
+      } else {
+        recovAwCommissionActive = false;
+        queueConsoleMessage("Recovery-restraint commission disarmed");
+      }
     }
     // No VoltageKd handler — voltage loop has no D term.
     if (request->hasParam("SlopeBleedThresh")) {
@@ -5423,7 +5488,7 @@ void setupServer() {
     if (request->hasParam("IExcessArmMarginV")) {
       foundParameter = true;
       inputMessage = request->getParam("IExcessArmMarginV")->value();
-      IExcessArmMarginV = constrain(inputMessage.toFloat(), 0.020f, 5.000f);
+      IExcessArmMarginV = constrain(inputMessage.toFloat(), 0.020f * ((float)BATTERY_VOLTAGE / 12.0f), 5.000f * ((float)BATTERY_VOLTAGE / 12.0f));
       settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
       queueConsoleMessageF("iExcess arming margin set to: %.0f mV below target", IExcessArmMarginV * 1000.0f);
     }
@@ -5453,7 +5518,7 @@ void setupServer() {
     if (request->hasParam("FastSetpointRiseHeadroomV")) {
       foundParameter = true;
       inputMessage = request->getParam("FastSetpointRiseHeadroomV")->value();
-      FastSetpointRiseHeadroomV = constrain(inputMessage.toFloat(), 0.05f, 2.0f);
+      FastSetpointRiseHeadroomV = constrain(inputMessage.toFloat(), 0.05f * ((float)BATTERY_VOLTAGE / 12.0f), 2.0f * ((float)BATTERY_VOLTAGE / 12.0f));
       settingWrite(NK_FastSetpointRiseHeadroomV, String(FastSetpointRiseHeadroomV, 2).c_str());
       queueConsoleMessageF("Fast rise headroom set to: %.2fV", FastSetpointRiseHeadroomV);
     }
@@ -5464,6 +5529,33 @@ void setupServer() {
       settingWrite(NK_AwSeedProtectMs, String(AwSeedProtectMs).c_str());
       queueConsoleMessageF("AW seed protect window set to: %u ms", (unsigned)AwSeedProtectMs);
       if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("RecovAwEnable")) {
+      foundParameter = true;
+      RecovAwEnable = (request->getParam("RecovAwEnable")->value().toInt() != 0);
+      settingWrite(NK_RecovAwEnable, String((int)RecovAwEnable).c_str());
+      queueConsoleMessageF("Recovery over-ramp restraint: %s", RecovAwEnable ? "ON" : "OFF");
+    }
+    if (request->hasParam("RecovAwArmAs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("RecovAwArmAs")->value();
+      RecovAwArmAs = constrain(inputMessage.toFloat(), 1.0f, 500.0f);
+      settingWrite(NK_RecovAwArmAs, String(RecovAwArmAs, 1).c_str());
+      queueConsoleMessageF("Recovery restraint arm threshold set to: %.1f A-s", RecovAwArmAs);
+    }
+    if (request->hasParam("RecovAwUpGain")) {
+      foundParameter = true;
+      inputMessage = request->getParam("RecovAwUpGain")->value();
+      RecovAwUpGain = constrain(inputMessage.toFloat(), 0.0f, 1.0f);
+      settingWrite(NK_RecovAwUpGain, String(RecovAwUpGain, 2).c_str());
+      queueConsoleMessageF("Recovery restraint up-integration gain set to: %.2f", RecovAwUpGain);
+    }
+    if (request->hasParam("RecovAwMaxMs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("RecovAwMaxMs")->value();
+      RecovAwMaxMs = (uint16_t)constrain(inputMessage.toInt(), 500, 30000);
+      settingWrite(NK_RecovAwMaxMs, String(RecovAwMaxMs).c_str());
+      queueConsoleMessageF("Recovery restraint time limit set to: %u ms", (unsigned)RecovAwMaxMs);
     }
     if (request->hasParam("KHard")) {
       foundParameter = true;
@@ -5526,14 +5618,14 @@ void setupServer() {
     if (request->hasParam("OvMeasMarginV")) {
       foundParameter = true;
       inputMessage = request->getParam("OvMeasMarginV")->value();
-      OvMeasMarginV = constrain(inputMessage.toFloat(), 0.020f, 0.500f);
+      OvMeasMarginV = constrain(inputMessage.toFloat(), 0.020f * ((float)BATTERY_VOLTAGE / 12.0f), 0.500f * ((float)BATTERY_VOLTAGE / 12.0f));
       settingWrite(NK_OvMeasMarginV, String(OvMeasMarginV, 3).c_str());
       queueConsoleMessageF("Group 2 measured-voltage trigger margin set to: %.0f mV", OvMeasMarginV * 1000.0f);
     }
     if (request->hasParam("OvPredMarginV")) {
       foundParameter = true;
       inputMessage = request->getParam("OvPredMarginV")->value();
-      OvPredMarginV = constrain(inputMessage.toFloat(), 0.050f, 1.000f);
+      OvPredMarginV = constrain(inputMessage.toFloat(), 0.050f * ((float)BATTERY_VOLTAGE / 12.0f), 1.000f * ((float)BATTERY_VOLTAGE / 12.0f));
       settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
       queueConsoleMessageF("Group 1 prediction trigger margin set to: %.0f mV", OvPredMarginV * 1000.0f);
     }
@@ -5585,7 +5677,7 @@ void setupServer() {
     if (request->hasParam("cvWaveAmplitudeV")) {
       foundParameter = true;
       inputMessage = request->getParam("cvWaveAmplitudeV")->value();
-      cvWaveAmplitudeV = inputMessage.toFloat();
+      cvWaveAmplitudeV = constrain(inputMessage.toFloat(), 0.05f * ((float)BATTERY_VOLTAGE / 12.0f), 2.0f * ((float)BATTERY_VOLTAGE / 12.0f));
       settingWrite(NK_cvWaveAmplitudeV, String(cvWaveAmplitudeV, 2).c_str());
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -6788,7 +6880,9 @@ void setupServer() {
     bool cvTestActive = (CVTuningMode && cvTuningScore.testStarted);
     float cvts = 0.0f;
     if (cvTestActive && cvTuningScore.activeTimeSec > 0.0f) {
-      cvts = 1000.0f * (cvTuningScore.totalIntegratedOvershootVs
+      // ÷ class ratio² to match commitCVTuningRecord's 12V-equivalent score normalization
+      float liveNorm = (12.0f / (float)BATTERY_VOLTAGE) * (12.0f / (float)BATTERY_VOLTAGE);
+      cvts = 1000.0f * liveNorm * (cvTuningScore.totalIntegratedOvershootVs
                         + cvTuningScore.totalLowIntOvVs
                         + cvTuningScore.totalLowUndershootVs)
              / cvTuningScore.activeTimeSec;
@@ -7212,22 +7306,32 @@ void SendWifiData() {
     float pidAltPV = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                     : g_pidI_filtered;
 
+    // Fast analog traces report the window mean (default). The Max toggle covers only the
+    // current/voltage channels (IBV, Bcur, MeasuredAmps); RPM/BatteryV(ADS)/Channel3V are always
+    // mean. winAggValue falls back to the latest value when no sample landed this window.
+    float ibvOut   = aggIbv.value(battMaxMode, IBV);
+    float bcurOut  = aggBcur.value(battMaxMode, Bcur);
+    float altOut   = aggAltCur.value(battMaxMode, MeasuredAmps);
+    float battVOut = aggBattV.value(false, BatteryV);
+    float rpmOut   = aggRpm.value(false, RPM);
+    float ch3Out   = aggCh3.value(false, Channel3V);
+
     int payload1Len = snprintf(payload1, PAYLOAD1_SIZE,
                                "%d,"  // CSV1_FIELD_COUNT
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +2: recovAwScale, recovAwAccumAs
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
                                SafeInt(dutyCycle, 100),
-                               SafeInt(BatteryV, 100),
-                               SafeInt(MeasuredAmps, 100),
-                               SafeInt(RPM),
-                               SafeInt(Channel3V, 100),
-                               SafeInt(IBV, 100),
-                               SafeInt(Bcur, 100),
+                               SafeInt(battVOut, 100),
+                               SafeInt(altOut, 100),
+                               SafeInt(rpmOut),
+                               SafeInt(ch3Out, 100),
+                               SafeInt(ibvOut, 100),
+                               SafeInt(bcurOut, 100),
                                SafeInt(VictronVoltage, 100),
                                SafeInt(LoopTime),
                                SafeInt(WifiHeartBeat),
@@ -7261,12 +7365,21 @@ void SendWifiData() {
                                SafeInt(g_iExcessThreshold, 10), // CSV1_iExcessThreshold — fire threshold E (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_mExcessEmaPeak : g_mExcessEma, 10),       // CSV1_mExcessEmaPeak (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_iExcessThreshWinMin : g_iExcessThreshold, 10), // CSV1_iExcessThreshMin (A ×10)
-                               SafeInt(protMask)                // CSV1_protEventMask — protection-event bits this frame
+                               SafeInt(protMask),               // CSV1_protEventMask — protection-event bits this frame
+                               SafeInt(currentPID.GetIntegralUpScale(), 100), // CSV1_recovAwScale (×100; 100=off)
+                               SafeInt(recovAwArmAccumAs, 10)   // CSV1_recovAwAccumAs (A·s ×10)
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
     g_iExcessThreshWinMin = 0.0f;
     g_iExcessArmedWin = false;
+    // Reset the fast-channel window accumulators for the next send interval.
+    aggIbv.reset();
+    aggBcur.reset();
+    aggAltCur.reset();
+    aggBattV.reset();
+    aggRpm.reset();
+    aggCh3.reset();
     if (payload1Len < 0 || payload1Len >= PAYLOAD1_SIZE) {
       Serial.printf("payload1 truncated or format error: %d\n", payload1Len);
       return;
@@ -7294,7 +7407,7 @@ void SendWifiData() {
     int payload4Len = snprintf(payload4, PAYLOAD4_SIZE,
                                "%d,"  // CSV4_FIELD_COUNT
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV4_FIELD_COUNT,
                                SafeInt(HeadingNMEA),                     // CSV4_HeadingNMEA
@@ -7313,7 +7426,8 @@ void SendWifiData() {
                                SafeInt(VictronSolarCurrent_A, 100),      // CSV4_VictronSolarCurrent
                                SafeInt(VictronCurrent, 100),             // CSV4_VictronCurrent
                                SafeInt(currentFuelGPH, 100),             // CSV4_currentFuelGPH
-                               SafeInt(currentNMPG, 100)                 // CSV4_currentNMPG
+                               SafeInt(currentNMPG, 100),                // CSV4_currentNMPG
+                               (int)ctrlLimiter                          // CSV4_ctrlLimiter -> banner limiter code
     );
     if (payload4Len < 0 || payload4Len >= PAYLOAD4_SIZE) {
       Serial.printf("payload4 truncated or format error: %d\n", payload4Len);
@@ -8099,7 +8213,12 @@ void SendWifiData() {
                                "%d,"  // ripWinMs
                                "%d,"  // ripDriftFloorA
                                "%d,"  // ripDriftPct
-                               "%d",  // SocAlarmLow
+                               "%d,"  // SocAlarmLow
+                               "%d,"  // battMaxMode
+                               "%d,"  // RecovAwEnable
+                               "%d,"  // RecovAwArmAs
+                               "%d,"  // RecovAwUpGain
+                               "%d",  // RecovAwMaxMs
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8157,7 +8276,7 @@ void SendWifiData() {
                                SafeInt(InvertAltAmps),
                                SafeInt(InvertBattAmps),
                                SafeInt(MaxDuty),
-                               SafeInt(MinDuty),
+                               SafeInt(MinDuty, 100),  // float floor ×100 (client divides back)
                                SafeInt(FieldResistance, 100),
                                SafeInt(maxPoints),
                                SafeInt(AlternatorCOffset, 100),
@@ -8433,7 +8552,12 @@ void SendWifiData() {
                                SafeInt(ripWinMs),                               // CSV3_ripWinMs (ms, integer)
                                SafeInt(ripDriftFloorA, 100),                    // CSV3_ripDriftFloorA (A ×100)
                                SafeInt(ripDriftPct, 10),                        // CSV3_ripDriftPct (% ×10)
-                               SafeInt(SocAlarmLow)                             // CSV3_SocAlarmLow (%, integer; 0 = disabled)
+                               SafeInt(SocAlarmLow),                            // CSV3_SocAlarmLow (%, integer; 0 = disabled)
+                               SafeInt(battMaxMode),                            // CSV3_battMaxMode (0 = Average, 1 = Max)
+                               (int)RecovAwEnable,                              // CSV3_RecovAwEnable (0/1)
+                               SafeInt(RecovAwArmAs, 10),                       // CSV3_RecovAwArmAs (A·s ×10)
+                               SafeInt(RecovAwUpGain, 100),                     // CSV3_RecovAwUpGain (×100; 100 = off)
+                               (int)RecovAwMaxMs                                // CSV3_RecovAwMaxMs (ms, integer)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
@@ -8669,5 +8793,8 @@ void saveVesselInfoToFile() {
   // handled by updateVesselInfoField().
   settingWrite(NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());
   settingWrite(NK_SolarWatts,         String(SolarWatts).c_str());
+
+  vesselInfoSaved = true;
+  seedSocFromVoltage();  // factory-fresh path: seed was deferred until real chemistry/capacity existed
 }
 

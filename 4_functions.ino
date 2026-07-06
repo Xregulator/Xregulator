@@ -799,6 +799,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
         IMU_DIST_CL_FT = doc["imu_dist_cl_ft"] | 0.0f;
         IMU_HEIGHT_WL_FT = doc["imu_height_wl_ft"] | 0.0f;
 
+        vesselInfoSaved = true;
         Serial.println("Vessel info loaded from LittleFS");
       } else {
         Serial.printf("Vessel info JSON parse failed: %s\n", error.c_str());
@@ -1326,9 +1327,12 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     MaxDuty = settingRead(NK_MaxDuty).toInt();
   }
   if (!settingExists(NK_MinDuty)) {
-    settingWrite(NK_MinDuty, String(MinDuty).c_str());
+    // Float field floor, first-creation scaled ×(12/BATTERY_VOLTAGE) like MaxDuty so the same
+    // field current floor applies on any bank (0.25% @48V ≡ 1% @12V).
+    MinDuty = MinDuty * 12.0f / (float)BATTERY_VOLTAGE;
+    settingWrite(NK_MinDuty, String(MinDuty, 2).c_str());
   } else {
-    MinDuty = settingRead(NK_MinDuty).toInt();
+    MinDuty = settingRead(NK_MinDuty).toFloat();
   }
   if (!settingExists(NK_R_fixed)) {
     settingWrite(NK_R_fixed, String(R_fixed).c_str());
@@ -1428,6 +1432,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     webgaugesinterval = settingRead(NK_webgaugesinterval).toInt();
     webgaugesinterval = constrain(webgaugesinterval, 1, 10000000);
+  }
+  if (!settingExists(NK_battMaxMode)) {
+    settingWrite(NK_battMaxMode, battMaxMode ? "1" : "0");
+  } else {
+    battMaxMode = (settingRead(NK_battMaxMode).toInt() != 0);
   }
   if (!settingExists(NK_plotTimeWindow)) {
     settingWrite(NK_plotTimeWindow, String(plotTimeWindow).c_str());
@@ -1812,16 +1821,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TempSustainedTimeout = settingRead(NK_TempSustainedTimeout).toInt();
   }
   // AlternatorHardShutdownV — absolute hard-shutdown voltage threshold.
-  // First-boot default auto-scales as BulkVoltage + 0.3 V so 24V/48V systems get sensible
-  // defaults. Once written, the value is treated as user-set and never auto-overwritten —
-  // a system-class change later requires manually re-setting it from the UI.
+  // First-boot default auto-scales as BulkVoltage + 0.3 V (headroom per-cell-scaled by class).
+  // Once written, the value is treated as user-set; a later system-class change re-derives it
+  // in applyNominalVoltageChange.
   // Migration: an old VoltageSpikeMargin key (a margin) converts to an absolute value.
   if (!settingExists(NK_AlternatorHardShutdownV)) {
     if (settingExists(NK_VoltageSpikeMargin)) {
       float oldMargin = settingRead(NK_VoltageSpikeMargin).toFloat();
       AlternatorHardShutdownV = BulkVoltage + oldMargin;
     } else {
-      AlternatorHardShutdownV = BulkVoltage + 0.3f;  // first-boot auto-scale default
+      AlternatorHardShutdownV = BulkVoltage + 0.3f * ((float)BATTERY_VOLTAGE / 12.0f);
     }
     settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
   } else {
@@ -1921,6 +1930,26 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_AwSeedProtectMs, String(AwSeedProtectMs).c_str());
   } else {
     AwSeedProtectMs = (uint16_t)settingRead(NK_AwSeedProtectMs).toInt();
+  }
+  if (!settingExists(NK_RecovAwEnable)) {
+    settingWrite(NK_RecovAwEnable, String((int)RecovAwEnable).c_str());
+  } else {
+    RecovAwEnable = (settingRead(NK_RecovAwEnable).toInt() != 0);
+  }
+  if (!settingExists(NK_RecovAwArmAs)) {
+    settingWrite(NK_RecovAwArmAs, String(RecovAwArmAs, 1).c_str());
+  } else {
+    RecovAwArmAs = settingRead(NK_RecovAwArmAs).toFloat();
+  }
+  if (!settingExists(NK_RecovAwUpGain)) {
+    settingWrite(NK_RecovAwUpGain, String(RecovAwUpGain, 2).c_str());
+  } else {
+    RecovAwUpGain = settingRead(NK_RecovAwUpGain).toFloat();
+  }
+  if (!settingExists(NK_RecovAwMaxMs)) {
+    settingWrite(NK_RecovAwMaxMs, String(RecovAwMaxMs).c_str());
+  } else {
+    RecovAwMaxMs = (uint16_t)settingRead(NK_RecovAwMaxMs).toInt();
   }
   if (!settingExists(NK_FastSetpointRiseRate)) {
     settingWrite(NK_FastSetpointRiseRate, String(FastSetpointRiseRate, 1).c_str());
@@ -2311,6 +2340,49 @@ void complementaryFilter(float ax, float ay, float az, float gx, float gy, float
   cf_heel = CF_ALPHA * cf_heel + (1.0f - CF_ALPHA) * accel_heel;
   cf_pitch = CF_ALPHA * cf_pitch + (1.0f - CF_ALPHA) * accel_pitch;
 }
+// Finalize IMU zero: normally once both windows hit the target (~2s @104Hz). The timeout
+// margin guarantees the capture always resolves — if samples arrive slowly it finalizes on
+// whatever it gathered (provided the IMU_ZERO_MIN floor), otherwise it aborts cleanly. Either
+// way settingsDirty fires so the CSV3 echo refreshes the dashboard "calculating" label at once.
+// Shared by the normal metrics path and the pre-vessel-info path (metrics gated, calibration live).
+void imuZeroFinalizeIfDue() {
+  if (!imuZeroInProgress) return;
+  bool targetMet = (imuZeroAccelN >= IMU_ZERO_TARGET && imuZeroGyroN >= IMU_ZERO_TARGET);
+  bool timedOut  = (millis() - imuZeroStartMs >= IMU_ZERO_TIMEOUT_MS);
+  if (targetMet || timedOut) {
+    if (imuZeroAccelN >= IMU_ZERO_MIN && imuZeroGyroN >= IMU_ZERO_MIN) {
+      float ax0 = imuZeroAxSum / imuZeroAccelN;
+      float ay0 = imuZeroAySum / imuZeroAccelN;
+      float az0 = imuZeroAzSum / imuZeroAccelN;
+      imuHeelOffsetDeg = atan2(ay0, sqrt(ax0 * ax0 + az0 * az0)) * 180.0f / PI;
+      imuPitchOffsetDeg = atan2(-ax0, sqrt(ay0 * ay0 + az0 * az0)) * 180.0f / PI;
+      imuGxBias = imuZeroGxSum / imuZeroGyroN;
+      imuGyBias = imuZeroGySum / imuZeroGyroN;
+      imuGzBias = imuZeroGzSum / imuZeroGyroN;
+
+      DynamicJsonDocument zdoc(256);
+      zdoc["heel_offset_deg"] = imuHeelOffsetDeg;
+      zdoc["pitch_offset_deg"] = imuPitchOffsetDeg;
+      zdoc["gx_bias"] = imuGxBias;
+      zdoc["gy_bias"] = imuGyBias;
+      zdoc["gz_bias"] = imuGzBias;
+      String zout;
+      serializeJson(zdoc, zout);
+      settingWrite(NK_imu_zero, zout.c_str());
+
+      cf_heel = 0; cf_pitch = 0;  // snap filter to new level reference (feels instant)
+      queueConsoleMessage("IMU ZERO: captured (heel " + String(imuHeelOffsetDeg, 1) +
+                          "°, pitch " + String(imuPitchOffsetDeg, 1) +
+                          (targetMet ? "°)" : "°, partial — timed out)"));
+    } else {
+      // Not enough samples even after the timeout (IMU barely streaming) — abort, keep old offsets.
+      queueConsoleMessage("IMU ZERO: aborted — too few samples (is the IMU streaming?)");
+    }
+    imuZeroInProgress = false;
+    settingsDirty = true;   // fire CSV3 now so the echo lands ~immediately, not on the 60s heartbeat
+  }
+}
+
 void updateAccelMetrics() {
   // Called from main loop every iteration (~300 Hz at 3ms loop time, NOT 1 Hz).
   // Most calls find 0 new samples (arrival rate is 104 Hz post-ODR-drop) and exit quickly;
@@ -2319,6 +2391,36 @@ void updateAccelMetrics() {
 
   if (!imuEnabled) return;
   if (!imuRingBuffer || !imuWindow) { imuEnabled = false; return; }
+  if (!vesselInfoSaved) {
+    // Metrics are gated until the first Vessel Info save — anything recorded before the mount
+    // orientation is known would put garbage heel/slam/sea-state into the NVS lifetime stats.
+    // The level-calibration capture must still see samples, so accumulate its sums while draining.
+    const AxisRemap &rg = axisRemap[imuMountOrientation];
+    while (imuRingBuffer->accel_tail != imuRingBuffer->accel_head) {
+      IMUSample *s = &imuRingBuffer->accel[imuRingBuffer->accel_tail];
+      if (imuZeroInProgress && imuZeroAccelN < IMU_ZERO_TARGET) {
+        float raw_a[3] = { (float)s->x, (float)s->y, (float)s->z };
+        imuZeroAxSum += raw_a[rg.src[0]] * ACCEL_SCALE * rg.sign[0];
+        imuZeroAySum += raw_a[rg.src[1]] * ACCEL_SCALE * rg.sign[1];
+        imuZeroAzSum += raw_a[rg.src[2]] * ACCEL_SCALE * rg.sign[2];
+        imuZeroAccelN++;
+      }
+      imuRingBuffer->accel_tail = (imuRingBuffer->accel_tail + 1) % ACCEL_RING_SIZE;
+    }
+    while (imuRingBuffer->gyro_tail != imuRingBuffer->gyro_head) {
+      IMUSample *s = &imuRingBuffer->gyro[imuRingBuffer->gyro_tail];
+      if (imuZeroInProgress && imuZeroGyroN < IMU_ZERO_TARGET) {
+        float raw_g[3] = { (float)s->x, (float)s->y, (float)s->z };
+        imuZeroGxSum += raw_g[rg.src[3]] * GYRO_SCALE * rg.sign[3];
+        imuZeroGySum += raw_g[rg.src[4]] * GYRO_SCALE * rg.sign[4];
+        imuZeroGzSum += raw_g[rg.src[5]] * GYRO_SCALE * rg.sign[5];
+        imuZeroGyroN++;
+      }
+      imuRingBuffer->gyro_tail = (imuRingBuffer->gyro_tail + 1) % GYRO_RING_SIZE;
+    }
+    imuZeroFinalizeIfDue();
+    return;
+  }
 
   uint32_t samples_processed = 0;
   unsigned long now = millis();
@@ -2604,46 +2706,7 @@ void updateAccelMetrics() {
     imuRingBuffer->gyro_tail = (imuRingBuffer->gyro_tail + 1) % GYRO_RING_SIZE;
   }
 
-  // Finalize IMU zero: normally once both windows hit the target (~2s @104Hz). The timeout
-  // margin guarantees the capture always resolves — if samples arrive slowly it finalizes on
-  // whatever it gathered (provided the IMU_ZERO_MIN floor), otherwise it aborts cleanly. Either
-  // way settingsDirty fires so the CSV3 echo refreshes the dashboard "calculating" label at once.
-  if (imuZeroInProgress) {
-    bool targetMet = (imuZeroAccelN >= IMU_ZERO_TARGET && imuZeroGyroN >= IMU_ZERO_TARGET);
-    bool timedOut  = (millis() - imuZeroStartMs >= IMU_ZERO_TIMEOUT_MS);
-    if (targetMet || timedOut) {
-      if (imuZeroAccelN >= IMU_ZERO_MIN && imuZeroGyroN >= IMU_ZERO_MIN) {
-        float ax0 = imuZeroAxSum / imuZeroAccelN;
-        float ay0 = imuZeroAySum / imuZeroAccelN;
-        float az0 = imuZeroAzSum / imuZeroAccelN;
-        imuHeelOffsetDeg = atan2(ay0, sqrt(ax0 * ax0 + az0 * az0)) * 180.0f / PI;
-        imuPitchOffsetDeg = atan2(-ax0, sqrt(ay0 * ay0 + az0 * az0)) * 180.0f / PI;
-        imuGxBias = imuZeroGxSum / imuZeroGyroN;
-        imuGyBias = imuZeroGySum / imuZeroGyroN;
-        imuGzBias = imuZeroGzSum / imuZeroGyroN;
-
-        DynamicJsonDocument zdoc(256);
-        zdoc["heel_offset_deg"] = imuHeelOffsetDeg;
-        zdoc["pitch_offset_deg"] = imuPitchOffsetDeg;
-        zdoc["gx_bias"] = imuGxBias;
-        zdoc["gy_bias"] = imuGyBias;
-        zdoc["gz_bias"] = imuGzBias;
-        String zout;
-        serializeJson(zdoc, zout);
-        settingWrite(NK_imu_zero, zout.c_str());
-
-        cf_heel = 0; cf_pitch = 0;  // snap filter to new level reference (feels instant)
-        queueConsoleMessage("IMU ZERO: captured (heel " + String(imuHeelOffsetDeg, 1) +
-                            "°, pitch " + String(imuPitchOffsetDeg, 1) +
-                            (targetMet ? "°)" : "°, partial — timed out)"));
-      } else {
-        // Not enough samples even after the timeout (IMU barely streaming) — abort, keep old offsets.
-        queueConsoleMessage("IMU ZERO: aborted — too few samples (is the IMU streaming?)");
-      }
-      imuZeroInProgress = false;
-      settingsDirty = true;   // fire CSV3 now so the echo lands ~immediately, not on the 60s heartbeat
-    }
-  }
+  imuZeroFinalizeIfDue();
 
   imu_heel_deg = cf_heel;
   imu_pitch_deg = cf_pitch;

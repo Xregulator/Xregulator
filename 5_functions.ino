@@ -2354,7 +2354,9 @@ void updateINA228OvervoltageThreshold() {
     return;
   }
 
-  VoltageHardwareLimit = BulkVoltage + 0.3;
+  // Headroom per-cell-scaled by class, matching the AlternatorHardShutdownV derivation so the
+  // hardware ALERT stays the same rung of the OV ladder at 24/48V.
+  VoltageHardwareLimit = BulkVoltage + 0.3f * ((float)BATTERY_VOLTAGE / 12.0f);
 
   const double LSB = 0.003125;                                           // 3.125 mV/LSB
   uint16_t thresholdLSB = (uint16_t)(VoltageHardwareLimit / LSB + 0.5);  // Round instead of truncate
@@ -2517,6 +2519,10 @@ void _ReadAnalogInputs_inner() {
                        MARK_FRESH(IDX_IBV);
                        MARK_FRESH(IDX_BCUR);
 
+                       // Accumulate every valid INA228 sample for the CSV1 window aggregation.
+                       aggIbv.add(IBV);
+                       aggBcur.add(Bcur);
+
                        // IBV EMA — used by getFiltV() and CV loop error terms
                        // dBcur/dt — positive value = load dump (loads disconnected, OV risk)
                        {
@@ -2677,6 +2683,7 @@ void _ReadAnalogInputs_inner() {
                              MARK_FRESH(IDX_BATTERY_V);
                              battVFreshFlag = true;
                              adsGapUpdate(0, now);  // CH0 battV inter-sample gap meter
+                             aggBattV.add(BatteryV);
                            }
                            break;
 
@@ -2723,6 +2730,7 @@ void _ReadAnalogInputs_inner() {
                            if (MeasuredAmps > -kSanityLim[rIdx] && MeasuredAmps < kSanityLim[rIdx]) {  // Sanity check
                              MARK_FRESH(IDX_MEASURED_AMPS);
                              wmIgnUpdate(wmIgn_amps, MeasuredAmps);  // ignition-cycle watermark
+                             aggAltCur.add(MeasuredAmps);
                              ch1FreshFlag = true;  // Signal PID that fresh current data is available
                              // ── EMA filters ────────────────────────────────────────────────────────
                              // Display/log EMA (InputFilterTC → MeasuredAmps_filtered) and Output PID EMA
@@ -2810,6 +2818,7 @@ void _ReadAnalogInputs_inner() {
                              MARK_FRESH(IDX_RPM);
                              wmIgnUpdate(wmIgn_RPM, RPM);  // ignition-cycle watermark
                              adsGapUpdate(2, now);  // CH2 RPM inter-sample gap meter
+                             aggRpm.add(RPM);
                            }
                            break;
 
@@ -2835,6 +2844,7 @@ void _ReadAnalogInputs_inner() {
                            }
                            if (Channel3V > 0 && Channel3V < 3.3f) {  // legitimate ADC range
                              MARK_FRESH(IDX_CHANNEL3V);
+                             aggCh3.add(Channel3V);
                            }
                            if (temperatureThermistor > -58 && temperatureThermistor < 392) {  // °F bounds
                              MARK_FRESH(IDX_THERMISTOR_TEMP);
@@ -3150,13 +3160,15 @@ void ReadAnalogInputs_Fake() {
     ApparentWindAngleNMEA = fakeApparentWindAngle;
     MARK_FRESH(IDX_APPARENT_WIND_ANGLE);
 
-    // Fake battery voltage, 11.5–15.0V
-    fakeVoltage += (random(-80, 80) / 100.0);  // ±0.8 V per update
-    if (fakeVoltage < 11.5) fakeVoltage = 11.5;
-    if (fakeVoltage > 15.0) fakeVoltage = 15.0;
+    // Fake battery voltage, 11.5–15.0V per-cell-scaled by class (unscaled 12V numbers would
+    // fail isVoltageSensorPlausible and trip the disagreement fault on a 24/48V-configured unit)
+    float simK = (float)BATTERY_VOLTAGE / 12.0f;
+    fakeVoltage += (random(-80, 80) / 100.0) * simK;  // ±0.8 V per update at 12V
+    if (fakeVoltage < 11.5 * simK) fakeVoltage = 11.5 * simK;
+    if (fakeVoltage > 15.0 * simK) fakeVoltage = 15.0 * simK;
     BatteryV = fakeVoltage;
-    IBV = fakeVoltage + (random(-30, 30) / 100.0);             // ±0.30 V
-    VictronVoltage = fakeVoltage + (random(-50, 50) / 100.0);  // ±0.50 V
+    IBV = fakeVoltage + (random(-30, 30) / 100.0) * simK;             // ±0.30 V at 12V
+    VictronVoltage = fakeVoltage + (random(-50, 50) / 100.0) * simK;  // ±0.50 V at 12V
     MARK_FRESH(IDX_BATTERY_V);
     MARK_FRESH(IDX_IBV);
     MARK_FRESH(IDX_VICTRON_VOLTAGE);
@@ -4086,8 +4098,11 @@ void saveNVSDataFull() {
   if (prev_socTime_AllTime != (uint32_t)totalSocSampleTime_AllTime)         { nvs_set_u32(h, "SocTime_AT",     (uint32_t)totalSocSampleTime_AllTime);          prev_socTime_AllTime = (uint32_t)totalSocSampleTime_AllTime;         chg = true; }
   if (prev_vltAccum_AllTime  != voltageAccumulator_AllTime)                  { nvs_set_blob(h, "VltAccum_AT",   &voltageAccumulator_AllTime, sizeof(double));   prev_vltAccum_AllTime  = voltageAccumulator_AllTime;                  chg = true; }
   if (prev_vltTime_AllTime   != (uint32_t)totalVoltageSampleTime_AllTime)    { nvs_set_u32(h, "VltTime_AT",     (uint32_t)totalVoltageSampleTime_AllTime);      prev_vltTime_AllTime   = (uint32_t)totalVoltageSampleTime_AllTime;    chg = true; }
-  if (prev_SOC_percent != (int32_t)SOC_percent)                             { nvs_set_i32(h, "SOC_percent",    (int32_t)SOC_percent);                          prev_SOC_percent = (int32_t)SOC_percent;                             chg = true; }
-  if (prev_CoulombCount != (int32_t)CoulombCount_Ah_scaled)                 { nvs_set_i32(h, "CoulombCount",   (int32_t)CoulombCount_Ah_scaled);               prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;                 chg = true; }
+  // Don't persist provisional pre-seed SOC/coulomb: a persisted value clears the pending flag next
+  // boot and skips the seed forever. Both guards needed — SOC only sticks if coulombSeedPending is
+  // still true (UpdateBatterySOC re-derives SOC from CoulombCount each tick).
+  if (!socSeedPending && prev_SOC_percent != (int32_t)SOC_percent)          { nvs_set_i32(h, "SOC_percent",    (int32_t)SOC_percent);                          prev_SOC_percent = (int32_t)SOC_percent;                             chg = true; }
+  if (!coulombSeedPending && prev_CoulombCount != (int32_t)CoulombCount_Ah_scaled) { nvs_set_i32(h, "CoulombCount",   (int32_t)CoulombCount_Ah_scaled);               prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;                 chg = true; }
   // Health + Thermal + Learning
   if (prev_SessionDur != (uint32_t)CurrentSessionDuration)                  { nvs_set_u32(h, "SessionDur",     (uint32_t)CurrentSessionDuration);              prev_SessionDur = (uint32_t)CurrentSessionDuration;                  chg = true; }
   if (prev_MaxLoop != (int32_t)MaxLoopTime)                                  { nvs_set_i32(h, "MaxLoop",        (int32_t)MaxLoopTime);                          prev_MaxLoop = (int32_t)MaxLoopTime;                                 chg = true; }
@@ -4232,8 +4247,13 @@ bool fieldOffSettled(uint32_t extraMs) {
 // First-boot SoC seed, deferred from loadNVSData() to the end of setup() so IBV holds a real
 // INA228 reading and BATTERY_TYPE / BATTERY_VOLTAGE / BatteryCapacity_Ah hold the vessel-info
 // values (all were still defaults/zero at loadNVSData time, which seeded 0% every fresh boot).
+// On a factory-fresh device (no vessel_info.json) it defers further: saveVesselInfoToFile()
+// re-invokes it after the first Vessel Info save, so the estimate never runs on the compile-time
+// chemistry/capacity defaults. SOC holds the provisional 50% until then; that provisional state is
+// never persisted (saveNVSDataFull guard), so the deferral survives reboots before that save.
 void seedSocFromVoltage() {
   if (!socSeedPending) return;
+  if (!vesselInfoSaved) return;
   socSeedPending = false;
 
   float voltage = getBatteryVoltage();

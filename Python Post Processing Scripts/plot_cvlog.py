@@ -264,6 +264,7 @@ numeric_cols = [
     "voltLoopInterval_ms", "inaInterval_ms",
     "slopeBleedAmps_A",
     "capReason",
+    "recovAwScale", "recovAwAccumAs",   # recovery over-ramp restraint (added 2026-07-04)
 ]
 
 for col in numeric_cols:
@@ -778,6 +779,16 @@ _leg2a.set_draggable(True)
 add_ov_shading(ax2a, df)
 add_cvbatt_shading(ax2a, df)   # §G: amber band = CV regulating battery current (track spLimited vs battI)
 add_voltloop_vlines(ax2a, df)
+
+# Recovery over-ramp restraint: shade spans where the inner integrator's up-climb is throttled
+# (recovAwScale < 1) — these line up with iMeas_A overshooting spLimited_A on the recovery. The
+# accumulator itself (recovAwAccumAs) is in the CSV and on plot_pidlog Plot 8. Guarded for old logs.
+if "recovAwScale" in df.columns and df["recovAwScale"].notna().any():
+    _rest_eng = df["recovAwScale"] < 0.999
+    if _rest_eng.any():
+        ax2a.fill_between(df["t_plot"], 0, 1, where=_rest_eng,
+                          transform=ax2a.get_xaxis_transform(),
+                          color="#8e24aa", alpha=0.12, step="pre", zorder=0)
 
 # Variable key table — maps legend nicknames to internal variable names; drag anywhere to reposition
 _p2_key = (

@@ -262,6 +262,10 @@ bool fsRemove(const char *path) {
 #define NK_RebulkCurrent_A "RebulkCurrent_A"
 #define NK_RebulkVoltage "RebulkVoltage"
 #define NK_ReseedFrac "ReseedFrac"
+#define NK_RecovAwEnable "RecovAwEnable"
+#define NK_RecovAwArmAs "RecovAwArmAs"
+#define NK_RecovAwUpGain "RecovAwUpGain"
+#define NK_RecovAwMaxMs "RecovAwMaxMs"
 #define NK_SLAM_THRESHOLD_G "SLAMTHRESHOLDG"
 #define NK_SOC_AllowRebulk_percent "SOCAllwRblkprcn"
 #define NK_SOC_BlockRebulk_percent "SOCBlckRblkprcn"
@@ -298,6 +302,7 @@ bool fsRemove(const char *path) {
 // RETIRED NVS keys — never reuse these key strings for a new setting (old devices still hold
 // stored values under them): "cvPlantTau", "cvPlantL" (removed 2026-07-03; τ/L fit retired).
 #define NK_CommissionTempF "CommissionTmpF"
+#define NK_battMaxMode "battMaxMode"   // battery V/I plot sampling: 0=window mean, 1=max-magnitude
 #define NK_battTempDerateEn "battTmpDerEn"
 #define NK_battTempCoeff "battTmpCoeff"
 #define NK_SlopeBleedK "SlopeBleedK"
@@ -758,6 +763,10 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/RebulkCurrent_A.txt", NK_RebulkCurrent_A },
   { "/RebulkVoltage.txt", NK_RebulkVoltage },
   { "/ReseedFrac.txt", NK_ReseedFrac },
+  { "/RecovAwEnable.txt", NK_RecovAwEnable },
+  { "/RecovAwArmAs.txt", NK_RecovAwArmAs },
+  { "/RecovAwUpGain.txt", NK_RecovAwUpGain },
+  { "/RecovAwMaxMs.txt", NK_RecovAwMaxMs },
   { "/SLAM_THRESHOLD_G.txt", NK_SLAM_THRESHOLD_G },
   { "/SOC_AllowRebulk_percent.txt", NK_SOC_AllowRebulk_percent },
   { "/SOC_BlockRebulk_percent.txt", NK_SOC_BlockRebulk_percent },
@@ -3063,7 +3072,9 @@ bool buildConfigPayload() {
 
   // Control Accuracy Scores since the last reset (≈one day — these auto-reset right after this
   // upload succeeds, so each daily snapshot is one independent measurement of loop performance).
-  // RMS tracking error + worst damaging overshoot per loop, in physical units.
+  // RMS tracking error + worst damaging overshoot per loop. Current is amps, thermal is °F; the
+  // voltage pair is 12V-EQUIVALENT mV (error ÷ class ratio at accumulation) so the columns are
+  // fleet-comparable across 12/24/48V banks.
   // CLOUD CONTRACT: like every state key, these are spread into the device_state_daily INSERT —
   // the 6 columns (acc_cur_rms_a, acc_cur_peak_a, acc_volt_rms_mv, acc_volt_peak_mv,
   // acc_therm_rms_f, acc_therm_peak_f) MUST exist in device_state_daily before this firmware ships,
@@ -3803,6 +3814,24 @@ volatile uint32_t resTestLastCmdMs = 0;       // deadman: browser refreshes this
 // test's high held current and slamming the soft OV (G2) the instant voltage control re-arms.
 volatile bool resTestReleasing = false;
 #define RES_TEST_DEADMAN_MS 8000UL            // > the browser's ~3 s keepalive; catches a closed/crashed wizard
+
+// Recovery-restraint commissioning (Phase B): catch the FIRST iExcess normally, then suspend ONLY the
+// iExcess re-arm for a bounded window so the uncut over-ramp can be measured to size the restraint knobs.
+// Hardware OV, fast OV, and the HardOCTripAmps trip stay live throughout (separate code paths). Deadman-
+// guarded exactly like resTest. State: 0 idle, 1 armed (waiting for fire #1), 2 watching (fire #1 seen,
+// over-ramp building), 3 measuring (over-ramp crossed E — re-arm suspended across the WHOLE overshoot,
+// tracking the true peak), 4 measured (over-ramp decayed below the release hysteresis — the inner loop
+// self-corrected, so protection resumes and results freeze). Suppression spans states 2/3 only, not 4.
+volatile bool recovAwCommissionActive = false;
+volatile uint32_t recovAwCommissionLastCmdMs = 0;   // deadman keepalive
+volatile uint32_t recovAwCommissionFire1Ms = 0;     // millis of fire #1 (latency reference)
+volatile uint8_t  recovAwTestState = 0;
+volatile float    recovAwTestPeakEma = 0.0f;        // peak uncut over-ramp mExcessEma (A)
+volatile float    recovAwTestArmAsAtCross = 0.0f;   // recovAwArmAccumAs at the would-be fire #2 (pre-overshoot under-current, A·s)
+volatile uint32_t recovAwTestLatencyMs = 0;         // fire #1 -> would-be fire #2 latency (ms)
+volatile float    recovAwTestThreshAtCross = 0.0f;  // detector threshold E at the crossing (A) — proves the two fires aren't threshold-separable
+#define RECOV_AW_COMMISSION_WINDOW_MS 12000UL       // bounded uncut window measured from fire #1; > any real secondary-fire latency
+#define RECOV_AW_COMMISSION_DEADMAN_MS 8000UL       // same as resTest: catches a closed/crashed wizard
 
 // Fold forensics (diagnostic ring, RAM-only): snapshots the window behind every ripTab fold event so
 // a phantom table value stays traceable without a live CSV log — the "why won't this bin settle"

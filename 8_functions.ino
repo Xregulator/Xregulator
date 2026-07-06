@@ -746,6 +746,10 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "SettleTimeBeforeCut", NK_SettleTimeBeforeCut, 1 },
   { "ShutdownPhase2HoldMs", NK_ShutdownPhase2HoldMs, 1 },
   { "ReseedFrac", NK_ReseedFrac, 1 },
+  { "RecovAwEnable", NK_RecovAwEnable, 1 },
+  { "RecovAwArmAs", NK_RecovAwArmAs, 1 },
+  { "RecovAwUpGain", NK_RecovAwUpGain, 1 },
+  { "RecovAwMaxMs", NK_RecovAwMaxMs, 1 },
   { "IExcessArmMarginV", NK_IExcessArmMarginV, 1 },
   { "IExcessCeilA", NK_IExcessCeilA, 1 },
   { "IExcessFloorA", NK_IExcessFloorA, 1 },
@@ -989,7 +993,7 @@ String manifestConfigObject(bool includeHardware) {
 // raw numbers (amps / watts / duty-%). A blob missing from NVS is omitted.
 String exportTablesObject() {
   String j;
-  j.reserve(768);
+  j.reserve(1024);
   j = "{";
   nvs_handle_t h;
   if (nvs_open("learning", NVS_READONLY, &h) != ESP_OK) { j += "}"; return j; }
@@ -1016,6 +1020,23 @@ String exportTablesObject() {
     j += '"';
   }
   nvs_close(h);
+  // Fuel-flow curve lives in its own "fuel" namespace (float[FUEL_TABLE_SIZE], not the
+  // learning-namespace RPM tables) — per-engine calibration, cloned like the cap tables.
+  if (nvs_open("fuel", NVS_READONLY, &h) == ESP_OK) {
+    float fr[FUEL_TABLE_SIZE], fg[FUEL_TABLE_SIZE];
+    size_t sr = sizeof(fr), sg = sizeof(fg);
+    if (nvs_get_blob(h, "fuelRPM", fr, &sr) == ESP_OK && sr == sizeof(fr) &&
+        nvs_get_blob(h, "fuelGPH", fg, &sg) == ESP_OK && sg == sizeof(fg)) {
+      if (!first) j += ',';
+      first = false;
+      j += "\"fuelRPM\":\"";
+      for (int i = 0; i < FUEL_TABLE_SIZE; i++) { if (i) j += ','; j += String(fr[i], 1); }
+      j += "\",\"fuelGPH\":\"";
+      for (int i = 0; i < FUEL_TABLE_SIZE; i++) { if (i) j += ','; j += String(fg[i], 3); }
+      j += '"';
+    }
+    nvs_close(h);
+  }
   j += "}";
   return j;
 }
@@ -1128,6 +1149,22 @@ static int applyImportTables(const char *body) {
   }
   if (applied) nvs_commit(h);
   nvs_close(h);
+  // Fuel curve — separate "fuel" namespace + FUEL_TABLE_SIZE arrays. Both halves must
+  // parse or neither is written (a half-updated curve would interpolate wrong).
+  float fr[FUEL_TABLE_SIZE], fg[FUEL_TABLE_SIZE];
+  if (cfgJsonExtract(tbl, "fuelRPM", val) && cfgCsvToFloat(val, fr, FUEL_TABLE_SIZE) &&
+      cfgJsonExtract(tbl, "fuelGPH", val) && cfgCsvToFloat(val, fg, FUEL_TABLE_SIZE)) {
+    nvs_handle_t fh;
+    if (nvs_open("fuel", NVS_READWRITE, &fh) == ESP_OK) {
+      nvs_set_blob(fh, "fuelRPM", fr, sizeof(fr));
+      nvs_set_blob(fh, "fuelGPH", fg, sizeof(fg));
+      nvs_commit(fh);
+      nvs_close(fh);
+      memcpy(fuelTableRPM, fr, sizeof(fr));   // live arrays for the noReboot=1 path
+      memcpy(fuelTableGPH, fg, sizeof(fg));
+      applied += 2;
+    }
+  }
   if (applied) loadLearningTableFromNVS();
   return applied;
 }
