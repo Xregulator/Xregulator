@@ -2298,6 +2298,7 @@ unsigned long activeCollapseDelay = 30000;  // ms
 // its own independent 10s latch in CheckAlarms() and bypasses the lockout
 // entirely via shouldImmediatelyCutGPIO4().
 int fieldActiveStatus = 0;  // direct read of ESP32 hardare to control the field active light in Banner
+volatile uint8_t g_fieldEventReason = 0;  // last field-control reason (FieldEventReason enum) for telemetry — annotates the banner OFF word; 0 = NONE
 
 
 int Voltage_scaled = 0;         // Battery voltage scaled (V × 100)
@@ -4349,7 +4350,7 @@ unsigned long wifiWakeStart = 0;                  // millis() when wake was trig
 // fully off at 80MHz we keep WiFi associated in modem-sleep so the dashboard stays reachable
 // with no button press. Falls back to full radio-off after 12h with no dashboard connected;
 // from there only the wake button or ignition brings it back. Inert in AP mode (a SoftAP can't sleep).
-bool wifiNapEnabled = false;          // System Setting (Client only); default off
+bool wifiNapEnabled = true;           // System Setting (Client only); default on — app can wake from engine-off standby without the GPIO5 button
 bool wifiNapActive = false;           // true while modem-sleep nap is active
 
 AsyncWebServer server(80);                  // Create AsyncWebServer object on port 80

@@ -241,6 +241,7 @@ const CSV1_FIELDS = [
     "mExcessEmaPeak",    // iExcess: per-frame peak averaged excess (A ×10) — live sparkline
     "iExcessThreshMin",  // iExcess: per-frame min fire threshold E (A ×10) — live sparkline
     "protEventMask",     // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
+    "fieldEventReason",  // FieldEventReason enum code — plain-English cause shown next to the banner OFF word
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -5105,8 +5106,7 @@ function updateAllEchosOptimized(data) {
         { key: 'AlternatorHardShutdownV', id: 'AlternatorHardShutdownV_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'HardOCTripAmps', id: 'HardOCTripAmps_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'HardOCDebounceMs', id: 'HardOCDebounceMs_echo', transform: v => Math.round(v) },
-        { key: 'IExcessFrac', id: 'IExcessFrac_echo', transform: v => (v / 10).toFixed(1) },          // ×1000 → % of command
-        { key: 'IExcessFracBulk', id: 'IExcessFracBulk_echo', transform: v => (v / 10).toFixed(1) },  // ×1000 → % of ceiling
+        { key: 'IExcessFrac', id: 'IExcessFrac_echo', transform: v => (v / 10).toFixed(1) },          // ×1000 → % of command; shared "Slope" echo also reflects IExcessFracBulk (written in lockstep, no separate span)
         { key: 'IExcessFloorA', id: 'IExcessFloorA_echo', transform: v => (v / 10).toFixed(1) },      // ×10 → A
         { key: 'IExcessCeilA', id: 'IExcessCeilA_echo', transform: v => (v / 10).toFixed(1) },        // ×10 → A (alternator detector)
         { key: 'IExcessBaseA', id: 'IExcessBaseA_echo', transform: v => (v / 10).toFixed(1) },        // ×10 → A (trip-line intercept / CV base)
@@ -5694,15 +5694,25 @@ async function handleVesselInfoSave(event) {
                 .then(() => maybeProposeBatteryDefaults(vesselData, _prevBatt, result.firstSave === true))  // async, never blocks the save result
                 // Factory-fresh device: the firmware runs its deferred SoC seed on Core 1 some time
                 // after this save responds, so poll /socseed until the snapshot lands (a single
-                // fixed delay raced the Core-1 write and could miss the popup forever).
+                // fixed delay raced the Core-1 write and could miss the popup forever). Show it and
+                // WAIT for the user to close it BEFORE commissioning: the wizard opens the commission
+                // modal and socSeedMaybeAutoOpen suppresses itself over that modal, so a SoC popup
+                // deferred until after the wizard opened would never appear this session.
                 .then(async () => {
                     for (let i = 0; i < 6; i++) {
                         await new Promise(res => setTimeout(res, 1000));
                         _socSeedData = null;
-                        await socSeedMaybeAutoOpen();
+                        await socSeedFetch();
                         if (_socSeedData && _socSeedData.snap) break;
                     }
-                });
+                    if (_socSeedData && _socSeedData.snap && !_socSeedData.ack && !sessionStorage.getItem('socSeedDismissed')) {
+                        await new Promise(res => { _socSeedResolve = res; socSeedOpen(); });
+                    }
+                })
+                // First save only: after the SoC estimate is acknowledged, collect the sensor/current
+                // settings commissioning depends on, then hand off to the wizard. Guarded so a failure
+                // here never blocks the save result.
+                .then(() => { if (result.firstSave === true) return maybeShowCommPrereqs().catch(() => { }); });
 
         } else {
             throw new Error(result.error || 'Save failed');
@@ -5730,7 +5740,7 @@ const BATTDEF_FW_DEFAULT = {
     SOC_BlockRebulk_percent: 95, SOC_AllowRebulk_percent: 94, TailCurrent_A: 5, TailCurrent: 2,
     ChargedVoltage: 14, BattCurrentLimitA: 100, MaximumAllowedBatteryAmps: 150,
     coldChargeLockoutEnable: 1, PeukertExponent: 1.05, ChargeEfficiency: 99,
-    VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0
+    VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0, AlternatorHardShutdownV: 14.8
 };
 // Stored NVS string → UI units (everything else is stored in UI units already)
 const BATTDEF_FROM_STORED = {
@@ -5777,6 +5787,10 @@ function deriveBatteryDefaults(type, capAh, sysV) {
     }
     rows.push({ param: 'ChargedVoltage', label: 'Max Charge Detection Voltage (V)', value: r2(T.chgDetV * kV) });
     rows.push({ param: 'TailCurrent', label: 'Max Charge Detection Tail Current (%)', value: T.tailPct });
+    // bulk + 0.3 V class-scaled — the same rung the firmware seeds at first boot and the INA228
+    // hardware ALERT re-derives whenever BulkVoltage is applied; without this row the software
+    // fast-OV cut stays at the old bulk's rung and the ladder inverts (hardware trips below software).
+    rows.push({ param: 'AlternatorHardShutdownV', label: 'Alternator Hard Shutdown Voltage (V)', value: r2((T.bulkV + 0.3) * kV) });
     rows.push({ param: 'VoltageAlarmHigh', label: 'High Voltage Alarm (V)', value: r2(T.vAlmHi * kV) });
     rows.push({ param: 'VoltageAlarmLow', label: 'Low Voltage Alarm (V)', value: r2(T.vAlmLo * kV) });
     rows.push({ param: 'SocAlarmLow', label: 'Low State of Charge Alarm (%)', value: T.socAlm });
@@ -5912,6 +5926,150 @@ function _battDefSkipNote(txt) {
     md.innerHTML += '<br><span style="color:#e6a23c;">' + txt + '</span>';
 }
 
+// ===== Commissioning Prerequisites screen =====
+// Shown once, after the battery-defaults popup, on a first Vessel Info save. Presents the
+// sensor/current settings commissioning depends on, pre-filled from /exportConfig, then hands off
+// to the commissioning wizard. Only user-edited fields are written, in one /get (battdef pattern).
+// Temperature inputs follow the app's display unit; every param is submitted in its native unit.
+let _commPrereqResolve = null;   // awaited by the vessel-save chain; resolved when the modal closes
+let _commPrepCfg = null;         // /exportConfig snapshot captured at open, for changed-detection
+let _commPrepInit = {};          // input id → initial value string (only changed inputs are written)
+let _commPrepTsInit = 0;         // TempSource at open (0 = DS18B20, 1 = Thermistor)
+let _commPrepTempSrc = 0;        // live TempSource selection
+
+async function maybeShowCommPrereqs() {
+    try {
+        if (!currentAdminPassword) return;
+        const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword) + '&includeHardware=1'), {}, 10000);
+        if (!r.ok) return;
+        _commPrepCfg = (await r.json()).config || {};
+        commPrepRender(_commPrepCfg);
+        document.getElementById('commprep-modal-overlay').style.display = 'flex';
+        await new Promise(res => { _commPrereqResolve = res; });
+    } catch (e) {
+        diagLog('commissioning prerequisites failed:', e);
+    }
+}
+
+function commPrepRender(cfg) {
+    const numF = k => (cfg[k] !== undefined && cfg[k] !== '') ? parseFloat(cfg[k]) : NaN;
+    const raw = k => { const v = numF(k); return isFinite(v) ? String(v) : ''; };
+    const tempLbl = tempUnitLabel();
+    const fToDisp = f => !isFinite(f) ? '' : (displayTempUnit === 1 ? String(Math.round((f - 32) * 5 / 9 * 10) / 10) : String(f));
+
+    const ts = (numF('TempSource') === 1) ? 1 : 0;
+    _commPrepTsInit = ts; _commPrepTempSrc = ts;
+
+    const inputCss = 'width:100%; background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:7px 10px; font-size:14px; box-sizing:border-box;';
+    const lblCss = 'display:block; font-size:12px; color:#9cc; margin-bottom:5px;';
+    const rowCss = 'margin-bottom:14px;';
+    const field = (label, id, val, step, min, max) =>
+        '<div style="' + rowCss + '"><label style="' + lblCss + '">' + label + '</label>' +
+        '<input id="' + id + '" type="number" step="' + step + '" min="' + min + '" max="' + max + '" value="' + val + '" style="' + inputCss + '"></div>';
+
+    const intro = '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">A few things to set before commissioning measures your system. These affect how the regulator reads temperature and current. Anything you skip stays editable later under Setup.</p>';
+
+    const seg = '<div style="' + rowCss + '"><label style="' + lblCss + '">Temperature Source</label>' +
+        '<div class="cap-mode-toggle" style="background:rgba(255,255,255,0.07); border-color:#444;">' +
+        '<button type="button" id="commprep-ts-0" class="cap-mode-btn' + (ts === 0 ? ' cap-mode-active' : '') + '" onclick="commPrepTempSrc(0)">Digital</button>' +
+        '<button type="button" id="commprep-ts-1" class="cap-mode-btn' + (ts === 1 ? ' cap-mode-active' : '') + '" onclick="commPrepTempSrc(1)">Thermistor</button>' +
+        '</div></div>';
+
+    const thermistor = '<div id="commprep-thermistor" style="display:' + (ts === 1 ? '' : 'none') + '; margin:0 0 14px; padding:10px 12px; background:#191919; border:1px solid #333; border-radius:6px;">' +
+        field('Thermistor Series Resistor R_fixed (Ω)', 'commprep-rfixed', raw('R_fixed'), '1', '0', '1000000') +
+        field('Thermistor Beta', 'commprep-beta', raw('Beta'), '1', '0', '100000') +
+        field('Thermistor Reference Temp T0 (°C)', 'commprep-t0', raw('T0_C'), '0.1', '0', '300') +
+        '</div>';
+
+    const hr = '<hr style="border:none; border-top:1px solid #333; margin:2px 0 14px;">';
+    document.getElementById('commprep-body').innerHTML =
+        intro + seg + thermistor + hr +
+        field('Alternator Temperature Limit (' + tempLbl + ')', 'commprep-templimit', fToDisp(numF('TemperatureLimitF')), '1', '0', '350') + hr +
+        field('Min Charge Temp (' + tempLbl + ')', 'commprep-minchg', fToDisp(numF('MinChargeTempF')), '1', '-40', '120') + hr +
+        field('Shunt Resistance (µΩ)', 'commprep-shunt', raw('ShuntResistanceMicroOhm'), '1', '1', '5000') + hr +
+        field('Battery Charge Current Limit (A)', 'commprep-battlim', raw('BattCurrentLimitA'), '5', '0', '500') + hr +
+        '<div style="' + rowCss + '"><label style="' + lblCss + '">Engine RPM vs. field table</label>' +
+        '<button type="button" onclick="commPrepGotoRpm()" style="width:100%; background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Set RPM table →</button></div>';
+
+    // Only inputs the user actually edits get written — snapshot their initial strings after render.
+    _commPrepInit = {};
+    document.querySelectorAll('#commprep-body input[type=number]').forEach(el => { _commPrepInit[el.id] = el.value; });
+}
+
+// Thermistor sub-fields (R_fixed / Beta / T0) reveal only when Thermistor is the source.
+function commPrepTempSrc(v) {
+    _commPrepTempSrc = v;
+    const b0 = document.getElementById('commprep-ts-0'), b1 = document.getElementById('commprep-ts-1');
+    if (b0) b0.classList.toggle('cap-mode-active', v === 0);
+    if (b1) b1.classList.toggle('cap-mode-active', v === 1);
+    const th = document.getElementById('commprep-thermistor');
+    if (th) th.style.display = (v === 1) ? '' : 'none';
+}
+
+function commPrepCollectChanges() {
+    const out = [];
+    const toF = d => displayTempUnit === 1 ? Math.round((d * 9 / 5 + 32) * 10) / 10 : d;   // display → native °F
+    const rec = (param, id, native) => {
+        const el = document.getElementById(id);
+        if (!el || el.value === '') return;                 // blank → don't write
+        if (el.value === (_commPrepInit[id] || '')) return; // unchanged in the shown unit
+        const v = parseFloat(el.value);
+        if (!isFinite(v)) return;
+        out.push({ param, value: native ? native(v) : v });
+    };
+    rec('TemperatureLimitF', 'commprep-templimit', toF);
+    rec('MinChargeTempF', 'commprep-minchg', toF);
+    rec('ShuntResistanceMicroOhm', 'commprep-shunt', null);
+    rec('BattCurrentLimitA', 'commprep-battlim', null);
+    rec('R_fixed', 'commprep-rfixed', null);
+    rec('Beta', 'commprep-beta', null);
+    rec('T0_C', 'commprep-t0', null);
+    if (_commPrepTempSrc !== _commPrepTsInit) out.push({ param: 'TempSource', value: _commPrepTempSrc });
+    return out;
+}
+
+// Write any edited fields (one /get) then close. start=true hands off to the commissioning wizard.
+async function commPrepFinish(start) {
+    const changes = commPrepCollectChanges();
+    document.getElementById('commprep-modal-overlay').style.display = 'none';
+    const pill = document.getElementById('commprep-back-pill'); if (pill) pill.remove();
+    if (changes.length && currentAdminPassword) {
+        let url = '/get?password=' + encodeURIComponent(currentAdminPassword);
+        for (const c of changes) url += '&' + c.param + '=' + encodeURIComponent(c.value);
+        try { await fetchWithTimeout(buildURL(url), {}, 10000); } catch (e) { diagLog('prerequisites submit failed:', e); }
+    }
+    const r = _commPrereqResolve; _commPrereqResolve = null; if (r) r();
+    if (start) openCommissionModal();
+}
+
+// ✕ — dismiss without writing edits (mirrors the battdef Skip/✕).
+function commPrepClose() {
+    document.getElementById('commprep-modal-overlay').style.display = 'none';
+    const pill = document.getElementById('commprep-back-pill'); if (pill) pill.remove();
+    const r = _commPrereqResolve; _commPrereqResolve = null; if (r) r();
+}
+
+// Deep-link to the RPM Table editor (Setup ▸ Alternator ▸ RPM Table) and show a return pill.
+// The prereq modal is only hidden (its in-progress edits survive), so the pill re-shows it intact.
+function commPrepGotoRpm() {
+    document.getElementById('commprep-modal-overlay').style.display = 'none';
+    showMainTab('settings');
+    showSubTab('settings', 'alternator');
+    showAltTab('primary', 'alt-panel-quick-view');
+    if (document.getElementById('commprep-back-pill')) return;
+    const pill = document.createElement('button');
+    pill.id = 'commprep-back-pill';
+    pill.type = 'button';
+    pill.textContent = '← Back to setup wizard';
+    pill.onclick = commPrepBackFromRpm;
+    pill.style.cssText = 'position:fixed; left:50%; transform:translateX(-50%); bottom:16px; z-index:9300; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:20px; padding:10px 18px; cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,0.5);';
+    document.body.appendChild(pill);
+}
+function commPrepBackFromRpm() {
+    const pill = document.getElementById('commprep-back-pill'); if (pill) pill.remove();
+    document.getElementById('commprep-modal-overlay').style.display = 'flex';
+}
+
 // ===== Themed alert/confirm (dark modal shell) =====
 // Replaces every native xAlert()/await xConfirm() in the app. One lazily-created overlay; concurrent
 // requests queue behind _xDlgQueue so a second dialog can never clobber the first's resolver.
@@ -5999,6 +6157,7 @@ function xConfirmSubmit(form, msg) {
 // factory-fresh device, right after the first Vessel Info save (the firmware defers the seed
 // until real chemistry/capacity exist). Reopens any time from the header SOC readout.
 let _socSeedData = null;
+let _socSeedResolve = null;   // resolved when the SoC popup closes, so the vessel-save chain can wait for it before commissioning
 
 async function socSeedFetch() {
     try {
@@ -6009,6 +6168,12 @@ async function socSeedFetch() {
 }
 
 async function socSeedMaybeAutoOpen() {
+    // Don't auto-pop over the first-run prerequisites or commissioning modal; still reachable from the header SOC readout.
+    const overModal = ['commprep-modal-overlay', 'commission-modal-overlay'].some(id => {
+        const el = document.getElementById(id);
+        return el && (el.style.display === 'flex' || el.style.display === 'block');
+    });
+    if (overModal) return;
     const d = await socSeedFetch();
     if (d && d.snap && !d.ack && !sessionStorage.getItem('socSeedDismissed')) socSeedOpen();
 }
@@ -6022,6 +6187,7 @@ function socSeedClose(finish) {
     } else {
         sessionStorage.setItem('socSeedDismissed', '1');
     }
+    const r = _socSeedResolve; _socSeedResolve = null; if (r) r();
 }
 
 async function socSeedApplySoc() {
@@ -6123,16 +6289,16 @@ function socSeedRender(s) {
         + ' style="flex:1; min-width:0; background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:7px 10px; font-size:14px; box-sizing:border-box;">'
         + '<span style="color:#888; font-size:13px;">%</span>'
         + '<button onclick="socSeedApplySoc()"' + (unlocked ? '' : ' disabled')
-        + ' style="background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:5px; padding:8px 16px; cursor:pointer;' + (unlocked ? '' : ' opacity:0.45; cursor:default;') + '">Set SOC</button></div>'
+        + ' style="background:#2a2a2a; color:#bbb; font-weight:600; font-size:13px; border:1px solid #444; border-radius:5px; padding:8px 16px; cursor:pointer;' + (unlocked ? '' : ' opacity:0.45; cursor:default;') + '">Set SOC</button></div>'
         + '<div id="socseed-override-msg" style="font-size:11px; color:#777; margin-top:6px;">'
         + (unlocked ? 'If you know the true state of charge, set it here &mdash; the charge counter (coulomb counter) restarts from this value.'
             : 'Unlock settings (admin password) to set a value.') + '</div></div>';
 
     const foot = '<div style="margin-top:14px; padding-top:10px; border-top:1px solid #333; font-size:11px; color:#777;">This is a one-time starting estimate. From here SOC tracks measured amp-hours in and out, and it self-corrects over time: every detected full charge re-anchors SOC to 100&nbsp;%, and deep discharges followed by a rest let the regulator measure the bank\'s true usable capacity.</div>';
 
-    const finish = '<button onclick="socSeedClose(true)" style="display:block; width:100%; margin-top:14px; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:14px; border:none; border-radius:5px; padding:10px 16px; cursor:pointer;">Finish</button>';
+    const finish = '<button onclick="socSeedClose(true)" style="display:block; margin:14px auto 0; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:5px; padding:8px 28px; cursor:pointer;">Finish</button>';
 
-    document.getElementById('socseed-body').innerHTML = intro + inputs + result + calc + ladder + override + foot + finish;
+    document.getElementById('socseed-body').innerHTML = intro + inputs + result + calc + ladder + foot + finish + override;
 }
 
 function populateProfileForm(profile) {
@@ -6913,6 +7079,51 @@ function renderSysidSweepLog(data) {
 // when the run was committed). >1577836800 = after 2020-01-01, i.e. a real synced time.
 function fmtTuningTs(ts) {
     return (ts && ts > 1577836800) ? new Date(ts * 1000).toLocaleString() : '—';
+}
+
+// Plain-English cause the banner shows next to a field OFF word. Driven by the firmware
+// FieldEventReason (CSV1 fieldEventReason), which maps 1:1 to the enum in Xregulator.ino.
+// CHARGING_DISABLED (10) is the one code the firmware can't disambiguate — it fires for BOTH the
+// master Alternator-Enable switch being off AND a completed charge cycle (IDLE) — so we split it
+// here using the header switch state and the live charge stage (gLastChargeStage). Only shown when
+// the field is actually OFF (status 0/undefined); ACTIVE/RAMP/MANUAL/WAITING clear it.
+function fieldOffReasonText(reasonCode) {
+    switch (reasonCode) {
+        case 1:  return 'temperature sensor stale';
+        case 2:  return 'over temperature (critical)';
+        case 3:  return 'over temperature';
+        case 4:  return 'sustained over temperature';
+        case 5:  return 'voltage reading implausible';
+        case 6:  return 'voltage sensors disagree';
+        case 7:  return 'voltage spike';
+        case 8:  return 'voltage sensors disagree';
+        case 9:  return 'protection lockout active';
+        case 10: {
+            const enableOn = (() => { const cb = document.getElementById('header-alternator-enable'); return cb ? cb.checked : true; })();
+            if (!enableOn) return 'alternator switched off';
+            if (gLastChargeStage === 7) return 'charge cycle complete — resting';
+            return 'charging disabled';
+        }
+        case 12: return 'overvoltage — hardware cutoff';
+        case 13: return 'over-current cutoff';
+        case 14: return 'engine not running / RPM too low';
+        case 15: return 'current sensor stale';
+        case 16: return 'overvoltage lockout';
+        case 17: return 'too cold to charge';
+        case 18: return 'commissioning — field resting';
+        // 0 NONE (transient), 11 MANUAL (shown as its own status word) — no OFF annotation
+        default: return '';
+    }
+}
+
+function fieldOffReasonUpdate(fieldActiveStatus, reasonCode) {
+    window._lastFieldEventReason = reasonCode;   // cached fresh (CSV1) for the commissioning field-step gate
+    const el = document.getElementById('field-off-reason');
+    if (!el) return;
+    const isOff = !(fieldActiveStatus >= 1 && fieldActiveStatus <= 4);   // 0/undefined = OFF; 1-4 have their own words
+    const txt = isOff ? fieldOffReasonText(reasonCode) : '';
+    if (txt) { el.textContent = txt; el.style.display = 'block'; }
+    else { el.textContent = ''; el.style.display = 'none'; }
 }
 
 // Short charge-stage label from getChargeStageDisplayCode() (firmware enum 0..7).
@@ -9734,6 +9945,21 @@ function updateCvGainModeUI(data) {
     const manBlk  = document.getElementById('cvManualBlock');
     if (autoBlk) autoBlk.style.display = auto ? '' : 'none';
     if (manBlk)  manBlk.style.display  = auto ? 'none' : '';
+    // Always-on "Active gains" line — the gains the loop is running RIGHT NOW, in 12V-equiv space,
+    // TEMPERATURE-CORRECTED. Firmware cvComputedKp/Ki (CSV3) are the BASE (no derate); the active
+    // gain = base × the battery-temp scale (CSV2 cvTempDerateScale, applied in both modes). This is
+    // deliberately distinct from the "From commissioning" line, which shows the un-derated base.
+    const activeEl = document.getElementById('cvActiveGains');
+    if (activeEl) {
+        const cKp = (data.cvComputedKp !== undefined) ? parseFloat(data.cvComputedKp) / 100 : NaN;
+        const cKi = (data.cvComputedKi !== undefined) ? parseFloat(data.cvComputedKi) / 100 : NaN;
+        const c2 = (typeof g_lastCsv2 !== 'undefined' && g_lastCsv2) ? g_lastCsv2 : {};
+        const tScale = (c2.cvTempDerateScale !== undefined && c2.cvTempDerateScale !== '') ? parseFloat(c2.cvTempDerateScale) / 1000 : 1;
+        const scaleTxt = (isFinite(tScale) && Math.abs(tScale - 1) > 0.005) ? ` &middot; temp &times;${Math.round(tScale * 100)}%` : '';
+        activeEl.innerHTML = (isFinite(cKp) && isFinite(cKi))
+            ? `<strong>Active gains:</strong> Kp ${(cKp * tScale).toFixed(1)} / Ki ${(cKi * tScale).toFixed(1)} (12 V-equiv)${scaleTxt} &middot; ${auto ? 'Auto' : 'Manual'}`
+            : '<strong>Active gains:</strong> &mdash;';
+    }
     // measured DC gain + computed gains (new measured-K_dc rule — see CV_AUTOTUNE_PLAN.md §E). τ/λ are
     // retired; only K_dc drives the gains via Kp = ω_target/K_dc, Ki = ρ·Kp (in 12V-equiv space).
     const K   = (parseFloat(data.cvPlantK) || 0) / 10000;   // V/A (K_dc)
@@ -9744,11 +9970,26 @@ function updateCvGainModeUI(data) {
     const g = valid ? cvGainsFromKnorm(Knorm, CV_CROSSOVER_TARGET, CV_PI_ZERO) : { Kp: 0, Ki: 0 };
     const Kp = g.Kp, Ki = g.Ki;
     const status = document.getElementById('cvFitStatus');
-    if (status) status.textContent = valid
-        ? `Measured gain: K20 = ${(K * 1000).toFixed(1)} mV/A  →  Kp ≈ ${Kp.toFixed(1)}, Ki ≈ ${Ki.toFixed(1)} (12 V-equiv)`
+    if (status) status.innerHTML = valid
+        ? `<strong>From commissioning:</strong> K20 = ${(K * 1000).toFixed(1)} mV/A &rarr; Kp ${Kp.toFixed(1)} / Ki ${Ki.toFixed(1)} (12 V-equiv)`
         : 'No plant fit yet — run the CV plant-fit step in commissioning. Auto uses safe defaults until then.';
     previewCvResp();
     renderBattTempDerate();
+    syncCvDependentVis();
+}
+
+// Show/hide the fields that only matter when their master toggle is On, so the panel never
+// shows an inert knob. Firmware-verified gates: slope-bleed runs only under cvHelpersEnabled
+// (6_functions.ino "if (cvHelpersEnabled && cvDSlope > ...)"); the derate coefficient + status
+// are meaningless unless battTempDerateEnable (computeCvTempScale returns 1.0 when off). Driven
+// off the live checkbox state (set by updateCheckbox / handleUserToggle just before this runs).
+function syncCvDependentVis() {
+    const helpers = document.getElementById('cvHelpersEnabled_checkbox');
+    const sb = document.getElementById('cvSlopeBleedBlock');
+    if (sb && helpers) sb.style.display = helpers.checked ? '' : 'none';
+    const derate = document.getElementById('battTempDerateEnable_checkbox');
+    const dd = document.getElementById('cvDerateDetailBlock');
+    if (dd && derate) dd.style.display = derate.checked ? '' : 'none';
 }
 
 // Live "what Set will apply" preview under the CV Response Time box. Uses the typed seconds if the user is
@@ -10045,7 +10286,7 @@ window.addEventListener("load", function () {
     // IDs that are intentionally absent at times (created on demand, or only present
     // while a transient dialog is open) — these are checked-then-created/guarded, so a
     // null lookup is expected, not a stale reference. Don't flag them.
-    const optionalElementIds = new Set(['recoveryDialog', 'lt-cloud-hint', 'faflip-pause-btn']);
+    const optionalElementIds = new Set(['recoveryDialog', 'lt-cloud-hint', 'faflip-pause-btn', 'cxCVReadyMsg']);
 
     document.getElementById = function (id) {
         const element = originalGetElementById.call(document, id);
@@ -10528,6 +10769,10 @@ window.addEventListener("load", function () {
             const fieldWrapper = fieldIndicator ? fieldIndicator.closest('.reading-value') : null;
             const dutyCycleDisplay = document.getElementById('dutyCycleID3');
             const dutyPercentSign  = document.getElementById('dutyCyclePercentSign');
+
+            // Field OFF ≠ a fault by itself — annotate WHY, from the firmware FieldEventReason (CSV1)
+            // plus the master switch and charge stage the firmware can't disambiguate on its own.
+            if (data.fieldEventReason !== undefined) fieldOffReasonUpdate(data.fieldActiveStatus, parseInt(data.fieldEventReason));
 
             if (fieldIndicator) {
                 if (data.fieldActiveStatus === 1) {
@@ -17877,6 +18122,7 @@ function cxLive() {
     amps: num('MeasuredAmps', 100), // alternator current (amps)
     duty: num('dutyCycle', 100),    // field duty (%)
     prot: ('protEventMask' in c) ? (parseInt(c.protEventMask) || 0) : 0,  // bit1=OV bit2=iExcess bit4=LoadDump
+    onoff: ('OnOff' in c) ? (parseInt(c.OnOff) === 1) : null,  // master Alternator Enable (top-right switch); null = unknown
   };
 }
 function cxBulkV() { const v = getEchoNumber('BulkVoltage_echo'); return (v > 0) ? v : NaN; }
@@ -18054,6 +18300,7 @@ function cxRenderPrep(b) {
         '<p style="font-size:15px;line-height:1.5;"><strong>Start the engine and check the charging headroom</strong>.</p>' +
         '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px; font-size:13px; line-height:1.7;">' +
         '<div>Engine: <span id="cx-prep-rpm">…</span></div>' +
+        '<div>Field: <span id="cx-prep-field">…</span></div>' +
         '<div>Charging headroom: <span id="cx-prep-headroom">…</span></div>' +
         '<div>Battery shunt: <span id="cx-prep-shunt">…</span></div>' +
         '</div>' +
@@ -18071,6 +18318,10 @@ function cxPrepRefresh() {
     const engineOk = !isNaN(L.rpm) && L.rpm > 300;
     rpmEl.innerHTML = isNaN(L.rpm) ? '<span style="color:#f0a500;">no RPM</span>'
         : '<strong style="color:' + (engineOk ? '#5a5' : '#f0a500') + ';">' + Math.round(L.rpm) + ' RPM</strong>' + (engineOk ? '' : ' (start the engine)');
+    const fEl = document.getElementById('cx-prep-field');
+    if (fEl) fEl.innerHTML = (L.onoff === true)
+        ? '<strong style="color:#5a5;">ON</strong>'
+        : '<strong style="color:#f0a500;">OFF</strong> (toggle in the top right to enable field)';
     // Headroom is advisory only — color warns, but it never blocks commissioning.
     // Green = comfortable room, orange = tight, red = almost no room (OV trip likely).
     if (isNaN(L.busV) || isNaN(bulk)) { hrEl.innerHTML = '<span style="color:#f0a500;">unknown (no live voltage)</span>'; }
@@ -18134,7 +18385,21 @@ function cxRenderField(b) {
     }
     b.innerHTML = body;
 }
+// The field-driving commissioning tests need the regulator actively charging in current-following
+// AUTO (firmware gate: sysMode == SYS_MODE_AUTO). If the bank is resting (IDLE / charge complete),
+// the engine is off, or a protection is holding the field down, refuse up front with the real cause
+// instead of firing the test and waiting out the 12 s "no start" timeout. We do NOT force a re-bulk —
+// a resting battery simply has nothing to measure. Signal is the fresh CSV1 fieldEventReason.
+function cxFieldRunBlockReason() {
+    const r = window._lastFieldEventReason;
+    if (r === undefined || r === 0 || r === 18) return null;   // NONE / commissioning-rest → runnable
+    const why = (r === 11) ? 'manual field mode is on' : (fieldOffReasonText(r) || 'the field is not under active charging control');
+    return 'The regulator is not charging right now (' + why + '). This test can only run while the alternator is actively charging in AUTO — a resting battery has nothing to measure. It will be available again once a charge cycle is underway.';
+}
+
 function cxFieldStart() {
+    const blocked = cxFieldRunBlockReason();
+    if (blocked) { cx.fieldResult = null; cx.fieldApplied = false; cx.fieldRunning = false; cx.fieldAbort = blocked; commissionRender(); return; }
     cxShowTab('plots', 'displays');   // open-loop ramp → watch on Plots ▸ Short Term
     cx.fieldResult = null; cx.fieldApplied = false; cx.fieldAbort = null; cx.fieldRunning = true; commissionRender();
     cxGet('startFieldCurve=1').then(() => {
@@ -19654,8 +19919,8 @@ function renderRipplePlots() {
     drawRippleThreshPlot('rippleThreshPlotAlt', {
         title: 'Alternator (G3)', color: '#4a9eff',
         floor: pField('IExcessFloorA', 'IExcessFloorA_echo'), ceil: pField('IExcessCeilA', 'IExcessCeilA_echo'),
-        lines: [{ slope: slope, base: baseA, label: 'CV threshold', color: '#4a9eff' },
-                { slope: slope, base: baseA + ccOff, label: 'CC threshold', color: '#f0a500' }],
+        lines: [{ slope: slope, base: baseA + ccOff, label: 'CC threshold', color: '#f0a500' },
+                { slope: slope, base: baseA, label: 'CV threshold', color: '#4a9eff' }],
         ripFit: rf.alt, xMax: rippleXmax('rippleXmaxAlt'), verdictId: 'rippleVerdictAlt'
     });
 }
@@ -19736,8 +20001,9 @@ function cxThrInit() {
             st.margin = 5;
             st.slope = cxThrClamp('slope', rf.a1 * 100);   // firmware stores slope as % of command
             st.base = cxThrClamp('base', rf.a0 + st.margin);
+            if (!(st.ccoff > 0)) st.ccoff = 4;   // give CC a visible gap above CV (device default 0 = coincident with CV)
             st.init = true;
-            cxThrWrite(['slope', 'base']);
+            cxThrWrite(['slope', 'base', 'ccoff']);
         } else {
             st.margin = null;
             st.slope = dNum('IExcessFrac_echo', 10);
@@ -19780,8 +20046,9 @@ function cxThrDraw() {
     if (st.rf && st.rf.n > 0) { const iHi = Math.max.apply(null, st.rf.i.slice(0, st.rf.n)); if (iHi * 1.2 > xMax) xMax = Math.ceil(iHi * 1.2 / 10) * 10; }
     drawRippleThreshPlot('cxThreshPlotAlt', {
         title: '', color: '#4a9eff', floor: st.floor, ceil: st.ceil,
-        lines: [{ slope: st.slope / 100, base: st.base, label: 'CV threshold', color: '#4a9eff' },
-                { slope: st.slope / 100, base: st.base + st.ccoff, label: 'CC threshold', color: '#f0a500' }],
+        // CC first so the binding CV line draws on top — visible even if the two coincide (CC offset 0).
+        lines: [{ slope: st.slope / 100, base: st.base + st.ccoff, label: 'CC threshold', color: '#f0a500' },
+                { slope: st.slope / 100, base: st.base, label: 'CV threshold', color: '#4a9eff' }],
         ripFit: st.rf, xMax: xMax
     });
 }
@@ -19811,13 +20078,39 @@ function cxAppliedSummary() {
     return rows.length ? rows.join('<br>') : 'No settings applied yet — earlier phases were skipped.';
 }
 function cxFinish() {
+    // commissionDone persists the new tune the moment Finish fires (so a ✕ on the Helpful Hints
+    // page below can't lose it); the close/reset/navigate tail moves behind the Done button.
     cxGet('commissionDone=1').then(() => {
         const _ALL = (1 << COMMISSION_STEPS.length) - 1;
         const allDone = (cxLastMask & _ALL) === _ALL;
         if (!allDone) xAlert('Selected steps saved. Some steps are still pending — the badge shows what remains.');
-        closeCommissionModal(); cx = null; cxPlanUserSet = false;   // re-default the plan next time
-        showMainTab('tuning'); showSubTab('tuning', 'commissioning');   // land on the Commissioning checklist when the wizard finishes
+        cxShowHelpfulHints();
     }).catch(e => xAlert('Finish failed: ' + e));
+}
+// Placeholder onboarding copy (owner will red-line) — one contiguous static block.
+const CX_HELPFUL_HINTS_HTML =
+    '<p style="font-size:15px; line-height:1.5; margin:0 0 12px;"><strong>Commissioning saved. A few things worth knowing:</strong></p>' +
+    '<ul style="list-style:none; padding:0; margin:0; font-size:13px; line-height:1.6;">' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Leave it enabled.</strong> You can leave Alternator Enable on permanently. The regulator only drives the field and produces charging current when the ignition is on AND the engine is turning above the Min RPM For Field speed (about 125 RPM by default). Engine off — or at rest — it outputs nothing regardless of the switch, so there\'s no reason to turn it off between trips.</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">It\'s also your monitor.</strong> The regulator stays powered as long as it has battery power. With the engine off it keeps tracking battery state of charge and logging sailing, motoring, GPS, and comfort data.</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Reaching it on your boat\'s network (Client mode).</strong> Engine off, it drops the WiFi into a low-power doze but stays reachable — open the app or go to alternator.local and it wakes on its own, no button.</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Reaching it with no network (AP mode — phone joined straight to the regulator\'s own WiFi).</strong> Engine off, it keeps WiFi up for about half an hour, then powers the radio down to save battery. Press the WiFi wake button on the unit to bring it back for about five minutes (starting the engine wakes it too).</li>' +
+    '<li style="margin-bottom:0;"><strong style="color:#2ec4b6;">The WiFi wake button always works.</strong> Either mode, anytime you can\'t reach the interface, one press wakes the WiFi.</li>' +
+    '</ul>';
+// Terminal Helpful Hints page, drawn into the commissioning modal body after Finish. No per-phase
+// poll or RPM strip (the run is over); the abort row is hidden so it can't revert the saved tune.
+function cxShowHelpfulHints() {
+    cxStopPoll();
+    const strip = document.getElementById('cx-rpm-strip'); if (strip) strip.style.display = 'none';
+    const abort = document.getElementById('commission-abort-row'); if (abort) abort.style.display = 'none';
+    const b = document.getElementById('commission-body');
+    if (!b) { cxHintsDone(); return; }
+    b.innerHTML = CX_HELPFUL_HINTS_HTML +
+        '<button onclick="cxHintsDone()" class="btn-primary" style="width:100%; padding:9px; margin-top:16px;">Done</button>';
+}
+function cxHintsDone() {
+    closeCommissionModal(); cx = null; cxPlanUserSet = false;   // re-default the plan next time
+    showMainTab('tuning'); showSubTab('tuning', 'commissioning');   // land on the Commissioning checklist
 }
 async function commissionAbort() {
     if (!await xConfirm('Abort commissioning and revert all settings to the pre-commissioning snapshot?')) return;
@@ -19834,7 +20127,7 @@ const COMMISSION_STEPS = [
     { name: 'Verify', desc: 'Seed the current-loop gains and confirm the loop responds.' },
     { name: 'Disturbances', desc: 'Map the worst over-current the field can actually react to.' },
     { name: 'Thresholds', desc: 'Set the over-current trip points above that disturbance floor.' },
-    { name: 'CV plant fit', desc: 'Step the charge current and measure the battery-voltage step gain K_dc (fast edge, slow charge ramp removed); set the voltage-loop Kp = ω/K_dc, Ki = ρ·Kp at the recommended ~14 s response and switch the CV gain source to Auto.' },
+    { name: 'CV plant fit', desc: 'Step the charge current and measure the battery-voltage step gain K20 (fast edge, slow charge ramp removed); compute the voltage-loop Kp/Ki from K20 at your configured response time (default ~20 s) and switch the CV gain source to Auto.' },
     { name: 'Min% floor', desc: 'Runs last, with the engine warm: guided onset-knee automatic current sweeps down the throttle at three RPMs (max working → mid → idle) fit the per-RPM Min% floor; above the max it is forced to zero.' },
 ];
 let cxLastState = 0;   // remembered from the last CSV3 frame, for the clear/restart confirm text

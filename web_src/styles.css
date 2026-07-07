@@ -228,6 +228,21 @@ textarea {
   min-height: 1.2em;
 }
 
+/* Why the field reads OFF — plain-English cause under the charge-stage badge (banner). Only shown
+   when field-status is OFF and the firmware reason is meaningful; muted amber so it reads as a note,
+   not an alarm. */
+.field-off-reason {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  margin-top: 1px;
+  font-weight: 500;
+  color: #c9922e;
+  max-width: 22ch;
+  white-space: normal;
+}
+
 /* BULK — aggressive charge → strong green */
 .charge-stage-bulk {
   color: #00c853;
@@ -649,6 +664,19 @@ textarea {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   opacity: 0.75;
+}
+
+/* Sub-group heading inside a tuning section — groups related parameter rows under one
+   label (e.g. the CV Controller Parameters "Gain selection" / "Temperature compensation"
+   bands). Lighter than the section title: no accent underline, so it reads as a divider
+   within the section rather than a new section. */
+.param-subhead {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.55;
+  margin: 20px 0 2px;
 }
 
 /* Collapsible tuning sections */

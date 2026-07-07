@@ -58,8 +58,9 @@ enum Csv1Index {
   CSV1_mExcessEmaPeak,   // iExcess: per-CSV1-frame peak averaged excess (A ×10) — live sparkline
   CSV1_iExcessThreshMin, // iExcess: per-CSV1-frame min fire threshold E (A ×10) — live sparkline
   CSV1_protEventMask,    // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
+  CSV1_fieldEventReason, // FieldEventReason enum code — plain-English cause the banner shows next to OFF
 
-  CSV1_FIELD_COUNT  // = 41
+  CSV1_FIELD_COUNT  // = 42
 };
 
 enum Csv2Index {
@@ -7317,7 +7318,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -7361,7 +7362,8 @@ void SendWifiData() {
                                SafeInt(g_iExcessThreshold, 10), // CSV1_iExcessThreshold — fire threshold E (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_mExcessEmaPeak : g_mExcessEma, 10),       // CSV1_mExcessEmaPeak (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_iExcessThreshWinMin : g_iExcessThreshold, 10), // CSV1_iExcessThreshMin (A ×10)
-                               SafeInt(protMask)               // CSV1_protEventMask — protection-event bits this frame
+                               SafeInt(protMask),              // CSV1_protEventMask — protection-event bits this frame
+                               SafeInt(g_fieldEventReason)     // CSV1_fieldEventReason — FieldEventReason code (banner OFF-reason)
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;

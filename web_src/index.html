@@ -108,6 +108,7 @@
           <span id="dutyCycleID3" style="display:none;"></span><span id="dutyCyclePercentSign" style="display:none;">%</span>
         </div>
         <span id="charge-stage" class="charge-stage charge-stage-unknown">—</span>
+        <span id="field-off-reason" class="field-off-reason" style="display:none;"></span>
       </div>
     </div>
 
@@ -202,11 +203,9 @@
   </div>
   <!-- Main Tab Navigation -->
   <div class="main-tabs">
-    <button class="main-tab" onclick="showMainTab('livedata')"><span class="tab-label-full">Live Data</span><span class="tab-label-short">Live</span></button>
+    <button class="main-tab" onclick="showMainTab('livedata')">Live Data</button>
     <button class="main-tab" onclick="showMainTab('settings')">Setup</button>
-    <button class="main-tab" onclick="showMainTab('tuning')"><span class="tab-label-full">Tuning</span><span class="tab-label-short">Tune</span></button>
     <button class="main-tab" onclick="showMainTab('plots')">Plots</button>
-    <button class="main-tab" onclick="showMainTab('console')">Console</button>
     <!--<button class="main-tab" onclick="showMainTab('about-sourcecode')">Documentation</button> -->
     <button class="main-tab" onclick="showMainTab('cloudfeatures')"><span class="tab-label-full">Cloud Features</span><span class="tab-label-short">Cloud</span></button>
   </div>
@@ -1572,7 +1571,7 @@
 
 
               <!-- Temperature Settings (open by default) -->
-              <details open class="alt-nested-section">
+              <details class="alt-nested-section">
                 <summary class="alt-summary-nested">Temperature Settings</summary>
 
                 <!-- Alternator Temp Limit -->
@@ -1945,7 +1944,7 @@
               </details><!-- END Current Sensing -->
 
               <!-- Alternator Health -->
-              <details open class="alt-nested-section">
+              <details class="alt-nested-section">
                 <summary class="alt-summary-nested">Alternator Health</summary>
 
                 <div class="form-row">
@@ -1965,6 +1964,8 @@
                 </div>
 
               </details><!-- END Alternator Health -->
+
+              <button class="btn-primary" onclick="showMainTab('tuning')" style="margin-top:24px;">Tuning Tools</button>
 
             </div>
 
@@ -2078,7 +2079,7 @@
                   <p data-intro="cl">When measured alternator current exceeds the safe limit for the debounce duration, the trip fires. Set <strong>Command Limit</strong> to the lowest safe maximum on the <strong>alternator side</strong> of the system — alternator continuous rating, mechanical belt drive capacity, fuse ratings, and wiring limits. Whichever is lowest. Battery acceptance is handled separately by the Group 4 <strong>Battery Charge Current Limit</strong>. The trip threshold is automatically 10 A above Command Limit.</p>
                   <p data-intro="g1">Predicts where battery voltage will be a fraction of a second from now: <strong>predicted = measured + Prediction Horizon × voltage rise rate</strong>. Engages when the prediction exceeds the active charge target by more than the <strong>Group 1 Trigger Margin</strong>. <strong>dvdt EMA TC</strong> sets how much the rise rate is smoothed before prediction — larger TC means smoother but laggier. <strong>Group 1 Enable</strong> turns the whole layer off.</p>
                   <p data-intro="g2">Engages when measured battery voltage exceeds the active charge target by more than the <strong>Group 2 Trigger Margin</strong>. <strong>Group 2 Enable</strong> turns the whole layer off.</p>
-                  <p data-intro="g3">Watches <strong>alternator</strong> output current. Two regimes, split at the <strong>Strict Over-Current Band</strong> below target. <strong>Near the target</strong>: engages when the time-averaged current rises above the commanded <strong>setpoint</strong> by more than the <strong>Detection Threshold</strong>. <strong>Below the band</strong>: the looser <strong>Detection Threshold (Bulk)</strong> takes over, judged against the commanded <strong>ceiling</strong> instead of the moving setpoint — so normal speed-up ramps don't false-trip. The threshold is bounded by the <strong>Threshold Floor / Ceiling</strong> (amps), and <strong>Release Hysteresis</strong> sets the re-arm point.</p>
+                  <p data-intro="g3">Watches <strong>alternator</strong> output current. Two regimes, split at the <strong>Strict Over-Current Band</strong> below the active voltage target. <strong>Near the target — the voltage-limited (CV) phase</strong>: engages when the time-averaged current rises above the moving current <strong>setpoint</strong> by more than the <strong>Detection Threshold</strong> — the sloped trip line set by <strong>Slope</strong> and <strong>CV base</strong> below. <strong>Below the band — the current-limited (bulk / CC) phase</strong>: the looser <strong>Detection Threshold (Bulk)</strong> takes over — the same line raised by <strong>CC offset</strong> and judged against the commanded <strong>ceiling</strong> instead of the moving setpoint, so normal speed-up ramps toward the ceiling don't false-trip. Both thresholds are bounded by the <strong>Threshold Floor / Ceiling</strong> (amps); <strong>Averaging Time Constant</strong> sets how heavily the current is smoothed before each comparison, and <strong>Release Hysteresis</strong> sets the re-arm point.</p>
                   <p data-intro="g4">Two <strong>battery-side</strong> features. <strong>Battery Charge Current Limit</strong> is a ceiling, not a trip: the commanded alternator current is capped at the limit plus the measured house-load draw, so the battery never sees more than the set amps no matter what the loads are doing. It needs the INA228 battery shunt and is off when set to 0. <strong>Load Dump</strong> is a protection: three tiered thresholds on the <em>rate-of-change</em> of battery current — <strong>Tier 1</strong> fires when one sample exceeds its threshold, <strong>Tier 2</strong> when two consecutive do, <strong>Tier 3</strong> when three consecutive do — catching FET-disconnect or load-drop events. Unlike the over-current detectors, Load Dump stays armed even when test protections are disabled.</p>
                 </div>
 
@@ -2236,7 +2237,7 @@
                       <canvas id="iExcessSparkG3" style="display:block; width:100%; height:60px;"></canvas>
                       <div style="font-size:0.92em; margin-top:5px;">
                         peak excess <strong id="mExcessEmaLiveG3">—</strong> A&nbsp;·&nbsp;threshold <strong id="iExcessELiveG3">—</strong> A
-                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Per ~0.1 s frame the chart plots the <strong>peak</strong> current excess above command (teal) against the <strong>minimum</strong> fire threshold (amber). The threshold rides the live current command and clamps onto this detector's Floor (grey dotted) / Ceiling (purple dashed). A <strong style="color:#c0392b">vertical red line</strong> marks a frame where the detector actually fired — drawn from the real event, not from where the plotted lines cross.</span></span>
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Per ~0.1 s frame the chart plots the <strong>peak</strong> current excess above command (teal) against the <strong>minimum</strong> trip threshold (amber). The threshold rides the live current command and clamps onto this detector's Floor (grey dotted) / Ceiling (purple dashed). A <strong style="color:#c0392b">vertical red line</strong> marks a frame where the detector actually fired — drawn from the real event, not from where the plotted lines cross.</span></span>
                         <span class="sinfo" data-sinfo="iexG3" onclick="sinfoToggle(this)"></span>
                       </div>
                     </div>
@@ -2246,7 +2247,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Strict Over-Current Band — V below target (<span id="IExcessArmMarginV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Within this band of the presently acting voltage target (usually, the bulk voltage), it's strict — it reacts whenever current exceeds the current setpoint. Below this band, current is allowed to momentarily run well above the moment-to-moment setpoint, all the way up toward the “ceiling” (the most current allowed right now).</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far below the active voltage target the strict near-target regime (voltage-limited / CV) reaches. Inside the band the detector measures the excess against the moving current setpoint, so a smaller overshoot crosses the Detection Threshold and trips. Below the band the looser bulk regime (current-limited / CC) takes over, measuring against the commanded ceiling — the most current allowed right now — so a normal speed-up ramp toward that ceiling doesn't trip. This is a voltage boundary that only picks which regime is armed; it does not move the trip-threshold plot below.</span></span>
                       <span class="sinfo" data-sinfo="IExcessArmMarginV" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
@@ -3236,7 +3237,7 @@
               <hr />
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Shunt Resitance uOhms (micro)(<span id="ShuntResistanceMicroOhm_echo">?</span>):</span>
+                  <span>Shunt Resistance uOhms (micro)(<span id="ShuntResistanceMicroOhm_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
                     ℹ️
                     <span class="tooltip-box">Resistance of your current shunt in micro-ohms (µΩ). The current sensor uses this value to convert measured voltage drop to amps. Victron SmartShunt / BMV shunts = 100µΩ. Check your shunt's datasheet if unsure — an incorrect value will scale all current and SoC readings proportionally.</span></span>
@@ -6791,6 +6792,10 @@
               <details class="tuning-section">
                 <summary class="tuning-section-title">Voltage Step Generator</summary>
 
+                <div style="margin:8px 0;">
+                  <a class="xnav-link" onclick="goToCVMode()">Shortcut to Voltage Setpoint adjustment <span class="xnav-arrow">&rarr;</span></a>
+                </div>
+
                 <!-- Protection toggle (per-page; all three test pages share the same firmware flag) -->
                 <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
                   <div class="form-row" style="margin-bottom:0;">
@@ -7094,19 +7099,11 @@
               <details open class="tuning-section">
                 <summary class="tuning-section-title">Controller Parameters</summary>
 
-                <div style="margin:8px 0;">
-                  <a class="xnav-link" onclick="goToCVMode()">Shortcut to Voltage Setpoint adjustment <span class="xnav-arrow">&rarr;</span></a>
-                </div>
+                <!-- ==================== GAIN SELECTION ==================== -->
+                <div class="param-subhead">Gain selection</div>
 
                 <hr />
-                <!-- Reset CV Integrator -->
-                <div style="margin:8px 0;">
-                  <button onclick="resetVoltageLoop()" class="btn-secondary">Reset CV Integrator</button>
-                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeroes the voltage loop integrator. Use if it's stuck at zero or wound up to a bad value — the PI will rebuild from scratch on the next tick. Useful after changing Voltage Loop Kp/Ki during a tuning session.</span></span>
-                </div>
-
-                <hr />
-                <!-- CV gain source: Auto (λ-based) vs Manual -->
+                <!-- CV gain source: Auto (ω-based) vs Manual -->
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>CV Gain Source (<span id="cvGainMode_echo">?</span>):</span>
@@ -7127,101 +7124,98 @@
                   </div>
                 </div>
 
-                <!-- Auto (λ-based) controls — shown only in Auto mode -->
+                <!-- Active gains — shown in BOTH modes: the gain the loop is running RIGHT NOW,
+                     temperature-corrected. The one unambiguous "what's running" readout. -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between; font-size:0.92em; opacity:0.95; line-height:1.5;">
+                    <span id="cvActiveGains">Active gains: &mdash;</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The Kp/Ki the voltage loop is running <strong>right now</strong>, in 12V-equivalent units. It is the commissioning gain <strong>after the battery-temperature correction</strong> (Temperature compensation, below), so it drifts with board temperature even though you never re-tune. In <strong>Auto</strong> the base comes from the plant fit; in <strong>Manual</strong> it is your typed Kp/Ki — either way, temperature-corrected. This is the number that actually shapes the response.</span></span>
+                  </div>
+                </div>
+
+                <!-- Auto (ω-based) controls — shown only in Auto mode -->
                 <div id="cvAutoBlock">
                   <hr />
                   <div class="form-row">
-                    <div class="form-label" style="font-size:0.9em; opacity:0.85; line-height:1.5;">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between; font-size:0.9em; opacity:0.85; line-height:1.5;">
                       <span id="cvFitStatus">No plant fit yet — run the CV plant-fit step in commissioning. Auto uses safe defaults until then.</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">What the CV plant-fit wizard computed at commissioning: it measured the battery gain <strong>K20</strong> and derived Kp = 1 ÷ (K20 × √(1 + (ρ/ω_c)²)), Ki = ρ·Kp. These are the <strong>base design gains at the commissioning temperature</strong> — before any temperature correction. Auto runs these (temperature-corrected) as the <strong>Active gains</strong> above. Re-run the CV plant-fit step to update K20.</span></span>
                     </div>
                   </div>
-                </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>CV Tuning Helpers (<span id="cvHelpersEnabled_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for two non-linear "helpers" that sit on top of the plain voltage PI: <strong>(1) asymmetric integrator unwind</strong> — when battery voltage goes above target the integrator drains 7× faster than it builds, and <strong>(2) slope-aware integrator bleed</strong> — drains the integrator early when voltage is rising fast near the target. Both exist for one purpose only: they <strong>REDUCE OVERSHOOT</strong> and <strong>HELP SPEED OVERVOLTAGE RECOVERY</strong>. They never make the loop more aggressive, so leaving them ON is always at least as safe.<br><br>Turn them <strong>OFF</strong> while tuning Voltage Loop Kp/Ki: the loop becomes a clean symmetric PI, so its overshoot and settling behaviour reflect Kp/Ki directly and are far <strong>easier to understand</strong>. Once Kp/Ki are dialled in, turn them back ON to add the overshoot/OV-recovery polish. This does NOT touch the real overvoltage protections (hardware OV, fast OV, hard clamp) — those stay live regardless.</span>
-                    </span>
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>CV Response Time (s) (<span id="cvRespS_echo">?</span>):<span id="cvRespPreview" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">&nbsp;</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how fast the auto gain mode pulls battery voltage back to target after a disturbance or target change. Valid range 5–80 s. <strong>Recommended ~18–22 s; the default 20 s is intentionally conservative.</strong> Shorter (faster) settings raise Kp/Ki and the overshoot risk — exactly when over-voltage matters most. The <strong>Battery-Temp Gain Derate</strong> handles most of the temperature swing, but it infers battery temperature from a <strong>board-temperature proxy</strong> with a generic per-°C coefficient, is clamped to a safe band, and can be switched off — so it can under-correct a cold-soaked battery. This response-time margin is the cheap backstop for that residual: sluggish-when-cold is harmless, over-voltage is not. The other floor is the field ramp-rate limit (currently <strong><span id="cvRespRampNote">—</span> %/s</strong> of duty), so stay well clear of that or recovery goes linear instead of exponential. Only affects Auto mode.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input id="cvRespS_input" name="cvRespS" type="number" step="1" min="5" max="80" oninput="previewCvResp()" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
                   </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="cvHelpersEnabled_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('cvHelpersEnabled_checkbox', 'cvHelpersEnabled', 'cvHelpersEnabled')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">On</span>
-                      <input id="cvHelpersEnabled" name="cvHelpersEnabled" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
 
-                <!-- Manual gains — shown only in Manual mode; ignored (but preserved) when Auto λ is active -->
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>CV auto-tune Ki/Kp ratio ρ (<span id="cvPiZero_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">In <strong>Auto</strong> gain mode the integral gain is set as a fixed fraction of the proportional gain: <strong>Ki = ρ × Kp</strong>. This places the integrator's corner (where it starts pulling out steady-state error) relative to the loop's response speed. Lower ρ = lazier integral (slower to erase residual error, less windup); higher ρ = more aggressive integral. Default 0.70. Only affects Auto mode. (Was a hard-coded constant; exposed here for bench tuning.)</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="cvPiZero" type="number" step="0.05" min="0.2" max="1.5" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+                </div> <!-- end cvAutoBlock -->
+
+                <!-- Manual gains — shown only in Manual mode; ignored (but preserved) when Auto ω is active -->
                 <div id="cvManualBlock">
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Kp (A/V) (<span id="VoltageKp_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage loop proportional gain. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. Sets the fast-response term of the CV PI: CV loop output = Voltage Loop Kp × voltage error + voltage loop integrator. That output becomes the current setpoint sent to the output current loop, then clamped to the RPM/thermal current ceiling. <strong>Voltage-normalized:</strong> the value you enter behaves the same on a 12, 24, or 48 V bank, so you never re-tune it when you change system voltage (it is scaled to the bus behind the scenes).</span></span>
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Voltage Loop Kp (A/V) (<span id="VoltageKp_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage loop proportional gain. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. Sets the fast-response term of the CV PI: CV loop output = Voltage Loop Kp × voltage error + voltage loop integrator. That output becomes the current setpoint sent to the output current loop, then clamped to the RPM/thermal current ceiling. <strong>Voltage-normalized:</strong> the value you enter behaves the same on a 12, 24, or 48 V bank, so you never re-tune it when you change system voltage (it is scaled to the bus behind the scenes).</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="VoltageKp" type="number" step="0.01" min="0" max="9999" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
                   </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageKp" type="number" step="0.01" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Ki (<span id="VoltageKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain for the voltage loop — the slow-correction term that pulls battery voltage exactly to target over time. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. <strong>Asymmetric:</strong> when battery voltage is below target the integrator builds up at this rate (gentle, patient approach), but when it goes above target the integrator unwinds 7× faster (aggressive recovery from overshoot). The 7× faster unwind is gated by the <strong>CV Tuning Helpers</strong> toggle above — turn that OFF and the loop becomes a symmetric PI (unwinds at this same rate). The 7× multiplier itself is hard-coded; only the build-up rate (this setting) is user-tunable. On CV entry the integrator is seeded so the current setpoint matches the output PID's current value — no step in setpoint. Set to 0 to disable integral action. Higher values reach target faster after a target change or disturbance; too high causes overshoot at the target crossing. The default suits a typical AGM bank — large lithium banks (stiffer voltage) may need more. <strong>Voltage-normalized:</strong> the value you enter behaves the same on a 12, 24, or 48 V bank, so you never re-tune it when you change system voltage (it is scaled to the bus behind the scenes).</span></span>
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Voltage Loop Ki (<span id="VoltageKi_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain for the voltage loop — the slow-correction term that pulls battery voltage exactly to target over time. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. <strong>Asymmetric:</strong> when battery voltage is below target the integrator builds up at this rate (gentle, patient approach), but when it goes above target the integrator unwinds 7× faster (aggressive recovery from overshoot). The 7× faster unwind is gated by the <strong>CV Tuning Helpers</strong> toggle below — turn that OFF and the loop becomes a symmetric PI (unwinds at this same rate). The 7× multiplier itself is hard-coded; only the build-up rate (this setting) is user-tunable. On CV entry the integrator is seeded so the current setpoint matches the output PID's current value — no step in setpoint. Set to 0 to disable integral action. Higher values reach target faster after a target change or disturbance; too high causes overshoot at the target crossing. The default suits a typical AGM bank — large lithium banks (stiffer voltage) may need more. <strong>Voltage-normalized:</strong> the value you enter behaves the same on a 12, 24, or 48 V bank, so you never re-tune it when you change system voltage (it is scaled to the bus behind the scenes).</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="VoltageKi" type="number" step="0.01" min="0" max="9999" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
                   </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageKi" type="number" step="0.01" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
                 </div> <!-- end cvManualBlock -->
 
                 <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>CV Response Time (s) (<span id="cvRespS_echo">?</span>):<span id="cvRespPreview" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">&nbsp;</span></span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how fast the auto gain mode pulls battery voltage back to target after a disturbance or target change. Valid range 5–80 s; recommended 13–15 s (leaves some margin for cold batteries, which have higher internal resistance and can lead to overshoot). The other floor is the field ramp-rate limit (currently <strong><span id="cvRespRampNote">—</span> %/s</strong> of duty), so stay clear of that or you'll start seeing a more linear / less exponential recovery. Only affects Auto mode.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input id="cvRespS_input" name="cvRespS" type="number" step="1" min="5" max="80" oninput="previewCvResp()" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
+                <!-- Reset CV Integrator — utility, tied to the Kp/Ki above -->
+                <div style="margin:8px 0;">
+                  <button onclick="resetVoltageLoop()" class="btn-secondary">Reset CV Integrator</button>
+                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeroes the voltage loop integrator. Use if it's stuck at zero or wound up to a bad value — the PI will rebuild from scratch on the next tick. Useful after changing Voltage Loop Kp/Ki during a tuning session.</span></span>
                 </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>CV auto-tune Ki/Kp ratio ρ (<span id="cvPiZero_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">In <strong>Auto</strong> gain mode the integral gain is set as a fixed fraction of the proportional gain: <strong>Ki = ρ × Kp</strong>. This places the integrator's corner (where it starts pulling out steady-state error) relative to the loop's response speed. Lower ρ = lazier integral (slower to erase residual error, less windup); higher ρ = more aggressive integral. Default 0.70. Only affects Auto mode. (Was a hard-coded constant; exposed here for bench tuning.)</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="cvPiZero" type="number" step="0.05" min="0.2" max="1.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
+                <!-- ============ TEMPERATURE COMPENSATION ============ -->
+                <div class="param-subhead">Temperature compensation</div>
 
                 <hr />
                 <!-- Battery-temperature gain derate -->
@@ -7236,7 +7230,7 @@
                       <span class="toggle-label">Off</span>
                       <label class="switch">
                         <input id="battTempDerateEnable_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('battTempDerateEnable_checkbox', 'battTempDerateEnable', 'battTempDerateEnable')) { this.form.submit(); submitMessage(); }" />
+                          onchange="if(handleUserToggle('battTempDerateEnable_checkbox', 'battTempDerateEnable', 'battTempDerateEnable')) { this.form.submit(); submitMessage(); } syncCvDependentVis();" />
                         <span class="slider round"></span>
                       </label>
                       <span class="toggle-label">On</span>
@@ -7245,6 +7239,8 @@
                   </div>
                 </div>
 
+                <!-- Derate detail (status + coefficient) — shown only when the derate is On -->
+                <div id="cvDerateDetailBlock">
                 <div class="form-row">
                   <div class="form-label" style="font-size:0.9em; opacity:0.85; line-height:1.5;">
                     <span id="battTempDerate_status">Not yet commissioned — run the CV plant-fit step.</span>
@@ -7265,6 +7261,10 @@
                     </form>
                   </div>
                 </div>
+                </div> <!-- end cvDerateDetailBlock -->
+
+                <!-- ============ TARGET SHAPING & TIMING ============ -->
+                <div class="param-subhead">Target shaping &amp; timing</div>
 
                 <hr />
                 <div class="form-row">
@@ -7296,6 +7296,60 @@
                   </div>
                 </div>
 
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Voltage sensor smoothing filter (ms) (<span id="VoltageFilterTC_echo_cv">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA filter applied to the slope bleed signal and the charging stage machine (Bulk → Absorption transitions). PI error terms and Group 1/2 voltage comparisons use raw battery voltage — this setting does not affect them. Group 1's voltage rate-of-change uses its own separate EMA, controlled by dvdt EMA TC. Set in Tuning → Plant Delay.</span></span>
+                  </div>
+                  <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
+                    Read-only — set in Tuning → Plant Delay
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Voltage Loop Interval (ms) (<span id="VoltageLoopInterval_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the voltage loop's <strong>integrator</strong> (the slow-correction term) updates. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. The <strong>proportional response</strong> (the fast-correction term — Voltage Loop Kp × voltage error) runs every output PID tick (~5ms) regardless of this setting, so the loop reacts to voltage changes immediately; only the integral build-up cadence is controlled here. Shorter values make the integrator more responsive but can amplify noise; longer values make it smoother but slower to correct steady-state error.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageLoopInterval" type="number" step="1" min="1" max="999999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- ============ OVERSHOOT & OV-RECOVERY SHAPING ============ -->
+                <div class="param-subhead">Overshoot &amp; OV-recovery shaping</div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>CV Tuning Helpers (<span id="cvHelpersEnabled_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Master switch for two non-linear "helpers" that sit on top of the plain voltage PI: <strong>(1) asymmetric integrator unwind</strong> — when battery voltage goes above target the integrator drains 7× faster than it builds, and <strong>(2) slope-aware integrator bleed</strong> — drains the integrator early when voltage is rising fast near the target. Both exist for one purpose only: they <strong>REDUCE OVERSHOOT</strong> and <strong>HELP SPEED OVERVOLTAGE RECOVERY</strong>. They never make the loop more aggressive, so leaving them ON is always at least as safe.<br><br>Turn them <strong>OFF</strong> while tuning Voltage Loop Kp/Ki: the loop becomes a clean symmetric PI, so its overshoot and settling behaviour reflect Kp/Ki directly and are far <strong>easier to understand</strong>. Once Kp/Ki are dialled in, turn them back ON to add the overshoot/OV-recovery polish. This does NOT touch the real overvoltage protections (hardware OV, fast OV, hard clamp) — those stay live regardless.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="cvHelpersEnabled_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('cvHelpersEnabled_checkbox', 'cvHelpersEnabled', 'cvHelpersEnabled')) { this.form.submit(); submitMessage(); } syncCvDependentVis();" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="cvHelpersEnabled" name="cvHelpersEnabled" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- Slope-bleed knobs (helper #2) — shown only when CV Tuning Helpers are On -->
+                <div id="cvSlopeBleedBlock">
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -7345,32 +7399,7 @@
                     </form>
                   </div>
                 </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Voltage sensor smoothing filter (ms) (<span id="VoltageFilterTC_echo_cv">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA filter applied to the slope bleed signal and the charging stage machine (Bulk → Absorption transitions). PI error terms and Group 1/2 voltage comparisons use raw battery voltage — this setting does not affect them. Group 1's voltage rate-of-change uses its own separate EMA, controlled by dvdt EMA TC. Set in Tuning → Plant Delay.</span></span>
-                  </div>
-                  <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
-                    Read-only — set in Tuning → Plant Delay
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Interval (ms) (<span id="VoltageLoopInterval_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the voltage loop's <strong>integrator</strong> (the slow-correction term) updates. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. The <strong>proportional response</strong> (the fast-correction term — Voltage Loop Kp × voltage error) runs every output PID tick (~5ms) regardless of this setting, so the loop reacts to voltage changes immediately; only the integral build-up cadence is controlled here. Shorter values make the integrator more responsive but can amplify noise; longer values make it smoother but slower to correct steady-state error.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageLoopInterval" type="number" step="1" min="1" max="999999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
+                </div> <!-- end cvSlopeBleedBlock -->
 
               </details> <!-- END VTM Controller Parameters -->
 
@@ -7870,6 +7899,7 @@
       <button class="sub-tab" onclick="showSubTab('livedata', 'diag', event)">Diag</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'protection', event)">Protection</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'esp32', event)">ESP32</button>
+      <button class="sub-tab" onclick="showSubTab('livedata', 'console', event)">Console</button>
     </div>
     <div id="livedata-alternator" class="sub-tab-content">
 
@@ -11562,14 +11592,6 @@
           <button onclick="resetAccuracyScores()" class="btn-secondary btn-sm">Reset</button>
         </div>
 
-        <details style="margin:12px 0 0;" ontoggle="if (this.open) fetchAccState()">
-          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;font-size:13px;">Episode diagnostics</summary>
-          <!-- On-demand /accstate fetch: live episode state + discarded-episode counts by reason -->
-          <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:6px 0 12px 0;background:var(--bg-elev,rgba(127,127,127,0.06));">
-            <pre id="accStateBody" style="margin:0;font-size:0.78em;white-space:pre-wrap;color:var(--text-muted);">—</pre>
-          </div>
-        </details>
-
         <details style="margin:12px 0 0;">
           <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;font-size:13px;">Color guide</summary>
           <!-- Color guide: maps the green/orange/red of each cell to its value range (thresholds live in accScoreCell calls in script.js) -->
@@ -11617,8 +11639,19 @@
               </tbody>
             </table>
             <p style="font-size:0.74em;color:var(--text-muted);margin:8px 0 0 0;">
-              Thermal-overshoot bands track the live over-temp shutdown trip (default 2&nbsp;°F); red means it reached shutdown. Current overshoot is not scored at this time, too noisy to be meaningful.
+              Current overshoot is not scored at this time, too noisy to be meaningful.
             </p>
+          </div>
+        </details>
+
+        <details style="margin:8px 0 0;" ontoggle="if (this.open) fetchAccState()">
+          <summary style="cursor:pointer;font-weight:600;color:var(--text-muted);font-size:11px;">Diag</summary>
+          <!-- On-demand /accstate fetch: live episode state + discarded-episode counts by reason -->
+          <div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin:6px 0 12px 0;background:var(--bg-elev,rgba(127,127,127,0.06));">
+            <p style="margin:0 0 6px 0;font-size:0.7em;color:var(--text-muted);font-style:italic;">
+              Developer diagnostics. Study firmware to make better sense of this panel.
+            </p>
+            <pre id="accStateBody" style="margin:0;font-size:0.7em;white-space:pre-wrap;color:var(--text-muted);">—</pre>
           </div>
         </details>
         </div>
@@ -11634,16 +11667,16 @@
             <p><b>Charging System Health</b> grades today's alternator output against the best
               it's ever done under the same conditions. The engine-hours trend is the plot to
               watch: a healthy system holds roughly flat in the mid-90s+, and a steady downward
-              slope is an early warning. The This Session plot below it shows the same grading
-              live since this page was opened.</p>
+              slope is an early warning. The "This Session" plot below it shows the same grading
+              data "live" since the page was opened.</p>
             <p><b>Live Oscilloscope &amp; Historical Snapshots</b> shows the alternator's output
-              current sampled 20,000 times a second — fast enough to see individual rectifier
+              current sampled at 20khz — fast enough to see individual rectifier
               pulses. Reference pages are known-good waveforms frozen once per RPM band; anomaly
               captures are saved automatically when the fault monitor trips. When something looks
-              off, flip between the capture and the reference for that speed and compare.</p>
+              off, flip between the capture and a close reference for that speed and compare.</p>
             <p><b>Resonance &amp; Ripple Map</b> is a learned table of the strongest ripple tone at
               every speed and load — used by the commissioning wizard to help optimize signal
-              filter and control response.</p>
+              filters and control response.</p>
             <p><b>Wear Rate &amp; Component Life</b> estimates how fast the alternator is aging at
               the present speed and temperature, and roughly how much component life remains
               (based on physics, but not yet calibrated&hellip;)</p>
@@ -11944,6 +11977,22 @@
 
       </div><!-- closes #diag-panel-battery -->
     </div>
+
+    <div id="livedata-console" class="sub-tab-content">
+      <div class="settings-card wide-card">
+        <div class="form-label">
+          <button type="button" id="pauseConsoleBtn" class="btn-secondary btn-sm" onclick="toggleConsolePause()"
+            style="margin-left: 10px;">Pause</button>
+          <button type="button" class="btn-secondary btn-sm" onclick="copyConsole()" style="margin-left: 5px;">Copy</button>
+          <button type="button" class="btn-secondary btn-sm" onclick="clearConsole()" style="margin-left: 5px;">Clear</button>
+        </div>
+        <div id="consoleOutput" class="responsive-console"></div>
+        <div style="font-size: 11px; color: #888; margin-top: 8px; font-style: italic; text-align: center;">
+          Timestamps show when messages were received by the app, not when sent by the regulator.
+          Messages are throttled: max 5 every 700ms (adjustable in firmware).
+        </div>
+      </div>
+    </div>
   </div>
   </div>
 
@@ -12156,23 +12205,6 @@
 
   </div>
 
-
-  <!-- Console -->
-  <div id="console" class="tab-content">
-    <div class="settings-card wide-card">
-      <div class="form-label">
-        <button type="button" id="pauseConsoleBtn" class="btn-secondary btn-sm" onclick="toggleConsolePause()"
-          style="margin-left: 10px;">Pause</button>
-        <button type="button" class="btn-secondary btn-sm" onclick="copyConsole()" style="margin-left: 5px;">Copy</button>
-        <button type="button" class="btn-secondary btn-sm" onclick="clearConsole()" style="margin-left: 5px;">Clear</button>
-      </div>
-      <div id="consoleOutput" class="responsive-console"></div>
-      <div style="font-size: 11px; color: #888; margin-top: 8px; font-style: italic; text-align: center;">
-        Timestamps show when messages were received by the app, not when sent by the regulator.
-        Messages are throttled: max 5 every 700ms (adjustable in firmware).
-      </div>
-    </div>
-  </div>
 
   <!-- Cloud Features Tab -->
   <div id="cloudfeatures" class="tab-content">
@@ -12961,6 +12993,23 @@
       </div>
     </div>
   </div><!-- END battdef-modal-overlay -->
+
+  <!-- Commissioning Prerequisites: after the battery-defaults popup on a first Vessel Info save,
+       collects the sensor/current settings commissioning depends on before the wizard measures them.
+       Body rendered by commPrepRender() from /exportConfig; only edited fields are written (one /get). -->
+  <div id="commprep-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9200; align-items:center; justify-content:center;">
+    <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1e1e1e; color:#ddd; width:560px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 80px); display:flex; flex-direction:column;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Commissioning Prerequisites</span>
+        <button onclick="commPrepClose()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
+      </div>
+      <div id="commprep-body" style="padding:14px 16px; overflow-y:auto; flex:1; min-height:0;"></div>
+      <div style="padding:12px 16px; border-top:1px solid #333; display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
+        <button onclick="commPrepFinish(false)" style="background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">I'll do this later</button>
+        <button onclick="commPrepFinish(true)" style="background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; border:none; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Start Commissioning →</button>
+      </div>
+    </div>
+  </div><!-- END commprep-modal-overlay -->
 
   <!-- First-boot SoC seed popup — auto-opens once after the boot-time voltage seed (ack persisted
        in NVS via SocSeedAck), reopens any time from the header SOC readout. Body rendered by socSeedRender(). -->

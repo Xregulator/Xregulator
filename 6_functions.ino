@@ -444,6 +444,7 @@ void enter_sys_off() {
  */
 void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
   bool alreadyCut = gpio4IsLow;
+  g_fieldEventReason = (uint8_t)reason;  // authoritative cut cause for the banner OFF-reason telemetry
   digitalWrite(4, LOW);
   gpio4IsLow = true;
   // Fast OV: arm the cooldown lockout so the field can't re-engage for FIELD_COLLAPSE_DELAY (30s).
@@ -1679,6 +1680,7 @@ void AdjustFieldLearnMode() {
   // ========== FAST-PATH: critical fault check ==========
   FieldControlMode mode = selectFieldControlMode(tick);
   FieldEventReason reason = selectFieldEventReason(tick);
+  g_fieldEventReason = (uint8_t)reason;  // steady-state / commission-rest cause (immediate cuts overwrite this in applyImmediateCut)
 
   if (shouldImmediatelyCutGPIO4(reason) && !gpio4IsLow) {
     applyImmediateCut(tick, reason);

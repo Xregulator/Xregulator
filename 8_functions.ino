@@ -981,6 +981,15 @@ String manifestConfigObject(bool includeHardware) {
   CFG_EMIT_REGISTRY(ALT_SETTINGS, ALT_SETTING_COUNT)
   CFG_EMIT_REGISTRY(PERF_SETTINGS, PERF_SETTING_COUNT)
   #undef CFG_EMIT_REGISTRY
+  // Derived read-only: the base 12V-equiv CV gains the voltage loop is ACTUALLY running
+  // (recomputeCvGains sets these from the plant fit in Auto, or = the manual VoltageKp/Ki in
+  // Manual). Emitted so the blob is self-describing — the manual VoltageKp/Ki above are the
+  // dormant fallback whenever cvGainMode=Auto. NOT in CONFIG_MANIFEST, so applyImportConfig
+  // ignores them on the destination (it recomputes its own from its own plant fit).
+  if (!first) j += ',';
+  first = false;
+  j += "\"cvComputedKp\":"; cfgAppendJsonStr(j, String(cvComputedKp, 2));
+  j += ",\"cvComputedKi\":"; cfgAppendJsonStr(j, String(cvComputedKi, 2));
   j += "}";
   return j;
 }
