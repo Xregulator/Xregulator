@@ -4310,41 +4310,28 @@ void seedSocFromVoltage() {
     }
     vOcv = voltage - corr;
 
-    if (isLithium) {
-      estimatedSoC = (int)(ocvToSoC(vOcv) + 0.5f);  // ocvToSoC scales by BATTERY_VOLTAGE/12 itself
-      if (vOcv >= capOcvVolt[0] * socM) {
-        snapVlo = snapVhi = capOcvVolt[0] * socM;
-        snapPlo = snapPhi = 100;
-      } else if (vOcv < capOcvVolt[CAP_OCV_ROWS - 1] * socM) {
-        snapVlo = snapVhi = capOcvVolt[CAP_OCV_ROWS - 1] * socM;
-        snapPlo = snapPhi = 0;
-      } else {
-        for (int i = 0; i < CAP_OCV_ROWS - 1; i++) {
-          float vHi = capOcvVolt[i] * socM, vLo = capOcvVolt[i + 1] * socM;
-          if (vOcv <= vHi && vOcv >= vLo) {
-            snapVhi = vHi; snapPhi = capOcvSocPct[i];
-            snapVlo = vLo; snapPlo = capOcvSocPct[i + 1];
-            break;
-          }
+    // One lookup for every chemistry: capOcvVolt[] is chemistry-matched at commissioning
+    // (applyChemistryOcvPreset) and honors a hand-tuned curve. ocvToSoC scales by BATTERY_VOLTAGE/12.
+    estimatedSoC = (int)(ocvToSoC(vOcv) + 0.5f);
+    if (vOcv >= capOcvVolt[0] * socM) {
+      snapVlo = snapVhi = capOcvVolt[0] * socM;
+      snapPlo = snapPhi = capOcvSocPct[0];
+    } else if (vOcv < capOcvVolt[CAP_OCV_ROWS - 1] * socM) {
+      snapVlo = snapVhi = capOcvVolt[CAP_OCV_ROWS - 1] * socM;
+      snapPlo = snapPhi = capOcvSocPct[CAP_OCV_ROWS - 1];
+    } else {
+      for (int i = 0; i < CAP_OCV_ROWS - 1; i++) {
+        float vHi = capOcvVolt[i] * socM, vLo = capOcvVolt[i + 1] * socM;
+        if (vOcv <= vHi && vOcv >= vLo) {
+          snapVhi = vHi; snapPhi = capOcvSocPct[i];
+          snapVlo = vLo; snapPlo = capOcvSocPct[i + 1];
+          break;
         }
       }
-    } else {
-      if (vOcv >= 12.7f * socM) estimatedSoC = 100;
-      else if (vOcv >= 12.5f * socM) estimatedSoC = 90;
-      else if (vOcv >= 12.4f * socM) estimatedSoC = 80;
-      else if (vOcv >= 12.2f * socM) estimatedSoC = 60;
-      else if (vOcv >= 12.0f * socM) estimatedSoC = 40;
-      else if (vOcv >= 11.8f * socM) estimatedSoC = 20;
-      else estimatedSoC = 10;
-      float rung = (estimatedSoC == 100) ? 12.7f : (estimatedSoC == 90) ? 12.5f
-                 : (estimatedSoC == 80)  ? 12.4f : (estimatedSoC == 60) ? 12.2f
-                 : (estimatedSoC == 40)  ? 12.0f : (estimatedSoC == 20) ? 11.8f : 0.0f;
-      snapVlo = snapVhi = rung * socM;
-      snapPlo = snapPhi = estimatedSoC;
     }
-    Serial.printf("SOC SEED: estimated %d%% from %.2fV terminal, %.1fA, %.0f°F (Rx%.2f) -> %.2fV OCV (%s)\n",
+    Serial.printf("SOC SEED: estimated %d%% from %.2fV terminal, %.1fA, %.0f°F (Rx%.2f) -> %.2fV OCV (%s curve, %s Reff)\n",
                   estimatedSoC, voltage, iBat, isnan(boardTempF) ? -99.0f : boardTempF, rTempScale,
-                  vOcv, isLithium ? "lithium OCV table" : "lead-acid ladder");
+                  vOcv, BATTERY_TYPE.c_str(), isLithium ? "Li" : "Pb");
   } else {
     Serial.printf("SOC SEED: no valid voltage (%.2fV) - defaulting to 50%%\n", voltage);
   }

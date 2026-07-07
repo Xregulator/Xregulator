@@ -1561,6 +1561,30 @@ void capDeserializeOcv(const String &blob) {
   for (int i = 0; i < CAP_OCV_ROWS && pos < (int)blob.length(); i++) capOcvVolt[i] = bhTok(blob, pos);
 }
 
+static bool ocvMatchesPreset(const float *p) {
+  for (int i = 0; i < CAP_OCV_ROWS; i++) if (fabsf(capOcvVolt[i] - p[i]) > 0.005f) return false;
+  return true;
+}
+// True while capOcvVolt[] still equals one of the chemistry presets — i.e. the user has NOT hand-tuned it.
+bool ocvIsAnyPreset() {
+  return ocvMatchesPreset(capOcvPresetLifepo4) || ocvMatchesPreset(capOcvPresetAgm) || ocvMatchesPreset(capOcvPresetLead);
+}
+// Bind the rested-voltage curve to the selected chemistry unless the user hand-tuned it. Runs at
+// commissioning (vessel-info save) and at boot, before the SoC seed reads the curve, so voltage→SoC
+// matches the bank. Idempotent: no NVS write when the curve is already the right preset.
+void applyChemistryOcvPreset() {
+  if (!ocvIsAnyPreset()) return;  // custom curve — never clobber
+  String bt = BATTERY_TYPE; bt.toLowerCase();
+  const float *p = nullptr;
+  if (bt.indexOf("lifepo") >= 0 || bt.indexOf("lithium") >= 0 || bt.indexOf("li-ion") >= 0 ||
+      bt.indexOf("liion") >= 0 || bt.indexOf("lfp") >= 0)  p = capOcvPresetLifepo4;
+  else if (bt.indexOf("agm") >= 0)                         p = capOcvPresetAgm;
+  else if (bt.indexOf("lead") >= 0)                        p = capOcvPresetLead;
+  if (!p || ocvMatchesPreset(p)) return;  // "other"/unknown chemistry, or already the right curve
+  for (int i = 0; i < CAP_OCV_ROWS; i++) capOcvVolt[i] = p[i];
+  settingWrite(NK_capOcvBlob, capSerializeOcv().c_str());
+}
+
 // Call after InitSystemSettings() — needs the NVS settings layer up.
 void bhInitSettings() {
   if (!settingExists(NK_bhStepLowA))   settingWrite(NK_bhStepLowA, String(bhStepLowA, 1).c_str());   else bhStepLowA   = settingRead(NK_bhStepLowA).toFloat();

@@ -605,15 +605,6 @@ enum Csv2Index {
   CSV2_BestUpwindVmgAT,     // best upwind VMG, kts ×100
   CSV2_LongestGaleAT,       // longest gale duration, hours ×100
 
-  // Control Accuracy Scores (accumulate-since-reset): RMS error + worst overshoot per loop.
-  // Current in A ×100, voltage in mV (V ×1000), thermal in °F ×100.
-  CSV2_accCurRms,    // inner current loop RMS error (A ×100)
-  CSV2_accCurPeak,   // inner current loop worst over-current (A ×100)
-  CSV2_accVoltRms,   // CV loop RMS error (mV)
-  CSV2_accVoltPeak,  // CV loop worst over-voltage (mV)
-  CSV2_accThermRms,  // thermal loop RMS error (°F ×100)
-  CSV2_accThermPeak, // thermal loop worst over-temp (°F ×100)
-
   CSV2_cpuFreqMhz,   // live CPU clock (80 or 240 MHz) — 80 = engine-off low-power throttle, 240 = full speed
 
   // ADS slow-channel inter-sample gap meters (ms). last = most recent gap between valid
@@ -637,17 +628,29 @@ enum Csv2Index {
 
   CSV2_cvTempDerateScale, // live battery-temp gain derate multiplier on the active CV gains; ×1000
 
-  // Control Accuracy v3 episode coverage (spec: CONTROL_ACCURACY_V3_EPISODE_SPEC.md). Counts +
-  // seconds so the UI can distinguish "0 episodes over hours of eligible time" from "never eligible".
-  CSV2_accCurEp,      // committed episodes since reset, current loop
-  CSV2_accVoltEp,     // committed episodes since reset, voltage loop
-  CSV2_accThermSess,  // thermal containment sessions since reset
-  CSV2_accCurEligS,   // seconds current-loop authority conditions held
-  CSV2_accVoltEligS,  // seconds CV was engaged
-  CSV2_accThermEligS, // seconds thermal binding condition held (pre-settle)
-  CSV2_accCurScorS,   // scored seconds (RMS denominator, incl. live episode), current
-  CSV2_accVoltScorS,  // scored seconds, voltage
-  CSV2_accThermScorS, // scored seconds, thermal
+  // Control Accuracy v4 routine-data loop health (spec: CONTROL_ACCURACY_V4_ROUTINE_SPEC.md).
+  // Raw accumulators; the UI derives Tracking % = inbandS/activeS, mean recovery = recovS10/10/exc,
+  // Constrained % = constS/validS. Current in A, voltage in 12V-equiv (mV where scaled), thermal °F.
+  CSV2_accCurValidS,    // current loop: seconds in authority
+  CSV2_accCurActiveS,   // challenged seconds — tracking denominator
+  CSV2_accCurInbandS,   // in-band seconds while active — tracking numerator
+  CSV2_accCurConstS,    // seconds output railed / protection clamp
+  CSV2_accCurExc,       // excursions (band exits) since reset
+  CSV2_accCurRecovS10,  // out-of-band seconds summed across excursions (s ×10)
+  CSV2_accCurOverExp,   // damaging exposure ∫(e−band)+dt (A·s ×100)
+  CSV2_accCurWorst,     // worst over-current vs command (A ×100)
+  CSV2_accVoltValidS,   // voltage loop: seconds CV engaged (non-zeroFloat)
+  CSV2_accVoltActiveS,
+  CSV2_accVoltInbandS,
+  CSV2_accVoltConstS,   // seconds Icv pinned (ceiling/zero) / protection / aw-recovery
+  CSV2_accVoltExc,
+  CSV2_accVoltRecovS10,
+  CSV2_accVoltOverExp,  // V·s 12V-equiv ×100
+  CSV2_accVoltWorst,    // worst over-voltage (mV 12V-equiv)
+  CSV2_accThermBindS,   // thermal: binding-and-settled seconds
+  CSV2_accThermInbandS, // of those, within ±3°F of the regulation setpoint
+  CSV2_accThermSess,    // containment sessions since reset
+  CSV2_accThermWorst,   // worst over-temp vs limit (°F ×100) — unconditional
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -6502,14 +6505,14 @@ void setupServer() {
     bool testActive = (TuningMode && tuningScore.toggleCount > 0);
     float ts = (tuningScore.activeTimeSec > 0.0f)
                  ? (tuningScore.errorAccum / tuningScore.activeTimeSec) : 0.0f;
-    // "live" carries the since-reset Control Accuracy score for this loop, PROVISIONAL (committed
-    // episodes + live episode buffer): [RMS error (A), worst over-current (A), 0, 0]. (4-slot
+    // "live" carries the since-reset Control Accuracy v4 numbers for this loop:
+    // [Tracking % (in-band while active), worst over-current (A), 0, 0]. (4-slot
     // shape kept for the tuning UI parser.)
     pos += snprintf(buf + pos, 10240 - pos,
       "],\"live\":[%.2f,%.2f,%.2f,%.2f],"
       "\"ts\":%.2f,\"tt\":%d,\"ta\":%d}",
-      accScoreRms(accCurrent.errAccum + epCur.errAccum, accCurrent.timeAccum + epCur.timeAccum),
-      fmaxf(accCurrent.worstOver, (epCur.state && epCur.sign > 0) ? epCur.peak : 0.0f), 0.0f, 0.0f,
+      (accCur4.activeSec > 0.5) ? (float)(100.0 * accCur4.inbandActiveSec / accCur4.activeSec) : 0.0f,
+      accCur4.worstOver, 0.0f, 0.0f,
       ts, (int)tuningScore.toggleCount, testActive ? 1 : 0);
 
     // Chunked send — only one TCP-MSS chunk (~1.5 KB) lands on the internal heap.
@@ -6846,14 +6849,14 @@ void setupServer() {
                         + cvTuningScore.totalLowUndershootVs)
              / cvTuningScore.activeTimeSec;
     }
-    // "live" carries the since-reset Control Accuracy score for the CV loop, PROVISIONAL (committed
-    // episodes + live episode buffer): [RMS error (mV), worst over-voltage (mV), 0, 0]. (4-slot
+    // "live" carries the since-reset Control Accuracy v4 numbers for the CV loop:
+    // [Tracking % (in-band while active), worst over-voltage (mV 12V-equiv), 0, 0]. (4-slot
     // shape kept for the tuning UI parser.)
     pos += snprintf(buf + pos, (pos >= 32768 ? 0 : 32768 - pos),
-      "],\"live\":[%.0f,%.0f,%.0f,%.0f],"
+      "],\"live\":[%.2f,%.0f,%.0f,%.0f],"
       "\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
-      accScoreRms(accVoltage.errAccum + epVolt.errAccum, accVoltage.timeAccum + epVolt.timeAccum) * 1000.0f,
-      fmaxf(accVoltage.worstOver, (epVolt.state && epVolt.sign > 0) ? epVolt.peak : 0.0f) * 1000.0f, 0.0f, 0.0f,  // mV
+      (accVolt4.activeSec > 0.5) ? (float)(100.0 * accVolt4.inbandActiveSec / accVolt4.activeSec) : 0.0f,
+      accVolt4.worstOver * 1000.0f, 0.0f, 0.0f,  // mV
       cvts, (int)cvTuningScore.scoredHighCount, cvTestActive ? 1 : 0);
 
     // Chunked send: only ~1.5 KB per chunk lands on the internal heap. bufPtr is
@@ -6878,10 +6881,8 @@ void setupServer() {
     cvTuningScore        = {};
     cvTuningParamChanged = false;
     if (cvTuningLog) memset(cvTuningLog, 0, 50 * sizeof(CVTuningRecord));
-    accVoltage = {};  // clear the CV loop's Control Accuracy score too (incl. live episode + stats)
-    epVolt = {};
-    accVoltStats = {};
-    accVRegime = 0;
+    accVolt4 = {};  // clear the CV loop's Control Accuracy numbers too (incl. live excursion)
+    excVolt = {};
     pendingSaveCVTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
@@ -6893,48 +6894,42 @@ void setupServer() {
     tuningScore       = {};
     tuningParamChanged = false;
     if (tuningLog) memset(tuningLog, 0, 50 * sizeof(TuningRecord));
-    accCurrent = {};  // clear the inner current loop's Control Accuracy score too (incl. live episode + stats)
-    epCur = {};
-    accCurStats = {};
-    accCurRefSeeded = false;
+    accCur4 = {};  // clear the inner current loop's Control Accuracy numbers too (incl. live excursion)
+    excCur = {};
     pendingSaveTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
 
-  // Manual "Reset" button under the Control Accuracy Scores panel. Clears committed accumulators,
-  // coverage stats AND live episode buffers. (The daily post-snapshot auto-reset passes false so a
-  // live episode carries across the window boundary.)
+  // Manual "Reset" button under the Control Accuracy panel. Clears all accumulators AND the live
+  // excursion stopwatches. (The daily post-snapshot auto-reset passes false so an in-progress
+  // excursion carries whole into the new window.)
   server.on("/resetAccuracyScores", HTTP_POST, [](AsyncWebServerRequest *request) {
     resetAccuracyScores(true);
     request->send(200, "text/plain", "OK");
   });
 
-  // Control Accuracy v3 diagnostics — live episode state + voids by reason, fetched on demand by
-  // the panel's expander (kept out of CSV2 to bound field growth). Void order matches AccVoidReason.
+  // Control Accuracy v4 diagnostics — raw accumulators + live excursion state, fetched on demand
+  // by the panel's expander (kept out of CSV2 to bound field growth).
   server.on("/accstate", HTTP_GET, [](AsyncWebServerRequest *request) {
     char buf[768];
     int p = snprintf(buf, sizeof(buf),
-                     "{\"reasons\":[\"rail\",\"ceiling\",\"engine_stop\",\"mode_exit\",\"cmd_zero\","
-                     "\"prot_unrelated\",\"sensor_suspect\",\"sample_gap\",\"target_step\",\"manual_reset\"],"
-                     "\"cur\":{\"active\":%d,\"sign\":%d,\"epSec\":%.1f,\"epPeak\":%.2f,\"episodes\":%u,"
-                     "\"eligibleS\":%.0f,\"scoredS\":%.1f,\"voids\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]},",
-                     (int)epCur.state, (int)epCur.sign, (float)epCur.timeAccum, epCur.peak,
-                     accCurStats.episodes, (float)accCurStats.eligibleSec,
-                     (float)(accCurrent.timeAccum + epCur.timeAccum),
-                     accCurStats.voids[0], accCurStats.voids[1], accCurStats.voids[2], accCurStats.voids[3],
-                     accCurStats.voids[4], accCurStats.voids[5], accCurStats.voids[6], accCurStats.voids[7],
-                     accCurStats.voids[8], accCurStats.voids[9]);
+                     "{\"cur\":{\"validS\":%.0f,\"activeS\":%.0f,\"inbandS\":%.0f,\"constS\":%.0f,"
+                     "\"exc\":%u,\"recovS\":%.1f,\"overExp\":%.2f,\"worst\":%.2f,"
+                     "\"liveExc\":%d,\"liveSide\":%d,\"liveOutS\":%.1f},",
+                     (float)accCur4.validSec, (float)accCur4.activeSec, (float)accCur4.inbandActiveSec,
+                     (float)accCur4.constrainedSec, (unsigned)accCur4.excursions, (float)accCur4.recovSecSum,
+                     (float)accCur4.overExpSum, accCur4.worstOver,
+                     (int)excCur.state, (int)excCur.side, (float)excCur.outSec);
     p += snprintf(buf + p, sizeof(buf) - p,
-                  "\"volt\":{\"active\":%d,\"sign\":%d,\"regime\":%u,\"epSec\":%.1f,\"epPeakMv\":%.0f,"
-                  "\"episodes\":%u,\"eligibleS\":%.0f,\"scoredS\":%.1f,\"voids\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]},"
-                  "\"therm\":{\"sessions\":%u,\"eligibleS\":%.0f,\"scoredS\":%.1f}}",
-                  (int)epVolt.state, (int)epVolt.sign, (unsigned)accVRegime, (float)epVolt.timeAccum,
-                  epVolt.peak * 1000.0f, accVoltStats.episodes, (float)accVoltStats.eligibleSec,
-                  (float)(accVoltage.timeAccum + epVolt.timeAccum),
-                  accVoltStats.voids[0], accVoltStats.voids[1], accVoltStats.voids[2], accVoltStats.voids[3],
-                  accVoltStats.voids[4], accVoltStats.voids[5], accVoltStats.voids[6], accVoltStats.voids[7],
-                  accVoltStats.voids[8], accVoltStats.voids[9],
-                  accThermSessions, (float)accThermEligibleSec, (float)accThermal.timeAccum);
+                  "\"volt\":{\"validS\":%.0f,\"activeS\":%.0f,\"inbandS\":%.0f,\"constS\":%.0f,"
+                  "\"exc\":%u,\"recovS\":%.1f,\"overExpMv\":%.0f,\"worstMv\":%.0f,"
+                  "\"liveExc\":%d,\"liveSide\":%d,\"liveOutS\":%.1f},"
+                  "\"therm\":{\"sessions\":%u,\"bindS\":%.0f,\"inbandS\":%.0f,\"worstF\":%.1f}}",
+                  (float)accVolt4.validSec, (float)accVolt4.activeSec, (float)accVolt4.inbandActiveSec,
+                  (float)accVolt4.constrainedSec, (unsigned)accVolt4.excursions, (float)accVolt4.recovSecSum,
+                  (float)(accVolt4.overExpSum * 1000.0), accVolt4.worstOver * 1000.0f,
+                  (int)excVolt.state, (int)excVolt.side, (float)excVolt.outSec,
+                  accThermSessions, (float)accThermBindingSec, (float)accThermInbandSec, accThermWorstOverF);
     request->send(200, "application/json", buf);
   });
 
@@ -7550,8 +7545,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                // +5: lifetime nav/sailing records (longest trip, max 24h dist, deepest anchorage, best upwind VMG, longest gale)
                                "%d,%d,%d,%d,%d,"
-                               // +12: inner-current-loop live accuracy (×4, amps²×10000) + CV-voltage-loop RMS error (×4, mV) + CV peak overshoot (×4, mV), 1m/10m/100m/1000m windows each
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // +6 (was +12): v4 removed the 6 RMS/peak fields — count-only bookkeeping; field identity is via CSV2_FIELDS order
+                               "%d,%d,%d,%d,%d,%d,"
                                // +1: live CPU clock (80 or 240 MHz)
                                "%d,"
                                // +4: ADS slow-channel gap meters (ch0/ch2 last+worst, ms)
@@ -7562,8 +7557,9 @@ void SendWifiData() {
                                "%d,%d,"
                                // +1: live battery-temp CV gain derate multiplier (×1000)
                                "%d,"
-                               // +9: Control Accuracy v3 coverage (3 episode/session counts, 3 eligible s, 3 scored s)
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               // +20: Control Accuracy v4 routine-data loop health (8 current + 8 voltage + 4 thermal)
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -8088,15 +8084,6 @@ void SendWifiData() {
                                SafeInt(DeepestAnchorage_Ft_AllTime, 10),   // CSV2_DeepestAnchorAT   (ft ×10)
                                SafeInt(best_upwind_vmg_alltime, 100),      // CSV2_BestUpwindVmgAT   (kts ×100)
                                SafeInt(longest_gale_duration_hours_alltime, 100), // CSV2_LongestGaleAT (hr ×100)
-                               // Control Accuracy Scores (since last reset). RMS error + worst overshoot per loop.
-                               // Electrical values are PROVISIONAL: committed episodes + the live episode buffer,
-                               // so the panel can't show a clean zero while a deviation is in progress.
-                               SafeInt(accScoreRms(accCurrent.errAccum + epCur.errAccum, accCurrent.timeAccum + epCur.timeAccum), 100),  // CSV2_accCurRms (A ×100)
-                               SafeInt(fmaxf(accCurrent.worstOver, (epCur.state && epCur.sign > 0) ? epCur.peak : 0.0f), 100),  // CSV2_accCurPeak (A ×100)
-                               SafeInt(accScoreRms(accVoltage.errAccum + epVolt.errAccum, accVoltage.timeAccum + epVolt.timeAccum), 1000),  // CSV2_accVoltRms (V→mV)
-                               SafeInt(fmaxf(accVoltage.worstOver, (epVolt.state && epVolt.sign > 0) ? epVolt.peak : 0.0f), 1000),  // CSV2_accVoltPeak (V→mV)
-                               SafeInt(accScoreRms(accThermal.errAccum, accThermal.timeAccum), 100),     // CSV2_accThermRms (°F ×100)
-                               SafeInt(accThermal.worstOver, 100),        // CSV2_accThermPeak (°F ×100)
                                SafeInt(getCpuFrequencyMhz()),             // CSV2_cpuFreqMhz   (MHz ×1)
                                SafeInt(ch0GapLastMs),                     // CSV2_ch0GapLast   (ms)
                                SafeInt(ch0GapWorstMs),                    // CSV2_ch0GapWorst  (ms)
@@ -8109,15 +8096,28 @@ void SendWifiData() {
                                SafeInt(httpsUploadLastMs),                // CSV2_httpsUpload_win -> Core-0 cloud op LAST (ms)
                                SafeInt(httpsUploadWorstMs),               // CSV2_httpsUpload_ses -> Core-0 cloud op WORST since reset (ms)
                                SafeInt(cvTempDerateScale, 1000),          // CSV2_cvTempDerateScale -> battery-temp gain derate multiplier (×1000)
-                               (int)accCurStats.episodes,                 // CSV2_accCurEp
-                               (int)accVoltStats.episodes,                // CSV2_accVoltEp
+                               // Control Accuracy v4 (spec: CONTROL_ACCURACY_V4_ROUTINE_SPEC.md). Raw accumulators;
+                               // the UI derives Tracking % / mean recovery / Constrained % client-side.
+                               (int)accCur4.validSec,                     // CSV2_accCurValidS
+                               (int)accCur4.activeSec,                    // CSV2_accCurActiveS
+                               (int)accCur4.inbandActiveSec,              // CSV2_accCurInbandS
+                               (int)accCur4.constrainedSec,               // CSV2_accCurConstS
+                               (int)accCur4.excursions,                   // CSV2_accCurExc
+                               (int)(accCur4.recovSecSum * 10.0),         // CSV2_accCurRecovS10 (s ×10)
+                               SafeInt((float)accCur4.overExpSum, 100),   // CSV2_accCurOverExp (A·s ×100)
+                               SafeInt(accCur4.worstOver, 100),           // CSV2_accCurWorst (A ×100)
+                               (int)accVolt4.validSec,                    // CSV2_accVoltValidS
+                               (int)accVolt4.activeSec,                   // CSV2_accVoltActiveS
+                               (int)accVolt4.inbandActiveSec,             // CSV2_accVoltInbandS
+                               (int)accVolt4.constrainedSec,              // CSV2_accVoltConstS
+                               (int)accVolt4.excursions,                  // CSV2_accVoltExc
+                               (int)(accVolt4.recovSecSum * 10.0),        // CSV2_accVoltRecovS10 (s ×10)
+                               SafeInt((float)accVolt4.overExpSum, 100),  // CSV2_accVoltOverExp (V·s 12V-equiv ×100)
+                               SafeInt(accVolt4.worstOver, 1000),         // CSV2_accVoltWorst (V→mV 12V-equiv)
+                               (int)accThermBindingSec,                   // CSV2_accThermBindS
+                               (int)accThermInbandSec,                    // CSV2_accThermInbandS
                                (int)accThermSessions,                     // CSV2_accThermSess
-                               (int)accCurStats.eligibleSec,              // CSV2_accCurEligS
-                               (int)accVoltStats.eligibleSec,             // CSV2_accVoltEligS
-                               (int)accThermEligibleSec,                  // CSV2_accThermEligS
-                               (int)(accCurrent.timeAccum + epCur.timeAccum),   // CSV2_accCurScorS (incl. live episode)
-                               (int)(accVoltage.timeAccum + epVolt.timeAccum),  // CSV2_accVoltScorS (incl. live episode)
-                               (int)accThermal.timeAccum                  // CSV2_accThermScorS
+                               SafeInt(accThermWorstOverF, 100)           // CSV2_accThermWorst (°F ×100)
     );
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
@@ -8800,6 +8800,7 @@ void saveVesselInfoToFile() {
   settingWrite(NK_SolarWatts,         String(SolarWatts).c_str());
 
   vesselInfoSaved = true;
+  applyChemistryOcvPreset();  // chemistry-match the rested-voltage curve before the seed reads it
   seedSocFromVoltage();  // factory-fresh path: seed was deferred until real chemistry/capacity existed
 }
 

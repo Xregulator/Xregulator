@@ -3070,26 +3070,27 @@ bool buildConfigPayload() {
     ",\"fa_pkpk_worst_session\":%.2f,\"fa_peak_worst_a_session\":%.2f,\"fa_peak_worst_hz_session\":%.1f",
     faSesPkpkWorstA, faSesPeakWorstA, faSesPeakWorstHz);
 
-  // Control Accuracy Scores since the last reset (≈one day — these auto-reset right after this
+  // Control Accuracy numbers since the last reset (≈one day — these auto-reset right after this
   // upload succeeds, so each daily snapshot is one independent measurement of loop performance).
-  // RMS tracking error + worst damaging overshoot per loop. Current is amps, thermal is °F; the
-  // voltage pair is 12V-EQUIVALENT mV (error ÷ class ratio at accumulation) so the columns are
-  // fleet-comparable across 12/24/48V banks.
   // CLOUD CONTRACT: like every state key, these are spread into the device_state_daily INSERT —
   // the 6 columns (acc_cur_rms_a, acc_cur_peak_a, acc_volt_rms_mv, acc_volt_peak_mv,
   // acc_therm_rms_f, acc_therm_peak_f) MUST exist in device_state_daily before this firmware ships,
   // or the whole daily snapshot 500s.
-  // v3 SEMANTICS BREAK (fw > 0.0.46): values are episode-conditional (committed challenge episodes
-  // only — no steady-state dwell in the RMS denominator), NOT trend-continuous with v2 rows.
-  // Filter fleet trends on this row's firmware_version_int. Uploads stay committed-only by design
-  // (a live episode carries into the next window; the dashboard shows it provisionally).
+  // v4 SEMANTICS BREAK (fw > 0.0.46): the *_rms columns now carry Tracking/containment % (0-100,
+  // in-band fraction of challenged/binding time — spec CONTROL_ACCURACY_V4_ROUTINE_SPEC.md); the
+  // *_peak columns keep their physical units (worst damaging overshoot: A, 12V-equiv mV, °F over
+  // limit). NOT trend-continuous with v2/v3 rows — filter fleet trends on firmware_version_int.
+  // -1 = never challenged today (distinguishes "not observed" from "0% tracking").
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
     ",\"acc_cur_rms_a\":%.2f,\"acc_cur_peak_a\":%.2f,"
     "\"acc_volt_rms_mv\":%.0f,\"acc_volt_peak_mv\":%.0f,"
     "\"acc_therm_rms_f\":%.2f,\"acc_therm_peak_f\":%.2f",
-    accScoreRms(accCurrent.errAccum, accCurrent.timeAccum), accCurrent.worstOver,
-    accScoreRms(accVoltage.errAccum, accVoltage.timeAccum) * 1000.0f, accVoltage.worstOver * 1000.0f,
-    accScoreRms(accThermal.errAccum, accThermal.timeAccum), accThermal.worstOver);
+    (accCur4.activeSec > 0.5) ? (float)(100.0 * accCur4.inbandActiveSec / accCur4.activeSec) : -1.0f,
+    accCur4.worstOver,
+    (accVolt4.activeSec > 0.5) ? (float)(100.0 * accVolt4.inbandActiveSec / accVolt4.activeSec) : -1.0f,
+    accVolt4.worstOver * 1000.0f,
+    (accThermBindingSec > 0.5) ? (float)(100.0 * accThermInbandSec / accThermBindingSec) : -1.0f,
+    accThermWorstOverF);
 
   // Close state, close root object
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "}}");

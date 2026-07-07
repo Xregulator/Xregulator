@@ -2686,7 +2686,9 @@ bool tuningSquareAbrupt = false;  // when set, the TuningMode square wave bypass
                                   // instant for its edge-gain extraction. Transient — auto-cleared on
                                   // TuningMode exit; never persisted.
 
-// Battery Health: active DCIR test + passive capacity-%-vs-cycles. Lithium-only.
+// Battery Health: active DCIR test + passive capacity-%-vs-cycles. Chemistry-agnostic — DCIR is
+// pure ohms; the capacity-trend OCV curve + anchor window are set per chemistry from the web
+// (LiFePO4 / lead-acid / AGM presets via the Vessel-Info populator; type "other" enters its own).
 // All NVS writes are field-off-deferred — a DCIR test always ends with the engine on.
 struct BattHealthSample {
   uint32_t tMs;
@@ -2755,11 +2757,17 @@ float    bhBaselineCapacityAh = 0.0f;       // first measured capacity (used whe
 #define  CAP_OCV_ROWS 11
 const uint8_t capOcvSocPct[CAP_OCV_ROWS] = {100, 90, 80, 60, 40, 30, 20, 15, 10, 5, 0};   // fixed breakpoints
 float    capOcvVolt[CAP_OCV_ROWS] = {13.6f, 13.4f, 13.3f, 13.2f, 13.1f, 13.0f, 12.9f, 12.8f, 12.5f, 12.0f, 10.0f};  // RESTED 12V LiFePO4 default; user-editable, scaled by BATTERY_VOLTAGE/12 at lookup
+// Chemistry rested-voltage presets (12V-referenced), mirror of web CAP_OCV_PRESETS. Loaded into
+// capOcvVolt[] by chemistry at commissioning so both the SoC seed and the capacity anchor read the
+// bank's real curve; a hand-tuned curve (matching no preset) is left untouched.
+const float capOcvPresetLifepo4[CAP_OCV_ROWS] = {13.60f, 13.40f, 13.30f, 13.20f, 13.10f, 13.00f, 12.90f, 12.80f, 12.50f, 12.00f, 10.00f};
+const float capOcvPresetAgm[CAP_OCV_ROWS]     = {12.85f, 12.70f, 12.55f, 12.35f, 12.15f, 12.05f, 11.90f, 11.80f, 11.70f, 11.60f, 11.50f};
+const float capOcvPresetLead[CAP_OCV_ROWS]    = {12.70f, 12.50f, 12.40f, 12.20f, 12.00f, 11.90f, 11.80f, 11.73f, 11.65f, 11.55f, 11.40f};
 // Exposed config
 float    capRestCurrentFrac = 0.01f;  // |I_batt| < frac×RATED ("resting"); default C/100
 uint16_t capRestFloorMin    = 30;     // minimum rest before OCV is trusted (min)
 float    capSettleRateMv10  = 2.0f;   // dV/dt settle threshold (mV per 10 min) — voltage must be this flat
-float    capSocLowMax       = 20.0f;  // low anchor must be ≤ this (only the bottom knee is reliable on LiFePO4)
+float    capSocLowMax       = 20.0f;  // low anchor must be ≤ this. LiFePO4 default 20 (only its flat curve's bottom knee reads SoC reliably); lead-acid/AGM set ~50 from the web since their OCV maps across the whole range
 float    capMinSpan         = 70.0f;  // (capFullSoc − socLow) must exceed this — "deep enough"
 float    capFullSoc         = 100.0f; // SoC assigned to the full-charge anchor
 uint8_t  capRefMode         = 0;      // 0 = % vs rated (BatteryCapacity_Ah), 1 = % vs first measurement
@@ -2798,6 +2806,8 @@ void   capTrackTick(float I_batt, float V_filt, float tempC, float dtSec);
 void   capTrackOnFull(uint32_t epoch, float tempC);
 String capSerializeOcv();
 void   capDeserializeOcv(const String &blob);
+bool   ocvIsAnyPreset();
+void   applyChemistryOcvPreset();
 
 // ── Tuning→Current closed-loop sine generator (Stage 2) ───────────────────────
 // Waveform: 0 = square (existing ISE tuning), 1 = sine manual, 2 = sine auto-sweep.
@@ -2903,86 +2913,70 @@ bool tuningParamChanged = false;             // set by server handlers when a tu
 volatile bool manualCommitTuningRequested = false;   // set by UI commit button
 volatile bool manualCommitCVTuningRequested = false; // set by UI commit button
 
-// ===== Control Accuracy Scores v3 — challenge-episode scoring. Full design:
-// Working Markdown Docs/CONTROL_ACCURACY_V3_EPISODE_SPEC.md. Electrical loops score only
-// discrete deviation episodes (steady-state dwell contributes nothing); thermal keeps the
-// v2 while-binding RMS (pinned at the limit IS continuous challenge). Auto-reset after each
-// successful config-snapshot upload (globals only — a live episode carries across, so a
-// failure spanning the daily boundary lands in the next window); manual Reset clears everything.
-// errAccum/timeAccum are DOUBLE on purpose: a float32 running sum silently STOPS growing once it
-// passes ~a day of accumulated time (the per-tick dt drops below the float ULP and rounds away).
-struct AccuracyScore {
-  double   errAccum;        // Σ(e²·dt) over committed episodes (thermal: over binding time)
-  double   timeAccum;       // Σ dt of the same — the RMS denominator ("scored seconds")
-  float    worstOver;       // worst single excursion in the damaging direction (physical units)
-  uint32_t bindingStartMs;  // thermal only: millis() binding went true (0 = not binding)
+// ===== Control Accuracy v4 — routine-data loop health. Full design:
+// Working Markdown Docs/CONTROL_ACCURACY_V4_ROUTINE_SPEC.md. No episodes, no reference
+// model. Per loop, each valid tick lands in ONE bucket, priority CONSTRAINED (output at a
+// rail / protection clamp — reported as its own number, never graded as loop error) >
+// ACTIVE (command moving or recent challenge — the graded tracking denominator) > QUIET
+// (steady dwell — earns nothing toward the graded number). Band exits run an excursion
+// stopwatch (count + out-of-band seconds → mean recovery time, dilution-immune); damaging-
+// side exposure and worst peak are RECORDED unconditionally within valid time (facts about
+// what the battery/alternator experienced, separate from graded blame). Auto-reset after
+// each successful config-snapshot upload; manual Reset also discards live stopwatches.
+// Accumulators are DOUBLE on purpose: a float32 running sum silently STOPS growing once
+// it passes ~a day of accumulated time (per-tick dt rounds below the float ULP).
+struct AccLoopV4 {
+  double   validSec;        // loop in authority
+  double   activeSec;       // challenged time — tracking denominator
+  double   inbandActiveSec; // in band while active — tracking numerator
+  double   constrainedSec;  // output railed / protection clamp owned the command
+  double   recovSecSum;     // Σ unpaused out-of-band seconds across excursions
+  double   overExpSum;      // Σ max(0, damaging e − band)·dt (unit·seconds)
+  float    worstOver;       // worst damaging-side error (physical units)
+  uint16_t excursions;      // confirmed band exits since reset
 };
-AccuracyScore accCurrent = {};  // inner current loop — error/overshoot in amps
-AccuracyScore accVoltage = {};  // CV voltage loop — error/overshoot in 12V-equiv volts (displayed mV)
-AccuracyScore accThermal = {};  // thermal loop — error/overshoot in °F
+AccLoopV4 accCur4 = {};   // inner current loop — amps; band = max(3 A, 5% of rated)
+AccLoopV4 accVolt4 = {};  // CV voltage loop — 12V-equiv volts (displayed mV)
 
-// Live episode buffer — accumulates locally while a deviation episode is ACTIVE; only a
-// COMMIT folds it into the AccuracyScore globals (a VOID discards it, counted by reason).
-struct AccEpisode {
-  uint8_t  state;        // 0 = idle, 1 = active
-  int8_t   sign;         // active episode side: +1 = damaging (over), -1 = under
-  int8_t   enterSign;    // side currently being debounced toward opening (or flip while active)
-  uint8_t  enterTicks;   // consecutive ticks beyond the entry band on enterSign's side
-  uint16_t samples;      // valid ACTIVE ticks — maturity gate for commit-on-trip
-  uint32_t exitStartMs;  // error inside exit band since (0 = not exiting)
-  double   errAccum;     // episode-local Σe²dt
-  double   timeAccum;    // episode-local Σdt
-  float    peak;         // max excursion in the episode's sign direction
+// Live excursion stopwatch — no commit/void machinery: the count is taken at confirmed
+// band exit; out-of-band time PAUSES while the loop is constrained in the direction the
+// error needs (rail/clamp physics is not tracking failure — v3's one kept authority idea).
+struct AccExcursion {
+  uint8_t  state;          // 0 = idle, 1 = out of band
+  int8_t   side;           // +1 = damaging (over), -1 = under
+  uint8_t  enterTicks;     // consecutive ticks beyond the band (open debounce)
+  uint32_t reentryStartMs; // back inside band since (0 = currently outside)
+  double   outSec;         // unpaused out-of-band seconds this excursion
 };
-AccEpisode epCur = {};
-AccEpisode epVolt = {};
+AccExcursion excCur = {};
+AccExcursion excVolt = {};
 
-enum AccVoidReason : uint8_t {
-  ACC_VOID_RAIL = 0,       // actuator rail in the direction the episode needed (physics)
-  ACC_VOID_CEILING = 1,    // Icv pinned at the current ceiling (voltage under-episode: no headroom)
-  ACC_VOID_ENGINE = 2,     // engine stopped mid-episode
-  ACC_VOID_MODE = 3,       // mode/stage/CV exit mid-episode
-  ACC_VOID_CMDZERO = 4,    // commanded current dropped to ~0 (deliberate, not a tracking failure)
-  ACC_VOID_PROT_UNREL = 5, // protection fired but episode direction unrelated to the trip cause
-  ACC_VOID_SENSOR = 6,     // ADS/INA cross-check failed at trip — attribution unknown
-  ACC_VOID_GAP = 7,        // scorer tick gap (scheduler stall / early-return period)
-  ACC_VOID_TARGETSTEP = 8, // immature voltage episode interrupted by a target step
-  ACC_VOID_MANUAL = 9,     // cleared by manual reset
-  ACC_VOID_REASONS = 10
-};
-struct AccLoopStats {
-  uint32_t episodes;                 // committed episodes since reset
-  double   eligibleSec;              // seconds the loop's authority conditions held
-  uint16_t voids[ACC_VOID_REASONS];  // discarded episodes by reason
-};
-AccLoopStats accCurStats = {};
-AccLoopStats accVoltStats = {};
 uint32_t accThermSessions = 0;       // thermal containment sessions (binding-settled rising edges)
-double   accThermEligibleSec = 0.0;  // seconds the thermal binding condition held (pre-settle)
+double   accThermBindingSec = 0.0;   // binding-and-settled seconds — containment denominator
+double   accThermInbandSec = 0.0;    // of those, |tempFiltered − tempPIDSetpoint_d| ≤ ACC_T_BAND_F
+float    accThermWorstOverF = 0.0f;  // worst °F over TemperatureLimitF — unconditional (coast-down peaks)
+uint32_t accThermBindingStartMs = 0; // millis() binding went true (0 = not binding) — settle timer
 
-float    accCurRef = 0.0f;           // current-loop achievable reference (lagged setpointLimited)
-bool     accCurRefSeeded = false;    // reseed ref to the PV on eligibility (re)gain
-uint32_t accScorerLastMs = 0;        // last tick the electrical scorer ran — raw-gap detection
-uint8_t  accVRegime = 0;             // voltage regimes: 0 = off, 1 = arrival, 2 = regulation
-bool     accVArrFromBelow = true;    // arrival direction: true = climbing to target
-uint32_t accVArrSettleStartMs = 0;   // |err| inside exit band since (arrival → regulation settle)
-float    accVPrevTargetV = 0.0f;     // previous-tick ChargingVoltageTarget for step detection
-bool     accVAwRecovPrev = false;    // previous-tick g_cvAwRecovering for falling-edge → arrival
+uint32_t accScorerLastMs = 0;        // last electrical-scorer tick — raw-gap guard
+uint32_t accCurActiveUntilMs = 0;    // ACTIVE bucket holds until here (0 = never armed)
+uint32_t accVoltActiveUntilMs = 0;
+float    accCurPrevCmd = 0.0f;       // previous-tick setpointCommand — command-motion ACTIVE trigger
+float    accVPrevTargetV = 0.0f;     // previous-tick ChargingVoltageTarget — step ACTIVE trigger
+bool     accClampPrev = false;       // previous-tick g_fastOvClampActive — release edge arms ACTIVE
+bool     accVAwRecovPrev = false;    // previous-tick g_cvAwRecovering — release edge arms ACTIVE
 
-const float    ACC_CUR_REF_TAU_S = 0.10f;        // expected-response envelope, NOT a tuning knob (spec §4.1)
-const float    ACC_CUR_ENTER_A = 3.0f;
-const float    ACC_CUR_EXIT_A = 1.5f;
-const uint32_t ACC_CUR_EXIT_HOLD_MS = 500;
-const float    ACC_V_ENTER_V = 0.100f;           // voltage bands in 12V-equivalent volts
-const float    ACC_V_EXIT_V = 0.050f;
-const uint32_t ACC_V_EXIT_HOLD_MS = 1000;
-const float    ACC_V_STEP_V = 0.050f;            // per-tick target delta that counts as a step (temp-comp drift stays far below)
+const float    ACC_CUR_BAND_FLOOR_A = 3.0f;     // current band = max(floor, frac × rated): rated-normalized so installs compare
+const float    ACC_CUR_BAND_FRAC = 0.05f;
+const float    ACC_V_BAND_V = 0.100f;           // voltage band, 12V-equivalent volts
+const float    ACC_T_BAND_F = 3.0f;             // thermal containment band vs tempPIDSetpoint_d
+const float    ACC_CUR_ACTIVE_RATE_A_S = 2.0f;  // command motion above this arms ACTIVE
+const float    ACC_V_STEP_V = 0.050f;           // per-tick target delta that arms ACTIVE (temp-comp drift stays far below)
+const uint32_t ACC_ACTIVE_HOLD_MS = 10000;      // ACTIVE lingers this long past the last trigger
 const uint8_t  ACC_ENTER_DEBOUNCE_TICKS = 2;
-const uint16_t ACC_MATURE_TICKS = 2;             // min ACTIVE samples before an interrupting event may commit
-const uint32_t ACC_GAP_VOID_MS = 250;            // raw scorer-tick gap that voids live episodes
-const float    ACC_XSENS_BAND_V = 0.5f;          // ADS-vs-INA agreement at a trip (12V-equiv; ADS round-robin lags ~30 ms)
-const uint32_t ACC_SETTLE_VOLTAGE_MS = 2000;    // arrival → regulation settle (CV settles in seconds)
-const uint32_t ACC_SETTLE_THERMAL_MS = 120000;  // thermal loop: minutes — require sustained binding
+const uint32_t ACC_CUR_EXIT_HOLD_MS = 500;      // sustained re-entry that ends an excursion
+const uint32_t ACC_V_EXIT_HOLD_MS = 1000;
+const uint32_t ACC_GAP_VOID_MS = 250;           // raw scorer-tick gap: skip the tick, discard live stopwatches
+const uint32_t ACC_SETTLE_THERMAL_MS = 120000;  // thermal: require sustained binding (kept from v2)
 
 // === CV Loop Tuning Score System ===
 float cvWaveAmplitudeV = 0.30f;   // V — target rises by this during HIGH phase (LOW phase sits at the real target)
@@ -3676,7 +3670,7 @@ float ThermalSlopeWindowSec = 25.0f;  // slope backward-difference window (s), c
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
 float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease (allow more current)
 
-float WarmupRampRate = 0.0f;      // A/s — rate at which output ceiling rises from 0 on field enable; 0 = disabled
+float WarmupRampRate = 10.0f;     // A/s — rate at which output ceiling rises from 0 on field enable; 0 = disabled
 float warmupCeiling = 0.0f;       // runtime warmup ceiling (not persisted)
 float prevThermalPenalty = 0.0f;  // last applied penalty (slew "prev" + stale-hold seed). penalty = FF + thermalIntegral, clamped to the live cap — see tempPID_tick().
 float thermalIntegral = 0.0f;     // HYBRID: holding-level integral (amps). The P + projection term is POSITIONAL feedforward (instant, FF = Kp·max(0,max(proj,present)−sp)); only this integral is accumulated, with the live-cap anti-windup clamp (I ≤ cap−FF), asymmetric below-setpoint bleed, and approach/descent gates. A pure velocity form silently zeroes the projection's constant lead (a difference form can't carry a feedforward level), landing the approach cut at a fraction of its strength — keep P+projection positional.
@@ -4705,7 +4699,7 @@ void setup() {
   tuningLog = (TuningRecord *)ps_malloc(50 * sizeof(TuningRecord));
   if (!tuningLog) Serial.println("FATAL: tuningLog ps_malloc failed");
   else memset(tuningLog, 0, 50 * sizeof(TuningRecord));
-  // Control Accuracy Scores need no PSRAM — accCurrent/accVoltage/accThermal are plain globals.
+  // Control Accuracy needs no PSRAM — accCur4/accVolt4 and the thermal scalars are plain globals.
   // CV tuning score log — 50 records × ~120 bytes = ~6 KB PSRAM
   cvTuningLog = (CVTuningRecord *)ps_malloc(50 * sizeof(CVTuningRecord));
   if (!cvTuningLog) Serial.println("FATAL: cvTuningLog ps_malloc failed");
@@ -5033,6 +5027,7 @@ void setup() {
     delay(50);           // Give it a moment to process
     ReadAnalogInputs();  // Second reading to be sure
   }
+  applyChemistryOcvPreset();  // repair a stale/wrong-chemistry rested-voltage curve (idempotent) before the seed reads it
   seedSocFromVoltage();  // deferred first-boot SoC estimate — needs the reads above (IBV) + vessel info (battery type/voltage/capacity)
 
   const esp_partition_t *running_partition = esp_ota_get_running_partition();

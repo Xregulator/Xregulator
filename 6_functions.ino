@@ -1009,19 +1009,11 @@ void commitCVTuningRecord() {
   cvTuningScore = {};
 }
 
-// ===== Control Accuracy Scores v3 — challenge-episode engine =====
-// Episode state machines live in AdjustFieldLearnMode (electrical loops) and
-// thermalAccuracyScore_tick (thermal, which keeps the while-binding RMS — pinned at the limit
-// is continuous challenge). Committed episodes fold into the AccuracyScore globals; the CSV2 /
-// tuning-log values are PROVISIONAL (committed + live episode buffer) so the panel can't show
-// a clean zero while a deviation is in progress. Cloud snapshot uploads read committed-only.
-
-// RMS tracking error in physical units = sqrt(Σ(e²·dt) / Σdt). Guard avoids a divide before any
-// scored time has accrued. Takes the raw double accumulators (NOT the struct) so the auto-
-// generated cross-file prototype doesn't reference AccuracyScore before it's defined. Returns float.
-float accScoreRms(double errAccum, double timeAccum) {
-  return (timeAccum > 0.1) ? sqrtf((float)(errAccum / timeAccum)) : 0.0f;
-}
+// ===== Control Accuracy v4 — routine-data engine =====
+// Bucket classifiers + excursion stopwatches live in AdjustFieldLearnMode (electrical loops)
+// and thermalAccuracyScore_tick (thermal containment — pinned at the limit is continuous
+// challenge). No committed/live split: the panel, the tuning-log mirrors, and the cloud
+// snapshot all read the same accumulators; ratios are computed at display time.
 
 // Settle/debounce gate: returns true only once the loop's authority condition has held continuously
 // for settleMs. The false→true edge stamps bindingStartMs; any false tick clears it (restart timer).
@@ -1031,25 +1023,23 @@ static bool accBindingReady(uint32_t &bindingStartMs, bool binding, uint32_t now
   return (uint32_t)(nowMs - bindingStartMs) >= settleMs;
 }
 
-// Zero all three loops' committed accumulators + coverage stats. clearLive=true (manual Reset
-// button) also discards live episode buffers and re-derives regime/reference state. The daily
-// auto-reset passes false: a live episode carries across the window boundary and commits into
-// the new window, so an ongoing failure is never erased by the day rolling over.
+// Zero all accumulators. clearLive=true (manual Reset button) also discards the live excursion
+// stopwatches. The daily auto-reset passes false: an in-progress excursion carries WHOLE into the
+// new window (counted there, out-of-band time preserved), so a failure spanning midnight lands in
+// the next day's row rather than being erased.
 void resetAccuracyScores(bool clearLive) {
-  accCurrent = {};
-  accVoltage = {};
-  accThermal = {};
-  accCurStats = {};
-  accVoltStats = {};
+  accCur4 = {};
+  accVolt4 = {};
   accThermSessions = 0;
-  accThermEligibleSec = 0.0;
+  accThermBindingSec = 0.0;
+  accThermInbandSec = 0.0;
+  accThermWorstOverF = 0.0f;
   if (clearLive) {
-    if (epCur.state) accCurStats.voids[ACC_VOID_MANUAL]++;
-    if (epVolt.state) accVoltStats.voids[ACC_VOID_MANUAL]++;
-    epCur = {};
-    epVolt = {};
-    accCurRefSeeded = false;
-    accVRegime = 0;
+    excCur = {};
+    excVolt = {};
+  } else {
+    if (excCur.state) accCur4.excursions = 1;
+    if (excVolt.state) accVolt4.excursions = 1;
   }
 }
 
@@ -1350,10 +1340,10 @@ void commitTuningSweepRecord() {
                        rec.runNumber, rec.bandwidthHz, rec.peakGain, rec.worstPhaseDeg);
 }
 
-// Called from tempPID_tick() on every tick (16 Hz). Feeds the Thermal Control
-// Accuracy live score (accumulate-since-reset), authority-gated.
+// Called from tempPID_tick() on every tick (16 Hz). Feeds the thermal Control
+// Accuracy containment score (v4: binding seconds + in-band seconds), authority-gated.
 void thermalAccuracyScore_tick(uint32_t nowMs, float dtSec) {
-  // ===== Thermal Control Accuracy score (accumulate-since-reset) =====
+  // ===== Thermal Control Accuracy — containment while binding =====
   // Authority gate: only score when the thermal loop is the binding constraint with no other
   // limiter in charge. The actuator here is the penalty-amps derate; a SUSTAINED penalty IS the
   // definition of "thermal is controlling" — the REVERSE PID floors penalty at 0 when cool, so a
@@ -1373,20 +1363,19 @@ void thermalAccuracyScore_tick(uint32_t nowMs, float dtSec) {
   bool thermalBinding = tempPIDActive && thermalSlopeBufFull && !isnan(tempFiltered)
                         && !g_fastOvClampActive && (MaintainMode == 0) && thermalPenaltyAmps > 2.0f
                         && (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
-  if (thermalBinding) accThermEligibleSec += (double)dtSec;
-  bool thermalSettled = accBindingReady(accThermal.bindingStartMs, thermalBinding, nowMs, ACC_SETTLE_THERMAL_MS);
+  bool thermalSettled = accBindingReady(accThermBindingStartMs, thermalBinding, nowMs, ACC_SETTLE_THERMAL_MS);
   static bool thermalSettledPrev = false;
   if (thermalSettled && !thermalSettledPrev) accThermSessions++;  // containment-session counter
   thermalSettledPrev = thermalSettled;
   if (thermalSettled) {
-    // RMS is referenced to the loop's ACTUAL regulation target (limit −7°F once the slope buffer
-    // is full — tempPIDSetpoint_d), NOT TemperatureLimitF: limit-referencing gave a perfectly
-    // regulating loop a built-in ~7°F RMS floor. worstOver stays limit-referenced (damage metric)
+    // Containment is referenced to the loop's ACTUAL regulation target (limit −7°F once the slope
+    // buffer is full — tempPIDSetpoint_d), NOT TemperatureLimitF: limit-referencing gave a perfectly
+    // regulating loop a built-in ~7°F error floor. worstOver stays limit-referenced (damage metric)
     // and is tracked UNCONDITIONALLY in AdjustFieldLearnMode (right after tempFilterUpdate), so
     // the peak captures field-off protection-cut tails this gated path never runs for.
     float err = tempFiltered - (float)tempPIDSetpoint_d;
-    accThermal.errAccum  += (double)err * (double)err * (double)dtSec;
-    accThermal.timeAccum += (double)dtSec;
+    accThermBindingSec += (double)dtSec;
+    if (fabsf(err) <= ACC_T_BAND_F) accThermInbandSec += (double)dtSec;
   }
 }
 
@@ -1446,13 +1435,13 @@ void AdjustFieldLearnMode() {
   // every mode (field on, FAULT, lockout, OFF cooldown). Over-temp damages the alternator regardless
   // of which subsystem holds the field, and the worst excursions happen during the protection-cut
   // coast-down (field OFF), which tempPID_tick / thermalAccuracyScore_tick never run for. Gating the
-  // peak on sustained thermal binding (the RMS gate, still in thermalAccuracyScore_tick) made the
-  // score blind to thermal limit-cycling — the exact failure it should flag (the 120s settle outlasts
-  // the trip-to-trip period and the peaks land while the field is cut). RMS error stays gated
-  // (regulation quality; cut noise corrupts it).
+  // peak on sustained thermal binding (the containment gate, still in thermalAccuracyScore_tick) made
+  // the score blind to thermal limit-cycling — the exact failure it should flag (the 120s settle
+  // outlasts the trip-to-trip period and the peaks land while the field is cut). Containment stays
+  // gated (regulation quality; cut noise corrupts it).
   if (!isnan(tempFiltered)) {
     float overNow = tempFiltered - TemperatureLimitF;
-    if (overNow > accThermal.worstOver) accThermal.worstOver = overNow;
+    if (overNow > accThermWorstOverF) accThermWorstOverF = overNow;
   }
 
   isTempSustainedWarning(tick.nowMs, tick.tempToUseF, tick.tempLimitF,
@@ -3391,284 +3380,180 @@ void AdjustFieldLearnMode() {
     innerTermI = (float)currentPID.GetIterm();
     innerTermD = (float)currentPID.GetDterm();
 
-    // ===== Control Accuracy v3 — challenge-episode scoring =====
-    // Spec: Working Markdown Docs/CONTROL_ACCURACY_V3_EPISODE_SPEC.md. Deviation episodes only:
-    // open when the error leaves an entry band (debounced), accumulate into a local buffer,
-    // COMMIT into the AccuracyScore globals on a held return-to-band, VOID (counted by reason)
-    // when the loop never had a fair chance. Steady-state dwell scores nothing by construction.
-    // A protection trip commits a mature damaging-side episode (the trip is the consequence of
-    // the failure, not an excuse) but only if ADS and INA voltage agree — the same INA228 IBV
-    // both feeds this scorer and fires fast-OV, so a glitch there must read as unknown, not fault.
+    // ===== Control Accuracy v4 — routine-data loop health =====
+    // Spec: Working Markdown Docs/CONTROL_ACCURACY_V4_ROUTINE_SPEC.md. Each valid tick lands in
+    // ONE bucket: CONSTRAINED (rail/protection — reported, never graded) > ACTIVE (command moving
+    // or recent challenge — the graded tracking denominator) > QUIET (steady dwell — earns
+    // nothing). Band exits run an excursion stopwatch; damaging-side exposure + worst peak are
+    // recorded unconditionally within valid time. No reference model: error is the PV vs the
+    // PRE-SLEW command, so the user's slew/filter choices are part of what the numbers report.
 
     // Raw scorer-tick gap: a scheduler stall, or any stretch where these blocks didn't run
     // (early returns, non-AUTO modes), must not masquerade as control data.
     bool accGap = (accScorerLastMs != 0) && ((uint32_t)(tick.nowMs - accScorerLastMs) > ACC_GAP_VOID_MS);
     accScorerLastMs = tick.nowMs;
-    bool accXsensOk = fabsf(BatteryV - IBV) <= ACC_XSENS_BAND_V * ((float)BATTERY_VOLTAGE / 12.0f);
+    bool accClampFell = accClampPrev && !g_fastOvClampActive;
+    accClampPrev = g_fastOvClampActive;
 
-    // ---- Current loop: PV vs achievable reference (setpointLimited through a first-order lag
-    // at the loop's design speed). A followable command — including the CV loop walking Icv
-    // around — produces ~zero error for a healthy loop; only genuine lag/ringing/disturbance
-    // scores. Stays live in CV mode: tracking Icv IS this loop's job there.
+    // ---- Current loop. Stays live in CV mode: tracking Icv IS this loop's job there.
     {
-      float dutyFloor = fmaxf(MinDuty, tick.rpmMinDuty);
-      float railMargin = fmaxf(0.1f, 0.01f * (ccDutyCeiling() - dutyFloor));
-      bool atFloor = dutyCycle <= dutyFloor + railMargin;
-      bool atCeil = dutyCycle >= ccDutyCeiling() - railMargin;
-      bool eligBase = !inStartupRamp && (MaintainMode == 0) && !zeroFloatActive
+      bool accValid = !inStartupRamp && (MaintainMode == 0) && !zeroFloatActive
                       && setpointLimited > 2.0f;  // Maintain/zeroFloat switch the PV to Bcur — a different job
-
-      if (!eligBase || accGap) {
-        accCurRefSeeded = false;
-        if (epCur.state) {
-          uint8_t reason = accGap                     ? ACC_VOID_GAP
-                           : (RPM < 100.0f)           ? ACC_VOID_ENGINE
-                           : (setpointLimited <= 2.0f) ? ACC_VOID_CMDZERO
-                                                       : ACC_VOID_MODE;
-          accCurStats.voids[reason]++;
-          epCur = {};
-        }
-        epCur.enterTicks = 0;
+      if (!accValid || accGap) {
+        excCur = {};
       } else {
-        accCurStats.eligibleSec += (double)actualDtSec;
-        if (!accCurRefSeeded) {
-          accCurRef = targetCurrent;
-          accCurRefSeeded = true;
+        float band = fmaxf(ACC_CUR_BAND_FLOOR_A, ACC_CUR_BAND_FRAC * (float)AlternatorNominalAmps);
+        float e = targetCurrent - setpointCommand;  // A; + = over-current (damaging side)
+
+        if (fabsf(setpointCommand - accCurPrevCmd) > ACC_CUR_ACTIVE_RATE_A_S * actualDtSec || accClampFell)
+          accCurActiveUntilMs = tick.nowMs + ACC_ACTIVE_HOLD_MS;
+
+        float dutyFloor = fmaxf(MinDuty, tick.rpmMinDuty);
+        float railMargin = fmaxf(0.1f, 0.01f * (ccDutyCeiling() - dutyFloor));
+        bool atFloor = dutyCycle <= dutyFloor + railMargin;
+        bool atCeil = dutyCycle >= ccDutyCeiling() - railMargin;
+        bool constrained = atFloor || atCeil || g_fastOvClampActive;
+        bool active = accCurActiveUntilMs != 0 && (int32_t)(accCurActiveUntilMs - tick.nowMs) > 0;
+
+        accCur4.validSec += (double)actualDtSec;
+        if (e > band) accCur4.overExpSum += (double)(e - band) * (double)actualDtSec;
+        if (e > accCur4.worstOver) accCur4.worstOver = e;
+        if (constrained) {
+          accCur4.constrainedSec += (double)actualDtSec;
+        } else if (active) {
+          accCur4.activeSec += (double)actualDtSec;
+          if (fabsf(e) <= band) accCur4.inbandActiveSec += (double)actualDtSec;
         }
-        // Exact discretization — stable for any dt (α→1 as dt→∞). Forward Euler (dt/τ) has
-        // gain 5 at the 500 ms dt cap and would manufacture oscillating fake episodes.
-        float alpha = 1.0f - expf(-actualDtSec / ACC_CUR_REF_TAU_S);
-        accCurRef += alpha * (setpointLimited - accCurRef);
-        float e = targetCurrent - accCurRef;  // A; + = over-current (damaging side)
 
-        if (epCur.state) {
-          if (g_fastOvClampActive) {
-            if (epCur.sign > 0 && epCur.samples >= ACC_MATURE_TICKS && accXsensOk) {
-              // Excess current raises voltage → an over-current episode is causally related
-              // to a fast-OV trip. Under-current isn't — that voids as unrelated.
-              accCurrent.errAccum += epCur.errAccum;
-              accCurrent.timeAccum += epCur.timeAccum;
-              if (epCur.peak > accCurrent.worstOver) accCurrent.worstOver = epCur.peak;
-              accCurStats.episodes++;
-              queueConsoleMessageF("AccScore: current over-episode committed at OV trip (peak %.1fA, %.1fs)",
-                                   epCur.peak, (float)epCur.timeAccum);
-            } else {
-              accCurStats.voids[accXsensOk ? ACC_VOID_PROT_UNREL : ACC_VOID_SENSOR]++;
+        // Excursion stopwatch. Out-of-band time PAUSES while the loop is constrained in the
+        // direction the error needs (over needs down-authority: duty floor / protection clamp;
+        // under needs up-authority: duty ceiling) — rail physics is not tracking failure.
+        if (excCur.state == 0) {
+          int8_t s = (e > band) ? 1 : (e < -band) ? -1 : 0;
+          bool blocked = (s > 0 && (atFloor || g_fastOvClampActive)) || (s < 0 && atCeil);
+          if (s != 0 && !blocked) {
+            excCur.enterTicks = (s == excCur.side) ? (uint8_t)(excCur.enterTicks + 1) : 1;
+            excCur.side = s;
+            if (excCur.enterTicks >= ACC_ENTER_DEBOUNCE_TICKS) {
+              excCur.state = 1;
+              excCur.outSec = 0.0;
+              excCur.reentryStartMs = 0;
+              accCur4.excursions++;
             }
-            epCur = {};
-          } else if ((epCur.sign > 0 && atFloor) || (epCur.sign < 0 && atCeil)) {
-            // Railed in the direction this episode needed — physics, not tuning. The opposite
-            // pairing (over @ ceiling, under @ floor) keeps scoring: authority is intact there.
-            accCurStats.voids[epCur.sign > 0 ? ACC_VOID_RAIL : ACC_VOID_CEILING]++;
-            epCur = {};
           } else {
-            epCur.errAccum += (double)e * (double)e * (double)actualDtSec;
-            epCur.timeAccum += (double)actualDtSec;
-            epCur.samples++;
-            float mag = (float)epCur.sign * e;
-            if (mag > epCur.peak) epCur.peak = mag;
-
-            bool flipped = (epCur.sign > 0) ? (e < -ACC_CUR_ENTER_A) : (e > ACC_CUR_ENTER_A);
-            epCur.enterTicks = flipped ? (uint8_t)(epCur.enterTicks + 1) : 0;
-            bool inside = (epCur.sign > 0) ? (e < ACC_CUR_EXIT_A) : (e > -ACC_CUR_EXIT_A);
-            if (epCur.enterTicks >= ACC_ENTER_DEBOUNCE_TICKS) {
-              // Swung through zero past the far entry band: commit here and open the
-              // opposite-sign episode so neither excursion is erased.
-              int8_t newSign = (int8_t)-epCur.sign;
-              accCurrent.errAccum += epCur.errAccum;
-              accCurrent.timeAccum += epCur.timeAccum;
-              if (epCur.sign > 0 && epCur.peak > accCurrent.worstOver) accCurrent.worstOver = epCur.peak;
-              accCurStats.episodes++;
-              epCur = {};
-              epCur.state = 1;
-              epCur.sign = newSign;
-            } else if (inside) {
-              if (epCur.exitStartMs == 0) epCur.exitStartMs = tick.nowMs;
-              else if ((uint32_t)(tick.nowMs - epCur.exitStartMs) >= ACC_CUR_EXIT_HOLD_MS) {
-                if (epCur.sign > 0 && epCur.peak > accCurrent.worstOver) accCurrent.worstOver = epCur.peak;
-                accCurrent.errAccum += epCur.errAccum;
-                accCurrent.timeAccum += epCur.timeAccum;
-                accCurStats.episodes++;
-                queueConsoleMessageF("AccScore: current %s-episode committed (peak %.1fA, %.1fs)",
-                                     epCur.sign > 0 ? "over" : "under", epCur.peak, (float)epCur.timeAccum);
-                epCur = {};
-              }
-            } else {
-              epCur.exitStartMs = 0;
-            }
+            excCur.enterTicks = 0;
           }
         } else {
-          int8_t s = (e > ACC_CUR_ENTER_A) ? 1 : (e < -ACC_CUR_ENTER_A) ? -1 : 0;
-          bool canOpen = (s != 0) && !g_fastOvClampActive
-                         && !(s > 0 && atFloor) && !(s < 0 && atCeil);
-          if (canOpen && s == epCur.enterSign) {
-            if (++epCur.enterTicks >= ACC_ENTER_DEBOUNCE_TICKS) {
-              epCur = {};
-              epCur.state = 1;
-              epCur.sign = s;
+          bool paused = (excCur.side > 0) ? (atFloor || g_fastOvClampActive) : atCeil;
+          bool inside = (excCur.side > 0) ? (e <= band) : (e >= -band);
+          bool flipped = (excCur.side > 0) ? (e < -band) : (e > band);
+          if (!paused && !inside) excCur.outSec += (double)actualDtSec;
+          if (flipped) {
+            // Swung through the band to the far side: close this excursion, open the opposite one.
+            accCur4.recovSecSum += excCur.outSec;
+            int8_t ns = (int8_t)-excCur.side;
+            excCur = {};
+            excCur.state = 1;
+            excCur.side = ns;
+            accCur4.excursions++;
+          } else if (inside) {
+            if (excCur.reentryStartMs == 0) excCur.reentryStartMs = tick.nowMs;
+            else if ((uint32_t)(tick.nowMs - excCur.reentryStartMs) >= ACC_CUR_EXIT_HOLD_MS) {
+              accCur4.recovSecSum += excCur.outSec;
+              excCur = {};
             }
           } else {
-            epCur.enterSign = s;
-            epCur.enterTicks = canOpen ? 1 : 0;
+            excCur.reentryStartMs = 0;
           }
         }
       }
+      accCurPrevCmd = setpointCommand;
     }
 
-    // ---- Voltage loop: regimes handle its one-sided authority (it drives voltage up via
-    // current but can only command zero and wait for loads to bring it down). ARRIVAL scores
-    // only the damaging overshoot — the climb is headroom physics, and a step-down descent
-    // counts nothing until the first cross below the new target (cvTuningScore's proven
-    // zero-crossing rule). REGULATION scores sign-tagged deviation episodes on both sides.
-    // Scored in 12V-EQUIVALENT volts so every published mV figure (CSV2, /cvtuninglog live,
-    // cloud acc_volt_* columns) and the fixed color bands compare across 12/24/48V systems.
+    // ---- Voltage loop. Its one-sided authority (drives voltage up via current; can only
+    // command zero and wait for loads to bring it down) is handled entirely by the
+    // constrained-direction rules: the CV-entry climb (Icv pinned at the ceiling) and a
+    // step-down descent (Icv pinned at zero) exclude themselves — no arrival/regulation
+    // regimes needed. Measured in 12V-EQUIVALENT volts so every published mV figure (CSV2,
+    // /cvtuninglog live, cloud acc_volt_* columns) compares across 12/24/48V systems.
     {
       float vNorm = 12.0f / (float)BATTERY_VOLTAGE;
-      float err12 = (IBV - ChargingVoltageTarget) * vNorm;  // 12V-equiv V; + = over (damaging)
-      // Per-tick delta so temp-comp drift (mV-scale per tick) never resets ARRIVAL; only a
-      // real stage/target step does.
+      // Per-tick delta so temp-comp drift (mV-scale per tick) never reads as a step; track the
+      // target every tick (valid or not) so CV re-entry can't fire a phantom step.
       bool targetStep = fabsf(ChargingVoltageTarget - accVPrevTargetV) * vNorm > ACC_V_STEP_V;
       accVPrevTargetV = ChargingVoltageTarget;
       bool awRecovFell = accVAwRecovPrev && !g_cvAwRecovering;
       accVAwRecovPrev = g_cvAwRecovering;
-
       // zeroFloatActive: the cascade regulates net battery amps to ~0 and lets IBV drift to
-      // resting voltage — deviations from the float target are by design, not scoreable.
-      if (!voltageControlActive || zeroFloatActive) {
-        if (epVolt.state) accVoltStats.voids[ACC_VOID_MODE]++;
-        epVolt = {};
-        accVRegime = 0;
-      } else {
-        accVoltStats.eligibleSec += (double)actualDtSec;
+      // resting voltage — deviations from the float target are by design.
+      bool accVValid = voltageControlActive && !zeroFloatActive;
+      static bool accVWasValid = false;
+      bool cvEntered = accVValid && !accVWasValid;
+      accVWasValid = accVValid;
 
-        if (accVRegime == 0 || targetStep || awRecovFell) {
-          if (epVolt.state) {
-            // Goalpost moved mid-episode: the deviation observed against the OLD target was
-            // real — commit the mature portion rather than erase it.
-            if (epVolt.samples >= ACC_MATURE_TICKS) {
-              accVoltage.errAccum += epVolt.errAccum;
-              accVoltage.timeAccum += epVolt.timeAccum;
-              if (epVolt.sign > 0 && epVolt.peak > accVoltage.worstOver) accVoltage.worstOver = epVolt.peak;
-              accVoltStats.episodes++;
-            } else {
-              accVoltStats.voids[ACC_VOID_TARGETSTEP]++;
-            }
-            epVolt = {};
-          }
-          accVRegime = 1;
-          accVArrFromBelow = (IBV < ChargingVoltageTarget);
-          accVArrSettleStartMs = 0;
+      if (!accVValid || accGap) {
+        excVolt = {};
+      } else {
+        float err12 = (IBV - ChargingVoltageTarget) * vNorm;  // 12V-equiv V; + = over (damaging)
+        if (targetStep || awRecovFell || cvEntered || accClampFell)
+          accVoltActiveUntilMs = tick.nowMs + ACC_ACTIVE_HOLD_MS;
+
+        bool ceilPinned = Icv >= (uTargetAmps - 0.5f);  // no up-headroom: current-limited
+        bool zeroPinned = Icv <= 0.5f;                  // downward authority fully spent
+        bool constrained = ceilPinned || zeroPinned || g_fastOvClampActive || g_cvAwRecovering;
+        bool active = accVoltActiveUntilMs != 0 && (int32_t)(accVoltActiveUntilMs - tick.nowMs) > 0;
+
+        accVolt4.validSec += (double)actualDtSec;
+        if (err12 > ACC_V_BAND_V) accVolt4.overExpSum += (double)(err12 - ACC_V_BAND_V) * (double)actualDtSec;
+        if (err12 > accVolt4.worstOver) accVolt4.worstOver = err12;
+        if (constrained) {
+          accVolt4.constrainedSec += (double)actualDtSec;
+        } else if (active) {
+          accVolt4.activeSec += (double)actualDtSec;
+          if (fabsf(err12) <= ACC_V_BAND_V) accVolt4.inbandActiveSec += (double)actualDtSec;
         }
 
-        if (accGap) {
-          if (epVolt.state) accVoltStats.voids[ACC_VOID_GAP]++;
-          epVolt = {};
-        } else if (g_cvAwRecovering) {
-          // Deliberate anti-windup climb-back after a trip: designed behavior, not scoreable.
-          // Falling edge re-enters ARRIVAL above.
-          if (epVolt.state) accVoltStats.voids[ACC_VOID_MODE]++;
-          epVolt = {};
-        } else if (accVRegime == 1 && !accVArrFromBelow) {
-          if (IBV < ChargingVoltageTarget) accVRegime = 2;  // first cross below the new target
-        } else if (accVRegime == 1 && Icv >= (uTargetAmps - 0.5f)) {
-          // Current-limited on the way up — CV not yet in authority. Pause: no scoring, no
-          // settle progress.
-          accVArrSettleStartMs = 0;
-          epVolt.enterTicks = 0;
-        } else {
-          bool arrival = (accVRegime == 1);
-
-          if (epVolt.state) {
-            if (g_fastOvClampActive) {
-              if (epVolt.sign > 0 && epVolt.samples >= ACC_MATURE_TICKS && accXsensOk) {
-                // The single most important event this score exists to record: an overshoot
-                // that grew until protection took over.
-                accVoltage.errAccum += epVolt.errAccum;
-                accVoltage.timeAccum += epVolt.timeAccum;
-                if (epVolt.peak > accVoltage.worstOver) accVoltage.worstOver = epVolt.peak;
-                accVoltStats.episodes++;
-                queueConsoleMessageF("AccScore: voltage over-episode committed at OV trip (peak %.0fmV, %.1fs)",
-                                     epVolt.peak * 1000.0f, (float)epVolt.timeAccum);
-              } else {
-                accVoltStats.voids[accXsensOk ? ACC_VOID_PROT_UNREL : ACC_VOID_SENSOR]++;
-              }
-              epVolt = {};
-            } else if (epVolt.sign < 0 && Icv >= (uTargetAmps - 0.5f)) {
-              // Undervoltage with Icv pinned at the current ceiling: load exceeded headroom —
-              // current-limited, not a CV tuning failure.
-              accVoltStats.voids[ACC_VOID_CEILING]++;
-              epVolt = {};
-            } else if (epVolt.sign > 0 && Icv <= 0.5f) {
-              // Zero commanded current = downward authority fully spent; the residual decay is
-              // battery/load physics. Keep the mature overshoot observed up to the pin.
-              if (epVolt.samples >= ACC_MATURE_TICKS) {
-                accVoltage.errAccum += epVolt.errAccum;
-                accVoltage.timeAccum += epVolt.timeAccum;
-                if (epVolt.peak > accVoltage.worstOver) accVoltage.worstOver = epVolt.peak;
-                accVoltStats.episodes++;
-              } else {
-                accVoltStats.voids[ACC_VOID_RAIL]++;
-              }
-              epVolt = {};
-            } else {
-              epVolt.errAccum += (double)err12 * (double)err12 * (double)actualDtSec;
-              epVolt.timeAccum += (double)actualDtSec;
-              epVolt.samples++;
-              float mag = (float)epVolt.sign * err12;
-              if (mag > epVolt.peak) epVolt.peak = mag;
-
-              bool flipped = !arrival
-                             && ((epVolt.sign > 0) ? (err12 < -ACC_V_ENTER_V) : (err12 > ACC_V_ENTER_V));
-              epVolt.enterTicks = flipped ? (uint8_t)(epVolt.enterTicks + 1) : 0;
-              bool inside = (epVolt.sign > 0) ? (err12 < ACC_V_EXIT_V) : (err12 > -ACC_V_EXIT_V);
-              if (epVolt.enterTicks >= ACC_ENTER_DEBOUNCE_TICKS) {
-                int8_t newSign = (int8_t)-epVolt.sign;
-                accVoltage.errAccum += epVolt.errAccum;
-                accVoltage.timeAccum += epVolt.timeAccum;
-                if (epVolt.sign > 0 && epVolt.peak > accVoltage.worstOver) accVoltage.worstOver = epVolt.peak;
-                accVoltStats.episodes++;
-                epVolt = {};
-                epVolt.state = 1;
-                epVolt.sign = newSign;
-              } else if (inside) {
-                if (epVolt.exitStartMs == 0) epVolt.exitStartMs = tick.nowMs;
-                else if ((uint32_t)(tick.nowMs - epVolt.exitStartMs) >= ACC_V_EXIT_HOLD_MS) {
-                  if (epVolt.sign > 0 && epVolt.peak > accVoltage.worstOver) accVoltage.worstOver = epVolt.peak;
-                  accVoltage.errAccum += epVolt.errAccum;
-                  accVoltage.timeAccum += epVolt.timeAccum;
-                  accVoltStats.episodes++;
-                  queueConsoleMessageF("AccScore: voltage %s-episode committed (peak %.0fmV, %.1fs)",
-                                       epVolt.sign > 0 ? "over" : "under", epVolt.peak * 1000.0f, (float)epVolt.timeAccum);
-                  epVolt = {};
-                }
-              } else {
-                epVolt.exitStartMs = 0;
-              }
+        // Excursion stopwatch — over needs down-authority (zero pin, protection clamp, and the
+        // deliberate anti-windup climb-back are all down-side states); under needs up-authority
+        // (ceiling; aw-recovery holds current low on purpose, so under pauses there too).
+        if (excVolt.state == 0) {
+          int8_t s = (err12 > ACC_V_BAND_V) ? 1 : (err12 < -ACC_V_BAND_V) ? -1 : 0;
+          bool blocked = (s > 0 && (zeroPinned || g_fastOvClampActive || g_cvAwRecovering))
+                         || (s < 0 && (ceilPinned || g_cvAwRecovering));
+          if (s != 0 && !blocked) {
+            excVolt.enterTicks = (s == excVolt.side) ? (uint8_t)(excVolt.enterTicks + 1) : 1;
+            excVolt.side = s;
+            if (excVolt.enterTicks >= ACC_ENTER_DEBOUNCE_TICKS) {
+              excVolt.state = 1;
+              excVolt.outSec = 0.0;
+              excVolt.reentryStartMs = 0;
+              accVolt4.excursions++;
             }
           } else {
-            int8_t s = (err12 > ACC_V_ENTER_V) ? 1 : (err12 < -ACC_V_ENTER_V) ? -1 : 0;
-            if (arrival && s < 0) s = 0;  // arrival scores overshoot only — the climb is physics
-            bool canOpen = (s != 0) && !g_fastOvClampActive
-                           && !(s > 0 && Icv <= 0.5f) && !(s < 0 && Icv >= (uTargetAmps - 0.5f));
-            if (canOpen && s == epVolt.enterSign) {
-              if (++epVolt.enterTicks >= ACC_ENTER_DEBOUNCE_TICKS) {
-                epVolt = {};
-                epVolt.state = 1;
-                epVolt.sign = s;
-              }
-            } else {
-              epVolt.enterSign = s;
-              epVolt.enterTicks = canOpen ? 1 : 0;
-            }
+            excVolt.enterTicks = 0;
           }
-
-          if (arrival) {
-            if (fabsf(err12) < ACC_V_EXIT_V) {
-              if (accVArrSettleStartMs == 0) accVArrSettleStartMs = tick.nowMs;
-              else if ((uint32_t)(tick.nowMs - accVArrSettleStartMs) >= ACC_SETTLE_VOLTAGE_MS) accVRegime = 2;
-            } else {
-              accVArrSettleStartMs = 0;
+        } else {
+          bool paused = (excVolt.side > 0) ? (zeroPinned || g_fastOvClampActive || g_cvAwRecovering)
+                                           : (ceilPinned || g_cvAwRecovering);
+          bool inside = (excVolt.side > 0) ? (err12 <= ACC_V_BAND_V) : (err12 >= -ACC_V_BAND_V);
+          bool flipped = (excVolt.side > 0) ? (err12 < -ACC_V_BAND_V) : (err12 > ACC_V_BAND_V);
+          if (!paused && !inside) excVolt.outSec += (double)actualDtSec;
+          if (flipped) {
+            // Swung through the band to the far side: close this excursion, open the opposite one.
+            accVolt4.recovSecSum += excVolt.outSec;
+            int8_t ns = (int8_t)-excVolt.side;
+            excVolt = {};
+            excVolt.state = 1;
+            excVolt.side = ns;
+            accVolt4.excursions++;
+          } else if (inside) {
+            if (excVolt.reentryStartMs == 0) excVolt.reentryStartMs = tick.nowMs;
+            else if ((uint32_t)(tick.nowMs - excVolt.reentryStartMs) >= ACC_V_EXIT_HOLD_MS) {
+              accVolt4.recovSecSum += excVolt.outSec;
+              excVolt = {};
             }
+          } else {
+            excVolt.reentryStartMs = 0;
           }
         }
       }

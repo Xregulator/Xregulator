@@ -769,13 +769,6 @@ const CSV2_FIELDS = [
     "DeepestAnchorAT",         // deepest anchorage, ft ×10
     "BestUpwindVmgAT",         // best upwind VMG, kts ×100
     "LongestGaleAT",           // longest gale duration, hours ×100
-    // Control Accuracy Scores (since last reset): RMS error + worst overshoot per loop, physical units.
-    "accCurRms",    // inner current loop RMS error (A ×100)
-    "accCurPeak",   // inner current loop worst over-current (A ×100)
-    "accVoltRms",   // CV loop RMS error (mV)
-    "accVoltPeak",  // CV loop worst over-voltage (mV)
-    "accThermRms",  // thermal loop RMS error (°F ×100)
-    "accThermPeak", // thermal loop worst over-temp (°F ×100)
     "cpuFreqMhz",   // live CPU clock (80 or 240 MHz)
     "ch0GapLast",   // CH0 battV read gap, most recent (ms)
     "ch0GapWorst",  // CH0 battV read gap, worst since reset (ms)
@@ -788,16 +781,27 @@ const CSV2_FIELDS = [
     "httpsUpload_win", // Core-0 HTTPS task cloud op time, LAST (ms — plain ms, NOT ft_ so no /1000)
     "httpsUpload_ses", // Core-0 HTTPS task cloud op time, WORST since reset (ms)
     "cvTempDerateScale", // live battery-temp CV gain derate multiplier; ×1000
-    // Control Accuracy v3 episode coverage — distinguishes "0 episodes over hours" from "never eligible"
-    "accCurEp",       // committed episodes since reset, current loop
-    "accVoltEp",      // committed episodes since reset, voltage loop
-    "accThermSess",   // thermal containment sessions since reset
-    "accCurEligS",    // seconds current-loop authority conditions held
-    "accVoltEligS",   // seconds CV was engaged
-    "accThermEligS",  // seconds thermal binding condition held
-    "accCurScorS",    // scored seconds (RMS denominator, incl. live episode), current
-    "accVoltScorS",   // scored seconds, voltage
-    "accThermScorS",  // scored seconds, thermal
+    // Control Accuracy v4 routine-data loop health — raw accumulators; ratios derived here.
+    "accCurValidS",    // current loop: seconds in authority
+    "accCurActiveS",   // challenged seconds (tracking denominator)
+    "accCurInbandS",   // in-band seconds while active (tracking numerator)
+    "accCurConstS",    // seconds output railed / protection clamp
+    "accCurExc",       // excursions (band exits) since reset
+    "accCurRecovS10",  // out-of-band seconds summed across excursions (s ×10)
+    "accCurOverExp",   // damaging exposure (A·s ×100)
+    "accCurWorst",     // worst over-current vs command (A ×100)
+    "accVoltValidS",   // voltage loop: seconds CV engaged
+    "accVoltActiveS",
+    "accVoltInbandS",
+    "accVoltConstS",   // seconds Icv pinned / protection / aw-recovery
+    "accVoltExc",
+    "accVoltRecovS10",
+    "accVoltOverExp",  // V·s 12V-equiv ×100
+    "accVoltWorst",    // worst over-voltage (mV 12V-equiv)
+    "accThermBindS",   // thermal: binding-and-settled seconds
+    "accThermInbandS", // of those, within ±3°F of the regulation setpoint
+    "accThermSess",    // containment sessions since reset
+    "accThermWorst",   // worst over-temp vs limit (°F ×100) — unconditional
 ];
 
 // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). Sits between CSV1 (10 Hz)
@@ -964,8 +968,6 @@ function cxRpmSparkOnCsv1(data) {
     S.rpm.push(isFinite(rpm) ? rpm : NaN); S.rpm.shift();
     const ve = document.getElementById('cx-rpm-spark-val');
     if (ve) ve.textContent = isFinite(rpm) ? Math.round(rpm) + ' RPM' : '—';
-    const rm = document.getElementById('cxCVReadyMsg');
-    if (rm) rm.textContent = cxCVReadyText();
     // Draw only when the strip is laid out (modal open, not hidden by the sweep game) — but the
     // ring above must keep feeding regardless: the game reads the same ring for its trace.
     if (canvas.clientWidth) drawCxRpmSpark(canvas);
@@ -993,25 +995,6 @@ function drawCxRpmSpark(c) {
     const last = S.rpm[N - 1];
     if (isFinite(last)) { g.fillStyle = '#2ec4b6'; g.beginPath(); g.arc(X(N - 1), Y(last), 2.6, 0, 7); g.fill(); }
 }
-// null = not enough live RPM (engine off / modal just opened); true/false = steady over the last ~7 s of the ring.
-function cxRpmSteady() {
-    const S = _cxRpmSpark, N = S.N, win = 70;
-    let lo = Infinity, hi = -Infinity, n = 0;
-    for (let i = Math.max(0, N - win); i < N; i++) {
-        const v = S.rpm[i]; if (!isFinite(v)) continue;
-        n++; if (v < lo) lo = v; if (v > hi) hi = v;
-    }
-    if (n < 30) return null;
-    const mean = (lo + hi) / 2;
-    if (mean < 50) return null;
-    return (hi - lo) <= Math.max(30, mean * 0.04);
-}
-function cxCVReadyText() {
-    return cxRpmSteady() === false
-        ? 'Bring the engine back to a steady cruising speed and press Run.'
-        : 'Hold a steady cruising speed and press Run.';
-}
-
 // ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
 // Schema-driven (fetch /altschema ONCE, zip names against AltLive/AltSettings) — no hardcoded array.
 let altSchema = null;
@@ -3679,7 +3662,9 @@ function startInterpLoop() {
     }
     function tuningTabVisible() {
         const el = document.getElementById('tuning');
-        return el && el.classList.contains('active');
+        const settings = document.getElementById('settings');
+        return el && el.classList.contains('active')
+            && settings && settings.classList.contains('active');
     }
 
     function frame() {
@@ -5579,6 +5564,7 @@ async function fetchAndPopulateVesselInfo() {
 
         vesselInfoComplete = allFieldsFilled;
         if (allFieldsFilled) setVesselButtonUpdateMode();
+        if (typeof updateBattHealthChemNote === 'function') updateBattHealthChemNote();
 
     } catch (error) {
         diagLog('Vessel info not found or invalid:', error);
@@ -5669,6 +5655,7 @@ async function handleVesselInfoSave(event) {
             window.vesselInfo = vesselData;
             window._nominalStored = vesselData.battery_voltage;  // new baseline for the next change/warning
             applyClassScaledInputAttrs();
+            updateBattHealthChemNote();  // chemistry may have just changed
             vesselInfoComplete = true;
             setVesselButtonUpdateMode();  // first save → becomes "Update Vessel Info" + tooltip
 
@@ -5740,7 +5727,8 @@ const BATTDEF_FW_DEFAULT = {
     SOC_BlockRebulk_percent: 95, SOC_AllowRebulk_percent: 94, TailCurrent_A: 5, TailCurrent: 2,
     ChargedVoltage: 14, BattCurrentLimitA: 100, MaximumAllowedBatteryAmps: 150,
     coldChargeLockoutEnable: 1, PeukertExponent: 1.05, ChargeEfficiency: 99,
-    VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0, AlternatorHardShutdownV: 14.8
+    VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0, AlternatorHardShutdownV: 14.8,
+    capSocLowMax: 20, capMinSpan: 70, capRestFloor: 30, capSettleRate: 2.0, bhStepLowA: 30, bhStepDeltaA: 30
 };
 // Stored NVS string → UI units (everything else is stored in UI units already)
 const BATTDEF_FROM_STORED = {
@@ -5749,15 +5737,59 @@ const BATTDEF_FROM_STORED = {
     PeukertExponent: v => v / 100       // ×100 → exponent
 };
 const BATTDEF_MODE_NAMES = ['No Float (idle)', 'Voltage Float', 'Zero-Current Float'];
+// Per-chemistry rationale shown under the proposal summary. Framed around what each battery wants —
+// these are battery-specific recommendations, NOT alternator limits (the alternator has its own).
+// lifepo4 is a fn of the proposed (class-scaled) Bulk voltage so the cited number matches 12/24/48 V banks.
+const BATTDEF_CHEM_COPY = {
+    lifepo4: v => 'For lithium (LiFePO4), Bulk and Absorption are set to ' + v + ' V — roughly a high-90s% state of charge, which avoids the higher-voltage cell stress of a full charge. Float is disabled. The charge current limit is set to a moderate fraction of the bank\'s capacity. You may want to manually increase it if you prioritize charging time vs. battery lifetime.',
+    agm: 'For AGM, the charge current limit is set to a high fraction of the bank\'s capacity: a high charge rate reduces sulfation and extends AGM cycle life, and AGM cells accept high in-rush current. The charge voltages are kept toward the lower end of the acceptable range to limit cell stress.',
+    lead_acid: 'For flooded lead-acid, the absorption voltage and charge current are set on the higher side to keep the cells fully charged and the electrolyte mixed. This errs toward reduced sulfation at the cost of higher water use — check the electrolyte level regularly and top up with distilled water, as a bank charged this way will need watering more often.'
+};
+
+// Per-chemistry Battery Health capacity-trend tuning. 12V-referenced rested open-circuit-voltage
+// curves at the fixed SoC breakpoints {100,90,80,60,40,30,20,15,10,5,0}; firmware scales by
+// BATTERY_VOLTAGE/12 at lookup, so these are entered as 12V values regardless of system voltage.
+// Firmware loads the chemistry-matched curve into capOcvVolt[] at commissioning (applyChemistryOcvPreset,
+// 8_functions.ino), so these presets drive BOTH the SoC seed and the capacity anchor; AGM rests slightly
+// above lead-acid. The anchor window differs because lead-acid/AGM voltage maps to SoC across the whole
+// range (anchor can sit at a shallow, non-damaging rest), while flat LiFePO4 only reads reliably at the bottom knee.
+const CAP_OCV_PRESETS = {
+    lifepo4:   [13.60, 13.40, 13.30, 13.20, 13.10, 13.00, 12.90, 12.80, 12.50, 12.00, 10.00],
+    agm:       [12.85, 12.70, 12.55, 12.35, 12.15, 12.05, 11.90, 11.80, 11.70, 11.60, 11.50],
+    lead_acid: [12.70, 12.50, 12.40, 12.20, 12.00, 11.90, 11.80, 11.73, 11.65, 11.55, 11.40]
+};
+// restFloor = minutes at rest before the OCV is trusted (Battery University BU-903: lithium ~90 min,
+// lead-acid ≥4 h for surface charge to dissipate; AGM recombines a bit faster). settleRate = the
+// dV/dt "stopped moving" gate in mV/10min, ANDed with restFloor. LiFePO4 settles fast so hold it tight
+// (2); lead-acid/AGM surface charge lingers, so loosen to ~3.5 — their OCV curve is steep at the anchor
+// SoC, so a looser voltage gate costs negligible SoC accuracy but lets a point actually capture.
+const CAP_CHEM_ANCHOR = {
+    lifepo4:   { lowMax: 20, span: 70, restFloor: 90,  settleRate: 2.0 },   // bottom knee only, deep cycle (flat mid-curve)
+    agm:       { lowMax: 50, span: 40, restFloor: 180, settleRate: 3.5 },
+    lead_acid: { lowMax: 50, span: 40, restFloor: 240, settleRate: 3.5 }
+};
+
+// OCV curves compare element-wise with tolerance so 2- vs 3-decimal storage never reads as "changed".
+function ocvBlobsEqual(a, b) {
+    const pa = String(a).split(',').map(Number), pb = String(b).split(',').map(Number);
+    if (pa.length !== pb.length || pa.length === 0) return false;
+    for (let i = 0; i < pa.length; i++) {
+        if (!isFinite(pa[i]) || !isFinite(pb[i]) || Math.abs(pa[i] - pb[i]) > 0.005) return false;
+    }
+    return true;
+}
 
 function deriveBatteryDefaults(type, capAh, sysV) {
-    // bulkV/absV are deliberately conservative: LiFePO4 13.9 V ≈ high-90s% SoC with far less cell
-    // stress than 14.4+; lead chemistries stay at the gentle end of full absorption (14.4) because
-    // going LOWER chronically undercharges them (sulfation) — that's the conservative choice there.
+    // bulkV/absV lean gentle for stress/lifetime: LiFePO4 13.9 V ≈ high-90s% SoC well below 14.4+;
+    // AGM at 14.4; flooded higher (14.6) because it needs the extra to counter stratification and its
+    // dominant killer is UNDERcharge (sulfation), not overcharge. limC is the opposite philosophy: high
+    // charge current REDUCES sulfation and lengthens life, so AGM is 1.0C (Lifeline tolerates 5C in-rush).
+    // Flooded stays 0.20C — it genuinely gasses and heats. These are battery-specific; the alternator's
+    // own current ceiling is a separate limit.
     const T = {
         lifepo4:   { bulkV: 13.9, absV: 13.9, floatV: null, durH: null, rebulkV: 13.1, socBlock: 90, socAllow: 80, tailC: 0.05, tailPct: 5, chgDetV: 13.8, limC: 0.50, cold: 1, peukert: 1.05, chgEff: 99, vAlmHi: 14.8, vAlmLo: 11.9, socAlm: 10 },
-        agm:       { bulkV: 14.4, absV: 14.4, floatV: 13.6, durH: 8,    rebulkV: 12.5, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.2, limC: 0.25, cold: 0, peukert: 1.10, chgEff: 93, vAlmHi: 15.0, vAlmLo: 11.8, socAlm: 40 },
-        lead_acid: { bulkV: 14.4, absV: 14.4, floatV: 13.4, durH: 8,    rebulkV: 12.4, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.1, limC: 0.13, cold: 0, peukert: 1.25, chgEff: 88, vAlmHi: 15.2, vAlmLo: 11.5, socAlm: 40 }
+        agm:       { bulkV: 14.4, absV: 14.4, floatV: 13.6, durH: 8,    rebulkV: 12.5, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.2, limC: 1.00, cold: 0, peukert: 1.10, chgEff: 93, vAlmHi: 15.0, vAlmLo: 11.8, socAlm: 40 },
+        lead_acid: { bulkV: 14.6, absV: 14.6, floatV: 13.4, durH: 8,    rebulkV: 12.4, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.3, limC: 0.20, cold: 0, peukert: 1.25, chgEff: 88, vAlmHi: 15.2, vAlmLo: 11.5, socAlm: 40 }
     }[type];
     if (!T) return null;
     const kV = (sysV === 24) ? 2 : (sysV === 48) ? 4 : 1;   // 12V-equivalent voltages scale by class
@@ -5797,6 +5829,24 @@ function deriveBatteryDefaults(type, capAh, sysV) {
     rows.push({ param: 'coldChargeLockoutEnable', label: 'Cold-Charge Lockout', value: T.cold, show: v => v ? 'On' : 'Off' });
     rows.push({ param: 'PeukertExponent', label: 'Peukert Exponent', value: T.peukert });
     rows.push({ param: 'ChargeEfficiency', label: 'Charge Efficiency (%)', value: T.chgEff });
+
+    // Battery Health — capacity trend anchoring (chemistry-specific) + DCIR step (bank-sized)
+    const anchor = CAP_CHEM_ANCHOR[type];
+    if (anchor && CAP_OCV_PRESETS[type]) {
+        const presetLabel = { lifepo4: 'LiFePO4 curve', agm: 'AGM curve', lead_acid: 'Lead-Acid curve' }[type];
+        const ocvBlob = CAP_OCV_PRESETS[type].map(v => v.toFixed(3)).join(',');
+        rows.push({ param: 'capOcv', label: 'Rested-Voltage Curve (Capacity Trend)', value: ocvBlob, blob: true,
+                    show: v => (v === ocvBlob ? presetLabel : (v ? 'current curve' : 'not set')) });
+        rows.push({ param: 'capSocLowMax', label: 'Capacity Anchor — Sample At or Below (%)', value: anchor.lowMax });
+        rows.push({ param: 'capMinSpan', label: 'Capacity Anchor — Minimum Span (%)', value: anchor.span });
+        rows.push({ param: 'capRestFloor', label: 'Capacity Anchor — Rest Before OCV Trusted (min)', value: anchor.restFloor });
+        rows.push({ param: 'capSettleRate', label: 'Capacity Anchor — Voltage Settle Rate (mV/10min)', value: anchor.settleRate });
+    }
+    if (C) {   // DCIR step ~C/4, clamped, so a small bank isn't pulsed at the fixed 30-60 A (crest = 2x low)
+        const step = Math.min(30, Math.max(10, Math.round(C / 4)));
+        rows.push({ param: 'bhStepLowA', label: 'Resistance Test — Step Low (A)', value: step });
+        rows.push({ param: 'bhStepDeltaA', label: 'Resistance Test — Step Delta (A)', value: step });
+    }
     return { rows, useFloat };
 }
 
@@ -5827,7 +5877,7 @@ function battDefClose(apply) {
 async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
     try {
         const type = vessel.battery_type;
-        if (!type || type === 'other') return;
+        if (!type) return;
         // deviceFirstSave (device flag) covers a stale pre-flash browser tab whose prevBatt is set.
         const firstSave = deviceFirstSave || !(prevBatt && prevBatt.type);
         const battChanged = prevBatt && prevBatt.type && (
@@ -5835,6 +5885,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
             prevBatt.cap !== Number(vessel.battery_capacity_ah) ||
             prevBatt.volt !== Number(vessel.battery_voltage));
         if (!firstSave && !battChanged) return;
+        if (type === 'other') { _battDefSkipNote('No recommendations are made for the Other battery type. Inspect every charge-stage and protection setting under Setup and adjust each one individually.'); return; }
         if (!currentAdminPassword) return;
 
         // Current values from the device (raw NVS strings)
@@ -5849,6 +5900,12 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         let unchanged = 0;
         const changed = [];
         for (const row of der.rows) {
+            if (row.blob) {   // OCV curve: comma-joined string, compared numerically not as a scalar
+                const nowStr = (cfg[row.param] !== undefined && cfg[row.param] !== '') ? String(cfg[row.param]) : '';
+                if (ocvBlobsEqual(nowStr, row.value)) { unchanged++; continue; }
+                changed.push({ ...row, now: nowStr });
+                continue;
+            }
             let nowUi;
             if (cfg[row.param] !== undefined) {
                 const raw = parseFloat(cfg[row.param]);
@@ -5863,11 +5920,13 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         const typeName = { lifepo4: 'LiFePO4', agm: 'AGM', lead_acid: 'Lead Acid' }[type] || type;
         const capTxt = (Number(vessel.battery_capacity_ah) > 0) ? Number(vessel.battery_capacity_ah) + ' Ah, ' : '';
         const sum = document.getElementById('battdef-summary');
-        sum.innerHTML = 'Based on your battery bank (<b>' + _cfgEsc(typeName) + '</b>, ' + capTxt + vessel.battery_voltage + ' V), '
-            + 'the regulator can fill in recommended starting values for the charge-stage and protection settings below.<br>'
-            + 'These are starting points, not locks — every setting stays individually editable in Setup afterward. '
-            + 'The proposed values are deliberately conservative to favor battery lifetime; we strongly recommend '
-            + 'checking the charge voltages against your battery manufacturer\'s data sheet.'
+        sum.innerHTML = 'Based on the bank (<b>' + _cfgEsc(typeName) + '</b>, ' + capTxt + vessel.battery_voltage + ' V), '
+            + 'the regulator can fill in recommended starting values for various settings below.<br>'
+            + 'These are starting points - verify against the battery manufacturer\'s data sheets and your own research.<br><br>'
+            + (typeof BATTDEF_CHEM_COPY[type] === 'function'
+                ? BATTDEF_CHEM_COPY[type]((der.rows.find(row => row.param === 'BulkVoltage') || {}).value)
+                : (BATTDEF_CHEM_COPY[type] || ''))
+            + ((type === 'agm' || type === 'lead_acid') ? ' <span style="color:#fca5a5;">This firmware does not yet support a battery temperature sensor, so it cannot reduce current if the battery itself gets hot. Evaluate your own battery-temperature risk before running high current — it matters most in hot installs and with aging cells. Battery-temperature support is planned in a future firmware update.</span>' : '')
             + ((type === 'lifepo4' && battSrc !== 0) ? '<br><span style="color:#fca5a5;">Zero-current float needs the INA228 battery shunt as the Battery Current Source, so Float Mode is proposed as No Float (idle) instead.</span>' : '')
             + (unchanged ? '<br><b>' + unchanged + '</b> setting' + (unchanged === 1 ? ' already matches' : 's already match') + ' and ' + (unchanged === 1 ? 'is' : 'are') + ' not shown.' : '');
 
@@ -5878,7 +5937,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
                 + '<tr style="color:#aaa; text-align:left;"><th style="padding:3px 6px 3px 0; text-align:center;"><input type="checkbox" id="battdef-cb-all" checked onchange="battDefCbAll(this.checked)" title="Check / uncheck all" style="accent-color:#00a19a; margin:0; vertical-align:middle;"><br>Apply</th><th style="padding:3px 8px 3px 0;">Setting</th><th style="padding:3px 8px;">Now</th><th style="padding:3px 0;">Proposed</th></tr>'
                 + changed.map((c, i) => '<tr><td style="padding:3px 6px 3px 0; text-align:center;"><input type="checkbox" class="battdef-cb" data-i="' + i + '" checked onchange="battDefCbChanged()" style="accent-color:#00a19a; margin:0; vertical-align:middle;"></td>'
                     + '<td style="padding:3px 8px 3px 0; color:#9cc;">' + _cfgEsc(c.label) + '</td>'
-                    + '<td style="padding:3px 8px; color:#888;">' + _cfgEsc(isFinite(c.now) ? show(c)(c.now) : '?') + '</td>'
+                    + '<td style="padding:3px 8px; color:#888;">' + _cfgEsc(c.blob ? show(c)(c.now) : (isFinite(c.now) ? show(c)(c.now) : '?')) + '</td>'
                     + '<td style="padding:3px 0; color:#fff;">' + _cfgEsc(show(c)(c.value)) + '</td></tr>').join('')
                 + '</table>';
         } else {
@@ -5936,6 +5995,8 @@ let _commPrepCfg = null;         // /exportConfig snapshot captured at open, for
 let _commPrepInit = {};          // input id → initial value string (only changed inputs are written)
 let _commPrepTsInit = 0;         // TempSource at open (0 = DS18B20, 1 = Thermistor)
 let _commPrepTempSrc = 0;        // live TempSource selection
+let _commPrepFloatInit = '';     // UseFloat at open (Other-only charge block); written only if the select changed
+let _commPrepRpmActive = false;  // deep-linked into the RPM editor from the wizard: suppress the live blue row highlight
 
 async function maybeShowCommPrereqs() {
     try {
@@ -5960,6 +6021,14 @@ function commPrepRender(cfg) {
     const ts = (numF('TempSource') === 1) ? 1 : 0;
     _commPrepTsInit = ts; _commPrepTempSrc = ts;
 
+    // Chemistry decides which fields are relevant. Min Charge Temp only matters for lithium (cold-charge
+    // lockout defaults ON only for LiFePO4; lead-acid/AGM charge cold fine). The whole charge block
+    // (Bulk/Absorption/Float/current/protection) appears ONLY for Other — every other chemistry got
+    // these proposed by the battery-defaults populator, which bails for Other and leaves nothing set.
+    const chem = (window.vesselInfo && String(window.vesselInfo.battery_type || '').toLowerCase()) || '';
+    const isLifepo4 = chem === 'lifepo4';
+    const isOther = chem === 'other';
+
     const inputCss = 'width:100%; background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:7px 10px; font-size:14px; box-sizing:border-box;';
     const lblCss = 'display:block; font-size:12px; color:#9cc; margin-bottom:5px;';
     const rowCss = 'margin-bottom:14px;';
@@ -5982,12 +6051,42 @@ function commPrepRender(cfg) {
         '</div>';
 
     const hr = '<hr style="border:none; border-top:1px solid #333; margin:2px 0 14px;">';
+
+    const minChgRow = isLifepo4
+        ? field('Min Charge Temp (' + tempLbl + ')', 'commprep-minchg', fToDisp(numF('MinChargeTempF')), '1', '-40', '120') + hr
+        : '';
+
+    // FLOAT_DURATION is stored/exported in seconds; the input edits hours (firmware re-multiplies on write).
+    const uf = (function () { const v = numF('UseFloat'); return (v === 1 || v === 2) ? v : 0; })();
+    const floatDurH = () => { const s = numF('FLOAT_DURATION'); return isFinite(s) ? String(Math.round(s / 3600 * 100) / 100) : ''; };
+    _commPrepFloatInit = String(uf);
+    const otherBlock = isOther ? (
+        '<div style="font-size:11px; color:#9cc; letter-spacing:0.04em; text-transform:uppercase; margin:2px 0 6px;">Charge Settings</div>' +
+        '<p style="font-size:12px; line-height:1.5; color:#e6a23c; margin:0 0 14px;">Battery type is set to Other, so no recommended charge values were proposed. Set these starting points now and verify each against your battery\'s data sheet.</p>' +
+        field('Bulk Voltage (V)', 'commprep-bulkv', raw('BulkVoltage'), '0.01', '1', '99') + hr +
+        field('Absorption Voltage (V)', 'commprep-absv', raw('AbsorptionVoltage'), '0.01', '1', '99') + hr +
+        '<div style="' + rowCss + '"><label style="' + lblCss + '">Float Mode</label>' +
+        '<select id="commprep-usefloat" onchange="commPrepFloatMode(this.value)" style="' + inputCss + '">' +
+        '<option value="0"' + (uf === 0 ? ' selected' : '') + '>No Float (idle)</option>' +
+        '<option value="1"' + (uf === 1 ? ' selected' : '') + '>Voltage Float</option>' +
+        '<option value="2"' + (uf === 2 ? ' selected' : '') + '>Zero-Current Float</option>' +
+        '</select></div>' +
+        '<div id="commprep-floatsub" style="display:' + (uf === 1 ? '' : 'none') + '; margin:0 0 14px; padding:10px 12px; background:#191919; border:1px solid #333; border-radius:6px;">' +
+        field('Float Voltage (V)', 'commprep-floatv', raw('FloatVoltage'), '0.01', '1', '99') +
+        field('Float Duration (hrs)', 'commprep-floatdur', floatDurH(), '0.01', '0', '999') +
+        '</div>' + hr +
+        field('Battery Charge Current Limit (A)', 'commprep-battlim', raw('BattCurrentLimitA'), '5', '0', '500') + hr +
+        field('Alternator Hard Shutdown Voltage (V)', 'commprep-hardsd', raw('AlternatorHardShutdownV'), '0.01', '1', '99') + hr +
+        field('High Voltage Alarm (V)', 'commprep-valmhi', raw('VoltageAlarmHigh'), '0.01', '1', '99') + hr +
+        field('Low Voltage Alarm (V)', 'commprep-valmlo', raw('VoltageAlarmLow'), '0.01', '1', '99') + hr
+    ) : '';
+
     document.getElementById('commprep-body').innerHTML =
         intro + seg + thermistor + hr +
         field('Alternator Temperature Limit (' + tempLbl + ')', 'commprep-templimit', fToDisp(numF('TemperatureLimitF')), '1', '0', '350') + hr +
-        field('Min Charge Temp (' + tempLbl + ')', 'commprep-minchg', fToDisp(numF('MinChargeTempF')), '1', '-40', '120') + hr +
+        minChgRow +
         field('Shunt Resistance (µΩ)', 'commprep-shunt', raw('ShuntResistanceMicroOhm'), '1', '1', '5000') + hr +
-        field('Battery Charge Current Limit (A)', 'commprep-battlim', raw('BattCurrentLimitA'), '5', '0', '500') + hr +
+        otherBlock +
         '<div style="' + rowCss + '"><label style="' + lblCss + '">Engine RPM vs. field table</label>' +
         '<button type="button" onclick="commPrepGotoRpm()" style="width:100%; background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Set RPM table →</button></div>';
 
@@ -6004,6 +6103,12 @@ function commPrepTempSrc(v) {
     if (b1) b1.classList.toggle('cap-mode-active', v === 1);
     const th = document.getElementById('commprep-thermistor');
     if (th) th.style.display = (v === 1) ? '' : 'none';
+}
+
+// Float Voltage / Float Duration are inert unless Voltage Float (UseFloat=1) is selected — reveal only then.
+function commPrepFloatMode(v) {
+    const sub = document.getElementById('commprep-floatsub');
+    if (sub) sub.style.display = (String(v) === '1') ? '' : 'none';
 }
 
 function commPrepCollectChanges() {
@@ -6024,6 +6129,17 @@ function commPrepCollectChanges() {
     rec('R_fixed', 'commprep-rfixed', null);
     rec('Beta', 'commprep-beta', null);
     rec('T0_C', 'commprep-t0', null);
+    // Other-only charge block. rec() no-ops when the input is absent, so these are inert for non-Other.
+    // Inputs already carry /get's expected units: volts direct, Float Duration in hours (firmware ×3600).
+    rec('BulkVoltage', 'commprep-bulkv', null);
+    rec('AbsorptionVoltage', 'commprep-absv', null);
+    rec('FloatVoltage', 'commprep-floatv', null);
+    rec('FLOAT_DURATION', 'commprep-floatdur', null);
+    rec('AlternatorHardShutdownV', 'commprep-hardsd', null);
+    rec('VoltageAlarmHigh', 'commprep-valmhi', null);
+    rec('VoltageAlarmLow', 'commprep-valmlo', null);
+    const ufSel = document.getElementById('commprep-usefloat');
+    if (ufSel && ufSel.value !== _commPrepFloatInit) out.push({ param: 'UseFloat', value: parseInt(ufSel.value, 10) });
     if (_commPrepTempSrc !== _commPrepTsInit) out.push({ param: 'TempSource', value: _commPrepTempSrc });
     return out;
 }
@@ -6031,6 +6147,7 @@ function commPrepCollectChanges() {
 // Write any edited fields (one /get) then close. start=true hands off to the commissioning wizard.
 async function commPrepFinish(start) {
     const changes = commPrepCollectChanges();
+    _commPrepRpmActive = false;
     document.getElementById('commprep-modal-overlay').style.display = 'none';
     const pill = document.getElementById('commprep-back-pill'); if (pill) pill.remove();
     if (changes.length && currentAdminPassword) {
@@ -6044,6 +6161,7 @@ async function commPrepFinish(start) {
 
 // ✕ — dismiss without writing edits (mirrors the battdef Skip/✕).
 function commPrepClose() {
+    _commPrepRpmActive = false;
     document.getElementById('commprep-modal-overlay').style.display = 'none';
     const pill = document.getElementById('commprep-back-pill'); if (pill) pill.remove();
     const r = _commPrereqResolve; _commPrereqResolve = null; if (r) r();
@@ -6056,16 +6174,19 @@ function commPrepGotoRpm() {
     showMainTab('settings');
     showSubTab('settings', 'alternator');
     showAltTab('primary', 'alt-panel-quick-view');
+    _commPrepRpmActive = true;
+    updateLearningTableHighlight({ currentRPMTableIndex: -1 });
     if (document.getElementById('commprep-back-pill')) return;
     const pill = document.createElement('button');
     pill.id = 'commprep-back-pill';
     pill.type = 'button';
-    pill.textContent = '← Back to setup wizard';
+    pill.textContent = 'Edit the RPM and Limit (A) columns then return to Setup Wizard by clicking here';
     pill.onclick = commPrepBackFromRpm;
-    pill.style.cssText = 'position:fixed; left:50%; transform:translateX(-50%); bottom:16px; z-index:9300; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:20px; padding:10px 18px; cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,0.5);';
+    pill.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:9300; max-width:min(360px,calc(100vw - 32px)); text-align:center; line-height:1.35; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:14px; border:none; border-radius:16px; padding:16px 22px; cursor:pointer; box-shadow:0 6px 24px rgba(0,0,0,0.55);';
     document.body.appendChild(pill);
 }
 function commPrepBackFromRpm() {
+    _commPrepRpmActive = false;
     const pill = document.getElementById('commprep-back-pill'); if (pill) pill.remove();
     document.getElementById('commprep-modal-overlay').style.display = 'flex';
 }
@@ -6257,27 +6378,21 @@ function socSeedRender(s) {
             calc += eq('Resting voltage (open-circuit voltage, OCV)',
                 'Bank capacity unknown &mdash; no current correction, V rest = ' + Number(s.v).toFixed(2) + ' V');
         }
-        if (s.lith) {
-            calc += eq('Resting-voltage table, interpolated',
-                Number(s.vlo).toFixed(2) + ' V = ' + s.plo + ' % &hellip; ' + Number(s.vhi).toFixed(2) + ' V = ' + s.phi + ' % &rarr; ' + s.soc + ' %');
-            if (s.vhi > s.vlo) {
-                const pos = Math.max(0, Math.min(1, (s.vocv - s.vlo) / (s.vhi - s.vlo))) * 100;
-                const knee = (s.soc <= 30)
-                    ? 'This reading sits on the bottom knee of the LiFePO4 curve &mdash; the one region where voltage alone gives a trustworthy state of charge.'
-                    : 'The LiFePO4 voltage curve is very flat in this range, so this estimate is coarse &mdash; if you know the true state of charge, set it below.';
-                ladder = '<div style="margin-top:20px;">'
-                    + '<div style="position:relative; height:26px; border-radius:5px; background:linear-gradient(to right,#46392a 0%,#3a3a2c 35%,#2a4340 100%); border:1px solid #333;">'
-                    + '<div style="position:absolute; top:-5px; bottom:-5px; left:' + pos.toFixed(0) + '%; width:2px; background:#2ec4b6; box-shadow:0 0 6px rgba(46,196,182,0.67);">'
-                    + '<span style="position:absolute; top:-15px; left:50%; transform:translateX(-50%); font-size:10px; color:#2ec4b6; white-space:nowrap;">' + Number(s.vocv).toFixed(2) + ' V</span></div></div>'
-                    + '<div style="display:flex; justify-content:space-between; font-size:10px; color:#666; margin-top:4px;">'
-                    + '<span>' + Number(s.vlo).toFixed(2) + ' V<br>' + s.plo + ' %</span>'
-                    + '<span style="text-align:right;">' + Number(s.vhi).toFixed(2) + ' V<br>' + s.phi + ' %</span></div>'
-                    + '<div style="font-size:11px; color:#777; margin-top:6px;">' + knee + '</div></div>';
-            }
-        } else {
-            calc += eq('Resting-voltage ladder (lead-acid)',
-                s.vlo > 0 ? 'V rest &ge; ' + Number(s.vlo).toFixed(2) + ' V &rarr; ' + s.soc + ' %'
-                    : 'below the lowest rung &rarr; ' + s.soc + ' %');
+        calc += eq('Resting-voltage table, interpolated',
+            Number(s.vlo).toFixed(2) + ' V = ' + s.plo + ' % &hellip; ' + Number(s.vhi).toFixed(2) + ' V = ' + s.phi + ' % &rarr; ' + s.soc + ' %');
+        if (s.lith && s.vhi > s.vlo) {   // flat-plateau graphic + caveat is LiFePO4-specific; lead/AGM slope monotonically
+            const pos = Math.max(0, Math.min(1, (s.vocv - s.vlo) / (s.vhi - s.vlo))) * 100;
+            const knee = (s.soc <= 30)
+                ? 'This reading sits on the bottom knee of the LiFePO4 curve &mdash; the one region where voltage alone gives a trustworthy state of charge.'
+                : 'The LiFePO4 voltage curve is very flat in this range, so this estimate is coarse &mdash; if you know the true state of charge, set it below.';
+            ladder = '<div style="margin-top:20px;">'
+                + '<div style="position:relative; height:26px; border-radius:5px; background:linear-gradient(to right,#46392a 0%,#3a3a2c 35%,#2a4340 100%); border:1px solid #333;">'
+                + '<div style="position:absolute; top:-5px; bottom:-5px; left:' + pos.toFixed(0) + '%; width:2px; background:#2ec4b6; box-shadow:0 0 6px rgba(46,196,182,0.67);">'
+                + '<span style="position:absolute; top:-15px; left:50%; transform:translateX(-50%); font-size:10px; color:#2ec4b6; white-space:nowrap;">' + Number(s.vocv).toFixed(2) + ' V</span></div></div>'
+                + '<div style="display:flex; justify-content:space-between; font-size:10px; color:#666; margin-top:4px;">'
+                + '<span>' + Number(s.vlo).toFixed(2) + ' V<br>' + s.plo + ' %</span>'
+                + '<span style="text-align:right;">' + Number(s.vhi).toFixed(2) + ' V<br>' + s.phi + ' %</span></div>'
+                + '<div style="font-size:11px; color:#777; margin-top:6px;">' + knee + '</div></div>';
         }
     }
 
@@ -6463,13 +6578,14 @@ function fetchTuningLog() {
 }
 
 function renderTuningLog(data) {
-    // Live accuracy mirror (Setup panel): data.live = [RMS error (A), worst over-current (A), 0, 0].
-    // The always-on Control Accuracy panel in Live Data → Diag is fed separately off CSV2.
-    const liveLabels = ['RMS', 'Peak'];
+    // Live accuracy mirror (Setup panel): data.live = [Tracking % (in-band of challenged time),
+    // worst over-current (A), 0, 0]. The always-on panel in Live Data → Diag is fed off CSV2.
     const live = data.live || [];
-    for (let i = 0; i < 2; i++) {
-        const el = document.getElementById('liveScore' + i);
-        if (el) el.textContent = liveLabels[i] + ': ' + (live[i] > 0 ? live[i].toFixed(2) + ' A' : '—');
+    {
+        const el0 = document.getElementById('liveScore0');
+        if (el0) el0.textContent = 'Tracking: ' + (live[0] > 0 ? live[0].toFixed(1) + ' %' : '—');
+        const el1 = document.getElementById('liveScore1');
+        if (el1) el1.textContent = 'Peak: ' + (live[1] > 0 ? live[1].toFixed(2) + ' A' : '—');
     }
 
     // Active test score
@@ -6589,16 +6705,16 @@ async function resetTuningLog() {
         .catch(() => {});
 }
 
-// Manual reset for the Control Accuracy Scores panel. Clears all three loops' committed
-// accumulators, coverage stats AND live episode buffers on the device; the cells fall to
-// dashes until a fresh challenge episode is scored.
+// Manual reset for the Control Accuracy panel. Clears all three loops' accumulators AND the
+// live excursion stopwatches on the device; the cells fall to dashes until fresh challenged
+// time accrues.
 async function resetAccuracyScores() {
-    if (!await xConfirm('Reset the Control Accuracy scores (RMS + worst overshoot for all three loops)?')) return;
+    if (!await xConfirm('Reset the Control Accuracy numbers (tracking, excursions, worst overshoot for all three loops)?')) return;
     fetch(buildURL('/resetAccuracyScores'), { method: 'POST' }).catch(() => {});
 }
 
-// Episode diagnostics expander: fetches /accstate on open and renders live episode state +
-// discarded ("voided") episode counts by reason. On-demand only — kept out of CSV2.
+// Diagnostics expander: fetches /accstate on open and renders the raw v4 accumulators + live
+// excursion state. On-demand only — kept out of CSV2.
 function fetchAccState() {
     const el = document.getElementById('accStateBody');
     if (!el) return;
@@ -6607,34 +6723,22 @@ function fetchAccState() {
         .then(r => r.ok ? r.json() : null)
         .then(d => {
             if (!d) { el.textContent = 'Not available.'; return; }
-            const reasonLabels = {
-                rail: 'actuator at rail (no authority that direction)',
-                ceiling: 'current ceiling reached (no headroom)',
-                engine_stop: 'engine stopped',
-                mode_exit: 'mode or stage exited',
-                cmd_zero: 'commanded current dropped to zero',
-                prot_unrelated: 'protection fired, unrelated direction',
-                sensor_suspect: 'sensor disagreement at protection trip',
-                sample_gap: 'control-tick gap (stall)',
-                target_step: 'voltage target stepped (immature episode)',
-                manual_reset: 'manual reset'
-            };
-            const liveLine = (L, isVolt) => !L.active ? 'none'
-                : (L.sign > 0 ? 'over' : 'under') + '-episode, '
-                  + (isVolt ? (L.epPeakMv.toFixed(0) + ' mV peak') : (L.epPeak.toFixed(2) + ' A peak'))
-                  + ', ' + L.epSec.toFixed(1) + 's so far';
-            const voidsOf = L => d.reasons
-                .map((r, i) => L.voids[i] > 0 ? (reasonLabels[r] || r) + ': ' + L.voids[i] : null)
-                .filter(Boolean).join('\n      ') || 'none';
-            const regimeName = ['idle (CV off)', 'arrival (settling toward target)', 'regulation'][d.volt.regime] || '?';
+            const liveLine = (L, unit) => !L.liveExc ? 'none'
+                : (L.liveSide > 0 ? 'over' : 'under') + '-band excursion, '
+                  + L.liveOutS.toFixed(1) + 's out of band so far' + unit;
+            const loopLines = (L, over, worst) =>
+                '   in authority ' + fmtT(L.validS) + ' — challenged ' + fmtT(L.activeS)
+                + ' (in band ' + fmtT(L.inbandS) + '), constrained ' + fmtT(L.constS)
+                + '\n   excursions: ' + L.exc + ', out-of-band total ' + L.recovS.toFixed(1) + 's'
+                + '\n   damaging exposure: ' + over + ', worst ' + worst;
             el.textContent =
-                'Current loop\n   live episode: ' + liveLine(d.cur, false)
-                + '\n   discarded episodes:\n      ' + voidsOf(d.cur)
-                + '\n\nVoltage loop — ' + regimeName
-                + '\n   live episode: ' + liveLine(d.volt, true)
-                + '\n   discarded episodes:\n      ' + voidsOf(d.volt)
+                'Current loop\n' + loopLines(d.cur, d.cur.overExp.toFixed(1) + ' A·s', d.cur.worst.toFixed(2) + ' A')
+                + '\n   live: ' + liveLine(d.cur, '')
+                + '\n\nVoltage loop\n' + loopLines(d.volt, d.volt.overExpMv.toFixed(0) + ' mV·s', d.volt.worstMv.toFixed(0) + ' mV')
+                + '\n   live: ' + liveLine(d.volt, '')
                 + '\n\nThermal loop\n   containment sessions: ' + d.therm.sessions
-                + ', scored ' + d.therm.scoredS.toFixed(0) + 's of ' + d.therm.eligibleS.toFixed(0) + 's eligible';
+                + ', binding ' + fmtT(d.therm.bindS) + ' (in band ' + fmtT(d.therm.inbandS) + ')'
+                + '\n   worst over limit: ' + d.therm.worstF.toFixed(1) + ' °F';
         })
         .catch(() => { el.textContent = 'Not available.'; });
 }
@@ -6768,22 +6872,23 @@ function fetchCVTuningLog() {
         .catch(() => {});
 }
 
-// Control Accuracy cell: divide the raw CSV value by `scale`, write it with `unit` and `decimals`,
-// and color green/orange/red by its thresholds (compared in display units). Dash rule keys on
-// scoredS (the RMS denominator), NOT the value: scoredS 0 → "—" (never observed under challenge),
-// while scoredS > 0 with value 0 renders 0 in green ("challenged and clean" — e.g. a thermal peak
-// that never crossed the limit). Caches the last render on the element so it's scope-independent.
-function accScoreCell(elId, raw, scale, unit, decimals, greenMax, orangeMax, muted, scoredS) {
+// Shared s/m/h formatter for the Control Accuracy panel + its diagnostics expander.
+function fmtT(s) {
+    return !(s > 0) ? '0s' : (s < 90 ? Math.round(s) + 's'
+        : (s < 5400 ? (s / 60).toFixed(1) + 'm' : (s / 3600).toFixed(1) + 'h'));
+}
+
+// Control Accuracy cell writer with render-stamp caching. Dash rule keys on `observedS`
+// (the metric's own denominator), NOT the value: 0 observed → "—" ("not observed" is never
+// shown as "perfect"). higherBetter=true colors green ABOVE the first threshold (tracking %);
+// false colors green BELOW it (worst overshoot, recovery time).
+function accCell(elId, txt, v, t1, t2, higherBetter, observedS) {
     const el = document.getElementById(elId);
-    if (!el || raw === undefined) return;
-    const v = Math.max(0, raw / scale);
-    let txt, color;
-    if (!(scoredS > 0)) { txt = '—'; color = 'var(--text-muted)'; }
-    else if (muted) { txt = v.toFixed(decimals) + unit; color = 'var(--text-muted)'; }
-    else {
-        txt = v.toFixed(decimals) + unit;
-        color = v < greenMax ? '#21c25e' : (v < orangeMax ? '#f08c1d' : '#ef4444');
-    }
+    if (!el) return;
+    let color;
+    if (!(observedS > 0)) { txt = '—'; color = 'var(--text-muted)'; }
+    else if (higherBetter) color = v >= t1 ? '#21c25e' : (v >= t2 ? '#f08c1d' : '#ef4444');
+    else color = v < t1 ? '#21c25e' : (v < t2 ? '#f08c1d' : '#ef4444');
     const stamp = txt + '|' + color;
     if (el.dataset.stamp === stamp) return;
     el.dataset.stamp = stamp;
@@ -6791,27 +6896,24 @@ function accScoreCell(elId, raw, scale, unit, decimals, greenMax, orangeMax, mut
     el.style.color = color;
 }
 
-// Coverage sub-line under each Control Accuracy row: "N episodes · Xs scored · Yh eligible".
-function accCovLine(elId, count, countWord, scoredS, eligS) {
+// Coverage sub-line under each Control Accuracy row.
+function accCovLine(elId, txt) {
     const el = document.getElementById(elId);
-    if (!el || count === undefined) return;
-    const fmtT = s => !(s > 0) ? '0s' : (s < 90 ? Math.round(s) + 's'
-        : (s < 5400 ? (s / 60).toFixed(1) + 'm' : (s / 3600).toFixed(1) + 'h'));
-    const txt = count + ' ' + countWord + (count === 1 ? '' : 's') + ' · '
-        + fmtT(scoredS) + ' scored · ' + fmtT(eligS) + ' eligible';
+    if (!el) return;
     if (el.dataset.stamp === txt) return;
     el.dataset.stamp = txt;
     el.textContent = txt;
 }
 
 function renderCVTuningLog(data) {
-    // CV live accuracy mirror: data.live = [RMS error (mV), worst over-voltage (mV), 0, 0].
-    // The always-on Control Accuracy panel in Live Data → Diag is fed separately off CSV2.
-    const cvLiveLabels = ['RMS', 'Peak'];
+    // CV live accuracy mirror: data.live = [Tracking % (in-band of challenged time),
+    // worst over-voltage (mV 12V-equiv), 0, 0]. The always-on panel is fed off CSV2.
     const live = data.live || [];
-    for (let i = 0; i < 2; i++) {
-        const el = document.getElementById('cvLiveScore' + i);
-        if (el) el.textContent = cvLiveLabels[i] + ': ' + (live[i] > 0 ? Math.round(live[i]) + ' mV' : '—');
+    {
+        const el0 = document.getElementById('cvLiveScore0');
+        if (el0) el0.textContent = 'Tracking: ' + (live[0] > 0 ? live[0].toFixed(1) + ' %' : '—');
+        const el1 = document.getElementById('cvLiveScore1');
+        if (el1) el1.textContent = 'Peak: ' + (live[1] > 0 ? Math.round(live[1]) + ' mV' : '—');
     }
 
     // Active test score banner
@@ -10286,7 +10388,7 @@ window.addEventListener("load", function () {
     // IDs that are intentionally absent at times (created on demand, or only present
     // while a transient dialog is open) — these are checked-then-created/guarded, so a
     // null lookup is expected, not a stale reference. Don't flag them.
-    const optionalElementIds = new Set(['recoveryDialog', 'lt-cloud-hint', 'faflip-pause-btn', 'cxCVReadyMsg']);
+    const optionalElementIds = new Set(['recoveryDialog', 'lt-cloud-hint', 'faflip-pause-btn']);
 
     document.getElementById = function (id) {
         const element = originalGetElementById.call(document, id);
@@ -11963,33 +12065,54 @@ window.addEventListener("load", function () {
                 }
             }
 
-            // Control Accuracy Scores v3 (always-on, fed off CSV2). Values are provisional
-            // (committed episodes + live episode). Current/thermal are ×100 in CSV2, voltage is
-            // already in mV. Dash keys on scored seconds, not the value, so "challenged and clean"
-            // reads 0 in green instead of dash. Thresholds in display units — placeholders until a
-            // bench day of v3 episode data (episode-conditional RMS runs higher than v2's).
-            const accCurS   = parseFloat(data.accCurScorS)   || 0;
-            const accVoltS  = parseFloat(data.accVoltScorS)  || 0;
-            const accThermS = parseFloat(data.accThermScorS) || 0;
-            accScoreCell('accCurRms',    data.accCurRms,    100, ' A',  2, 3,  5, false, accCurS);
-            accScoreCell('accCurPeak',   data.accCurPeak,   100, ' A',  2, 2,  5, true,  accCurS);  // greyed: single-sample peak is too easily polluted by one bad reading
-            accScoreCell('accVoltRms',   data.accVoltRms,     1, ' mV', 0, 200, 300, false, accVoltS);
-            accScoreCell('accVoltPeak',  data.accVoltPeak,    1, ' mV', 0, 100, 150, false, accVoltS);
-            accScoreCell('accThermRms',  data.accThermRms,  100, ' °F', 1, 10,  15, false, accThermS);
-            // Worst over-temp: red once the peak reaches the over-temp shutdown trip (limit + TempWarnExcess,
-            // default 2°F) — if it shut down, it's red. Orange from half that. Tracks the live warn-excess.
-            // Denominator is total accumulated time (thermal peak is tracked unconditionally), so any
-            // uptime shows a number; use eligible+scored as "observed" proxy.
+            // Control Accuracy v4 (always-on, fed off CSV2). Raw accumulators → ratios derived
+            // here: Tracking % = in-band/challenged, mean recovery = out-of-band s / excursions,
+            // coverage line shows the challenged/quiet/constrained split. Dash keys on each
+            // metric's own denominator ("not observed" is never shown as "perfect"). Color
+            // thresholds are placeholders pending fleet percentile data (spec §8.1).
+            const accLoop = pfx => ({
+                valid: parseFloat(data[pfx + 'ValidS']) || 0,
+                act:   parseFloat(data[pfx + 'ActiveS']) || 0,
+                inb:   parseFloat(data[pfx + 'InbandS']) || 0,
+                con:   parseFloat(data[pfx + 'ConstS']) || 0,
+                exc:   parseInt(data[pfx + 'Exc']) || 0,
+                rec:   (parseFloat(data[pfx + 'RecovS10']) || 0) / 10,
+                worst: parseFloat(data[pfx + 'Worst']) || 0
+            });
+            const covTxt = a => fmtT(a.act) + ' challenged · '
+                + fmtT(Math.max(0, a.valid - a.act - a.con)) + ' quiet · '
+                + fmtT(a.con) + ' constrained of ' + fmtT(a.valid) + ' in control';
+            const renderElec = (a, ids, worstScale, worstUnit, worstDec, worstT1, worstT2, recT1, recT2) => {
+                const trk = 100 * a.inb / Math.max(a.act, 0.001);
+                accCell(ids.trk, trk.toFixed(1) + ' %', trk, 95, 85, true, a.act);
+                const meanRec = a.exc > 0 ? a.rec / a.exc : 0;
+                accCell(ids.exc, a.exc + (a.exc > 0 ? ' · ' + meanRec.toFixed(1) + 's avg' : ''),
+                        meanRec, recT1, recT2, false, a.valid);
+                accCell(ids.worst, (a.worst / worstScale).toFixed(worstDec) + worstUnit,
+                        a.worst / worstScale, worstT1, worstT2, false, a.valid);
+                accCovLine(ids.cov, covTxt(a));
+            };
+            renderElec(accLoop('accCur'), { trk: 'accCurTrk', exc: 'accCurExc_c', worst: 'accCurWorst_c', cov: 'accCurCov' },
+                       100, ' A', 1, 6, 12, 5, 15);
+            renderElec(accLoop('accVolt'), { trk: 'accVoltTrk', exc: 'accVoltExc_c', worst: 'accVoltWorst_c', cov: 'accVoltCov' },
+                       1, ' mV', 0, 200, 400, 20, 60);
+            // Thermal: containment % while binding + unconditional worst-over-limit. Worst goes red
+            // once the peak reaches the over-temp shutdown trip (limit + TempWarnExcess, default
+            // 2°F) — if it shut down, it's red; orange from half that. Peak is tracked in all modes,
+            // so it shows whenever it's nonzero even if the loop never formally bound.
+            const thermBindS = parseFloat(data.accThermBindS) || 0;
+            const thermInbS = parseFloat(data.accThermInbandS) || 0;
+            const thermWorstF = (parseFloat(data.accThermWorst) || 0) / 100;
             const thermWarnF = (window._tempWarnExcessF > 0) ? window._tempWarnExcessF : 2.0;
-            const thermObsS = Math.max(accThermS, parseFloat(data.accThermEligS) || 0);
-            accScoreCell('accThermPeak', data.accThermPeak, 100, ' °F', 1, thermWarnF * 0.5, thermWarnF, false,
-                         (parseFloat(data.accThermPeak) > 0) ? Math.max(thermObsS, 1) : thermObsS);
-            accCovLine('accCurCov',   parseInt(data.accCurEp)     || 0, 'episode',
-                       accCurS,   parseFloat(data.accCurEligS)  || 0);
-            accCovLine('accVoltCov',  parseInt(data.accVoltEp)    || 0, 'episode',
-                       accVoltS,  parseFloat(data.accVoltEligS) || 0);
-            accCovLine('accThermCov', parseInt(data.accThermSess) || 0, 'session',
-                       accThermS, parseFloat(data.accThermEligS) || 0);
+            const thermCont = 100 * thermInbS / Math.max(thermBindS, 0.001);
+            accCell('accThermTrk', thermCont.toFixed(1) + ' %', thermCont, 95, 85, true, thermBindS);
+            accCovLine('accThermSess_c', thermBindS > 0 || (parseInt(data.accThermSess) || 0) > 0
+                ? String(parseInt(data.accThermSess) || 0) : '—');
+            accCell('accThermWorst_c', thermWorstF.toFixed(1) + ' °F', thermWorstF,
+                    thermWarnF * 0.5, thermWarnF, false, thermWorstF > 0 ? 1 : thermBindS);
+            accCovLine('accThermCov', (parseInt(data.accThermSess) || 0) + ' containment session'
+                + ((parseInt(data.accThermSess) || 0) === 1 ? '' : 's') + ' · '
+                + fmtT(thermBindS) + ' binding · ' + fmtT(thermInbS) + ' in band');
 
             // Update GPS display and manual entry form visibility
             if (data.LatitudeNMEA !== undefined && data.LongitudeNMEA !== undefined) {
@@ -12858,6 +12981,8 @@ function updateLearningTableHighlight(data) {
         row.classList.remove('history-row-active');
     });
 
+    if (_commPrepRpmActive) return;   // wizard deep-link: no live row highlight while editing
+
     // Highlight 3 rows: lower RPM point, bucket, upper RPM point
     if (data.currentRPMTableIndex >= 0 && data.currentRPMTableIndex <= 9) {
         const allRows = document.querySelectorAll('#learning-table-body tr');
@@ -13114,7 +13239,20 @@ function showDiagPanel(panelName, evt = null) {
     if (panel) panel.classList.add('active');
     if (evt && evt.target) evt.target.classList.add('active');
     // Battery Health canvas was sized at width 0 while hidden — refresh once it's visible.
-    if (panelName === 'battery' && typeof pollBatteryHealth === 'function') setTimeout(pollBatteryHealth, 60);
+    if (panelName === 'battery') {
+        updateBattHealthChemNote();
+        if (typeof pollBatteryHealth === 'function') setTimeout(pollBatteryHealth, 60);
+    }
+}
+
+// Capacity trend needs a rested-voltage curve to anchor SoC. Known chemistries get one from the
+// Vessel-Info populator; type "other" gets none, so prompt the user to enter their own. Unknown
+// (vessel info not yet loaded) shows no note so it never flashes on boot. DCIR is unaffected either way.
+function updateBattHealthChemNote() {
+    const note = document.getElementById('capChemNote');
+    if (!note) return;
+    const bt = window.vesselInfo && String(window.vesselInfo.battery_type || '').toLowerCase();
+    note.style.display = (bt === 'other') ? '' : 'none';
 }
 
 // Inner Charge Settings / Battery Monitor switch inside Setup -> Battery. Dedicated (NOT showAltTab,
@@ -13161,11 +13299,43 @@ function showAltTab(group, panelId) {
 
 }
 
+// Dedicated switcher for the Tuning Tools alt-panel's inner tabs. NOT showSubTab: #tuning is
+// nested under Setup > Alternator, so the generic showSubTab('settings',...) querySelectors would
+// clobber these panels — the same reason showBatteryPanel/showDiagPanel exist. Uses private
+// .tuning-tab/.tuning-panel classes so the outer sub-tab machinery can never reach them.
+function showTuningPanel(name, evt = null) {
+    document.querySelectorAll('#tuning .tuning-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('#tuning .tuning-tab').forEach(b => b.classList.remove('active'));
+    const panel = document.getElementById('tuning-' + name);
+    if (panel) panel.classList.add('active');
+    if (evt && evt.target) {
+        evt.target.classList.add('active');
+    } else {
+        document.querySelectorAll('#tuning .tuning-tab').forEach(b => {
+            if ((b.getAttribute('onclick') || '').includes(`showTuningPanel('${name}'`)) b.classList.add('active');
+        });
+    }
+    window.scrollTo(0, 0);
+    resizeLivePlotsOnShow();   // charts in the revealed panel were built at width 0 while hidden
+}
+
+// Tuning Tools is a 5th alt-tab inside Setup > Alternator (id="tuning", .alt-panel). Route every
+// deep-link through here so the main tab, sub-tab, and alt-tab are all set before the inner panel.
+function goToTuning(subTab) {
+    if (!subTab) {
+        const active = document.querySelector('#tuning .tuning-panel.active');
+        subTab = active ? active.id.replace('tuning-', '') : 'commissioning';
+    }
+    showMainTab('settings');
+    showSubTab('settings', 'alternator');
+    showAltTab('primary', 'tuning');
+    showTuningPanel(subTab);
+}
+
 // Paired shortcuts for the CV-Mode voltage setpoint and the Voltage-loop tuning tab,
 // which are edited back-to-back during tuning.
 function goToVoltageTuning() {
-    showMainTab('tuning');
-    showSubTab('tuning', 'voltage');
+    goToTuning('voltage');
 }
 function goToCVMode() {
     showMainTab('settings');
@@ -18115,6 +18285,7 @@ function cxStopPoll() { if (cxPollTimer) { clearInterval(cxPollTimer); cxPollTim
 // g_lastCsv1 holds the latest CSV1 frame (raw, name-keyed); echoes carry CSV3 settings.
 function cxLive() {
   const c = (typeof g_lastCsv1 === 'object' && g_lastCsv1) ? g_lastCsv1 : {};
+  const c3 = (typeof g_lastCsv3 === 'object' && g_lastCsv3) ? g_lastCsv3 : {};
   const num = (k, s) => (k in c && c[k] !== '' && c[k] != null) ? parseFloat(c[k]) / s : NaN;
   return {
     rpm: num('RPM', 1),
@@ -18122,7 +18293,7 @@ function cxLive() {
     amps: num('MeasuredAmps', 100), // alternator current (amps)
     duty: num('dutyCycle', 100),    // field duty (%)
     prot: ('protEventMask' in c) ? (parseInt(c.protEventMask) || 0) : 0,  // bit1=OV bit2=iExcess bit4=LoadDump
-    onoff: ('OnOff' in c) ? (parseInt(c.OnOff) === 1) : null,  // master Alternator Enable (top-right switch); null = unknown
+    onoff: ('OnOff' in c3) ? (parseInt(c3.OnOff) === 1) : null,  // master Alternator Enable — lives in CSV3 settings echo, not CSV1; null = unknown
   };
 }
 function cxBulkV() { const v = getEchoNumber('BulkVoltage_echo'); return (v > 0) ? v : NaN; }
@@ -18196,7 +18367,10 @@ function cxVerifyParams() {
 //   open-loop ramp / open-loop sine / disturbance creep / validation hold → Plots ▸ Short Term
 //   closed-loop sine-sweep verify                                          → Tuning ▸ Current
 function cxShowTab(main, sub) {
-  try { showMainTab(main); showSubTab(main, sub); } catch (e) { /* tab not present — non-fatal */ }
+  try {
+    if (main === 'tuning') { goToTuning(sub); return; }   // #tuning is an alt-panel, not a main tab
+    showMainTab(main); showSubTab(main, sub);
+  } catch (e) { /* tab not present — non-fatal */ }
 }
 
 // Every commissioning write goes through here so the admin password is always attached.
@@ -18854,8 +19028,9 @@ function cxRenderCVPlant(b) {
                 '<button onclick="cxCVFitDownload()" class="btn-secondary btn-sm">Download raw data</button>';
         }
     }
-    // After the Disturbances sweep the engine could be anywhere in the band — bring it back to cruise.
-    if (!cx.cvFitRunning && !f) body += '<p style="font-size:15px;line-height:1.5;"><strong id="cxCVReadyMsg">' + cxCVReadyText() + '</strong> The test briefly steps the charge current and measures how the battery responds, then proposes the voltage-loop gains.</p>' +
+    // Engine state entering this step is indeterminate (post-sweep, then a read-only Thresholds step),
+    // so the instruction is one wording valid from idle or cruise — no live steady/unsteady branch.
+    if (!cx.cvFitRunning && !f) body += '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine to a steady cruising speed and press Run.</strong> The test briefly steps the charge current and measures how the battery responds, then proposes the voltage-loop gains.</p>' +
         '<p style="font-size:13px;color:#f0a500;line-height:1.45;">⚠️ Don\'t switch other loads on or off during the test (inverter, thrusters, fridge, windlass…) — it spoils the reading.</p>' +
         '<button onclick="cxCVPlantStart()" class="btn-primary btn-sm">Run</button>';
     else if (!cx.cvFitRunning && f) {
@@ -19576,7 +19751,7 @@ function cxRtestPanel() {
         h += '<div style="margin-top:8px;font-size:13px;line-height:1.6;">' +
              'Alternator ripple &asymp; <strong>' + R.a0.toFixed(2) + ' + ' + R.a1.toFixed(3) + '&middot;I</strong> A pk-pk' +
              '</div>';
-        h += '<div style="margin-top:8px;font-size:13px;">Saved as the measured-ripple overlay. Check it against your thresholds on the <strong>Protections</strong> ripple plot (or the review in the next step) &mdash; nothing was changed automatically.</div>';
+        h += '<div style="margin-top:8px;font-size:13px;">Saved as the measured-ripple overlay. Check it against the thresholds in the next step.</div>';
         h += '<div style="margin-top:8px;">' + cxNextBtn(true, true) + ' ' +
              '<button onclick="cxRtReady()" class="btn-secondary btn-sm">Re-run</button> ' +
              '<button onclick="cxMatrixStart()" class="btn-secondary btn-sm">Re-sweep</button></div>';
@@ -20110,7 +20285,7 @@ function cxShowHelpfulHints() {
 }
 function cxHintsDone() {
     closeCommissionModal(); cx = null; cxPlanUserSet = false;   // re-default the plan next time
-    showMainTab('tuning'); showSubTab('tuning', 'commissioning');   // land on the Commissioning checklist
+    goToTuning('commissioning');   // land on the Commissioning checklist
 }
 async function commissionAbort() {
     if (!await xConfirm('Abort commissioning and revert all settings to the pre-commissioning snapshot?')) return;
@@ -22910,7 +23085,7 @@ function pollBatteryHealth() {
     bhSet('capTempNorm_echo', cfg.tempNorm == 1 ? 'on' : 'off');
     bhSet('capTempCoeff_echo', cfg.tempCoeff + ' %/°C');
     bhSet('capTempRef_echo', cfg.tempRef + ' °C');
-    if (j.ocv && j.ocvSoc) renderCapOcvTable(j.ocv, j.ocvSoc);
+    if (j.ocv && j.ocvSoc) renderCapOcvTable(j.ocv, j.ocvSoc, Number(cfg.socLowMax));
   }).catch(() => { });
 }
 
@@ -23007,14 +23182,14 @@ function drawBhCapDate(pts) {
   bhCapPlot.setData(bhCapData());
 }
 
-const CAP_OCV_DEFAULT = [13.6, 13.4, 13.3, 13.2, 13.1, 13.0, 12.9, 12.8, 12.5, 12.0, 10.0];
-function renderCapOcvTable(volts, socs) {
+function renderCapOcvTable(volts, socs, lowMax) {
   const tb = document.getElementById('capOcvBody');
   if (!tb) return;
+  const thr = isFinite(lowMax) ? lowMax : 20;   // rows at/below the anchor ceiling are the ones the tracker uses
   if (tb.children.length !== volts.length) {   // build once; don't clobber the user's typing each poll
     let html = '';
     for (let i = 0; i < volts.length; i++) {
-      const knee = socs[i] <= 20;
+      const knee = socs[i] <= thr;
       html += '<tr' + (knee ? ' style="font-weight:600;"' : '') + '><td>' + socs[i] + (knee ? ' ◀' : '') + '</td>' +
         '<td><input id="capOcv_' + i + '" type="number" step="0.01" style="width:80px;" value="' + Number(volts[i]).toFixed(2) + '"></td></tr>';
     }
@@ -23030,8 +23205,9 @@ function submitCapOcv() {
   fetch(buildURL('/get?capOcv=' + encodeURIComponent(vals.join(',')) + '&password=' + encodeURIComponent(pw ? pw.value : '')))
     .then(() => setTimeout(pollBatteryHealth, 500)).catch(() => { });
 }
-function loadCapOcvDefaults() {
-  for (let i = 0; i < CAP_OCV_DEFAULT.length; i++) { const el = document.getElementById('capOcv_' + i); if (el) el.value = CAP_OCV_DEFAULT[i].toFixed(2); }
+function loadCapOcvPreset(type) {
+  const preset = CAP_OCV_PRESETS[type] || CAP_OCV_PRESETS.lifepo4;
+  for (let i = 0; i < preset.length; i++) { const el = document.getElementById('capOcv_' + i); if (el) el.value = preset[i].toFixed(2); }
 }
 
 // Poll only when the Health section is on-screen (sub-tab active AND details open).

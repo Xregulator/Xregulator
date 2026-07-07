@@ -2087,7 +2087,7 @@ h2 {
   margin-bottom: 1rem;
 }
 
-.sub-tab {
+.sub-tab, .tuning-tab {
   padding: 5px 11px;
   border: 1px solid var(--border);
   background: var(--bg-light);
@@ -2100,23 +2100,23 @@ h2 {
   flex: 0 0 auto;
 }
 
-.sub-tab:hover {
+.sub-tab:hover, .tuning-tab:hover {
   background: rgba(0, 161, 154, 0.1);
   border-color: var(--accent);
   color: var(--accent);
 }
 
-.sub-tab.active {
+.sub-tab.active, .tuning-tab.active {
   background: var(--accent);
   color: var(--card-light);
   border-color: var(--accent);
 }
 
-.sub-tab-content {
+.sub-tab-content, .tuning-panel {
   display: none;
 }
 
-.sub-tab-content.active {
+.sub-tab-content.active, .tuning-panel.active {
   display: block;
 }
 
