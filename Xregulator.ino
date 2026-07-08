@@ -1077,9 +1077,9 @@ int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) 
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
-uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=Min% floor, 8=finished); drives the Commissioning tab checklist
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished); drives the Commissioning tab checklist
 // Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
-// 0=Prep 1=Field curve 2=Plant fit 3=Verify 4=Disturbances 5=Thresholds 6=CV plant fit 7=Min% floor. Drives the
+// 0=Prep 1=Field curve 2=Min% floor 3=Plant fit 4=Verify 5=Disturbances 6=Thresholds 7=CV plant fit. Drives the
 // per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0xFF.
 uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
 volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
@@ -1245,6 +1245,7 @@ float MinDuty = 1.0;       //33 works on my boat to make sure RPM is always pres
 int ManualDutyTarget = 4;  // example manual override value
 int InvertAltAmps = 0;     // change sign of alternator amp reading
 int InvertBattAmps = 0;    // change sign of battery amp reading
+int BatteryShuntPresent = 1;  // 1 = INA228 battery shunt fitted (default). 0 = no battery-current sensor: Bcur meaningless, every battery-current consumer takes its safe/off branch and the UI hides those features.
 uint32_t Freq = 0;         // ESP32 switching Frequency in case we want to report it for debugging
 
 //Variables to store measurements
@@ -1784,14 +1785,18 @@ volatile uint16_t longTermHead    = 0;       // next write slot (circular)
 volatile uint16_t longTermCount   = 0;       // 0..LONGTERM_RING_SIZE
 uint16_t   prev_longTermHead      = 0xFFFF;  // shadow — persist only when head moved
 time_t     longTermLastEpoch      = 0;       // epoch of newest record (0 = unsynced)
+uint32_t   longTermPushSeq        = 0;       // monotonic record-push counter (append-flush bookkeeping)
+uint32_t   longTermFlushedSeq     = 0;       // longTermPushSeq value at last successful flush
+uint32_t   longTermFileRecords    = 0;       // records currently on disk (0 = none/invalid → compact next flush)
 #define LONGTERM_BACKUP_PATH  "/longterm_ring.bin"
 #define LONGTERM_BACKUP_MAGIC 0x4C54504Cu    // 'LTPL'
 #define LONGTERM_BACKUP_VER   3u    // v3: soc avg-only → envelope (128→132 B); old rings discarded
 // Periodic field-off dump interval. The rising-edge dump alone captures a nearly
 // empty ring on a bench (field never cycles), so accumulated records were lost on
 // reboot/power-loss. This re-dumps every interval WHILE field-off (only when the
-// ring actually changed). writePsramBlob writes just `count` records, so it's cheap
-// while the ring is small and bounded (~501 KB) when full.
+// ring actually changed). dumpLongTermRing() appends just the new records each time
+// (full rewrite only on compaction), so this cadence costs a few hundred bytes, not
+// a ~501 KB whole-file erase — the flash-endurance fix for always-powered installs.
 const unsigned long LONGTERM_DUMP_INTERVAL_MS = 15UL * 60UL * 1000UL;  // 15 min
 
 // ===== ZERO-DRIFT CHARACTERIZATION LOG (temporary diagnostic) =====
@@ -1817,6 +1822,9 @@ ZeroLogRecord *zeroLogRing = nullptr;       // ps_malloc'd in zeroLogInit()
 volatile uint16_t zeroLogHead = 0;          // next write slot (circular)
 volatile uint16_t zeroLogCount = 0;         // 0..ZEROLOG_RING_SIZE
 uint16_t  prev_zeroLogHead = 0xFFFF;        // shadow — flush only when head moved
+uint32_t  zeroLogPushSeq = 0;               // monotonic sample-push counter (append-flush bookkeeping)
+uint32_t  zeroLogFlushedSeq = 0;            // zeroLogPushSeq value at last successful flush
+uint32_t  zeroLogFileRecords = 0;           // records currently on disk (0 = none/invalid → compact next flush)
 bool      ZeroLogEnable = true;             // master toggle (NVS NK_ZeroLogEnable), default ON (permanent subsystem)
 float     altAmpsP2P = 0.0f;                // latched 0.5 s peak-to-peak of MeasuredAmps (set in ReadAnalogInputs)
 #define ZEROLOG_PATH  "/zerolog.bin"
@@ -2244,6 +2252,10 @@ int ChargeEfficiency_scaled = 990;    // Charging efficiency % × 10 (990 = 99.0
 int ChargedVoltage_Scaled = 1400;     // Voltage threshold for "charged" (V × 100) (a Battery Monitor setup parameter, nothing to do with alternator)
 float TailCurrent = 2.0f;             // % of battery Ah capacity (1 decimal place)
 int ShuntResistanceMicroOhm = 100;    // Shunt resistance in microohms
+// Single gate every battery-current consumer reads (SoC, tail-current, MaintainMode, load-dump, charge-
+// current limit, CV plant fit). True only with a declared shunt AND nonzero resistance — the nonzero
+// resistance also keeps the Bcur divide finite. Defined here (compiled first) so every file sees it.
+#define HAS_BATT_SHUNT (BatteryShuntPresent && ShuntResistanceMicroOhm > 0)
 int ChargedDetectionTime = 180;       // Time at charged state to consider 100% (seconds) (3 mins, industry standard for lithium)
 int IgnoreTemperature = 0;            // If no temp sensor, set to 1
 int IgnoreRPM = 0;                    // If RPM sensor absent or malfunctioning, set to 1 to bypass RPM gate
@@ -2787,12 +2799,48 @@ float    capLastDvdtMv10    = 999.0f; // last settle rate (confidence + display)
 uint32_t capLastUpdateEpoch = 0;
 float    capLastPct         = NAN;    // most recent capacity % (display)
 
+// ── CV plant-fit (firmware-side voltage-loop plant identification) — CV_AUTOTUNE_PLAN.md §F ──
+// Commands a bounded alternator-current step through the inner current loop and reads the battery-voltage
+// step gain at the LOOP's OWN timescale (read horizon = 1/cvCrossover), which is what the crossover formula
+// needs — NOT the old 20s-horizon K20 that folded in slow surface-charge/SOC creep and read every AGM/
+// lead-acid install ~2.5x too soft. Deterministic on-device timing + a settled-baseline gate (chemistry-
+// agnostic: AGM/flooded surface charge must relax before the measured step, which the old fixed 5s rest
+// got wrong). Replaces the browser-orchestrated fit; result → cvPlantK on the user's Apply.
+struct CvPlantFitSample { uint32_t tMs; float v; float iAlt; float iBat; };  // 16 B; v=IBV iAlt=MeasuredAmps iBat=Bcur
+CvPlantFitSample *cvpfBuf = nullptr;
+int      cvpfBufCap   = 0;
+int      cvpfBufCount = 0;
+volatile bool cvPlantFitActive = false;   // read by the control loop's plant-fit branch
+volatile uint8_t cvpfState = 0;           // 0 IDLE, 1 RUNNING, 2 DONE-OK, 3 ABORTED
+volatile uint8_t cvpfPhase = 0;           // 0 SETTLE, 1 PILOT, 2 REST, 3 STEP, 4 RELEASE (UI progress)
+volatile bool cvpfReady = false;          // a run finished (ok or not) — poller shows result
+volatile bool cvpfOk    = false;          // fit produced a usable gain
+float    cvpfK        = 0.0f;             // V/A — measured gain (→ cvPlantK on Apply)
+float    cvpfDV       = 0.0f;             // V — step ΔV at the read horizon
+float    cvpfDI       = 0.0f;             // A — measured current step (alt or battery)
+float    cvpfSNR      = 0.0f;
+float    cvpfKp       = 0.0f, cvpfKi = 0.0f;   // display gains (recomputeCvGains is authoritative on Apply)
+float    cvpfHorizonS = 5.0f;             // read horizon actually used = 1/ω_c
+uint8_t  cvpfWarn     = 0;                 // bit0 delivery bit1 SNR bit2 baseline-moving bit3 gap-drift bit4 OV-fallback
+const char *cvpfAbortMsg = "";
+// phase-machine internals (init in cvpfStartTest, advanced in cvPlantFit_advance)
+uint32_t cvpfPhaseStartMs = 0, cvpfStepT0Ms = 0, cvpfSampleLastMs = 0, cvpfTestStartMs = 0, cvpfRestChkMs = 0;
+float    cvpfBaseA = 10.0f, cvpfPilotA = 6.0f, cvpfStepA = 6.0f, cvpfTargetDV = 0.30f;
+float    cvpfPilotK = 0.02f, cvpfPilotVbase = 12.0f, cvpfCmdA = 10.0f;
+bool     cvpfFellBack = false, cvpfReleasing = false;
+
 // Explicit prototypes: String-return / String& functions don't survive auto-prototype ordering.
 void   bhSample(uint32_t nowMs);
 bool   bhStartTest();
 void   bhAbort(const char *reason);
 void   bhComputeDcir();
 void   bhServiceCompletion();
+void   cvpfSample(uint32_t nowMs);
+bool   cvpfStartTest();
+void   cvpfAbort(const char *reason);
+void   cvpfProcess();
+void   cvpfServiceCompletion();
+void   cvPlantFit_advance(uint32_t nowMs);
 void   bhFlushCapNVS();
 void   bhInitSettings();
 String bhSerializeResults();
@@ -4665,6 +4713,12 @@ void setup() {
   bhSampleCap = 8192;
   bhSamples = (BattHealthSample *)ps_malloc(bhSampleCap * sizeof(BattHealthSample));
   if (!bhSamples) Serial.println("FATAL: bhSamples ps_malloc failed");
+  // CV plant-fit sample buffer (40ms gated: 4096 covers ~164s ≥ the worst-case 300→180mV OV re-step at the
+  // slowest ω_c — two 45s settled-rests + two horizon-scaled step-holds + release — so the measured edge is
+  // never lost to a full buffer and the buffer isn't the limiter before the watchdog (cvpfServiceCompletion)).
+  cvpfBufCap = 4096;
+  cvpfBuf = (CvPlantFitSample *)ps_malloc(cvpfBufCap * sizeof(CvPlantFitSample));
+  if (!cvpfBuf) Serial.println("FATAL: cvpfBuf ps_malloc failed");
   bhResults = (BattHealthResult *)ps_malloc(bhResultCap * sizeof(BattHealthResult));
   if (!bhResults) Serial.println("FATAL: bhResults ps_malloc failed");
   else memset(bhResults, 0, bhResultCap * sizeof(BattHealthResult));
@@ -5167,6 +5221,7 @@ void loop() {
   currentTime = millis();
 
   bhServiceCompletion();  // Battery Health: runs the DCIR fit once a test finishes / aborts on timeout
+  cvpfServiceCompletion();  // CV plant fit: runs the gain fit once the step sequence finishes / aborts on timeout
 
   // SOC and runtime update every 2 seconds (runs regardless of hardwarePresent)
   if (currentTime - lastSOCUpdateTime >= SOCUpdateInterval) {
@@ -5175,7 +5230,7 @@ void loop() {
     lastSOCUpdateTime = currentTime;
     UpdateEngineRuntime(elapsedMillis);  // untimed: negligible 2s-cadence arithmetic
     UpdateEngineFuel(elapsedMillis);
-    TIMED_CALL(ft_UpdateBatterySOC, UpdateBatterySOC(elapsedMillis));  // ~0.3ms; wraps battery-health capacity tracking
+    if (HAS_BATT_SHUNT) TIMED_CALL(ft_UpdateBatterySOC, UpdateBatterySOC(elapsedMillis));  // no battery shunt → SoC/coulomb/capacity all need Bcur; skip entirely
     UpdateTravelStatistics(elapsedMillis);
     UpdateBoardTempPressureMaximums();
     handleSocGainReset();   // do the dynamic updates
@@ -5208,7 +5263,7 @@ void loop() {
     bool ltRisingEdge = (ltFieldOff && !prevLongTermFieldOff);
     bool ltPeriodic   = (ltFieldOff && (millis() - lastLongTermDumpMs >= LONGTERM_DUMP_INTERVAL_MS));
     if ((ltRisingEdge || ltPeriodic) && prev_longTermHead != longTermHead) {
-      TIMED_CALL(ft_dumpLongTermRing, dumpLongTermRing());  // this LittleFS flush is the periodic ~250ms loop spike
+      TIMED_CALL(ft_dumpLongTermRing, dumpLongTermRing());  // append-only in the common case; ~250ms spike only on a rare compaction
       lastLongTermDumpMs = millis();
     }
     prevLongTermFieldOff = ltFieldOff;

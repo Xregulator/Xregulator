@@ -1747,7 +1747,7 @@ void AdjustFieldLearnMode() {
   // go inert so a stray user setting can't ruin a commissioning/health measurement (each test carries
   // its own built-in slew behavior). NOT bare TuningMode/CVTuningMode — those are the manual study tabs
   // where the toggles are meant to be live.
-  g_autoTestActive = (commissionState == 1) || batteryHealthTestActive || resTestActive || (systemIDActive != 0);
+  g_autoTestActive = (commissionState == 1) || batteryHealthTestActive || resTestActive || cvPlantFitActive || (systemIDActive != 0);
 
   // ========== DETERMINE GOVERNOR MODE ==========
   govMode = GOV_NORMAL_SLEW;
@@ -2131,6 +2131,26 @@ void AdjustFieldLearnMode() {
         // Field is down → hand back to normal control from a low-voltage state (CV ramps up from below).
         if (resTestReleasing && setpointLimited <= 2.0f) { resTestActive = false; resTestReleasing = false; }
 
+      } else if (cvPlantFitActive) {
+        // Firmware-side CV plant fit (CV_AUTOTUNE_PLAN.md §F): a bounded alternator-current step commanded
+        // through the inner current loop; the battery-voltage step gain is read at the loop's own timescale
+        // (1/cvCrossover) with a settled-baseline gate. Protections identical to resTest — voltageControlActive
+        // stays false so G1/G2 are suppressed and the step manifests; fast-OV/INA228/hard-OC stay live. The
+        // phase machine (settle→pilot→settled-rest→step→release) sets cvpfCmdA / cvpfReleasing each tick.
+        cvPlantFit_advance(tick.nowMs);
+        setpointCommand = cvpfCmdA;
+        float cvpfFall = cvpfReleasing ? SetpointFallRate : TEST_ENTRY_RATE_A;
+        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                       TEST_ENTRY_RATE_A, cvpfFall, actualDtSec);
+        voltageControlActive = false;
+        ctrlLimiter = 0;
+        targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
+                                                                                       : g_pidI_filtered;
+        pidInput = (double)targetCurrent;
+        pidSetpoint = (double)setpointLimited;
+        pidError = setpointLimited - targetCurrent;
+        currentPID.Compute();
+
       } else if (TuningMode) {
         // ===== TUNING MODE (square-wave setpoint generator) =====
         static bool tuningWaveHigh = false;
@@ -2365,7 +2385,7 @@ void AdjustFieldLearnMode() {
         // Zero-current float (UseFloat=2): same zero-command regulation as MaintainMode, but entered
         // automatically by the float stage — alternator carries the house loads, battery rests at 0 A.
         // Unlike the manual MaintainMode override, the stage machine (and its rebulk criteria) stays live.
-        zeroFloatActive = (UseFloat == 2) && !inBulkStage && !inAbsorptionStage && !inIdleStage
+        zeroFloatActive = (UseFloat == 2) && HAS_BATT_SHUNT && !inBulkStage && !inAbsorptionStage && !inIdleStage
                           && MaintainMode == 0 && TargetVoltageMode == 0 && !CVTuningMode;
         if (MaintainMode == 1 || zeroFloatActive) uTargetAmps = 0;
 
@@ -2388,7 +2408,7 @@ void AdjustFieldLearnMode() {
           }
         }
         bool battCeilBinding = false;  // battery charge-current ceiling won the min-select this tick (banner limiter code 4)
-        if (BattCurrentLimitA > 0.0f && BatteryCurrentSource == 0 && ShuntResistanceMicroOhm > 0) {
+        if (BattCurrentLimitA > 0.0f && BatteryCurrentSource == 0 && ShuntResistanceMicroOhm > 0 && BatteryShuntPresent) {
           float battCeilAlt = BattCurrentLimitA + fmaxf(0.0f, loadOffsetFilt);
           // Console note when the battery limit is the binding ceiling AND output is actually riding it
           // (e.g. absorption approaching target slowly, or bulk capped below the RPM table): once after
@@ -2675,7 +2695,7 @@ void AdjustFieldLearnMode() {
           static int ldCount1 = 0;  // consecutive samples above LoadDumpDtThresh1
           static int ldCount2 = 0;  // consecutive samples above LoadDumpDtThresh
           static int ldCount3 = 0;  // consecutive samples above LoadDumpDtThresh3
-          if (voltageControlActive && inaFastModeActive) {
+          if (voltageControlActive && inaFastModeActive && HAS_BATT_SHUNT) {  // no shunt → dBcur/dt is noise; fast-OV dV/dt is the load-dump backstop
             if (g_dBcur_dt > LoadDumpDtThresh1) {
               ldCount1++;
             } else {
@@ -3676,7 +3696,9 @@ void updateChargingStage() {
     ChargingVoltageTargetReq = AbsorptionVoltage;
 
     const bool thermallyConstrained = (thermalPenaltyAmps > 2.0f) && (uTargetAmps <= TailCurrent_A * 2.0f);  //if you ever want CV-awareness here you'd change it to Icv <= TailCurrent_A * 2.0f.
-    const bool tailReached = !thermallyConstrained && (Bcur <= TailCurrent_A);
+    // No battery shunt → Bcur is meaningless (reads ~0), which would false-trip tail on tick 1 and drop
+    // the bank out of absorption instantly. Disable the tail path; absorption then ends on AbsorptionTimeoutMs.
+    const bool tailReached = HAS_BATT_SHUNT && !thermallyConstrained && (Bcur <= TailCurrent_A);
     const bool timedOut = ((uint32_t)(now - absorptionStartTime) >= AbsorptionTimeoutMs);
 
     static bool lastThermallyConstrained = false;
@@ -4473,6 +4495,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     // path fall through and consume it on the same tick.
     bool anyTestActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
                          fieldCurveRequested || systemIDRequested ||
+                         resTestActive || batteryHealthTestActive || cvPlantFitActive ||
                          TuningMode || CVTuningMode || faCommissionGate;
     tick.commissioningResting = (commissionState == 1) && dialogAlive && !anyTestActive;
   }

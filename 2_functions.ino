@@ -207,6 +207,7 @@ bool fsRemove(const char *path) {
 #define NK_InstallId       "InstallId"       // random device identity; survives reflash, regenerated only when NVS is erased
 #define NK_InvertAltAmps "InvertAltAmps"
 #define NK_InvertBattAmps "InvertBattAmps"
+#define NK_BatteryShuntPresent "BattShuntPresnt"
 #define NK_KHard "KHard"
 #define NK_LastResetReason "LastResetReason"
 #define NK_LatitudeManual "LatitudeManual"
@@ -318,7 +319,7 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=Min% floor, 8=finished)
+#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished)
 #define NK_commissionDoneMask "commissnDoneMsk" // per-stage completion bitmask (bit i = stage i done); 15-char max
 #define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
 #define NK_T0_C "T0_C"
@@ -595,7 +596,7 @@ void commissionSetPhase(uint8_t p) {
 }
 
 // ── Per-stage completion tracking ─────────────────────────────────────────────
-// commissionDoneMask carries one bit per stage (0=Prep … 6=CV plant fit, 7=Min% floor). It is the
+// commissionDoneMask carries one bit per stage (0=Prep … 6=Thresholds, 7=CV plant fit). It is the
 // source of truth for the per-step ✓ marks and for the default checkbox selection of a
 // partial re-run. commissionState (0/1/2) is the lifecycle badge and is DERIVED from the
 // mask wherever it is recomputed below.
@@ -603,19 +604,20 @@ void commissionSetPhase(uint8_t p) {
 #define COMMISSION_ALL_DONE    0xFF   // bits 0..7 set = every stage complete
 
 // Downstream stages invalidated when an upstream stage is (re)completed — see the coupling
-// analysis: Field curve(1) feeds Plant fit(2) + Verify(3); Plant fit(2) feeds Verify(3);
-// Disturbances(4) feeds Thresholds(5). CV plant fit(6) measures the current→voltage plant, which
+// analysis: Field curve(1) feeds Plant fit(3) + Verify(4); Plant fit(3) feeds Verify(4);
+// Disturbances(5) feeds Thresholds(6). CV plant fit(7) measures the current→voltage plant, which
 // sits downstream of the whole inner current loop — so any current-loop retune (Field curve 1,
-// Plant fit 2, or Verify 3) makes the CV fit stale and clears bit 6. Min% floor(7) is independent
-// (nothing feeds it, it feeds nothing) and runs last so the engine is warm at max RPM. Re-doing an
-// upstream stage clears its dependents' done bits; the wizard forces them into the same run to be re-measured.
+// Plant fit 3, or Verify 4) makes the CV fit stale and clears bit 7. Min% floor(2) is independent
+// (nothing feeds it, it feeds nothing) and runs early — 2nd, right after Field curve — so the measured
+// knee floors every later current-control step. Prep requires the engine already warm because Min% floor
+// sweeps to max RPM this early. Re-doing an upstream stage clears its dependents' done bits; the wizard forces them into the same run to be re-measured.
 static uint16_t commissionDependentsMask(int stage) {
   switch (stage) {
-    case 1: return (1 << 2) | (1 << 3) | (1 << 6);  // Field curve → Plant fit, Verify, CV plant fit
-    case 2: return (1 << 3) | (1 << 6);             // Plant fit   → Verify, CV plant fit
-    case 3: return (1 << 6);                        // Verify      → CV plant fit
-    case 4: return (1 << 5);                        // Disturbances → Thresholds
-    default: return 0;
+    case 1: return (1 << 3) | (1 << 4) | (1 << 7);  // Field curve → Plant fit, Verify, CV plant fit
+    case 3: return (1 << 4) | (1 << 7);             // Plant fit   → Verify, CV plant fit
+    case 4: return (1 << 7);                        // Verify      → CV plant fit
+    case 5: return (1 << 6);                        // Disturbances → Thresholds
+    default: return 0;                              // Min% floor(2) independent — no dependents
   }
 }
 
@@ -710,6 +712,7 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/InputFilterTC.txt", NK_InputFilterTC },
   { "/InvertAltAmps.txt", NK_InvertAltAmps },
   { "/InvertBattAmps.txt", NK_InvertBattAmps },
+  { "/BatteryShuntPresent.txt", NK_BatteryShuntPresent },
   { "/KHard.txt", NK_KHard },
   { "/LastResetReason.txt", NK_LastResetReason },
   { "/LatitudeManual.txt", NK_LatitudeManual },
@@ -1072,6 +1075,74 @@ uint32_t readPsramBlob(const char *path, uint32_t magic, uint32_t version,
   }
   if (userWordOut) *userWordOut = hdr.userWord;
   return toRead;
+}
+
+// ── Append-extend a writePsramBlob file (flash-wear optimization for high-cadence rings) ──────
+// A circular PSRAM ring persisted by full-file rewrite erases every block on each flush; at a
+// 15/30-min field-off cadence that is the dominant lifetime flash-write source. Instead, the
+// periodic flush APPENDS only the records pushed since the last flush (LittleFS "a" touches just
+// the tail block), and a full writePsramBlob() compaction runs only when the file would grow past
+// ~2× the ring. The file is one chronological oldest→newest sequence (compacted body + appended
+// tail); restoreRingBlob() derives the true record count from file size and keeps the newest
+// `capacity`, so a plain writePsramBlob snapshot (zero appends) restores identically — no format
+// version bump, old field files stay valid.
+//
+// Appends the newest `delta` records of ring `base[capacity]` (slots ending at head-1, oldest of
+// those first → chronological). Returns bytes written, 0 on any failure (caller then compacts).
+uint32_t appendRingBlob(const char *path, const void *base, size_t recordSize,
+                        uint32_t capacity, uint32_t head, uint32_t delta) {
+  if (!base || recordSize == 0 || capacity == 0 || delta == 0 || delta > capacity) return 0;
+  fsTakeLock();
+  File f = LittleFS.open(path, "a");
+  if (!f) { fsReleaseLock(); return 0; }
+  const uint8_t *bytes = (const uint8_t *)base;
+  bool ok = true;
+  for (uint32_t i = delta; i >= 1 && ok; i--) {          // i=delta → oldest new record, i=1 → newest
+    uint32_t slot = (head + capacity - i) % capacity;
+    ok = (f.write(bytes + (size_t)slot * recordSize, recordSize) == recordSize);
+    esp_task_wdt_reset();
+  }
+  f.close();
+  fsReleaseLock();
+  return ok ? delta * (uint32_t)recordSize : 0;
+}
+
+// Restore a (possibly append-extended) writePsramBlob file into linear `base` (tail=0, head=count).
+// File may hold MORE than `capacity` records (accumulated appends) — keeps the newest `capacity`.
+// Validates magic/version/recordSize (mismatch → delete + 0). *fileRecordsOut = total records on
+// disk (may exceed capacity → caller compacts when capped). Returns records restored (≤ capacity).
+uint32_t restoreRingBlob(const char *path, uint32_t magic, uint32_t version,
+                         void *base, size_t recordSize, uint32_t capacity,
+                         uint32_t *fileRecordsOut) {
+  if (fileRecordsOut) *fileRecordsOut = 0;
+  if (!base || recordSize == 0 || capacity == 0 || !fsExists(path)) return 0;
+  fsTakeLock();
+  File f = LittleFS.open(path, "r");
+  if (!f) { fsReleaseLock(); return 0; }
+  PsramBlobHeader hdr;
+  bool ok = (f.readBytes((char *)&hdr, sizeof(hdr)) == sizeof(hdr)
+             && hdr.magic == magic && hdr.version == version
+             && hdr.recordSize == (uint32_t)recordSize);
+  if (!ok) {
+    f.close();
+    LittleFS.remove(path);
+    fsReleaseLock();
+    Serial.printf("restoreRingBlob: header mismatch (%s) — discarded\n", path);
+    return 0;
+  }
+  size_t sz = f.size();
+  uint32_t fileRecords = (sz > sizeof(hdr)) ? (uint32_t)((sz - sizeof(hdr)) / recordSize) : 0;
+  uint32_t keep = (fileRecords > capacity) ? capacity : fileRecords;
+  if (keep > 0) {
+    f.seek(sizeof(hdr) + (size_t)(fileRecords - keep) * recordSize);   // skip evicted overflow
+    size_t want = (size_t)keep * recordSize;
+    if (f.readBytes((char *)base, want) != want) { f.close(); fsReleaseLock(); return 0; }
+  }
+  f.close();
+  fsReleaseLock();
+  esp_task_wdt_reset();
+  if (fileRecordsOut) *fileRecordsOut = fileRecords;
+  return keep;
 }
 
 void performDeepFactoryReset() {
@@ -2791,6 +2862,7 @@ void pushLongTermRecord() {
   longTermRing[longTermHead] = rec;
   longTermHead = (longTermHead + 1) % LONGTERM_RING_SIZE;
   if (longTermCount < LONGTERM_RING_SIZE) longTermCount++;
+  longTermPushSeq++;   // drives the append-flush delta (records new since last flush)
   // Header anchor for the .bin (newest record's epoch); unchanged when unsynced.
   if (nowEpoch) longTermLastEpoch = nowEpoch;
 }
@@ -2828,49 +2900,88 @@ void uploadSensorHistory() {
   resetAccelWindow();
 }
 
-// Long-term plot ring persistence via the Phase-0 scaffold. Durable month-long
-// cache (NOT drained like the sensor ring), so restore keeps the file
-// (deleteAfter=false) and each dump overwrites it. lastEpoch rides in the scaffold
-// userWord (uint32 → good to 2106). Field-off only — called on the field-off-settled
-// edge + at shutdown.
+// Long-term plot ring persistence. Durable month-long cache (NOT drained like the sensor ring),
+// so restore keeps the file (deleteAfter=false). To spare flash, the periodic field-off flush
+// APPENDS only records pushed since the last flush (see appendRingBlob); a full writePsramBlob
+// compaction runs only for the first write, when the file would exceed ~2× the ring, or if an
+// append fails. Field-off only — called on the field-off-settled edge + at shutdown.
 void dumpLongTermRing() {
   if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM ring is synthetic/empty — keep the real flash blob
   if (!longTermRing || longTermCount == 0) return;
+  uint32_t delta = longTermPushSeq - longTermFlushedSeq;   // records new since last flush (unsigned wrap-safe)
+  if (delta == 0 && longTermFileRecords > 0) return;       // file already holds every record — nothing to persist
+  if (longTermFileRecords > 0 && delta > 0 && delta <= longTermCount
+      && longTermFileRecords + delta <= (uint32_t)LONGTERM_RING_SIZE * 2
+      && fsExists(LONGTERM_BACKUP_PATH)
+      && appendRingBlob(LONGTERM_BACKUP_PATH, longTermRing, sizeof(LongTermRecord),
+                        LONGTERM_RING_SIZE, longTermHead, delta) > 0) {
+    longTermFileRecords += delta;
+    longTermFlushedSeq   = longTermPushSeq;
+    prev_longTermHead    = longTermHead;
+    return;
+  }
+  // Compaction: self-contained oldest-first snapshot the append path can extend. lastEpoch rides
+  // in the scaffold userWord (unused by restore, kept for continuity).
   uint16_t startIdx = (longTermCount < LONGTERM_RING_SIZE) ? 0 : longTermHead;  // oldest record
   uint32_t n = writePsramBlob(LONGTERM_BACKUP_PATH, LONGTERM_BACKUP_MAGIC, LONGTERM_BACKUP_VER,
                               (uint32_t)longTermLastEpoch, longTermRing, sizeof(LongTermRecord),
                               LONGTERM_RING_SIZE, startIdx, longTermCount);
-  if (n > 0) prev_longTermHead = longTermHead;  // mark dumped so the edge won't re-write unchanged
-  Serial.printf("dumpLongTermRing: wrote %u records\n", (unsigned)n);
+  if (n > 0) {
+    longTermFileRecords = n;
+    longTermFlushedSeq  = longTermPushSeq;
+    prev_longTermHead   = longTermHead;
+  }
+  Serial.printf("dumpLongTermRing: compacted %u records\n", (unsigned)n);
 }
 
-// Boot restore. Unwraps the stored ring into linear order (tail=0, head=count) and
-// keeps the file as the durable copy. No-op if absent / layout-mismatched.
+// Boot restore. Reads the newest LONGTERM_RING_SIZE records (file may hold more — appended tail)
+// into linear order (tail=0, head=count) and keeps the file as the durable copy. A plain
+// writePsramBlob snapshot from an older firmware restores identically. No-op if absent / mismatched.
 void restoreLongTermRing() {
   if (!longTermRing) return;
-  uint32_t epochU32 = 0;
-  uint32_t n = readPsramBlob(LONGTERM_BACKUP_PATH, LONGTERM_BACKUP_MAGIC, LONGTERM_BACKUP_VER,
-                             longTermRing, sizeof(LongTermRecord), LONGTERM_RING_SIZE,
-                             &epochU32, false);
-  if (n == 0) return;
+  uint32_t fileRecords = 0;
+  uint32_t n = restoreRingBlob(LONGTERM_BACKUP_PATH, LONGTERM_BACKUP_MAGIC, LONGTERM_BACKUP_VER,
+                               longTermRing, sizeof(LongTermRecord), LONGTERM_RING_SIZE, &fileRecords);
+  if (n == 0) { longTermFileRecords = 0; longTermPushSeq = 0; longTermFlushedSeq = 0; return; }
   longTermCount = (uint16_t)n;
   longTermHead = (n >= LONGTERM_RING_SIZE) ? 0 : (uint16_t)n;
-  longTermLastEpoch = (time_t)epochU32;
+  longTermLastEpoch = 0;   // newest non-zero record epoch = exactly how pushLongTermRecord maintains it
+  for (int i = (int)n - 1; i >= 0; i--) { if (longTermRing[i].timestamp) { longTermLastEpoch = (time_t)longTermRing[i].timestamp; break; } }
+  longTermFileRecords = fileRecords;              // may exceed ring size → next capped flush compacts
+  longTermPushSeq = longTermFlushedSeq = 0;       // file already holds every restored record
   prev_longTermHead = longTermHead;
-  Serial.printf("restoreLongTermRing: restored %u records\n", (unsigned)n);
+  Serial.printf("restoreLongTermRing: restored %u of %u file records\n", (unsigned)n, (unsigned)fileRecords);
 }
 
 // ===== Zero-drift characterization log (temporary diagnostic) =====
 // Flush the PSRAM ring to LittleFS so a reboot doesn't lose the session. Field-off only (the
-// caller gates it), mirrors dumpLongTermRing — writes just `count` records via the blob scaffold.
+// caller gates it). Mirrors dumpLongTermRing: the periodic flush APPENDS only samples new since
+// the last flush; a full writePsramBlob compaction runs only for the first write, past ~2× the
+// ring, or on append failure.
 void dumpZeroLog() {
   if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM ring is synthetic/empty — keep the real flash blob
   if (!zeroLogRing || zeroLogCount == 0) return;
+  uint32_t delta = zeroLogPushSeq - zeroLogFlushedSeq;   // samples new since last flush (unsigned wrap-safe)
+  if (delta == 0 && zeroLogFileRecords > 0) return;      // file already holds every sample — nothing to persist
+  if (zeroLogFileRecords > 0 && delta > 0 && delta <= zeroLogCount
+      && zeroLogFileRecords + delta <= (uint32_t)ZEROLOG_RING_SIZE * 2
+      && fsExists(ZEROLOG_PATH)
+      && appendRingBlob(ZEROLOG_PATH, zeroLogRing, sizeof(ZeroLogRecord),
+                        ZEROLOG_RING_SIZE, zeroLogHead, delta) > 0) {
+    zeroLogFileRecords += delta;
+    zeroLogFlushedSeq   = zeroLogPushSeq;
+    prev_zeroLogHead    = zeroLogHead;
+    return;
+  }
   uint16_t startIdx = (zeroLogCount < ZEROLOG_RING_SIZE) ? 0 : zeroLogHead;  // oldest record
   uint32_t n = writePsramBlob(ZEROLOG_PATH, ZEROLOG_MAGIC, ZEROLOG_VER, 0,
                               zeroLogRing, sizeof(ZeroLogRecord),
                               ZEROLOG_RING_SIZE, startIdx, zeroLogCount);
-  if (n > 0) prev_zeroLogHead = zeroLogHead;  // mark dumped so the edge won't re-write unchanged
+  if (n > 0) {
+    zeroLogFileRecords = n;
+    zeroLogFlushedSeq  = zeroLogPushSeq;
+    prev_zeroLogHead   = zeroLogHead;
+  }
 }
 
 // Boot init: load the enable toggle, alloc the PSRAM ring, restore any persisted records
@@ -2885,18 +2996,21 @@ void zeroLogInit() {
     if (!zeroLogRing) { Serial.println("FATAL: zeroLogRing ps_malloc failed"); return; }
     memset(zeroLogRing, 0, ZEROLOG_RING_SIZE * sizeof(ZeroLogRecord));
   }
-  uint32_t uw = 0;
-  uint32_t n = readPsramBlob(ZEROLOG_PATH, ZEROLOG_MAGIC, ZEROLOG_VER,
-                             zeroLogRing, sizeof(ZeroLogRecord), ZEROLOG_RING_SIZE, &uw, false);
+  uint32_t fileRecords = 0;
+  uint32_t n = restoreRingBlob(ZEROLOG_PATH, ZEROLOG_MAGIC, ZEROLOG_VER,
+                               zeroLogRing, sizeof(ZeroLogRecord), ZEROLOG_RING_SIZE, &fileRecords);
   zeroLogCount = (uint16_t)n;
   zeroLogHead  = (n >= ZEROLOG_RING_SIZE) ? 0 : (uint16_t)n;
+  zeroLogFileRecords = fileRecords;               // may exceed ring size → next capped flush compacts
+  zeroLogPushSeq = zeroLogFlushedSeq = 0;         // file already holds every restored record
   prev_zeroLogHead = zeroLogHead;
-  if (n > 0) Serial.printf("zeroLogInit: restored %u records\n", (unsigned)n);
+  if (n > 0) Serial.printf("zeroLogInit: restored %u of %u file records\n", (unsigned)n, (unsigned)fileRecords);
 }
 
 // Dashboard "Reset Log" handler: empty the ring + delete the LittleFS backup (fresh session).
 void zeroLogResetAll() {
   zeroLogHead = 0; zeroLogCount = 0; prev_zeroLogHead = 0xFFFF;
+  zeroLogFileRecords = 0; zeroLogPushSeq = 0; zeroLogFlushedSeq = 0;   // file removed → next flush compacts fresh
   if (zeroLogRing) memset(zeroLogRing, 0, ZEROLOG_RING_SIZE * sizeof(ZeroLogRecord));
   fsTakeLock();
   if (fsExists(ZEROLOG_PATH)) LittleFS.remove(ZEROLOG_PATH);
@@ -2941,6 +3055,7 @@ void zeroLogService() {
                                    : ZEROLOG_TEMP_BLANK; // board sensor (BMP388) absent → blank
       zeroLogHead = (zeroLogHead + 1) % ZEROLOG_RING_SIZE;
       if (zeroLogCount < ZEROLOG_RING_SIZE) zeroLogCount++;
+      zeroLogPushSeq++;   // drives the append-flush delta (samples new since last flush)
     }
   }
 

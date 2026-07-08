@@ -936,7 +936,7 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   // we know it's fully charged regardless of what's charging it
   // Units: BatteryCurrent_scaled is A×100. TailCurrent is % of capacity, so the
   // threshold in A×100 is (TailCurrent/100 × Capacity) × 100 = TailCurrent × Capacity.
-  if ((abs(BatteryCurrent_scaled) <= (TailCurrent * BatteryCapacity_Ah)) && (Voltage_scaled >= ChargedVoltage_Scaled)) {
+  if (HAS_BATT_SHUNT && (abs(BatteryCurrent_scaled) <= (TailCurrent * BatteryCapacity_Ah)) && (Voltage_scaled >= ChargedVoltage_Scaled)) {
     FullChargeTimer += elapsedSeconds;
 
     if (FullChargeTimer >= ChargedDetectionTime) {
@@ -1661,7 +1661,7 @@ void CheckAlarms() {
 
     static unsigned long lastSocLowMsgMs = 0;
     // SOC_percent is %×100; socInfoAvailable gates this the same way as the rebulk SoC gates
-    if (SocAlarmLow > 0 && socInfoAvailable && SOC_percent < SocAlarmLow * 100) {
+    if (HAS_BATT_SHUNT && SocAlarmLow > 0 && socInfoAvailable && SOC_percent < SocAlarmLow * 100) {
       currentAlarmCondition = true;
       alarmReason = "Low battery state of charge";
       if (millis() - lastSocLowMsgMs >= 30000) {
@@ -1687,7 +1687,7 @@ void CheckAlarms() {
     }
 
     static unsigned long lastBatCurMsgMs = 0;
-    if (MaximumAllowedBatteryAmps > 0 && abs(Bcur) > MaximumAllowedBatteryAmps) {
+    if (HAS_BATT_SHUNT && MaximumAllowedBatteryAmps > 0 && abs(Bcur) > MaximumAllowedBatteryAmps) {
       currentAlarmCondition = true;
       alarmReason = "High battery current";
       if (millis() - lastBatCurMsgMs >= 30000) {
@@ -2506,7 +2506,7 @@ void _ReadAnalogInputs_inner() {
                      if (inaBusDt > 15000UL) inaBusSlowCount++;          // ≥1 Wire-timeout's worth = bus stall
 
                      if (!isnan(IBV) && IBV > 5.0 && IBV < 70.0 && !isnan(ShuntVoltage_mV)) {
-                       Bcur = ShuntVoltage_mV * 1000.0f / ShuntResistanceMicroOhm;
+                       Bcur = (ShuntResistanceMicroOhm > 0) ? (ShuntVoltage_mV * 1000.0f / ShuntResistanceMicroOhm) : 0.0f;
                        Bcur = Bcur + BatteryCOffset;
                        if (InvertBattAmps == 1) {
                          Bcur = -Bcur;

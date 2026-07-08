@@ -97,6 +97,15 @@
 
   <div class="permanent-header">
 
+    <!-- Minimized one-line status strip — shown only while .header-collapsed; values mirrored from the live header by syncHeaderStrip() -->
+    <div id="header-collapsed-strip" onclick="toggleHeaderCollapse()" title="Expand header">
+      <span id="hcs-status" class="hcs-status">—</span>
+      <span class="hcs-metric"><span id="hcs-volt">-</span><span class="hcs-unit">V</span></span>
+      <span class="hcs-metric req-batt-current"><span id="hcs-soc">-</span><span class="hcs-unit">%</span></span>
+      <span id="hcs-altdot" class="hcs-dot" title="Alternator enable"></span>
+      <span class="hcs-chevron">⌄</span>
+    </div>
+
     <!-- Brand row: wordmark left, field cluster right -->
     <div class="header-brand-row">
       <div class="header-wordmark">
@@ -121,9 +130,9 @@
           <span class="duo-lbl" id="lbl-voltage">Batt</span>
           <span class="duo-num"><span id="header-voltage">-</span></span>
           <span class="duo-unit">V</span>
-          <span class="duo-lbl" onclick="socSeedOpen()" style="cursor:pointer;">SOC</span>
-          <span class="duo-num" onclick="socSeedOpen()" style="cursor:pointer;"><span id="header-soc">-</span></span>
-          <span class="duo-unit" onclick="socSeedOpen()" style="cursor:pointer;">%</span>
+          <span class="duo-lbl req-batt-current" onclick="socSeedOpen()" style="cursor:pointer;">SOC</span>
+          <span class="duo-num req-batt-current" onclick="socSeedOpen()" style="cursor:pointer;"><span id="header-soc">-</span></span>
+          <span class="duo-unit req-batt-current" onclick="socSeedOpen()" style="cursor:pointer;">%</span>
         </div>
 
         <!-- Alt + Batt currents — 3-column grid keeps A's vertically aligned -->
@@ -131,9 +140,9 @@
           <span class="duo-lbl" id="lbl-alt-current">Alt</span>
           <span class="duo-num"><span id="header-alt-current">-</span></span>
           <span class="duo-unit">A</span>
-          <span class="duo-lbl" id="lbl-batt-current">Batt</span>
-          <span class="duo-num"><span id="header-batt-current">-</span></span>
-          <span class="duo-unit">A</span>
+          <span class="duo-lbl req-batt-current" id="lbl-batt-current">Batt</span>
+          <span class="duo-num req-batt-current"><span id="header-batt-current">-</span></span>
+          <span class="duo-unit req-batt-current">A</span>
         </div>
 
         <!-- Alt Temp: label above value row to save horizontal space -->
@@ -198,6 +207,12 @@
           <div id="admin_password_msg"></div>
         </form>
       </div>
+    </div>
+
+    <!-- Minimize handle — shown only while the header is expanded -->
+    <div id="header-collapse-bar" onclick="toggleHeaderCollapse()" title="Minimize header">
+      <span class="hcb-label">minimize</span>
+      <span class="hcb-chevron">⌃</span>
     </div>
 
   </div>
@@ -2065,7 +2080,7 @@
                   <span class="group-label">Group 3</span>
                   <span class="nick-label">Alternator iExcess</span>
                 </button>
-                <button type="button" data-filter="g4">
+                <button type="button" class="req-batt-current" data-filter="g4">
                   <span class="group-label">Group 4</span>
                   <span class="nick-label">Battery Limit</span>
                 </button>
@@ -2264,7 +2279,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Safety Margin — amps above ripple
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps the over-current trip line sits above the measured alternator ripple. Larger means fewer nuisance trips but less sensitivity to a genuine over-current. Applying it sets the trip line parallel to the ripple this alternator produces (Slope and CV base below are set for you). Requires a ripple measurement from Commissioning ▸ Step 5.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps the over-current trip line sits above the measured alternator ripple. Larger means fewer nuisance trips but less sensitivity to a genuine over-current. Applying it sets the trip line parallel to the ripple this alternator produces (Slope and CV base below are set for you). Requires a ripple measurement from Commissioning ▸ Step 6.</span></span>
                     </div>
                     <div class="protections-edit-row">
                       <input name="IExcessSafetyMargin" id="protMarginInput" type="number" step="1" min="0" max="25" />
@@ -2376,10 +2391,10 @@
                     </div>
                     <canvas id="rippleThreshPlotAlt" style="display:block; width:100%; height:220px; background:#161616; border-radius:6px;"></canvas>
                     <div id="rippleVerdictAlt" style="font-size:12px; color:#bbb; margin-top:6px; line-height:1.5;"></div>
-                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 5 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
+                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 6 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
                   </article>
 
-                  <article class="protections-param" data-groups="g4">
+                  <article class="protections-param req-batt-current" data-groups="g4">
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
                       Battery Charge Current Limit (A) (<span id="BattCurrentLimitA_echo">?</span>)
@@ -2430,7 +2445,7 @@
                     </form>
                   </article>
 
-                  <article class="protections-param" data-groups="g4">
+                  <article class="protections-param req-batt-current" data-groups="g4">
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
                       Tier 1 — Single-Sample Threshold (A/s) (<span id="LoadDumpDtThresh1_echo">?</span>)
@@ -2447,7 +2462,7 @@
                     </form>
                   </article>
 
-                  <article class="protections-param" data-groups="g4">
+                  <article class="protections-param req-batt-current" data-groups="g4">
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
                       Tier 2 — Two-Consecutive Threshold (A/s) (<span id="LoadDumpDtThresh_echo">?</span>)
@@ -2464,7 +2479,7 @@
                     </form>
                   </article>
 
-                  <article class="protections-param" data-groups="g4">
+                  <article class="protections-param req-batt-current" data-groups="g4">
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
                       Tier 3 — Three-Consecutive Threshold (A/s) (<span id="LoadDumpDtThresh3_echo">?</span>)
@@ -3803,7 +3818,7 @@
               </details>
 
               <!-- Voltage Step Generator (collapsed) -->
-              <details class="tuning-section">
+              <details class="tuning-section" id="cvStepGenSection">
                 <summary class="tuning-section-title">Voltage Step Generator</summary>
 
                 <div style="margin:8px 0;">
@@ -5007,8 +5022,8 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
+              <hr class="req-batt-current" />
+              <div class="form-row req-batt-current">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Tail Current (A) (<span id="TailCurrent_A_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
@@ -5071,7 +5086,7 @@
             </details>
 
             <!-- Float Phase -->
-            <details open style="margin-top: 20px;">
+            <details class="req-batt-current" open style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Float Phase
@@ -5160,8 +5175,8 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
+              <hr class="req-batt-current" />
+              <div class="form-row req-batt-current">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Force "Maintain Mode" (<span id="MaintainMode_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
@@ -5214,8 +5229,8 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
+              <hr class="req-batt-current" />
+              <div class="form-row req-batt-current">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Rebulk Current Threshold (A) (<span id="RebulkCurrent_A_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
@@ -5366,7 +5381,7 @@
 
 
             <!-- SoC Integration Section -->
-            <details open style="margin-top: 20px;">
+            <details class="req-batt-current" open style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 SoC Integration
@@ -5457,6 +5472,29 @@
 
               <hr />
               <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Battery Shunt Present (<span id="BatteryShuntPresent_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">Turn off if this device has no battery shunt (battery-current sensor). Battery current, State of Charge, battery health, the battery charge-current limit, load-dump detection and float charging all become unavailable and are hidden — the alternator current limit is then the only thing bounding charge current.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <span class="toggle-label">No</span>
+                    <label class="switch">
+                      <input id="BatteryShuntPresent_checkbox" type="checkbox"
+                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'BatteryShuntPresent').then(ok => { if (ok && handleUserToggle('BatteryShuntPresent_checkbox', 'BatteryShuntPresent', 'BatteryShuntPresent')) { cb.form.submit(); submitMessage(); } });" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">Yes</span>
+                    <input id="BatteryShuntPresent" name="BatteryShuntPresent" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr class="req-batt-current" />
+              <div class="form-row req-batt-current">
                 <div class="form-label">Invert Battery Amps (<span id="InvertBattAmps_echo">?</span>):</div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
@@ -5473,8 +5511,8 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
+              <hr class="req-batt-current" />
+              <div class="form-row req-batt-current">
                 <div class="form-label">Battery Current Offset (A) (<span id="BatteryCOffset_echo">?</span>):</div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form"
@@ -5486,8 +5524,8 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
+              <hr class="req-batt-current" />
+              <div class="form-row req-batt-current">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Shunt Resistance uOhms (micro)(<span id="ShuntResistanceMicroOhm_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
@@ -5601,7 +5639,7 @@
 
 
             <!-- Full Charge Detection Section -->
-            <details open style="margin-top: 20px;">
+            <details class="req-batt-current" open style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Full Charge Detection</summary>
@@ -5672,7 +5710,7 @@
             </details>
 
             <!-- Efficiency Parameters Section -->
-            <details open style="margin-top: 20px;">
+            <details class="req-batt-current" open style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Efficiency Parameters</summary>
@@ -5708,7 +5746,7 @@
             </details>
 
             <!-- SOC Correction Section -->
-            <details open style="margin-top: 20px;">
+            <details class="req-batt-current" open style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 SOC Correction</summary>
@@ -5774,8 +5812,8 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
+              <hr class="req-batt-current" />
+              <div class="form-row req-batt-current">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Battery Current Source (<span id="BatteryCurrentSource_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box"><strong>This setting only chooses the source for the battery-monitor SoC and current readouts.</strong> It does NOT change which sensor drives any safety or control loop. The onboard INA228 shunt is always required for this controller — Load Dump Protection, fast over-voltage, tail-current detection, rebulk-by-current, and MaintainMode all read the INA228 directly regardless of this setting.<br><br>INA228 Shunt = onboard high-precision sensor (most accurate, recommended; also makes the battery-monitor numbers consistent with the safety logic). Victron VE.Direct = use serial data from a Victron BMV or smart shunt for the SoC display only. Note that Victron data lags the actual current by ~1–2 s, so short transients (e.g. windlass pulls) will be smeared in the SoC readout.</span></span>
@@ -6175,8 +6213,8 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
+              <hr class="req-batt-current" />
+              <div class="form-row req-batt-current">
                 <div class="form-label">Low State of Charge Alarm (%) (<span id="SocAlarmLow_echo">0</span>):
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sounds the alarm when the battery's state of charge falls below this percentage. Only active when the battery monitor's state of charge information is available. 0 disables.</span></span>
                 </div>
@@ -6208,8 +6246,8 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
+              <hr class="req-batt-current" />
+              <div class="form-row req-batt-current">
                 <div class="form-label">High Current Alarm (Battery) (A) (<span
                     id="MaximumAllowedBatteryAmps_echo">0</span>):
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Alarm only — never reduces the field. Fires when battery current magnitude exceeds this value in either direction, so it catches heavy discharge as well as over-charge. Separate from the Group 4 Battery Charge Current Limit (which actively caps the command); set this alarm above that limit so a correctly limited charge doesn't alarm. 0 disables.</span></span>
@@ -6307,7 +6345,7 @@
         <p data-intro="c1"><strong>C1 — Anomaly Detection</strong> watches the fast current sensor for rectifier/stator fault signatures. It shares the fast channel and its steady-state admission gates (current drift floor/slope, input-range switching) with C2 — those live in the shared Fast Current Channel section. Its own pieces: the fault alarm, the fault-class and lifetime-anomaly readouts, and the anomaly snapshots in the Waveforms flipbook. Arming ignores engine speed entirely, so it keeps working with a dead tach.</p>
         <p data-intro="c2"><strong>C2 — Resonance &amp; Ripple Map</strong> learns the strongest current-ripple tones at every engine speed and load, from the same fast channel as C1. It uses the shared current-drift gates plus two gates of its own: the steady-state RPM margin (a window is discarded when the engine sits on a speed-bin edge) and the minimum tone amplitude. Its results: the map itself, the worst ripple &amp; tone table, and the biggest actionable disturbance.</p>
         <p data-intro="c3"><strong>C3 — Charging System Health</strong> grades output amps against the best this machine has ever done at the same operating point. A point is admitted only after every signal — RPM, field duty, voltage, temperature, amps — holds steady. Those admission gates and the curve-fit tuning are the knobs under Gates &amp; Tuning in this section; the resulting health gauge, session plot, and engine-hours trend appear on Live Data → Diag → Alternator.</p>
-        <p data-intro="c4"><strong>C4 — Ripple Measurements</strong> is one measurement engine with two collectors: the RPM ripple table is filled <em>only</em> by the commissioning game, and the ripple-vs-current line on the Protections plots is filled <em>only</em> by Commissioning Step 5. These gates define what counts as a valid measurement for both. They are deliberately separate from C1/C2’s gates, so tuning them can never loosen fault-detector arming.</p>
+        <p data-intro="c4"><strong>C4 — Ripple Measurements</strong> is one measurement engine with two collectors: the RPM ripple table is filled <em>only</em> by the commissioning game, and the ripple-vs-current line on the Protections plots is filled <em>only</em> by Commissioning Step 6. These gates define what counts as a valid measurement for both. They are deliberately separate from C1/C2’s gates, so tuning them can never loosen fault-detector arming.</p>
       </div>
 
           <!-- Flat, pill-filtered knob cards (Protections pattern): each block tags the checkpoint(s)
@@ -6895,7 +6933,7 @@
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Ripple Measurements</span>
         </div>
-        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">One measurement engine, two collectors: the <strong>RPM ripple table</strong> is filled only by the commissioning game, and the <strong>ripple-vs-current line</strong> on the Protections plots only by Commissioning Step 5. These gates define what counts as a valid measurement for both. A measurement counts only if conditions were <strong>stationary</strong>: the window's two halves must have (nearly) the same average — a throttle or load transient walks the average in one direction and is rejected, while a rough-but-repeating condition (a hunting idle, cycling loads) swings hard yet averages the same in both halves and is admitted. This is deliberate: a "dirty speed" is exactly what the over-current protections experience, so it must make it into the table. Each gate shows its worst value over the last 10 s (green = passing). Never relaxed during commissioning: a stationary number cannot be measured while ramping — the wizard's instructed pauses are when measurements admit.</div>
+        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">One measurement engine, two collectors: the <strong>RPM ripple table</strong> is filled only by the commissioning game, and the <strong>ripple-vs-current line</strong> on the Protections plots only by Commissioning Step 6. These gates define what counts as a valid measurement for both. A measurement counts only if conditions were <strong>stationary</strong>: the window's two halves must have (nearly) the same average — a throttle or load transient walks the average in one direction and is rejected, while a rough-but-repeating condition (a hunting idle, cycling loads) swings hard yet averages the same in both halves and is admitted. This is deliberate: a "dirty speed" is exactly what the over-current protections experience, so it must make it into the table. Each gate shows its worst value over the last 10 s (green = passing). Never relaxed during commissioning: a stationary number cannot be measured while ramping — the wizard's instructed pauses are when measurements admit.</div>
 
         <div class="form-row">
           <div class="form-label">Capture Window (ms) (<span id="ripWinMs_echo">?</span>):
@@ -7288,7 +7326,7 @@
                       <span class="toggle-label">No</span>
                       <label class="switch">
                         <input id="IgnoreRPM_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('IgnoreRPM_checkbox', 'IgnoreRPM', 'IgnoreRPM')) { this.form.submit(); submitMessage(); }" />
+                          onchange="if(handleUserToggle('IgnoreRPM_checkbox', 'IgnoreRPM', 'IgnoreRPM')) { this.form.submit(); submitMessage(); if(this.checked) warnIgnoreRpmNeedsCap(); }" />
                         <span class="slider round"></span>
                       </label>
                       <span class="toggle-label">Yes</span>
@@ -8144,7 +8182,7 @@
       <div class="settings-card">
         <div class="grid">
 
-          <div class="card">
+          <div class="card req-batt-current">
             <p>State of Charge</p>
             <p class="reading with-wm" style="font-size: 28px;">
               <span><span id="SOC_percentID">0</span> %</span>
@@ -8197,7 +8235,7 @@
             <p class="reading"><span id="charging-mode">-</span></p>
           </div>
 
-          <div class="card-group">
+          <div class="card-group req-batt-current">
             <p class="card-group-title">Current</p>
             <div class="metric-row">
               <span class="metric-label">Battery Current</span>
@@ -8215,7 +8253,7 @@
             </div>
           </div>
 
-          <div class="card-group">
+          <div class="card-group req-batt-current">
             <p class="card-group-title">Charge/Discharge Time</p>
             <div class="metric-row">
               <span class="metric-label">Time to Full Charge</span>
@@ -8227,7 +8265,7 @@
             </div>
           </div>
 
-          <div class="card">
+          <div class="card req-batt-current">
             <p>SOC Gain Factor (Auto-Learned)</p>
             <p class="reading"><span id="DynamicShuntGainFactor_display">1.000</span></p>
           </div>
@@ -8238,8 +8276,8 @@
         <div class="section-title">Energy and Statistics</div>
 
         <!-- Energy Table -->
-        <hr />
-        <div class="form-row">
+        <hr class="req-batt-current" />
+        <div class="form-row req-batt-current">
           <div class="form-label">Energy</div>
           <div class="form-input">
             <div style="display:flex;flex-direction:column;gap:0;">
@@ -8349,8 +8387,8 @@
         </div>
 
         <!-- Average State of Charge -->
-        <hr />
-        <div class="form-row">
+        <hr class="req-batt-current" />
+        <div class="form-row req-batt-current">
           <div class="form-label">Average State of Charge</div>
           <div class="form-input">
             <span id="AvgSOC_AllTimeID" style="font-weight:bold;font-size:18px;">0</span>%
@@ -8358,8 +8396,8 @@
         </div>
 
         <!-- Charge Cycles -->
-        <hr />
-        <div class="form-row">
+        <hr class="req-batt-current" />
+        <div class="form-row req-batt-current">
           <div class="form-label">Charge Cycles</div>
           <div class="form-input">
             <div class="dual-counter">
@@ -10435,7 +10473,7 @@
               </div>
 
               <!-- Battery Health NVS Save -->
-              <div
+              <div class="req-batt-current"
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Battery Health NVS Save
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
@@ -11210,7 +11248,7 @@
       <div class="settings-card" style="padding-top:0;">
         <div class="alt-tabs alt-tabs-primary">
           <button class="alt-tab-btn alt-tab-btn-primary diag-panel-tab active" onclick="showDiagPanel('alternator', event)">Alternator</button>
-          <button class="alt-tab-btn alt-tab-btn-primary diag-panel-tab" onclick="showDiagPanel('battery', event)">Battery</button>
+          <button class="alt-tab-btn alt-tab-btn-primary diag-panel-tab req-batt-current" onclick="showDiagPanel('battery', event)">Battery</button>
         </div>
       </div>
 
@@ -11379,7 +11417,7 @@
           <span style="margin-left:auto;font-size:12px;color:var(--text-muted);white-space:nowrap;"><span id="faCellsUsed_ID" style="font-weight:600;">?</span> cells learned</span>
           <button type="button" class="btn-secondary btn-sm" onclick="downloadRippleBundle()">Download CSV</button>
           <button type="button" class="btn-danger-ghost btn-sm"
-            onclick="if(!currentAdminPassword){xAlert('Please unlock settings first');return;} xConfirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});}})">Clear Map</button>
+            onclick="if(!currentAdminPassword){xAlert('Please unlock settings first');return;} xConfirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});rippleMapClearVisual();}})">Clear Map</button>
         </div>
       </div>
 
@@ -11404,7 +11442,7 @@
           <form action="/get" method="GET" target="hidden-form" style="display:inline;margin:0 0 0 auto;">
             <input type="hidden" name="ResetRipplePeaks" id="ResetRipplePeaks" value="0" />
             <input type="hidden" name="password" class="password_field" />
-            <button type="button" class="btn-secondary btn-sm" onclick="resetParameter('ResetRipplePeaks')"
+            <button type="button" class="btn-secondary btn-sm" onclick="resetParameter('ResetRipplePeaks'); if(currentAdminPassword) rippleWorstsClearVisual();"
               id="ResetRipplePeaks_button">Reset Worsts</button>
           </form>
         </div>
@@ -11712,7 +11750,7 @@
       </details>
       </div><!-- closes #diag-panel-alternator -->
 
-      <div id="diag-panel-battery" class="diag-panel">
+      <div id="diag-panel-battery" class="diag-panel req-batt-current">
 
       <details class="diag-section" open>
         <summary class="diag-section-title">Resistance Test (DCIR)</summary>

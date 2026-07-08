@@ -903,6 +903,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "AmpSensorRange", NK_AmpSensorRange, 2 },
   { "InvertAltAmps", NK_InvertAltAmps, 2 },
   { "InvertBattAmps", NK_InvertBattAmps, 2 },
+  { "BatteryShuntPresent", NK_BatteryShuntPresent, 2 },
   { "AlternatorCOffset", NK_AlternatorCOffset, 2 },
   { "BatteryCOffset", NK_BatteryCOffset, 2 },
   { "AutoAltCurrentZero", NK_AutoAltCurrentZero, 2 },
@@ -1141,7 +1142,7 @@ static int applyImportTables(const char *body) {
   if (havePts) {
     bool moved = false;
     for (int i = 0; i < RPM_TABLE_SIZE; i++) if (pts[i] != rpmTableRPMPoints[i]) moved = true;
-    if (moved) { kneeLearnResetDefaults(); commissionClearStage(7); }
+    if (moved) { kneeLearnResetDefaults(); commissionClearStage(2); }
   }
   int applied = 0;
   nvs_handle_t h;
@@ -1253,7 +1254,7 @@ bool bhStartTest() {
   if (RPM < 100)               { bhAbortReason = "engine not running";       return false; }
   if (sysMode != SYS_MODE_AUTO){ bhAbortReason = "must be in AUTO mode";     return false; }   // generator only runs in the AUTO control path
   if (TuningMode || CVTuningMode || systemIDActive) { bhAbortReason = "another test active"; return false; }
-  if (BatteryCurrentSource != 0){ bhAbortReason = "needs INA228 battery shunt"; return false; }
+  if (BatteryCurrentSource != 0 || !HAS_BATT_SHUNT){ bhAbortReason = "needs INA228 battery shunt"; return false; }
   if (bhNumEdges < 3) bhNumEdges = 3;
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
   if (bhDwellMs < bhMinDwellMs()) bhDwellMs = bhMinDwellMs();   // belt-and-braces; set paths already clamp
@@ -1350,6 +1351,238 @@ void bhServiceCompletion() {
   // test would hang RUNNING forever.
   uint32_t budget = (uint32_t)(bhNumEdges + 4) * bhDwellMs + 5000;
   if (millis() - bhTestStartMs > budget) bhAbort("timed out (engine stopped or left AUTO?)");
+}
+
+// ════════════════════════ CV PLANT FIT (firmware voltage-loop identification) ════════════════════════
+// See Xregulator.ino globals + CV_AUTOTUNE_PLAN.md §F. Commands ONE bounded current step through the inner
+// current loop (like resTest/DCIR) and reads ΔV/ΔI at the loop's own timescale (read horizon = 1/cvCrossover).
+// The measured gain is |P(jω_c)| — what the crossover formula needs — not the 20s-horizon K20 that folded in
+// slow surface-charge creep. Two chemistry-agnostic fixes over the old browser fit: (1) read at 1/ω_c not 20s,
+// (2) a settled-baseline slope gate replaces the fixed 5s rest so AGM/flooded surface charge has relaxed
+// before the measured edge. recomputeCvGains() stays the authoritative Kp/Ki source when the user Applies.
+static const uint32_t CVPF_SAMPLE_INTERVAL_MS = 40;    // ~25 Hz — ample for a ~5s horizon; bounds buffer fill
+static const uint32_t CVPF_T_SETTLE_MS = 6000;
+static const uint32_t CVPF_T_PILOT_MS  = 3000;
+static const uint32_t CVPF_REST_MAX_MS = 45000;        // slope-gated; 45s cap for slow flooded/large banks
+static const float    CVPF_REST_SLOPE_MVPS = 0.5f;     // "settled" = |dV/dt| under this over a 3s window
+static const uint32_t CVPF_SKIP_MS = 1500;             // current-loop settle before the horizon read
+static const float    CVPF_DI_MAX = 40.0f;
+static const float    CVPF_V_RESERVE = 0.15f;          // keep the projected step peak this far below the hard-OV cut
+
+void cvpfSample(uint32_t nowMs) {
+  if (!cvpfBuf || cvpfBufCount >= cvpfBufCap) return;
+  if (nowMs - cvpfSampleLastMs < CVPF_SAMPLE_INTERVAL_MS) return;
+  cvpfSampleLastMs = nowMs;
+  cvpfBuf[cvpfBufCount].tMs  = nowMs;
+  cvpfBuf[cvpfBufCount].v    = IBV;
+  cvpfBuf[cvpfBufCount].iAlt = MeasuredAmps;
+  cvpfBuf[cvpfBufCount].iBat = Bcur;
+  cvpfBufCount++;
+}
+
+// One-pass stats over the sample buffer for [t0,t1): mean, linear slope (units per ms), RMS residual about
+// the fitted line (ripple proxy). field: 0=v 1=iAlt 2=iBat. Returns sample count (0 → mean=NAN).
+static int cvpfWinStats(uint32_t t0, uint32_t t1, int field, float &mean, float &slope, float &resid) {
+  double sx = 0, sy = 0, sxx = 0, sxy = 0; int n = 0;
+  for (int i = 0; i < cvpfBufCount; i++) {
+    uint32_t t = cvpfBuf[i].tMs;
+    if (t < t0 || t >= t1) continue;
+    double x = (double)(t - t0);
+    double y = (field == 0) ? cvpfBuf[i].v : (field == 1) ? cvpfBuf[i].iAlt : cvpfBuf[i].iBat;
+    sx += x; sy += y; sxx += x * x; sxy += x * y; n++;
+  }
+  if (n == 0) { mean = NAN; slope = 0; resid = 0; return 0; }
+  mean = (float)(sy / n);
+  if (n >= 2) {
+    double d = n * sxx - sx * sx;
+    double b = (d > 1e-9) ? (n * sxy - sx * sy) / d : 0.0;
+    double a = (sy - b * sx) / n;
+    slope = (float)b;
+    double ss = 0;
+    for (int i = 0; i < cvpfBufCount; i++) {
+      uint32_t t = cvpfBuf[i].tMs; if (t < t0 || t >= t1) continue;
+      double x = (double)(t - t0);
+      double y = (field == 0) ? cvpfBuf[i].v : (field == 1) ? cvpfBuf[i].iAlt : cvpfBuf[i].iBat;
+      double e = y - (a + b * x); ss += e * e;
+    }
+    resid = (float)sqrt(ss / n);
+  } else { slope = 0; resid = 0; }
+  return n;
+}
+
+// Size the main step for cvpfTargetDV, capped by OV headroom (never below the pilot — need signal).
+static void cvpfSizeStep() {
+  float Kupper   = cvpfPilotK * 1.5f;                                        // pessimistic (bigger K → smaller ΔI)
+  float headroom = fmaxf(0.05f, AlternatorHardShutdownV - cvpfPilotVbase - CVPF_V_RESERVE);
+  float di = CVPF_DI_MAX;
+  di = fminf(di, headroom / fmaxf(1e-3f, Kupper));
+  di = fminf(di, cvpfTargetDV / fmaxf(1e-3f, cvpfPilotK));
+  di = roundf(di);
+  if (di < cvpfPilotA) di = cvpfPilotA;
+  if (di > CVPF_DI_MAX) di = CVPF_DI_MAX;
+  cvpfStepA = di;
+}
+
+// Phase machine — called every control tick from the cvPlantFitActive branch. Sets cvpfCmdA (the commanded
+// alternator current for this tick) and cvpfReleasing; ends by clearing cvPlantFitActive (branch stops,
+// cvpfServiceCompletion runs the fit next loop()).
+void cvPlantFit_advance(uint32_t nowMs) {
+  cvpfSample(nowMs);
+  uint32_t elapsed = nowMs - cvpfPhaseStartMs;
+  switch (cvpfPhase) {
+    case 0:  // SETTLE
+      cvpfCmdA = cvpfBaseA;
+      if (elapsed >= CVPF_T_SETTLE_MS) { cvpfPhase = 1; cvpfPhaseStartMs = nowMs; }
+      break;
+    case 1: {  // PILOT — probe the fast resistance, then size the main step
+      cvpfCmdA = cvpfBaseA + cvpfPilotA;
+      if (elapsed >= CVPF_T_PILOT_MS) {
+        float vB, vP, iBn, iPn, sl, rs;
+        cvpfWinStats(cvpfPhaseStartMs - 2500, cvpfPhaseStartMs - 200, 0, vB,  sl, rs);   // last 2.5s of SETTLE
+        cvpfWinStats(cvpfPhaseStartMs - 2500, cvpfPhaseStartMs - 200, 1, iBn, sl, rs);
+        cvpfWinStats(nowMs - 1500, nowMs - 200, 0, vP,  sl, rs);                          // last ~1.3s of PILOT
+        cvpfWinStats(nowMs - 1500, nowMs - 200, 1, iPn, sl, rs);
+        float dIp = iPn - iBn, dVp = vP - vB;
+        cvpfPilotK     = (dIp > 0.5f && dVp > 0.0f) ? (dVp / dIp) : (cvpfTargetDV / fmaxf(1.0f, cvpfPilotA));
+        cvpfPilotVbase = isnan(vB) ? IBV : vB;
+        cvpfSizeStep();
+        cvpfPhase = 2; cvpfPhaseStartMs = nowMs; cvpfRestChkMs = nowMs;
+        queueConsoleMessageF("CV plant-fit: pilotK=%.1f mV/A -> step %.0f A (target %.0f mV); resting for a settled baseline",
+                             cvpfPilotK * 1000.0f, cvpfStepA, cvpfTargetDV * 1000.0f);
+      }
+      break; }
+    case 2: {  // REST — hold baseline; wait for the surface charge to relax (slope gate) or the cap
+      cvpfCmdA = cvpfBaseA;
+      bool timedOut = elapsed >= CVPF_REST_MAX_MS;
+      bool settled  = false;
+      if (nowMs - cvpfRestChkMs >= 500 && elapsed >= 3000) {
+        cvpfRestChkMs = nowMs;
+        float m, slope, r;
+        int n = cvpfWinStats(nowMs - 3000, nowMs, 0, m, slope, r);
+        if (n >= 6 && fabsf(slope) * 1e6f < CVPF_REST_SLOPE_MVPS) settled = true;   // slope V/ms → mV/s ×1e6
+      }
+      if (settled || timedOut) {
+        if (timedOut && !settled) cvpfWarn |= 0x04;   // baseline still moving at the cap
+        cvpfPhase = 3; cvpfPhaseStartMs = nowMs; cvpfStepT0Ms = nowMs;
+      }
+      break; }
+    case 3: {  // STEP — the measured edge
+      cvpfCmdA = cvpfBaseA + cvpfStepA;
+      // Runtime OV guard: if the bank climbs toward the hard-OV cut, abort this step. First time → fall back
+      // to a smaller (180 mV) step and re-run; still over-volts at 180 mV → give up (charge target too near OV).
+      if (IBV > AlternatorHardShutdownV - 0.10f) {
+        if (!cvpfFellBack) {
+          cvpfFellBack = true; cvpfTargetDV = 0.18f; cvpfWarn |= 0x10;
+          cvpfSizeStep();
+          cvpfPhase = 2; cvpfPhaseStartMs = nowMs; cvpfRestChkMs = nowMs;   // re-settle, then re-step smaller
+          queueConsoleMessageF("CV plant-fit: over-voltage headroom tight — step reduced to %.0f A, re-testing", cvpfStepA);
+        } else {
+          cvpfAbort("over-voltage during fit even at the reduced step — lower the charge target or raise OV headroom, then re-run");
+        }
+        break;
+      }
+      float hMs = fmaxf(2500.0f, cvpfHorizonS * 1000.0f);   // read horizon, floored so the current has settled
+      if (elapsed >= CVPF_SKIP_MS + (uint32_t)hMs + 2000) { cvpfPhase = 4; cvpfPhaseStartMs = nowMs; cvpfReleasing = true; }
+      break; }
+    case 4:  // RELEASE — ease back to baseline, then hand to normal AUTO (bumpless via the setpoint slew)
+      cvpfCmdA = cvpfBaseA;
+      if (elapsed >= 2500) { cvPlantFitActive = false; cvpfReleasing = false; }
+      break;
+  }
+}
+
+// Fit the captured buffer once the sequence ends (called from cvpfServiceCompletion). Flat pre-step baseline
+// (NO forward-extrapolated slope — that was the contamination bug), read at the 1/ω_c horizon.
+void cvpfProcess() {
+  uint32_t tP = micros();
+  cvpfReady = true;
+  if (cvpfBufCount < 8 || cvpfStepT0Ms == 0) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = "no usable samples — re-run"; return; }
+  uint32_t tS  = cvpfStepT0Ms;
+  uint32_t hMs = (uint32_t)fmaxf(2500.0f, cvpfHorizonS * 1000.0f);
+  uint32_t rC  = tS + hMs;
+  float vBase, iaBase, ibBase, vRead, iaRead, ibRead, sl, rs, ripple;
+  cvpfWinStats(tS - 2000, tS - 300, 0, vBase,  sl, rs);   // FLAT baseline means just before the step
+  cvpfWinStats(tS - 2000, tS - 300, 1, iaBase, sl, rs);
+  cvpfWinStats(tS - 2000, tS - 300, 2, ibBase, sl, rs);
+  int nRead = cvpfWinStats(rC - 1000, rC + 1000, 0, vRead, sl, ripple);   // ripple = residual RMS about the trend
+  cvpfWinStats(rC - 1000, rC + 1000, 1, iaRead, sl, rs);
+  cvpfWinStats(rC - 1000, rC + 1000, 2, ibRead, sl, rs);
+  if (isnan(vBase) || isnan(vRead) || nRead < 3) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = "step too short to read the horizon — re-run"; return; }
+  bool  noShunt = !HAS_BATT_SHUNT;
+  float dIalt = iaRead - iaBase, dIbat = ibRead - ibBase;
+  float dI = noShunt ? dIalt : dIbat;
+  float dV = vRead - vBase;
+  cvpfDV = dV; cvpfDI = dI;
+  if (fabsf(dI) < 0.5f) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = noShunt ? "no alternator-current step (weak alternator? raise RPM)" : "no battery-current step"; return; }
+  float K = dV / dI;
+  if (!(K > 1e-4f)) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = "voltage moved the wrong way — check current-sensor sign/wiring"; return; }
+  cvpfK   = K;
+  cvpfSNR = dV / fmaxf(1e-4f, ripple);
+  // advisory gates (never block — the wizard shows them and the user still chooses Apply)
+  if (fabsf(dIalt) / fmaxf(1e-3f, cvpfStepA) < 0.6f) cvpfWarn |= 0x01;   // delivery came up short
+  if (cvpfSNR < 12.0f) cvpfWarn |= 0x02;                                 // weak signal vs ripple
+  if (!noShunt) {   // gap-drift: alt-minus-battery current MOVING across the step ⇒ a load switched mid-test
+    float iaM, iaSl, iaR, ibM, ibSl, ibR;
+    cvpfWinStats(tS + CVPF_SKIP_MS, rC + 1000, 1, iaM, iaSl, iaR);
+    cvpfWinStats(tS + CVPF_SKIP_MS, rC + 1000, 2, ibM, ibSl, ibR);
+    float gapDriftA = fabsf(iaSl - ibSl) * (float)((rC + 1000) - (tS + CVPF_SKIP_MS));
+    if (gapDriftA / fmaxf(1.0f, fabsf(dIalt)) > 0.15f) cvpfWarn |= 0x08;
+  }
+  // display Kp/Ki (mirrors recomputeCvGains; recomputeCvGains is authoritative when the user Applies cvPlantK)
+  float vNorm = 12.0f / (float)BATTERY_VOLTAGE;
+  float Knorm = K * vNorm;
+  float wc = (cvCrossover > 1e-3f) ? cvCrossover : 0.20f;
+  float rho = cvPiZero;
+  float kp = 1.0f / (Knorm * sqrtf(1.0f + (rho / wc) * (rho / wc)));
+  float ki = rho * kp;                        // Ki from the UN-clamped Kp, then clamp both — matches recomputeCvGains
+  cvpfKp = clamp_f(kp, 2.0f, 120.0f);
+  cvpfKi = clamp_f(ki, 1.0f, 80.0f);
+  cvpfOk = true; cvpfState = 2;
+  queueConsoleMessageF("CV plant-fit: K=%.1f mV/A dV=%.0f mV dI=%.2f A horizon=%.1fs SNR=%.0f -> Kp %.1f Ki %.1f warn=%d (%luus)",
+                       K * 1000.0f, dV * 1000.0f, dI, cvpfHorizonS, cvpfSNR, kp, cvpfKi, (int)cvpfWarn, (unsigned long)(micros() - tP));
+}
+
+bool cvpfStartTest() {
+  if (cvpfState == 1)           { cvpfAbortMsg = "already running";        return false; }
+  if (!cvpfBuf)                 { cvpfAbortMsg = "buffer unallocated";     return false; }
+  if (RPM < 100)                { cvpfAbortMsg = "engine not running";     return false; }
+  if (sysMode != SYS_MODE_AUTO) { cvpfAbortMsg = "must be in AUTO mode";   return false; }
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive) {
+    cvpfAbortMsg = "another test active"; return false;
+  }
+  cvpfBufCount = 0; cvpfSampleLastMs = 0;
+  cvpfPhase = 0; cvpfState = 1;
+  cvpfPhaseStartMs = millis(); cvpfTestStartMs = cvpfPhaseStartMs; cvpfRestChkMs = cvpfPhaseStartMs;
+  cvpfStepT0Ms = 0;
+  cvpfBaseA = 10.0f; cvpfPilotA = 6.0f; cvpfStepA = 6.0f;
+  cvpfTargetDV = 0.30f; cvpfFellBack = false; cvpfReleasing = false;
+  cvpfCmdA = cvpfBaseA;
+  cvpfHorizonS = 1.0f / ((cvCrossover > 1e-3f) ? cvCrossover : 0.20f);
+  cvpfReady = false; cvpfOk = false; cvpfWarn = 0; cvpfAbortMsg = "";
+  cvpfK = cvpfDV = cvpfDI = cvpfSNR = 0.0f; cvpfKp = cvpfKi = 0.0f;
+  cvPlantFitActive = true;
+  queueConsoleMessageF("CV plant-fit: started (read horizon %.1fs = 1/omega_c; settle->pilot->settled-rest->step)", cvpfHorizonS);
+  return true;
+}
+
+void cvpfAbort(const char *reason) {
+  cvPlantFitActive = false; cvpfReleasing = false;
+  cvpfState = 3; cvpfReady = true; cvpfOk = false;
+  cvpfAbortMsg = reason;
+  queueConsoleMessageF("CV plant-fit: aborted — %s", reason);
+}
+
+// Called every loop(): runs the fit once the control-loop branch finishes, plus a hang watchdog.
+void cvpfServiceCompletion() {
+  if (cvpfState != 1) return;
+  if (!cvPlantFitActive) { cvpfProcess(); return; }   // branch finished the RELEASE phase
+  // Worst case = two settled-rests at the cap + two step-holds (each scales with the read horizon 1/ω_c) +
+  // release, for a 300→180mV OV re-step. The step-hold term MUST track cvpfHorizonS or a slow ω_c fit gets
+  // killed mid-measurement; keep this ≥ the sample-buffer coverage so neither is the limiter.
+  uint32_t hMs = (uint32_t)fmaxf(2500.0f, cvpfHorizonS * 1000.0f);
+  uint32_t budget = CVPF_T_SETTLE_MS + CVPF_T_PILOT_MS + 2 * CVPF_REST_MAX_MS
+                    + 2 * (CVPF_SKIP_MS + hMs + 2000) + 6000;
+  if (millis() - cvpfTestStartMs > budget) cvpfAbort("timed out (engine stopped or left AUTO?)");
 }
 
 // ── Capacity tracker (OCV-anchored) — see Xregulator.ino cap globals + dev doc ──

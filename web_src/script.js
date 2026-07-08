@@ -2574,6 +2574,7 @@ const CSV3_FIELDS = [
     "battMaxMode",                   // battery V/I plot sampling: 0 = window mean, 1 = max-magnitude
     "IExcessBaseA",                  // over-current trip-line intercept / CV base (A ×10)
     "IExcessCcOffsetA",              // CC trip line offset above CV (A ×10)
+    "BatteryShuntPresent",
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5036,6 +5037,7 @@ function updateAllEchosOptimized(data) {
         { key: 'ShuntResistanceMicroOhm', id: 'ShuntResistanceMicroOhm_echo', transform: v => v },
         { key: 'InvertAltAmps', id: 'InvertAltAmps_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'InvertBattAmps', id: 'InvertBattAmps_echo', transform: v => v == 1 ? 'Yes' : 'No' },
+        { key: 'BatteryShuntPresent', id: 'BatteryShuntPresent_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'MaxDuty', id: 'MaxDuty_echo', transform: v => v },
         { key: 'MinDuty', id: 'MinDuty_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'FieldResistance', id: 'FieldResistance_echo', transform: v => (v / 100).toFixed(2) },
@@ -5897,13 +5899,11 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         const der = deriveBatteryDefaults(type, Number(vessel.battery_capacity_ah), Number(vessel.battery_voltage));
         if (!der) return;
 
-        let unchanged = 0;
-        const changed = [];
+        const rows = [];   // preserve der.rows order; each carries now + match so matches render inline, highlighted
         for (const row of der.rows) {
             if (row.blob) {   // OCV curve: comma-joined string, compared numerically not as a scalar
                 const nowStr = (cfg[row.param] !== undefined && cfg[row.param] !== '') ? String(cfg[row.param]) : '';
-                if (ocvBlobsEqual(nowStr, row.value)) { unchanged++; continue; }
-                changed.push({ ...row, now: nowStr });
+                rows.push({ ...row, now: nowStr, match: ocvBlobsEqual(nowStr, row.value) });
                 continue;
             }
             let nowUi;
@@ -5913,9 +5913,10 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
             } else {
                 nowUi = BATTDEF_FW_DEFAULT[row.param];
             }
-            if (isFinite(nowUi) && Math.abs(nowUi - row.value) < 0.005) { unchanged++; continue; }
-            changed.push({ ...row, now: nowUi });
+            rows.push({ ...row, now: nowUi, match: isFinite(nowUi) && Math.abs(nowUi - row.value) < 0.005 });
         }
+        const changed = rows.filter(r => !r.match);
+        const unchanged = rows.length - changed.length;
 
         const typeName = { lifepo4: 'LiFePO4', agm: 'AGM', lead_acid: 'Lead Acid' }[type] || type;
         const capTxt = (Number(vessel.battery_capacity_ah) > 0) ? Number(vessel.battery_capacity_ah) + ' Ah, ' : '';
@@ -5928,17 +5929,31 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
                 : (BATTDEF_CHEM_COPY[type] || ''))
             + ((type === 'agm' || type === 'lead_acid') ? ' <span style="color:#fca5a5;">This firmware does not yet support a battery temperature sensor, so it cannot reduce current if the battery itself gets hot. Evaluate your own battery-temperature risk before running high current — it matters most in hot installs and with aging cells. Battery-temperature support is planned in a future firmware update.</span>' : '')
             + ((type === 'lifepo4' && battSrc !== 0) ? '<br><span style="color:#fca5a5;">Zero-current float needs the INA228 battery shunt as the Battery Current Source, so Float Mode is proposed as No Float (idle) instead.</span>' : '')
-            + (unchanged ? '<br><b>' + unchanged + '</b> setting' + (unchanged === 1 ? ' already matches' : 's already match') + ' and ' + (unchanged === 1 ? 'is' : 'are') + ' not shown.' : '');
+            + (unchanged ? '<br><b>' + unchanged + '</b> setting' + (unchanged === 1 ? ' already matches' : 's already match') + ' the recommendation and ' + (unchanged === 1 ? 'is' : 'are') + ' highlighted below.' : '');
 
         const body = document.getElementById('battdef-body');
         if (changed.length) {
             const show = row => row.show ? row.show : (v => String(v));
+            let ci = 0;   // running index into `changed` for checkbox data-i (matches carry no checkbox)
             body.innerHTML = '<table style="width:100%; border-collapse:collapse; font-size:0.85em;">'
                 + '<tr style="color:#aaa; text-align:left;"><th style="padding:3px 6px 3px 0; text-align:center;"><input type="checkbox" id="battdef-cb-all" checked onchange="battDefCbAll(this.checked)" title="Check / uncheck all" style="accent-color:#00a19a; margin:0; vertical-align:middle;"><br>Apply</th><th style="padding:3px 8px 3px 0;">Setting</th><th style="padding:3px 8px;">Now</th><th style="padding:3px 0;">Proposed</th></tr>'
-                + changed.map((c, i) => '<tr><td style="padding:3px 6px 3px 0; text-align:center;"><input type="checkbox" class="battdef-cb" data-i="' + i + '" checked onchange="battDefCbChanged()" style="accent-color:#00a19a; margin:0; vertical-align:middle;"></td>'
-                    + '<td style="padding:3px 8px 3px 0; color:#9cc;">' + _cfgEsc(c.label) + '</td>'
-                    + '<td style="padding:3px 8px; color:#888;">' + _cfgEsc(c.blob ? show(c)(c.now) : (isFinite(c.now) ? show(c)(c.now) : '?')) + '</td>'
-                    + '<td style="padding:3px 0; color:#fff;">' + _cfgEsc(show(c)(c.value)) + '</td></tr>').join('')
+                + rows.map(c => {
+                    const sh = show(c);
+                    const nowTxt = _cfgEsc(c.blob ? sh(c.now) : (isFinite(c.now) ? sh(c.now) : '?'));
+                    const propTxt = _cfgEsc(sh(c.value));
+                    if (c.match) {
+                        return '<tr style="background:rgba(0,161,154,0.10);">'
+                            + '<td style="padding:3px 6px 3px 0; text-align:center;"><span style="color:#00a19a; font-size:0.8em; font-weight:600;" title="Already matches the recommendation — nothing to apply">matches</span></td>'
+                            + '<td style="padding:3px 8px 3px 0; color:#9cc;">' + _cfgEsc(c.label) + '</td>'
+                            + '<td style="padding:3px 8px; color:#888;">' + nowTxt + '</td>'
+                            + '<td style="padding:3px 0; color:#888;">' + propTxt + '</td></tr>';
+                    }
+                    const i = ci++;
+                    return '<tr><td style="padding:3px 6px 3px 0; text-align:center;"><input type="checkbox" class="battdef-cb" data-i="' + i + '" checked onchange="battDefCbChanged()" style="accent-color:#00a19a; margin:0; vertical-align:middle;"></td>'
+                        + '<td style="padding:3px 8px 3px 0; color:#9cc;">' + _cfgEsc(c.label) + '</td>'
+                        + '<td style="padding:3px 8px; color:#888;">' + nowTxt + '</td>'
+                        + '<td style="padding:3px 0; color:#fff;">' + propTxt + '</td></tr>';
+                }).join('')
                 + '</table>';
         } else {
             body.innerHTML = '<div style="color:#888; font-size:0.9em; padding:8px 0;">Nothing to change — the current settings already match the recommendations for this bank.</div>';
@@ -6180,7 +6195,7 @@ function commPrepGotoRpm() {
     const pill = document.createElement('button');
     pill.id = 'commprep-back-pill';
     pill.type = 'button';
-    pill.textContent = 'Edit the RPM and Limit (A) columns then return to Setup Wizard by clicking here';
+    pill.innerHTML = 'Edit the RPM and Limit (A) columns then...<br><br>...press this button to return to Setup Wizard';
     pill.onclick = commPrepBackFromRpm;
     pill.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:9300; max-width:min(360px,calc(100vw - 32px)); text-align:center; line-height:1.35; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:14px; border:none; border-radius:16px; padding:16px 22px; cursor:pointer; box-shadow:0 6px 24px rgba(0,0,0,0.55);';
     document.body.appendChild(pill);
@@ -9936,6 +9951,10 @@ function updateTogglesFromData(data) {
         updateCheckbox("AlarmActivate_checkbox", data.AlarmActivate, "AlarmActivate");
         updateCheckbox("InvertAltAmps_checkbox", data.InvertAltAmps, "InvertAltAmps");
         updateCheckbox("InvertBattAmps_checkbox", data.InvertBattAmps, "InvertBattAmps");
+        updateCheckbox("BatteryShuntPresent_checkbox", data.BatteryShuntPresent, "BatteryShuntPresent");
+        // Single point that drives the whole no-shunt UI hide: body.no-batt-current gates every
+        // .req-batt-current container (styles.css). Only touch it when the echo is actually present.
+        if ('BatteryShuntPresent' in data) document.body.classList.toggle('no-batt-current', String(data.BatteryShuntPresent) === '0' || (parseFloat(data.ShuntResistanceMicroOhm) || 0) <= 0);  // mirror firmware HAS_BATT_SHUNT
         updateCheckbox("IgnitionOverride_checkbox", data.IgnitionOverride, "IgnitionOverride");  // unchecked = Auto (0/2), checked = Force On (1)
         updateCheckbox("TempSource_checkbox", data.TempSource, "TempSource");
         updateCheckbox("AlarmLatchEnabled_checkbox", data.AlarmLatchEnabled, "AlarmLatchEnabled");
@@ -10034,6 +10053,47 @@ function handleUserToggle(checkboxId, hiddenInputId, dataKey) {
         return true;
     }
     return false;
+}
+
+// Ignore RPM only removes the RPM field-cut; it does NOT set a charge current. With no RPM signal the
+// regulator reads RPM as 0, so the current ceiling comes from the first row of the RPM Table, and that
+// row defaults to 0 A -> the alternator targets 0 A and never charges. Warn + offer a deep-link on toggle-on.
+function warnIgnoreRpmNeedsCap() {
+    const box = document.getElementById('rpmCapCurrentTable0_input');
+    const cur = box ? parseFloat(box.value) : NaN;
+    const hiBtn = document.getElementById('chargeRateHighBtn');
+    const rateName = (hiBtn && hiBtn.classList.contains('cap-mode-active')) ? 'High' : 'Low';
+    let msg;
+    if (isFinite(cur) && cur > 0) {
+        msg = 'Ignore RPM lets the field turn on without a valid RPM signal, but it does not set a charge current on its own.\n\n'
+            + 'The current target comes from the first row of the table of current limits vs. RPM (Setup ▸ Alternator ▸ RPM Table). '
+            + 'Your ' + rateName + ' table’s first row reads ' + cur + ' A, which will charge — but each charge rate keeps its own table, so confirm the other rate’s first row is also non-zero.\n\n'
+            + 'Open the RPM Table to check?';
+    } else {
+        msg = 'Ignore RPM lets the field turn on without a valid RPM signal, but it does not set a charge current on its own.\n\n'
+            + 'With no RPM signal the regulator reads the first row of the table of current limits vs. RPM (Setup ▸ Alternator ▸ RPM Table). '
+            + 'That row’s Limit (A) is currently 0 — the factory default — so the alternator is commanded to 0 A and will not charge, even with Ignore RPM on.\n\n'
+            + 'To charge with no RPM signal, set a non-zero Limit (A) in the first row, for both charge rates (High and Low).\n\n'
+            + 'Open the RPM Table now?';
+    }
+    xConfirm(msg, { title: 'Ignore RPM — needs a current limit', okText: 'Open RPM Table', cancelText: 'Not now' })
+        .then(go => { if (go) gotoRpmTableHighlightFirstAmps(); });
+}
+
+// Deep-link to Setup > Alternator > RPM Table and flash the first-row Limit (A) box. The box shows the
+// active charge rate only (High/Low keep separate tables), so the warning copy tells the user to check both.
+function gotoRpmTableHighlightFirstAmps() {
+    showMainTab('settings');
+    showSubTab('settings', 'alternator');
+    showAltTab('primary', 'alt-panel-quick-view');
+    setTimeout(() => {
+        const box = document.getElementById('rpmCapCurrentTable0_input');
+        if (!box) return;
+        try { box.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { try { box.scrollIntoView(); } catch (e2) {} }
+        box.classList.add('cap-first-row-flash');
+        try { box.focus({ preventScroll: true }); } catch (e) { try { box.focus(); } catch (e2) {} }
+        setTimeout(() => box.classList.remove('cap-first-row-flash'), 6000);
+    }, 80);
 }
 
 // ── CV gain-mode UI (Auto ω-based vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
@@ -10378,6 +10438,42 @@ function setCapMode(mode) {
         }
     }
 }
+
+// Header minimize: mirrors the live header values into the one-line collapsed strip.
+// No-op unless collapsed, so the 500ms poll below is free while the header is expanded.
+function syncHeaderStrip() {
+    const hdr = document.querySelector('.permanent-header');
+    if (!hdr || !hdr.classList.contains('header-collapsed')) return;
+    const copy = (fromId, toId) => {
+        const from = document.getElementById(fromId);
+        const to = document.getElementById(toId);
+        if (from && to) to.textContent = from.textContent;
+    };
+    copy('field-status', 'hcs-status');
+    copy('header-voltage', 'hcs-volt');
+    copy('header-soc', 'hcs-soc');
+    const alt = document.getElementById('header-alternator-enable');
+    const dot = document.getElementById('hcs-altdot');
+    if (dot) dot.classList.toggle('on', !!(alt && alt.checked));
+}
+
+function toggleHeaderCollapse() {
+    const hdr = document.querySelector('.permanent-header');
+    if (!hdr) return;
+    const collapsed = hdr.classList.toggle('header-collapsed');
+    try { localStorage.setItem('header_collapsed', collapsed ? '1' : '0'); } catch (e) {}
+    syncHeaderStrip();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    try {
+        if (localStorage.getItem('header_collapsed') === '1') {
+            document.querySelector('.permanent-header')?.classList.add('header-collapsed');
+        }
+    } catch (e) {}
+    syncHeaderStrip();
+    setInterval(syncHeaderStrip, 500);
+});
 
 // this is known as the window.load event in AI speak, all this stuff executes on page load
 window.addEventListener("load", function () {
@@ -10811,7 +10907,7 @@ window.addEventListener("load", function () {
             // Wind dial + trend plot: cache the fast (CSV1) wind series, drive the dial.
             try { windLiveOnCsv1(data); } catch (e) { }
 
-            // CV plant-fit (commissioning step 7): capture {t, battery voltage, measured amps} while a fit runs.
+            // CV plant-fit (commissioning step 8): capture {t, battery voltage, measured amps} while a fit runs.
             try { cvFitOnCsv1(data); } catch (e) { }
 
             // Live iExcess detector sparkline (Group 3/4): peak excess vs min threshold E.
@@ -12830,6 +12926,7 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("AlarmActivate_checkbox").checked = (document.getElementById("AlarmActivate").value === "1");
     document.getElementById("InvertAltAmps_checkbox").checked = (document.getElementById("InvertAltAmps").value === "1");
     document.getElementById("InvertBattAmps_checkbox").checked = (document.getElementById("InvertBattAmps").value === "1");
+    document.getElementById("BatteryShuntPresent_checkbox").checked = (document.getElementById("BatteryShuntPresent").value === "1");
     document.getElementById("IgnitionOverride_checkbox").checked = (document.getElementById("IgnitionOverride").value === "1");
     document.getElementById("TempSource_checkbox").checked = (document.getElementById("TempSource").value === "1");
     document.getElementById("admin_password").addEventListener("change", updatePasswordFields);
@@ -13336,6 +13433,13 @@ function goToTuning(subTab) {
 // which are edited back-to-back during tuning.
 function goToVoltageTuning() {
     goToTuning('voltage');
+    // Land on the Voltage Step Generator section — it holds the reciprocal
+    // link back to CV Mode but is collapsed by default (showTuningPanel resets scroll to top).
+    const sec = document.getElementById('cvStepGenSection');
+    if (sec) {
+        sec.open = true;
+        requestAnimationFrame(() => sec.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
 }
 function goToCVMode() {
     showMainTab('settings');
@@ -14142,7 +14246,7 @@ const SINFO = {
     IExcessFloorA: () => [
         ['Role', 'lower bound (amps) on the alternator detector’s threshold'],
         ['Signal context', S_ADS_ALT],
-        ['Set', 'operator-owned — never auto-written by commissioning; size it with the ripple plot below (measured in Commissioning ▸ Step 5)'],
+        ['Set', 'operator-owned — never auto-written by commissioning; size it with the ripple plot below (measured in Commissioning ▸ Step 6)'],
     ],
     IExcessCeilA: () => [
         ['Role', 'upper bound (amps) on the alternator detector’s threshold'],
@@ -14154,7 +14258,7 @@ const SINFO = {
     ],
     ripPlotAlt: () => [
         ['Threshold lines', 'recomputed live from the threshold / floor / ceiling fields above'],
-        ['Ripple line', 'alternator ripple measured during Commissioning ▸ Step 5 (current check), filtered with the same EMA the detectors use (τ = ' + svv('IExcessTau_echo', 'ms') + ' — the "Averaging Time Constant" field above) so it is detector-eye ripple; fixed until Step 5 is re-run'],
+        ['Ripple line', 'alternator ripple measured during Commissioning ▸ Step 6 (current check), filtered with the same EMA the detectors use (τ = ' + svv('IExcessTau_echo', 'ms') + ' — the "Averaging Time Constant" field above) so it is detector-eye ripple; fixed until Step 6 is re-run'],
         ['Source', S_ADS_ALT],
     ],
     IExcessTau: () => [
@@ -14243,7 +14347,7 @@ const SINFO = {
         ['Signals', 'battery current (INA228 shunt, ~5&nbsp;ms samples while charging) + alternator current (ADS1115 Hall clamp, fresh within ~30&nbsp;ms) + engine speed (ADS1115 ch&nbsp;2)'],
         ['Filter', 'the same EMA the over-current detectors use — τ = ' + svv('IExcessTau_echo', 'ms') + ', set as "Averaging Time Constant" on Setup ▸ Alternator ▸ Protections'],
         ['Recorded value', 'the smaller of the two half-window peak-to-peaks'],
-        ['Consumed by', 'Commissioning ▸ Step 5 current check and the RPM-table game'],
+        ['Consumed by', 'Commissioning ▸ Step 6 current check and the RPM-table game'],
     ],
     ripDriftFloorA: () => [
         ['Signals', 'the two half-window averages of each sensor (alternator ADS1115, battery INA228, plus RPM with its own fixed floor), and the travel of the current command'],
@@ -18129,23 +18233,31 @@ function computeActionableDisturbance() {
 // existing SystemID / tuning-sweep / matrix endpoints; the operator only holds or
 // slowly changes engine speed when prompted — the regulator drives the field.
 // ============================================================================
-const CX_PHASES = ['Prep', 'Field curve', 'Plant fit', 'Verify', 'Disturbances', 'Thresholds', 'CV plant fit', 'Min% floor'];
+const CX_PHASES = ['Prep', 'Field curve', 'Min% floor', 'Plant fit', 'Verify', 'Disturbances', 'Thresholds', 'CV plant fit'];
 let cx = null;             // orchestrator state object; persists across panel close (in-session resume)
 let cxPollTimer = null;
 let cxHeartbeatTimer = null;   // pings commissionHeartbeat while the modal is open (firmware idle-rest hold)
+// Field-command epoch: bumped whenever a wizard flow (re)acquires field control (sweep, current-check,
+// CV plant fit). A teardown that schedules a DELAYED release (the 2.5 s field-down wait before resTest=0/
+// faCommissionGate=0) stamps the epoch and skips its release writes if a newer flow has since taken the
+// field. Without it, a stale resTest=0 lands mid-run and — since the firmware rest-hold now yields to
+// resTestActive — the disarm drops the field to the commissioning rest floor. cxFieldArm() = one bump.
+let cxFieldEpoch = 0;
+function cxFieldArm() { return ++cxFieldEpoch; }
 
 // ── Per-stage run plan (partial re-commissioning) ─────────────────────────────
-// cxPlan[i] = run stage i in the next/active wizard pass (0=Prep … 7=Min% floor). Prep (0) is
+// cxPlan[i] = run stage i in the next/active wizard pass (0=Prep … 7=CV plant fit). Prep (0) is
 // ALWAYS run (it snapshots the tune for safe revert + checks preconditions), so it stays true and
 // its checkbox is disabled. The wizard navigation skips any stage left false.
 let cxPlan = [true, true, true, true, true, true, true, true];
 // Coupling: (re)running a stage invalidates the downstream stages it feeds, so selecting one
-// force-selects them. Field curve(1) → Plant fit(2)+Verify(3)+CV plant fit(6); Plant fit(2) →
-// Verify(3)+CV plant fit(6); Verify(3) → CV plant fit(6); Disturbances(4) → Thresholds(5).
-// CV plant fit(6) measures the current→voltage plant, downstream of the whole inner current loop.
-// Min% floor(7) is independent (no dependents) and runs last so the engine is warm at max RPM.
+// force-selects them. Field curve(1) → Plant fit(3)+Verify(4)+CV plant fit(7); Plant fit(3) →
+// Verify(4)+CV plant fit(7); Verify(4) → CV plant fit(7); Disturbances(5) → Thresholds(6).
+// CV plant fit(7) measures the current→voltage plant, downstream of the whole inner current loop.
+// Min% floor(2) is independent (no dependents) and runs early — 2nd, right after Field curve — so its
+// measured knee floors every later current-control step (Prep requires a warm engine: it sweeps to max RPM).
 // (Mirrors commissionDependentsMask() in the firmware.)
-const CX_DEPENDENTS = { 1: [2, 3, 6], 2: [3, 6], 3: [6], 4: [5] };
+const CX_DEPENDENTS = { 1: [3, 4, 7], 3: [4, 7], 4: [7], 5: [6] };
 let cxPlanUserSet = false;   // true once the user ticks a box, so CSV3 re-renders stop re-defaulting the plan
 let cxLastPhase = 0;         // remembered from the last CSV3 frame (for re-render after a checkbox toggle)
 let cxLastMask = 0;          // per-stage done bitmask from the last CSV3 frame
@@ -18254,13 +18366,14 @@ function cxNextBtn(markDone = true, primary = true) {
     const cls = primary ? 'btn-primary btn-sm' : 'btn-secondary btn-sm';
     return '<button onclick="cxAdvance(' + markDone + ')" class="' + cls + '">' + label + '</button>';
 }
-// ── Clean-pass chaining across the cruise-hold stretch (Field curve → Plant fit → Verify) ──
+// ── Clean-pass chaining across the cruise-hold stretch (Plant fit → Verify) ──
 // These stages share one held engine speed, so when a result is CLEAN the primary button applies
 // it AND starts the next stage's test in one press (instead of Apply → Next → Run). Only the
-// stages in CX_AUTORUN are ever auto-started — Disturbances needs a drop to idle and CV plant fit
-// has its own load-steady precondition, so a human press stays required there. Any warning or
-// marginal result falls back to the plain Apply primary and today's manual flow.
-const CX_AUTORUN = { 2: () => cxPlantStart(false), 3: () => cxVerifyStart() };
+// stages in CX_AUTORUN are ever auto-started — Min% floor sits between Field curve and Plant fit and
+// needs its own high-RPM sweep, Disturbances needs a drop to idle, and CV plant fit has its own
+// load-steady precondition, so a human press stays required there. Any warning or marginal result
+// falls back to the plain Apply primary and today's manual flow.
+const CX_AUTORUN = { 3: () => cxPlantStart(false), 4: () => cxVerifyStart() };
 // applyFn = global apply-function name; it must accept (run) and call cxAdvanceRun() when true.
 function cxApplyRunBtn(applyFn, clean) {
     const nx = cxNextSelected(cx.phase);
@@ -18299,9 +18412,9 @@ function cxLive() {
 function cxBulkV() { const v = getEchoNumber('BulkVoltage_echo'); return (v > 0) ? v : NaN; }
 function cxHardV() { const v = getEchoNumber('AlternatorHardShutdownV_echo'); return (v > 0) ? v : NaN; }
 
-// The one true protection statement, per phase. Open-loop phases (Field curve 1, Min% floor 2,
-// Plant fit 3) and the closed-loop verify (4) are guarded only by the fast OV cut + INA228 backstop;
-// the disturbance map (5) and validation (7) run under full normal protection.
+// The one true protection statement, per phase. The open-loop / test-current phases — Field curve (1),
+// Min% floor (2), Plant fit (3), Verify (4), CV plant fit (7) — are guarded only by the fast OV cut +
+// INA228 backstop; the disturbance map (5) and threshold review (6) run under full normal protection.
 // Per-phase protection statement (plain text — the footer wrapper lives in commissionRender).
 function cxSafetyText(phase) {
   const hv = cxHardV();
@@ -18314,7 +18427,7 @@ function cxSafetyText(phase) {
   else ov = hv.toFixed(2) + ' V (Alternator Hard Shutdown Voltage)';
   // Open-loop / test-current steps (Field curve, Plant fit, Verify, CV plant fit, and Min% floor)
   // run with only the fast over-voltage hard-shutdown live; the rest run under full normal protection.
-  const openLoop = (phase >= 1 && phase <= 3) || phase >= 6;
+  const openLoop = (phase >= 1 && phase <= 4) || phase === 7;
   return openLoop
     ? 'Protections active this step: <strong>over-voltage only</strong>.'
     : 'Protections active this step: <strong>all of them</strong>.';
@@ -18326,12 +18439,12 @@ function cxFinePrint(phase) {
   switch (phase) {
     case 0: return 'Commissioning runs some semi-automated tests on your alternator and uses the results to optimize configuration settings. Time required is ~ 5 minutes and requires some charging headroom in the battery SOC to avoid tripping overvoltage protections.';
     case 1: return 'Open-loop field-duty ramp across the full range maps duty→amps, finds the saturation knee, and proposes the plant test\'s wave floor (baseline current) and step size. No feedback control — raw duty only.';
-    case 7: return 'Briefly ramps field at each held RPM until output current just begins (the onset knee). The onset follows a 1/RPM law, so those three points fit the whole Min% column, parked a margin below and maintained automatically over alternator life. Above your highest captured RPM the floor is forced to zero, so the field can always shut fully off at speed. Only over-voltage is active during the ramp.';
-    case 2: return 'Open-loop sine sweep on field duty identifies the plant (time constant τ, gain, dead time) and proposes the PI gains and filter time constants. This characterizes the alternator\'s own field→current behavior, so it runs on <strong>alternator current</strong> — the same signal the inner loop regulates in every mode. Wave floor and step size carry over from the Field curve step\'s proposal (the Plant Delay tab). The sweep frequency range is fixed at <strong>0.5–20 Hz</strong> (0.3–30 Hz on an auto-widen retry).';
-    case 3: return 'Closed-loop sine sweep — passes when the peak closed-loop gain stays ≤ 1.15 (no resonant peak). The parameters are computed from the plant fit and field curve. This verifies the inner current loop on alternator current — the signal it regulates in every mode.';
-    case 4: return 'Records the low-frequency disturbance at each engine speed into a map; you can stop as soon as the worst-ripple speed is pinned down and no unswept gap could hide a bigger peak — no need to cover every speed. During the sweep the wizard holds the alternator at a <strong>fixed test current</strong> (25% of your RPM/Amps table max) and captures the <strong>measured filtered ripple</strong> (the same IExcessTau-averaged signal each over-current detector trips on) per RPM bin, for both the alternator and battery detectors — a value only commits when two readings at that speed agree, so a throttle transient can\'t poison the table. The optional current-check then commands 3 current levels at the worst-ripple RPM and fits ripple = a0 + a1·I per detector. This produces the <strong>measured-ripple projection</strong> only — it never sets a threshold. Review it against your settings in the next step and on the Protections ripple plots.';
-    case 5: return 'Sets the over-current trip line from the ripple measured in Step 5. The trip line is <code>Slope·current + CV base</code>, floored and capped: Slope is set to the measured ripple slope and CV base to ripple-at-idle + the Safety Margin, so the line runs parallel to the ripple that margin above it. The CC (current-limited) line runs the same slope, the CC offset above CV. Any current where the ripple would cross the line is shaded red. These are the exact G3 settings on Settings ▸ Alternator ▸ Protections — editing here writes them live. No fit yet (Step 5 skipped) → set them by hand.';
-    case 6: return 'Commands one bounded current step (~6–40 A, auto-sized for ~300 mV) through the already-tuned current loop and records how battery voltage responds to the current measured at the battery shunt, measuring the <strong>finite-horizon gain K20</strong> (the rise at a fixed 20 s horizon with the slow charge ramp removed). The voltage-loop gains follow from K20 via the exact PI magnitude condition, Ki = ρ·Kp, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
+    case 2: return 'Briefly ramps field at each held RPM until output current just begins (the onset knee). The onset follows a 1/RPM law, so those three points fit the whole Min% column, parked a margin below and maintained automatically over alternator life. Above your highest captured RPM the floor is forced to zero, so the field can always shut fully off at speed. Only over-voltage is active during the ramp.';
+    case 3: return 'Open-loop sine sweep on field duty identifies the plant (time constant τ, gain, dead time) and proposes the PI gains and filter time constants. This characterizes the alternator\'s own field→current behavior, so it runs on <strong>alternator current</strong> — the same signal the inner loop regulates in every mode. Wave floor and step size carry over from the Field curve step\'s proposal (the Plant Delay tab). The sweep frequency range is fixed at <strong>0.5–20 Hz</strong> (0.3–30 Hz on an auto-widen retry).';
+    case 4: return 'Closed-loop sine sweep — passes when the peak closed-loop gain stays ≤ 1.15 (no resonant peak). The parameters are computed from the plant fit and field curve. This verifies the inner current loop on alternator current — the signal it regulates in every mode.';
+    case 5: return 'Records the low-frequency disturbance at each engine speed into a map; you can stop as soon as the worst-ripple speed is pinned down and no unswept gap could hide a bigger peak — no need to cover every speed. During the sweep the wizard holds the alternator at a <strong>fixed test current</strong> (25% of your RPM/Amps table max) and captures the <strong>measured filtered ripple</strong> (the same IExcessTau-averaged signal each over-current detector trips on) per RPM bin, for both the alternator and battery detectors — a value only commits when two readings at that speed agree, so a throttle transient can\'t poison the table. The optional current-check then commands 3 current levels at the worst-ripple RPM and fits ripple = a0 + a1·I per detector. This produces the <strong>measured-ripple projection</strong> only — it never sets a threshold. Review it against your settings in the next step and on the Protections ripple plots.';
+    case 6: return 'Sets the over-current trip line from the ripple measured in Step 6. The trip line is <code>Slope·current + CV base</code>, floored and capped: Slope is set to the measured ripple slope and CV base to ripple-at-idle + the Safety Margin, so the line runs parallel to the ripple that margin above it. The CC (current-limited) line runs the same slope, the CC offset above CV. Any current where the ripple would cross the line is shaded red. These are the exact G3 settings on Settings ▸ Alternator ▸ Protections — editing here writes them live. No fit yet (Step 6 skipped) → set them by hand.';
+    case 7: return 'Commands one bounded current step (~6–40 A, auto-sized for ~300 mV) through the already-tuned current loop and records how battery voltage responds — measured at the battery shunt, or at the alternator sensor when no shunt is fitted (with loads held steady the two steps are equal). It reads the step gain at the <strong>voltage loop\'s own response timescale</strong> (at 1/ω_c, ~5 s at the default response time), against a <strong>flat pre-step baseline</strong>, and only after a short rest where it waits for the battery to stop drifting — so slow surface-charge (AGM / flooded lead-acid) doesn\'t inflate the reading. If the bank nears its over-voltage ceiling the step is automatically reduced. The voltage-loop gains follow via the exact PI magnitude condition, Ki = ρ·Kp, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
     default: return '';
   }
 }
@@ -18409,7 +18522,7 @@ function closeCommissionModal() {
         if (cx.fieldRunning) cxGet('cancelFieldCurve=1').catch(() => { });
         if (cx.plantRunning) cxGet('cancelSystemID=1').catch(() => { });
         if (cx.verifyRunning) cxGet('TuningMode=0').catch(() => { });
-        if (cx.cvFitRunning) { cx.cvFitDone = true; if (cx.cvFitCdTimer) { clearInterval(cx.cvFitCdTimer); cx.cvFitCdTimer = null; } if (cxPollTimer) { clearTimeout(cxPollTimer); cxPollTimer = null; } if (cvFitCapture) cvFitCapture.active = false; cxGet('TuningMode=0').catch(() => { }); }
+        if (cx.cvFitRunning) { cx.cvFitDone = true; if (cx.cvFitCdTimer) { clearInterval(cx.cvFitCdTimer); cx.cvFitCdTimer = null; } if (cxPollTimer) { clearTimeout(cxPollTimer); cxPollTimer = null; } cxGet('cvPlantFitCancel=1').catch(() => { }); }
         // Modal close is a sweep teardown path: freeze + persist the RPM ripple table (committed cells
         // from a cut-short sweep are honest data). The rtFieldArmed block below releases the field —
         // the game runs with rtFieldArmed set for exactly that reason.
@@ -18452,7 +18565,7 @@ function commissionRender() {
     document.getElementById('commission-abort-row').style.display = (cx.phase > 0) ? 'block' : 'none';
     cxRpmStripVis();
     const b = document.getElementById('commission-body');
-    const R = [cxRenderPrep, cxRenderField, cxRenderPlant, cxRenderVerify, cxRenderMatrix, cxRenderThresh, cxRenderCVPlant, cxRenderKnee];
+    const R = [cxRenderPrep, cxRenderField, cxRenderKnee, cxRenderPlant, cxRenderVerify, cxRenderMatrix, cxRenderThresh, cxRenderCVPlant];
     // Wrap render so a transient error can never blank/close the panel mid-flow.
     try { R[cx.phase](b); } catch (e) { console.warn('commissionRender', e); return; }
     // One muted footer under a single rule: technical "details" for this phase, then the
@@ -18460,7 +18573,7 @@ function commissionRender() {
     let details = cxFinePrint(cx.phase);
     // The Disturbances fine print describes the sweep/map — only relevant on this step's first
     // (sweep) screen, not once the alternator-current-check sub-flow is running. Drop it there.
-    if (cx.phase === 4 && (cx.matrixOn || cx.matrixCov)) details = '';
+    if (cx.phase === 5 && (cx.matrixOn || cx.matrixCov)) details = '';
     b.insertAdjacentHTML('beforeend',
         '<div style="margin-top:14px; padding-top:10px; border-top:1px solid #2c2c2c; font-size:11px; color:#888; line-height:1.5;">' +
         (details ? '<div style="margin-bottom:8px;">' + details + '</div>' : '') +
@@ -18471,7 +18584,7 @@ function commissionRender() {
 // ── Step 1 · Prep — preconditions & snapshot ────────────────────────────────
 function cxRenderPrep(b) {
     b.innerHTML =
-        '<p style="font-size:15px;line-height:1.5;"><strong>Start the engine and check the charging headroom</strong>.</p>' +
+        '<p style="font-size:15px;line-height:1.5;"><strong>Warm the engine fully, then start it and check the charging headroom</strong>. Min% floor now runs 2nd and sweeps to high RPM — do not commission a cold engine.</p>' +
         '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px; font-size:13px; line-height:1.7;">' +
         '<div>Engine: <span id="cx-prep-rpm">…</span></div>' +
         '<div>Field: <span id="cx-prep-field">…</span></div>' +
@@ -18606,8 +18719,8 @@ function cxFieldApply(run = false) {
         .catch(e => xAlert('Apply failed: ' + e));
 }
 
-// ── Step 8 · Min% floor — GUIDED onset-knee sweeps at 3 DESCENDING RPMs → Min% column ──
-// Runs LAST so the engine is fully warmed up before the first hold at maximum working RPM.
+// ── Step 3 · Min% floor — GUIDED onset-knee sweeps at 3 DESCENDING RPMs → Min% column ──
+// Runs 2nd (right after Field curve); the engine must already be warm before the first hold at maximum working RPM.
 // Reuses the field ramp in onset-stop mode (firmware: fieldCurveOnsetMode). The wizard walks the user
 // DOWN the throttle through three held speeds (max working RPM → mid → idle) — one "Start" per step.
 // Each clean sweep auto-commits as an anchor; the firmware warm-starts each sweep from the previous
@@ -18625,7 +18738,7 @@ function cxRenderKnee(b) {
     const anchors = cx.kneeAnchors || [];
     const NSTEP = CX_KNEE_STEPS.length;
     const step = anchors.length;          // 0..2 = next guided capture; >=3 = review & approve
-    let body = '<p style="font-size:15px;line-height:1.5;">In this final step you\'ll hold three speeds, starting at your highest ' +
+    let body = '<p style="font-size:15px;line-height:1.5;">In this step you\'ll hold three speeds, starting at your highest ' +
         'working speed now that the engine is warm, while the regulator searches for the onset knee ' +
         '(where the field begins to produce an output current).</p>';
 
@@ -18731,11 +18844,11 @@ function cxKneeRefresh() {
         cx.kneeAnchors = j.anchors || [];
         cx.kneeFitResid = (typeof j.fitResid === 'number' && j.fitResid >= 0) ? j.fitResid : undefined;
         cx.kneeFitWorstIdx = (typeof j.fitWorstIdx === 'number') ? j.fitWorstIdx : -1;
-        if (cx.phase === 7) commissionRender();
+        if (cx.phase === 2) commissionRender();
     }).catch(() => { });
 }
 
-// ── Step 3 · Plant fit — open-loop sweep → PI gains + filters ─────────────────
+// ── Step 4 · Plant fit — open-loop sweep → PI gains + filters ─────────────────
 function cxRenderPlant(b) {
     const fit = cx.fit;
     let body = '';
@@ -18747,8 +18860,9 @@ function cxRenderPlant(b) {
             'Proposed <strong>Kp ' + fit.Kp.toFixed(3) + '</strong>, <strong>Ki ' + fit.Ki.toFixed(3) + '</strong>; filters τ/3=' + Math.round(fit.tauMs / 3) + ' ms, voltage τ=' + Math.round(fit.tauMs) + ' ms.' +
             (cx.plantApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>';
     }
-    // Speed instruction tracks the plan: after the Field curve the engine is already at cruise.
-    if (!cx.plantRunning && !fit) body += '<p style="font-size:15px;line-height:1.5;"><strong>' + (cxPlan[1] ? 'Keep the engine steady at the same cruising speed and press Run.' : 'Bring the engine to a typical cruising speed, hold, and press Run.') + '</strong></p><button onclick="cxPlantStart(false)" class="btn-primary" style="width:100%;padding:9px;">Run plant sine sweep</button>';
+    // Speed instruction tracks the plan: engine is still at cruise only if Field curve ran AND Min% floor
+    // (a high-RPM sweep that ends at idle, now inserted before Plant fit) did NOT run this pass.
+    if (!cx.plantRunning && !fit) body += '<p style="font-size:15px;line-height:1.5;"><strong>' + ((cxPlan[1] && !cxPlan[2]) ? 'Keep the engine steady at the same cruising speed and press Run.' : 'Bring the engine to a typical cruising speed, hold, and press Run.') + '</strong></p><button onclick="cxPlantStart(false)" class="btn-primary" style="width:100%;padding:9px;">Run plant sine sweep</button>';
     else if (!cx.plantRunning && fit && fit.ok) {
         // One primary action: clean fit → Apply & run next (cxApplyRunBtn); applied → advance.
         const action = cx.plantApplied ? cxNextBtn(true) : cxApplyRunBtn('cxPlantApply', true);
@@ -18802,7 +18916,7 @@ function cxPlantApply(run = false) {
         .catch(e => xAlert('Apply failed: ' + e));
 }
 
-// ── Step 4 · Verify — closed-loop stability check ────────────────────────────
+// ── Step 5 · Verify — closed-loop stability check ────────────────────────────
 function cxRenderVerify(b) {
     let body = '';
     if (cx.verifyRunning) body += '<p style="color:#4a9eff;">Closed-loop sweep running…</p>';
@@ -18814,7 +18928,7 @@ function cxRenderVerify(b) {
             (v.pass ? '<span style="color:#5a5;">Passed — loop is stable.</span>' : '<span style="color:#f0a500;">Peak gain above 1.15 — loop is too aggressive.</span>') + '</div>' +
             (v.pass ? '' : '<button onclick="cxDetune()" class="btn-primary btn-sm">Detune 20% &amp; re-verify</button>');
     }
-    if (!cx.verifyRunning && !cx.verify) body += '<p style="font-size:15px;line-height:1.5;"><strong>' + ((cxPlan[1] || cxPlan[2]) ? 'Keep the engine steady at the same cruising speed and press Run.' : 'Bring the engine to a typical cruising speed, hold, and press Run.') + '</strong></p><button onclick="cxVerifyStart()" class="btn-primary" style="width:100%;padding:9px;">Run closed-loop verify</button>';
+    if (!cx.verifyRunning && !cx.verify) body += '<p style="font-size:15px;line-height:1.5;"><strong>' + ((cxPlan[1] || cxPlan[3]) ? 'Keep the engine steady at the same cruising speed and press Run.' : 'Bring the engine to a typical cruising speed, hold, and press Run.') + '</strong></p><button onclick="cxVerifyStart()" class="btn-primary" style="width:100%;padding:9px;">Run closed-loop verify</button>';
     else if (!cx.verifyRunning && cx.verify) {
         // cxVerifyDone leaves closed-loop tuning (TuningMode=0) before advancing, so it builds the
         // advance button inline instead of cxNextBtn. Pass → advance is the one primary action;
@@ -18863,7 +18977,7 @@ function cxDetune() {
 }
 function cxVerifyDone() { cxGet('TuningMode=0').finally(() => cxAdvance()); }
 
-// ── Step 7 · CV plant fit — current square wave → battery-voltage FOPDT → λ-tuned Kp/Ki ──
+// ── Step 8 · CV plant fit — current square wave → battery-voltage FOPDT → λ-tuned Kp/Ki ──
 // Reuses the proven current-tuning square wave (TuningMode, tuningWaveform=0) to COMMAND current; the
 // browser records the live CSV1 (IBV, MeasuredAmps) stream and fits K/τ/L locally (no internet),
 // then writes them via the cvPlantK/τ/L handlers and switches CV gains to Auto. No new firmware control
@@ -18899,111 +19013,6 @@ function cvGainsFromKnorm(Knorm, omega_c, rho) {
     omega_c = (omega_c > 1e-3) ? omega_c : 0.20; rho = rho || 0.70;
     const Kp = 1 / (Knorm * Math.sqrt(1 + (rho / omega_c) * (rho / omega_c)));
     return { Kp: Math.min(120, Math.max(2, Kp)), Ki: Math.min(80, Math.max(1, rho * Kp)) };
-}
-// floorA/ampA = commanded low level + step size; sysV = nominal system voltage (12/24/48).
-// Returns {ok, K (V/A = K_dc), Kp, Ki (12V-equiv preview), nUp, relK, deadMs} or {ok:false, reason}.
-function cvLinFit(pts) {
-    // Least-squares line v = a + b*t over a window; resid = RMS of the fit (the voltage-noise estimate,
-    // already detrended so it is noise only, not the slow ramp).
-    const n = pts.length; if (n < 3) return null;
-    let st = 0, sv = 0, stt = 0, stv = 0;
-    for (const p of pts) { st += p.t; sv += p.v; stt += p.t * p.t; stv += p.t * p.v; }
-    const den = n * stt - st * st; if (Math.abs(den) < 1e-12) return null;
-    const b = (n * stv - st * sv) / den, a = (sv - b * st) / n;
-    let ss = 0; for (const p of pts) { const e = p.v - (a + b * p.t); ss += e * e; }
-    return { a: a, b: b, resid: Math.sqrt(ss / n), n: n };
-}
-
-// Mean of a sample field over a [t0,t1) time window. key ∈ {v, iB, iA}.
-function cvWinMean(samples, t0, t1, key) {
-    let s = 0, n = 0;
-    for (const p of samples) { if (p.t >= t0 && p.t < t1) { s += p[key]; n++; } }
-    return n ? s / n : NaN;
-}
-
-// Single-pulse, finite-horizon battery-current fit (CV_AUTOTUNE_PLAN.md §F rev 2). ONE bounded up-step is
-// commanded through the inner current loop; we read how BATTERY voltage (IBV) responds to BATTERY current
-// (Bcur) at a fixed 20 s horizon, baseline-detrended so the slow SOC/diffusion ramp cancels. There is no
-// settle to wait for (a charging battery never plateaus) and no train (a train accumulates polarization).
-//   K20  = [V_fit(t_edge+20s) − V_baseline_extrapolated(t_edge+20s)] / ΔI_battery     (V/A)
-//   ε20  = 20·|slope of V_fit| / |ΔV20|   — what fraction of the rise is still moving at 20 s (non-stationarity)
-// The up-edge gives the primary K20; the return-edge is a REPEATABILITY DIAGNOSTIC only (different
-// electrochemical state — never averaged in). marks = {di (commanded ΔI), tUp, tReturn} from the orchestrator.
-// ALL checks are ADVISORY (collected in .warns) — the ONLY ok:false case is "no measurement exists".
-function cvFitSinglePulse(samples, marks, sysV) {
-    const SKIP_S = 4.5, HORIZON_S = 20.0;   // §F.7 GUESSES from one 12 V LFP bench bank — field-verify, not validated
-    if (!samples || samples.length < 20 || marks.tUp == null)
-        return { ok: false, reason: 'no telemetry captured (the test produced no usable samples) — re-run' };
-    const tUp = marks.tUp, tRet = (marks.tReturn != null) ? marks.tReturn : (tUp + SKIP_S + HORIZON_S + 1);
-    const baseW = [tUp - 5.0, tUp - 0.3];
-    const upW = [tUp + SKIP_S, Math.min(tUp + HORIZON_S, tRet - 0.3)];
-    const upPts = samples.filter(p => p.t >= upW[0] && p.t < upW[1]);
-    const basePts = samples.filter(p => p.t >= baseW[0] && p.t < baseW[1]);
-    if (upPts.length < 6 || basePts.length < 4)
-        return { ok: false, reason: 'the current step did not hold long enough to read the 20 s horizon — re-run' };
-    const vFit = cvLinFit(upPts.map(p => ({ t: p.t, v: p.v })));
-    const vBase = cvLinFit(basePts.map(p => ({ t: p.t, v: p.v })));
-    if (!vFit || !vBase)
-        return { ok: false, reason: 'could not fit the voltage response — re-run' };
-    const tH = tUp + HORIZON_S;
-    const dV20 = (vFit.a + vFit.b * tH) - (vBase.a + vBase.b * tH);   // baseline-detrended rise at the horizon
-    const iBup = cvWinMean(samples, upW[0], upW[1], 'iB');
-    const iBbase = cvWinMean(samples, baseW[0], baseW[1], 'iB');
-    const dIbat = iBup - iBbase;                                       // measured BATTERY-current step = the denominator
-    if (!(Math.abs(dIbat) > 0.5))
-        return { ok: false, reason: 'no measurable battery-current step (current never reached the battery / divide-by-zero) — confirm the inner current loop is tuned, then re-run' };
-    const K20 = dV20 / dIbat;
-    if (!(K20 > 1e-4))
-        return { ok: false, reason: 'battery voltage moved the wrong way for the current step — check the battery-current sensor sign / wiring, then re-run' };
-    const eps20 = HORIZON_S * Math.abs(vFit.b) / Math.max(1e-4, Math.abs(dV20));
-    // Alternator-current step + external-network check (advisory): in a clean test all the alternator-current
-    // increment lands at the battery, so ΔI_alt ≈ ΔI_batt. A gap = a load switched / another source moved.
-    const iAup = cvWinMean(samples, upW[0], upW[1], 'iA');
-    const iAbase = cvWinMean(samples, baseW[0], baseW[1], 'iA');
-    const dIalt = iAup - iAbase;
-    const dIext = dIalt - dIbat;
-    const extScore = Math.abs(dIext) / Math.max(1, Math.abs(dIalt));
-    // Disturbance test keys on the alt-minus-battery gap MOVING across the horizon, not its size: a steady
-    // unmeasured path (parallel bank, combiner, steady house load) leaves a large but CONSTANT gap and is
-    // benign — K20 is anchored to ΔI_batt regardless. Only a load that SWITCHES mid-test makes the gap drift,
-    // and that is what corrupts the reading. slope × horizon mirrors the ε20 non-stationarity convention above.
-    const gapFit = cvLinFit(upPts.map(p => ({ t: p.t, v: p.iA - p.iB })));
-    const extDrift = gapFit ? Math.abs(gapFit.b) * HORIZON_S : 0;     // A the gap moved across the 20 s horizon
-    const extDriftFrac = extDrift / Math.max(1, Math.abs(dIalt));
-    const sigV = vFit.resid;                                          // detrended voltage ripple
-    const snr = Math.abs(dV20) / Math.max(1e-4, sigV);
-    // Return-edge K20 — REPEATABILITY DIAGNOSTIC ONLY (do NOT average with the up-edge).
-    let K20ret = NaN;
-    {
-        const rUpW = [tRet + SKIP_S, tRet + HORIZON_S], rBaseW = [tRet - 5.0, tRet - 0.3];
-        const rUp = samples.filter(p => p.t >= rUpW[0] && p.t < rUpW[1]);
-        const rB = samples.filter(p => p.t >= rBaseW[0] && p.t < rBaseW[1]);
-        if (rUp.length >= 6 && rB.length >= 4) {
-            const f = cvLinFit(rUp.map(p => ({ t: p.t, v: p.v }))), fb = cvLinFit(rB.map(p => ({ t: p.t, v: p.v })));
-            if (f && fb) {
-                const th = tRet + HORIZON_S, dvr = (f.a + f.b * th) - (fb.a + fb.b * th);
-                const dir = cvWinMean(samples, rUpW[0], rUpW[1], 'iB') - cvWinMean(samples, rBaseW[0], rBaseW[1], 'iB');
-                if (Math.abs(dir) > 0.5) K20ret = dvr / dir;
-            }
-        }
-    }
-    const cmdDI = marks.di || dIbat;
-    const deliveryFrac = Math.abs(dIbat) / Math.max(1e-4, Math.abs(cmdDI));
-    // User-facing advisories — short, actionable. The full numbers (ε20, ΔI_ext, SNR, both edges) are in the
-    // downloadable cvfit.csv, not on the wizard face.
-    const warns = [];
-    if (deliveryFrac < 0.6) warns.push('The current step came up short — alternator may be weak at this RPM. Re-run at a higher RPM.');
-    if (extDriftFrac > 0.15) warns.push('Something else moved during the test (a load switched, or another charger). Re-run with all other loads steady.');
-    if (snr < 12) warns.push('Weak signal vs. noise — result is usable but rough. A higher or quieter RPM would help.');
-    if (eps20 > 0.5) warns.push('The battery was still settling at the end, so the gain may read slightly aggressive. Consider re-running.');
-    const vNorm = 12 / (sysV || 12), Knorm = K20 * vNorm;
-    const g = cvGainsFromKnorm(Knorm, CV_CROSSOVER_TARGET, CV_PI_ZERO);
-    return {
-        ok: true, K20: K20, eps20: eps20, K20ret: K20ret, dIbat: dIbat, dIalt: dIalt, dIext: dIext, extScore: extScore,
-        extDrift: extDrift, extDriftFrac: extDriftFrac,
-        achievedDV: dV20, sigV: sigV, snr: snr, deliveryFrac: deliveryFrac, Kp: g.Kp, Ki: g.Ki,
-        skipS: SKIP_S, horizonS: HORIZON_S, nUp: upPts.length, nBase: basePts.length, nSamp: samples.length, warns: warns
-    };
 }
 
 function cxRenderCVPlant(b) {
@@ -19044,77 +19053,71 @@ function cxRenderCVPlant(b) {
     b.innerHTML = body;
 }
 
-// Single-pulse orchestration (CV_AUTOTUNE_PLAN.md §F.2): baseline → pilot (sizing probe) → rest → one sized
-// up-step held through the 20 s horizon → return. The browser commands a HELD current by setting the tuning
-// square-wave floor with amplitude 0 (so the toggle is inert) and tuningSquareAbrupt=1 (true step, no slew);
-// stepping the floor IS the pulse — no new firmware control code. TuningMode gates G1/G2; fast-OV stays live.
-// §F.7 GUESSES (one 12 V LFP bench bank), field-verify: BASE/PILOT currents, ΔV_target 300 mV, hold times.
+// Firmware-side CV plant fit (CV_AUTOTUNE_PLAN.md §F): the browser only TRIGGERS the run and polls
+// /cvplantfit.json for phase + result. The whole sequence (settle → pilot-sized step → settled-baseline-
+// gated rest → measured step → release), the sampling, and the gain fit (read at 1/ω_c with a flat baseline)
+// all run on-device — deterministic timing, connection-tolerant, one code path for every chemistry/size.
 function cxCVPlantStart() {
-    // Max-mode CSV1 feeds the fit peak values instead of true samples — the identified gain is wrong.
+    // Max-mode CSV1 feeds the plots peak values instead of true samples — the on-device fit reads true INA228.
     if (g_lastCsv3 && g_lastCsv3.battMaxMode == 1) {
         xAlert('Battery V/I Plot Sampling is set to Max. The CV plant fit needs true samples — set it back to Average in System Settings before running the fit.');
         return;
     }
     cxShowTab('plots', 'displays');   // watch current + voltage on Plots ▸ Short Term
     cx.cvFit = null; cx.cvApplied = false; cx.cvFitRunning = true; cx.cvFitDone = false; cx.cvFitPhase = 'Starting…';
+    cxFieldArm();   // take field ownership → invalidates any pending deferred release
     cxStopPoll();
-    const sysV = window._nominalStored || 12;
-    const BASE_A = 10, PILOT_A = 6, DV_TARGET = 0.30, DI_MAX = 40, V_RESERVE = 0.15;     // §F.7 guesses
-    const T_SETTLE = 6, T_PILOT = 3, T_REST = 5, T_UPHOLD = 4.5 + 20 + 3, T_RETHOLD = 4.5 + 20 + 1;  // seconds
-    const bulkEcho = getEchoNumber('BulkVoltage_echo');
-    const ceilingV = (bulkEcho > 5) ? (bulkEcho + 0.3) : null;   // ≈ AlternatorHardShutdownV (fast-OV trip)
-    const marks = { baseLevel: BASE_A, di: null, tUp: null, tReturn: null, pilotK: null, ceilingV: ceilingV };
-    const t0now = performance.now();
-    cvFitCapture = { active: true, samples: [], t0: t0now };
-    const tNow = () => (performance.now() - t0now) / 1000;
-    const hold = ms => new Promise(r => setTimeout(r, ms));
-    const cmd = floor => cxGet('tuningSquareAbrupt=1&wavePeriod=600&tuningWaveFloor=' + Math.round(floor) + '&waveAmplitude=0&tuningWaveform=0&TuningMode=1');
-    const setPhase = p => { cx.cvFitPhase = p; const el = document.getElementById('cvFitPhase'); if (el) el.textContent = p; else commissionRender(); };
-    const wm = (a, bb, k) => cvWinMean(cvFitCapture.samples, a, bb, k);
-    const fail = e => {
-        cx.cvFitDone = true; if (cvFitCapture) cvFitCapture.active = false; cx.cvFitRunning = false;
-        cxGet('tuningSquareAbrupt=0&TuningMode=0').catch(() => { });
-        xAlert('CV plant fit failed: ' + e); commissionRender();
-    };
+    cx._cvPollStart = performance.now();
     commissionRender();
-    cmd(BASE_A).then(async () => {
-        setPhase('Settling at baseline…'); await hold(T_SETTLE * 1000);
-        const vB0 = wm(tNow() - 2.5, tNow(), 'v'), iB0 = wm(tNow() - 2.5, tNow(), 'iB');
-        // Pilot sizing probe
-        setPhase('Sizing the step…'); await cmd(BASE_A + PILOT_A); await hold(T_PILOT * 1000);
-        const vP = wm(tNow() - 1.5, tNow(), 'v'), iP = wm(tNow() - 1.5, tNow(), 'iB');
-        const dIp = iP - iB0, dVp = vP - vB0;
-        const Kprior = (dIp > 0.5 && dVp > 0) ? (dVp / dIp) : (DV_TARGET / Math.max(1, PILOT_A));   // V/A (fallback)
-        marks.pilotK = Kprior;
-        // Size the main step: target ΔV, alternator/OV-headroom capped, never below the pilot (need signal).
-        const Kupper = Kprior * 1.5;                                  // pessimistic (bigger K → smaller ΔI)
-        const headroom = (ceilingV != null && isFinite(vB0)) ? Math.max(0.05, ceilingV - vB0 - V_RESERVE) : DV_TARGET;
-        let di = Math.min(DI_MAX, headroom / Math.max(1e-3, Kupper), DV_TARGET / Math.max(1e-3, Kprior));
-        di = Math.max(PILOT_A, Math.round(di));
-        marks.di = di;
-        await cmd(BASE_A); setPhase('Resting…'); await hold(T_REST * 1000);
-        // The sized up-step — the measured edge
-        await cmd(BASE_A + di); marks.tUp = tNow();
-        setPhase('Holding the step — measuring…'); await hold(T_UPHOLD * 1000);
-        // Return to baseline (repeatability diagnostic)
-        await cmd(BASE_A); marks.tReturn = tNow();
-        setPhase('Returning to baseline…'); await hold(T_RETHOLD * 1000);
-        if (cvFitCapture) cvFitCapture.active = false;
-        await cxGet('tuningSquareAbrupt=0&TuningMode=0').catch(() => { });   // bumpless restore
-        const samples = cvFitCapture ? cvFitCapture.samples : [];
-        cx.cvFitLastSamples = samples; cx.cvFitMarks = marks;
-        cx.cvFit = cvFitSinglePulse(samples, marks, sysV);
-        cxCVFitLog(cx.cvFit, marks);   // full diagnostics → Console tab + browser console (NOT the wizard face)
-        cx.cvFitDone = true; cx.cvFitRunning = false;
-        commissionRender();
-    }).catch(fail);
+    cxGet('cvPlantFitStart=1')
+        .then(() => { setTrackedTimeout(cxCVPollFit, 800); })
+        .catch(e => { cx.cvFitRunning = false; cx.cvFitDone = true; cx.cvFit = { ok: false, reason: 'could not start the fit — ' + e }; commissionRender(); });
+}
+
+// Poll the device for CV plant-fit phase/result. Ends the poll on the device going inactive (result ready)
+// or a ~2 min safety timeout. cvFitRunning gates re-entry so navigating away stops the loop.
+function cxCVPollFit() {
+    if (!cx.cvFitRunning) return;
+    const giveUp = () => (performance.now() - (cx._cvPollStart || 0) > 120000);
+    fetch(buildURL('/cvplantfit.json')).then(r => r.json()).then(j => {
+        const phaseTxt = ['Settling at baseline…', 'Sizing the step…', 'Resting — waiting for the battery to settle…',
+                          'Holding the step — measuring…', 'Returning to baseline…'];
+        cx.cvFitPhase = phaseTxt[j.phase] || 'Running…';
+        const el = document.getElementById('cvFitPhase'); if (el) el.textContent = cx.cvFitPhase; else commissionRender();
+        if (j.active) { setTrackedTimeout(cxCVPollFit, 800); return; }
+        if (j.ready) {
+            cx.cvFit = cvFitFromDevice(j);
+            cxCVFitLog(cx.cvFit, {});   // full numbers → Console tab (NOT the wizard face)
+            cx.cvFitDone = true; cx.cvFitRunning = false; commissionRender(); return;
+        }
+        if (giveUp()) { cx.cvFit = { ok: false, reason: 'no result from the device (timed out) — re-run' }; cx.cvFitDone = true; cx.cvFitRunning = false; commissionRender(); return; }
+        setTrackedTimeout(cxCVPollFit, 800);
+    }).catch(() => {
+        if (giveUp()) { cx.cvFit = { ok: false, reason: 'lost connection to the device during the fit — re-run' }; cx.cvFitDone = true; cx.cvFitRunning = false; commissionRender(); return; }
+        setTrackedTimeout(cxCVPollFit, 1200);
+    });
+}
+
+// Map the device /cvplantfit.json result into the shape cxRenderCVPlant / cxCVPlantApply expect. K20 keeps
+// its field name for render/apply compatibility, but it now carries the crossover-timescale gain (read at
+// 1/ω_c), not the old 20 s value.
+function cvFitFromDevice(j) {
+    if (!j || !j.ok) return { ok: false, reason: (j && j.abort) ? j.abort : 'fit failed — re-run' };
+    const w = j.warn | 0, warns = [];
+    if (w & 1)  warns.push('The current step came up short — alternator may be weak at this RPM. Re-run at a higher RPM.');
+    if (w & 2)  warns.push('Weak signal vs. noise — result is usable but rough. A higher or quieter RPM would help.');
+    if (w & 4)  warns.push('The battery was still drifting when the step began — consider re-running after a longer rest.');
+    if (w & 8)  warns.push('Something else moved during the test (a load switched, or another charger). Re-run with all other loads steady.');
+    if (w & 16) warns.push('Over-voltage headroom was tight — the step was reduced to protect the bank.');
+    return { ok: true, K20: j.K_mVpA / 1000, Kp: j.Kp, Ki: j.Ki, achievedDV: j.dV_mV / 1000,
+             snr: j.snr, eps20: 0, horizonS: j.horizonS, dIalt: j.dI, warns: warns };
 }
 
 function cxCVPlantApply() {
     const f = cx.cvFit; if (!f || !f.ok) return;
-    // Store the measured finite-horizon gain K20 (raw V/A at the pack) into cvPlantK; recomputeCvGains()
-    // applies the 12V-block normalization + the exact PI magnitude condition and switches CV gains to Auto.
-    // The fit confidence record lives in the cvfit.csv download.
+    // Store the device-measured crossover-timescale gain (raw V/A at the pack; f.K20 is the field name,
+    // now carrying the 1/ω_c reading) into cvPlantK; recomputeCvGains() applies the 12V-block normalization
+    // + the exact PI magnitude condition and switches CV gains to Auto. Confidence record → cvfit.csv download.
     cxGet('cvPlantK=' + f.K20.toFixed(5))
         .then(() => cxGet('cvGainMode=1'))
         .then(() => { cx.cvApplied = true; commissionRender(); })
@@ -19125,57 +19128,36 @@ function cxCVPlantApply() {
 // remote log relay) AND the browser DevTools console. Deliberately NOT on the wizard face — see the brief
 // result panel in cxRenderCVPlant. Same numbers that used to clutter the face, plus the marks.
 function cxCVFitLog(f, m) {
-    m = m || {};
     const L = [];
     if (!f || !f.ok) {
         L.push('CVfit: no usable result — ' + (f ? f.reason : 'no fit'));
     } else {
-        L.push('CVfit: K20 ' + (f.K20 * 1000).toFixed(1) + ' mV/A  Kp ' + f.Kp.toFixed(1) + '  Ki ' + f.Ki.toFixed(1) + ' (12V-equiv)');
-        L.push('CVfit: ΔI_batt ' + f.dIbat.toFixed(1) + ' A  ΔV ' + (f.achievedDV * 1000).toFixed(0) + ' mV  SNR ' + f.snr.toFixed(0) + '×  ε20 ' + (f.eps20 * 100).toFixed(0) + '%');
-        L.push('CVfit: ΔI_alt ' + f.dIalt.toFixed(1) + ' A  ΔI_ext ' + f.dIext.toFixed(1) + ' A (steady ' + Math.round(f.extScore * 100) + '%, drift ' + Math.round(f.extDriftFrac * 100) + '%)  delivery ' + Math.round(f.deliveryFrac * 100) + '%');
-        L.push('CVfit: return-edge ' + (isFinite(f.K20ret) ? (f.K20ret * 1000).toFixed(1) + ' mV/A (' + Math.round(Math.abs(f.K20ret - f.K20) / Math.max(1e-4, Math.abs(f.K20)) * 100) + '% vs up, diagnostic only)' : 'not read'));
-        L.push('CVfit: commanded ΔI ' + (m.di != null ? m.di + ' A' : '?') + '  pilotK ' + (m.pilotK != null ? (m.pilotK * 1000).toFixed(1) + ' mV/A' : '?') + '  skip ' + f.skipS + ' s  horizon ' + f.horizonS + ' s  samples ' + f.nSamp);
+        L.push('CVfit: K ' + (f.K20 * 1000).toFixed(1) + ' mV/A (read at ' + (f.horizonS != null ? f.horizonS.toFixed(1) : '?') + 's = 1/ω_c)  Kp ' + f.Kp.toFixed(1) + '  Ki ' + f.Ki.toFixed(1) + ' (12V-equiv)');
+        L.push('CVfit: ΔV ' + (f.achievedDV * 1000).toFixed(0) + ' mV  ΔI ' + (f.dIalt != null ? f.dIalt.toFixed(1) : '?') + ' A  SNR ' + (f.snr != null ? f.snr.toFixed(0) : '?') + '×');
         if (f.warns && f.warns.length) L.push('CVfit: advisories — ' + f.warns.join(' | '));
     }
     for (const line of L) { try { appendConsoleLine(line, true); } catch (e) { } }
     try { console.log(L.join('\n')); } catch (e) { }
 }
 
-// Raw fit dump (CV_AUTOTUNE_PLAN.md §F.7 / commissioning spec §3): the confidence record as header comments
-// + raw (t, IBV, Bcur, MeasuredAmps) so the field can tell us whether the τ_p/SKIP_S/horizon guesses transfer.
-// Captured browser-side (the fit runs in the browser), offered as a download named cvfit.csv.
+// Raw fit dump (CV_AUTOTUNE_PLAN.md §7): confidence-record header comments + raw (t, IBV, Bcur, MeasuredAmps)
+// so the field can tell us whether the horizon / step-size / rest-gate transfer across chemistries and sizes.
+// Built ON-DEVICE now (the fit runs in firmware); this just streams /cvfit.csv down as a browser download.
 function cxCVFitDownload() {
-    const s = cx.cvFitLastSamples, f = cx.cvFit, m = cx.cvFitMarks || {};
-    if (!s || !s.length) { xAlert('No fit data captured yet.'); return; }
-    let txt = '';
-    if (f && f.ok) {
-        txt += '# cvfit confidence record\n';
-        txt += '# K20_mV_per_A,' + (f.K20 * 1000).toFixed(2) + '\n';
-        txt += '# eps20,' + f.eps20.toFixed(3) + '\n';
-        txt += '# SKIP_S,' + f.skipS + '\n';
-        txt += '# horizon_S,' + f.horizonS + '\n';
-        txt += '# achieved_dV_mV,' + (f.achievedDV * 1000).toFixed(1) + '\n';
-        txt += '# dI_battery_A,' + f.dIbat.toFixed(2) + ',dI_alt_A,' + f.dIalt.toFixed(2) + ',dI_ext_A,' + f.dIext.toFixed(2) + ',ext_drift_A,' + f.extDrift.toFixed(2) + ',ext_drift_frac,' + f.extDriftFrac.toFixed(3) + '\n';
-        txt += '# snr,' + f.snr.toFixed(1) + ',Kp,' + f.Kp.toFixed(2) + ',Ki,' + f.Ki.toFixed(2) + '\n';
-        txt += '# commanded_dI_A,' + (m.di != null ? m.di : '') + ',pilotK_mV_per_A,' + (m.pilotK != null ? (m.pilotK * 1000).toFixed(1) : '') + ',t_up_s,' + (m.tUp != null ? m.tUp.toFixed(2) : '') + ',t_return_s,' + (m.tReturn != null ? m.tReturn.toFixed(2) : '') + '\n';
-    }
-    txt += 't_s,IBV_V,Bcur_A,MeasuredAmps_A\n';
-    for (const p of s) txt += p.t.toFixed(3) + ',' + p.v.toFixed(4) + ',' + p.iB.toFixed(3) + ',' + p.iA.toFixed(3) + '\n';
-    const blob = new Blob([txt], { type: 'text/csv' });
+    // Raw trace + confidence header now live on-device (the fit runs there). Stream /cvfit.csv straight down.
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'cvfit.csv';
+    a.href = buildURL('/cvfit.csv'); a.download = 'cvfit.csv';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
-// ── Step 5 · Disturbances — guided slow sweep populates the matrix ────────────
+// ── Step 6 · Disturbances — guided slow sweep populates the matrix ────────────
 function cxRenderMatrix(b) {
     let body = '';
     // Pause length matters (§11): a ripple value needs TWO agreeing ~2 s stationary windows at a speed
     // before it commits (agree-twice), so ~6 s per pause. The wizard holds a fixed test current
     // (25% of the cap-table max ≤2000 RPM) through resTest for the whole sweep — ripple scales with
     // current, so the table is only comparable across RPM at one amperage.
-    const sweepDesc = '<p style="font-size:15px;line-height:1.5;"><strong>This step uses a Space-Invaders-style game to map current ripple from idle to 2000 RPM.</strong> Use the throttle to kill the invaders, observing the shape of the ripple map (below the game) as you go. Once you\'re confident you\'ve captured the peaks, end the game and move on.</p>';
+    const sweepDesc = '<p style="font-size:15px;line-height:1.5;"><strong>This step uses a Space-Invaders-style game to map current ripple from idle to 2000 RPM.</strong> Use the throttle to kill the invaders, orange ones first, observing the shape of the Ripple Map (below the game) as you go. Once you\'re confident you\'ve captured the peaks, end the game and move on.</p>';
     const sweepStartCta = '<p style="font-size:15px;line-height:1.5;">To begin, bring the engine to idle and hit "Start Game".</p>';
     if (cx.matrixOn) {
         // Sweep-in-progress view is the "RPM Invaders" game (cxGame* below): y-axis = RPM, one
@@ -19254,6 +19236,7 @@ function cxMatrixStart() {
         cx.rtLastCmd = Date.now();
         // Arm order matters: idle stamp + resTest level land BEFORE ripGameFill=1 — the firmware wipe
         // stamps resTestTargetA and the staged idle into the session at arm.
+        cxFieldArm();   // take field ownership → invalidates any pending deferred release from a prior stop
         cxGet('ripGameIdleRpm=' + cx.matrixIdle)
             .then(() => cxGet('resTest=1'))
             .then(() => cxGet('resTestTargetA=' + levelA.toFixed(1)))
@@ -19402,9 +19385,10 @@ function cxMatrixStop() {
     cx.matrixOn = false; cxStopPoll(); cx.rtLastCmd = 0; cx.rtFieldArmed = false;
     // Freeze + persist the table FIRST, then the gentle resTest exit (mirrors cxRtFinish: command 0,
     // let the slew actually get there, then release — firmware deferred-release covers the rest).
+    const ep = cxFieldEpoch;   // release only if no newer flow grabs the field during the 2.5 s wind-down
     cxGet('ripGameFill=0')
         .then(() => cxGet('resTestTargetA=0')).then(() => new Promise(r => setTimeout(r, 2500)))
-        .then(() => cxGet('resTest=0')).then(() => cxGet('faCommissionGate=0'))
+        .then(() => { if (cxFieldEpoch !== ep) return; return cxGet('resTest=0').then(() => cxGet('faCommissionGate=0')); })
         .catch(() => { });
     commissionRender();
 }
@@ -19451,11 +19435,11 @@ function cxGameStop() {
     if (cxGame.raf) { cancelAnimationFrame(cxGame.raf); cxGame.raf = 0; }
     cxRpmStripVis();
 }
-// RPM strip is hidden during the Step-5 sweep game (draws its own trace) and on the read-only Step-6
-// Thresholds review (phase 5) — no test runs there, so live RPM steadiness is moot.
+// RPM strip is hidden during the Step-6 sweep game (draws its own trace) and on the read-only Step-7
+// Thresholds review (phase 6) — no test runs there, so live RPM steadiness is moot.
 function cxRpmStripVis() {
     const strip = document.getElementById('cx-rpm-strip');
-    if (strip) strip.style.display = (cxGame.active || (cx && cx.phase === 5)) ? 'none' : '';
+    if (strip) strip.style.display = (cxGame.active || (cx && cx.phase === 6)) ? 'none' : '';
 }
 // Called from cxMatrixPoll with the parsed /filtripple.csv rows. Kill ground truth is the RPM ripple
 // table's per-bin ALT state: pending (altSt 1) kills the first invader, commit (altSt 2) kills both
@@ -19566,6 +19550,9 @@ function cxGameDraw(c, t, rpm, curKey, dt) {
         g.fillStyle = '#666'; g.fillText(gv, axisX - 5, y);
     }
     g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('RPM', 6, 6);
+    g.textAlign = 'center'; g.fillStyle = '#888'; g.font = '700 13px -apple-system, sans-serif';
+    g.fillText('Ripple Map', w / 2, 5);
+    g.font = '10px -apple-system, sans-serif';
     // current-bin band highlight
     if (curKey >= 0 && !cxGame.bins[curKey].covered) {
         g.fillStyle = 'rgba(46,196,182,0.07)';
@@ -19820,6 +19807,7 @@ function cxRtReady() {  // user is holding the resonant RPM → arm field-comman
     cxShowTab('plots', 'displays');
     commissionRender();
     // Arm ripple capture + field-commanding, then command level 1.
+    cxFieldArm();   // take field ownership → invalidates any pending sweep/current-check deferred release
     cxGet('faCommissionGate=1').then(() => cxGet('bcurRtest=1')).then(() => cxGet('resTest=1'))
         .then(() => cxRtSetLevel(0));
 }
@@ -19910,8 +19898,9 @@ function cxRtFinish() {
     cxStopPoll(); cx.rtLastCmd = 0; cx.rtFieldArmed = false;  // stop the keepalive; field released below
     // Gentle exit: ramp the commanded current to 0 and wait long enough for the slew to actually reach it
     // (~2.5 s covers a high last level at SetpointFallRate), THEN release (slew carries it back to AUTO).
+    const ep = cxFieldEpoch;   // release only if no newer flow (e.g. an immediate Retry) grabs the field during the wind-down
     cxGet('resTestTargetA=0').then(() => new Promise(r => setTimeout(r, 2500)))
-        .then(() => cxGet('resTest=0')).then(() => cxGet('bcurRtest=0')).then(() => cxGet('faCommissionGate=0'));
+        .then(() => { if (cxFieldEpoch !== ep) return; return cxGet('resTest=0').then(() => cxGet('bcurRtest=0')).then(() => cxGet('faCommissionGate=0')); });
     const pts = cx.rtPts;
     // Least-squares ripple = a0 + a1·I, clamping a1 ≥ 0 (ripple can't credibly fall with current; a noisy
     // negative slope must never LOWER a safety floor) → on clamp, fall back to a flat mean.
@@ -19949,8 +19938,9 @@ function cxRtFinish() {
 }
 function cxRtAbort() {
     cxStopPoll(); cx.rtLastCmd = 0; cx.rtFieldArmed = false;  // stop the keepalive; field released below
+    const ep = cxFieldEpoch;   // release only if no newer flow grabs the field during the wind-down
     cxGet('resTestTargetA=0').then(() => new Promise(r => setTimeout(r, 2500)))
-        .then(() => cxGet('resTest=0')).then(() => cxGet('bcurRtest=0')).then(() => cxGet('faCommissionGate=0'));
+        .then(() => { if (cxFieldEpoch !== ep) return; return cxGet('resTest=0').then(() => cxGet('bcurRtest=0')).then(() => cxGet('faCommissionGate=0')); });
     cx.rtestState = 'idle';
     commissionRender();
 }
@@ -19972,7 +19962,7 @@ function pField(name, echoId) {
     return getEchoNumber(echoId);
 }
 function rippleVerdict(rf, bindE, xMax) {
-    if (!rf || !(rf.n > 0)) return 'Run the current check in <strong>Commissioning ▸ Step 5 (Disturbances)</strong> to overlay measured ripple.';
+    if (!rf || !(rf.n > 0)) return 'Run the current check in <strong>Commissioning ▸ Step 6 (Disturbances)</strong> to overlay measured ripple.';
     const rip = I => rf.a0 + rf.a1 * I;
     let worstMargin = 1e9, worstAt = 0, bandHiI = -1, needFloor = 0;
     for (let I = 0; I <= xMax; I += Math.max(0.5, xMax / 300)) {
@@ -20113,14 +20103,14 @@ function protApplyMargin() {
     if (!isFinite(m)) { xAlert('Enter a margin in amps first.'); return; }
     const doApply = () => {
         const rf = cxRipFit && cxRipFit.alt;
-        if (!rf || !(rf.n > 0)) { xAlert('No measured ripple yet — run Commissioning ▸ Step 5 (current-check) first, or set the Slope and CV base directly.'); return; }
+        if (!rf || !(rf.n > 0)) { xAlert('No measured ripple yet — run Commissioning ▸ Step 6 (current-check) first, or set the Slope and CV base directly.'); return; }
         const base = Math.min(40, Math.max(0, rf.a0 + m)), slope = Math.min(50, Math.max(2, rf.a1 * 100));
         cxGet('IExcessBaseA=' + base.toFixed(1) + '&IExcessFrac=' + slope.toFixed(1) + '&IExcessFracBulk=' + slope.toFixed(1)).then(() => setTimeout(renderRipplePlots, 400)).catch(() => {});
     };
     if (!cxRipFit) loadRipFit(doApply); else doApply();
 }
 
-// ── Step 6 · Current Threshold Setting — sets the affine over-current trip line (G3) ─────────
+// ── Step 7 · Current Threshold Setting — sets the affine over-current trip line (G3) ─────────
 // The measured ripple fit (a0 + a1·I) drives the recommendation: slope = a1, CV base = a0 + margin, so
 // the CV trip line runs parallel to the ripple the Safety Margin above it; the CC line is the same slope,
 // IExcessCcOffsetA above CV. Writes IExcessFrac+FracBulk (kept equal → parallel), Base, CcOffset, Floor,
@@ -20189,7 +20179,7 @@ function cxThrInit() {
     const noFit = !rf;
     const mr = document.getElementById('cxThrMarginRow'); if (mr) mr.style.display = noFit ? 'none' : 'flex';
     const nf = document.getElementById('cxThrNoFit');
-    if (nf) nf.innerHTML = noFit ? '<div style="font-size:13px;color:#e0a03a;background:#2a2620;border-radius:6px;padding:8px 10px;margin-bottom:12px;line-height:1.5;">No ripple measurement yet — run the Step 5 current-check for a recommendation, or set the trip line by hand below.</div>' : '';
+    if (nf) nf.innerHTML = noFit ? '<div style="font-size:13px;color:#e0a03a;background:#2a2620;border-radius:6px;padding:8px 10px;margin-bottom:12px;line-height:1.5;">No ripple measurement yet — run the Step 6 current-check for a recommendation, or set the trip line by hand below.</div>' : '';
     const ms = document.getElementById('cxThrMargin'); if (ms && st.margin != null) ms.value = st.margin;
     const mv = document.getElementById('cxThrMarginVal'); if (mv && st.margin != null) mv.textContent = st.margin + ' A';
     cxThrReflectAdv();
@@ -20262,15 +20252,13 @@ function cxFinish() {
         cxShowHelpfulHints();
     }).catch(e => xAlert('Finish failed: ' + e));
 }
-// Placeholder onboarding copy (owner will red-line) — one contiguous static block.
 const CX_HELPFUL_HINTS_HTML =
-    '<p style="font-size:15px; line-height:1.5; margin:0 0 12px;"><strong>Commissioning saved. A few things worth knowing:</strong></p>' +
+    '<p style="font-size:15px; line-height:1.5; margin:0 0 12px;"><strong>Commissioning saved. Helpful tips at this point:</strong></p>' +
     '<ul style="list-style:none; padding:0; margin:0; font-size:13px; line-height:1.6;">' +
-    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Leave it enabled.</strong> You can leave Alternator Enable on permanently. The regulator only drives the field and produces charging current when the ignition is on AND the engine is turning above the Min RPM For Field speed (about 125 RPM by default). Engine off — or at rest — it outputs nothing regardless of the switch, so there\'s no reason to turn it off between trips.</li>' +
-    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">It\'s also your monitor.</strong> The regulator stays powered as long as it has battery power. With the engine off it keeps tracking battery state of charge and logging sailing, motoring, GPS, and comfort data.</li>' +
-    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Reaching it on your boat\'s network (Client mode).</strong> Engine off, it drops the WiFi into a low-power doze but stays reachable — open the app or go to alternator.local and it wakes on its own, no button.</li>' +
-    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Reaching it with no network (AP mode — phone joined straight to the regulator\'s own WiFi).</strong> Engine off, it keeps WiFi up for about half an hour, then powers the radio down to save battery. Press the WiFi wake button on the unit to bring it back for about five minutes (starting the engine wakes it too).</li>' +
-    '<li style="margin-bottom:0;"><strong style="color:#2ec4b6;">The WiFi wake button always works.</strong> Either mode, anytime you can\'t reach the interface, one press wakes the WiFi.</li>' +
+    '<li style="margin-bottom:12px;">You can leave Alternator Enable toggled on permanently (in top right of screen). The regulator only drives the field and produces charging current when the ignition is on and engine speed is &gt; Min RPM (125 RPM by default).</li>' +
+    '<li style="margin-bottom:12px;">The regulator stays powered as long as it has battery power. With the engine off it keeps tracking battery state of charge and logging sailing, motoring, GPS, and comfort data.</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Engine off, Client Mode:</strong> regulator drops WiFi into a low-power doze but stays reachable — open the app or browse to alternator.local and it wakes on its own.</li>' +
+    '<li style="margin-bottom:0;"><strong style="color:#2ec4b6;">Engine off, AP (Hotspot) Mode:</strong> regulator keeps WiFi up for about 30 minutes, then powers the radio down to save battery. Press the WiFi wake button to bring it back for five minutes. Ignition on also restarts WiFi.</li>' +
     '</ul>';
 // Terminal Helpful Hints page, drawn into the commissioning modal body after Finish. No per-phase
 // poll or RPM strip (the run is over); the abort row is hidden so it can't revert the saved tune.
@@ -20298,12 +20286,12 @@ async function commissionAbort() {
 const COMMISSION_STEPS = [
     { name: 'Prep', desc: 'Preconditions checked, current tune snapshotted for safe revert.' },
     { name: 'Field curve', desc: 'Map field duty → current and find the saturation knee.' },
+    { name: 'Min% floor', desc: 'Runs 2nd (right after Field curve), with the engine warm: guided onset-knee automatic current sweeps down the throttle at three RPMs (max working → mid → idle) fit the per-RPM Min% floor; above the max it is forced to zero.' },
     { name: 'Plant fit', desc: 'Measure the field coil\'s electrical lag (plant delay) and set the filters.' },
     { name: 'Verify', desc: 'Seed the current-loop gains and confirm the loop responds.' },
     { name: 'Disturbances', desc: 'Map the worst over-current the field can actually react to.' },
     { name: 'Thresholds', desc: 'Set the over-current trip points above that disturbance floor.' },
-    { name: 'CV plant fit', desc: 'Step the charge current and measure the battery-voltage step gain K20 (fast edge, slow charge ramp removed); compute the voltage-loop Kp/Ki from K20 at your configured response time (default ~20 s) and switch the CV gain source to Auto.' },
-    { name: 'Min% floor', desc: 'Runs last, with the engine warm: guided onset-knee automatic current sweeps down the throttle at three RPMs (max working → mid → idle) fit the per-RPM Min% floor; above the max it is forced to zero.' },
+    { name: 'CV plant fit', desc: 'Step the charge current and measure the battery-voltage step gain at the loop\'s own response timescale (read at 1/ω_c, flat baseline, with a settled-baseline gate so surface charge has relaxed first). Computes the voltage-loop Kp/Ki from that gain and your configured response time, then switches the CV gain source to Auto.' },
 ];
 let cxLastState = 0;   // remembered from the last CSV3 frame, for the clear/restart confirm text
 
@@ -23361,6 +23349,41 @@ function rippleMapPointer(ev) {
         ? rpmLo + '–' + (rpmLo + f.RPW) + ' RPM × ' + ampLo + '–' + (ampLo + f.APW) + ' A — ripple ' + c.pkpk.toFixed(2)
           + ' A pk-pk · top tone ' + c.f1.toFixed(0) + ' Hz @ ' + c.a1.toFixed(2) + ' A · ' + c.windows + ' windows'
         : rpmLo + '–' + (rpmLo + f.RPW) + ' RPM × ' + ampLo + '–' + (ampLo + f.APW) + ' A — not learned yet';
+}
+
+// Immediate visual clear for the Clear Map / Reset Worsts buttons. The firmware clear is async
+// (Clear Map is deferred to Core 1, Reset Worsts commits in the /get handler), so without this the
+// table/heatmap only change on the next telemetry cycle — and the heatmap is never re-fetched at all.
+// The values below mirror the firmware zero-state renders so the blank matches a fresh device.
+// lastValues (the dispatcher's telemetry cache) is deliberately NOT touched: the dispatcher repaints a
+// span only when the incoming value differs from its cache, so it keeps skipping the pre-clear value
+// and can't overwrite these blanks until firmware actually reports zeros.
+const FA_CLEARED = {
+    faSesPkpkWorst_ID: '0.00', faSesPkpkRpm_ID: '0', faSesPkpkAmps_ID: '0.0', faSesPkpkTempF_ID: '—', faSesPkpkEpoch_ID: '—',
+    faDomAmp_ID: '0.00', faDomFreq_ID: '0.0', faDomRpmCtx_ID: '0', faDomAmps_ID: '0.0', faDomTempF_ID: '—', faDomEpoch_ID: '—'
+};
+function faClearSpans(ids) {
+    for (const id of ids) { const el = document.getElementById(id); if (el) el.textContent = FA_CLEARED[id]; }
+}
+const FA_PKPK_SPANS = ['faSesPkpkWorst_ID', 'faSesPkpkRpm_ID', 'faSesPkpkAmps_ID', 'faSesPkpkTempF_ID', 'faSesPkpkEpoch_ID'];
+const FA_TONE_SPANS = ['faDomAmp_ID', 'faDomFreq_ID', 'faDomRpmCtx_ID', 'faDomAmps_ID', 'faDomTempF_ID', 'faDomEpoch_ID'];
+
+// Clear Map: wipe the heatmap + cells counter now, clear the Highest Tone row (firmware faDomReset
+// rides with the matrix wipe), keep Ripple Pk-Pk. Re-fetch after the Core-1 wipe has run to confirm.
+function rippleMapClearVisual() {
+    rippleMapCells = [];
+    rippleMapHover = null;
+    rippleMapRender();
+    rippleMapInfoDefault();
+    const cells = document.getElementById('faCellsUsed_ID');
+    if (cells) cells.textContent = '0';
+    faClearSpans(FA_TONE_SPANS);
+    setTimeout(drawRippleMap, 2500);
+}
+
+// Reset Worsts clears both headline rows (firmware zeros faSesPkpk* and calls faDomReset).
+function rippleWorstsClearVisual() {
+    faClearSpans(FA_PKPK_SPANS.concat(FA_TONE_SPANS));
 }
 
 setTimeout(drawRippleMap, 1500);

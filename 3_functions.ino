@@ -990,7 +990,7 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=CV plant fit, 7=Min% floor, 8=finished
+  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=Thresholds, 7=CV plant fit, 8=finished
   CSV3_commissionDoneMask,      // per-stage completion bitmask (bit i = stage i done)
   CSV3_cvHelpersEnabled,        // master switch: asymmetric KiDown unwind + slope-aware integrator bleed (1=on)
   CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
@@ -1022,6 +1022,7 @@ enum Csv3Index {
   CSV3_battMaxMode,             // battery V/I plot sampling: 0 = window mean, 1 = max-magnitude
   CSV3_IExcessBaseA,            // over-current trip-line intercept / CV base (A ×10)
   CSV3_IExcessCcOffsetA,        // CC trip line offset above CV (A ×10)
+  CSV3_BatteryShuntPresent,     // 1 = INA228 battery shunt fitted; 0 = no battery-current sensor
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -3166,6 +3167,16 @@ void setupServer() {
       queueConsoleMessage("SystemID: abort requested via web UI");
     }
 
+    // ── CV plant fit (firmware voltage-loop identification, commissioning Step 8) ──
+    else if (request->hasParam("cvPlantFitStart")) {
+      foundParameter = true;
+      if (!cvpfStartTest()) queueConsoleMessageF("CV plant-fit: cannot start — %s", cvpfAbortMsg);
+    }
+    else if (request->hasParam("cvPlantFitCancel")) {
+      foundParameter = true;
+      if (cvpfState == 1) cvpfAbort("cancelled by user");
+    }
+
     // ── Auto-commissioning: field-% curve (Phase 1a) ────────────────────────
     else if (request->hasParam("startFieldCurve")) {
       foundParameter = true;
@@ -3306,7 +3317,7 @@ void setupServer() {
       commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
       commissionSetPhase(0);        // reset furthest-phase (the wizard bumps it forward per phase)
       commissionMarkStage(0);       // Prep complete: snapshot taken, preconditions checked
-      // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (step 8) starts the sweeps clean if it is run.
+      // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (step 3) starts the sweeps clean if it is run.
       // (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable floors,
       // which are left intact so a partial re-run that skips Min% keeps its learned floors.)
       kneeAnchorN = 0;
@@ -3759,7 +3770,8 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("MaintainMode")->value();
       MaintainMode = inputMessage.toInt();
-      settingWrite(NK_MaintainMode, inputMessage.c_str());
+      if (!HAS_BATT_SHUNT) MaintainMode = 0;  // no battery-current sensor → 0-net-amps hold impossible; refuse enable
+      settingWrite(NK_MaintainMode, String(MaintainMode).c_str());
       if (MaintainMode) {
         // MaintainMode and TargetVoltageMode are mutually exclusive — clear the other.
         TargetVoltageMode = 0;
@@ -3826,6 +3838,19 @@ void setupServer() {
       inputMessage = request->getParam("InvertBattAmps")->value();
       settingWrite(NK_InvertBattAmps, inputMessage.c_str());
       InvertBattAmps = inputMessage.toInt();
+    }
+    if (request->hasParam("BatteryShuntPresent")) {
+      foundParameter = true;
+      inputMessage = request->getParam("BatteryShuntPresent")->value();
+      settingWrite(NK_BatteryShuntPresent, inputMessage.c_str());
+      BatteryShuntPresent = inputMessage.toInt();
+      if (!BatteryShuntPresent) {
+        // No battery-current sensor: float (tail detection) and MaintainMode (0-net-amps) can't run, so
+        // force them off here — otherwise the stage machine would act on a meaningless Bcur.
+        if (UseFloat != 0)     { UseFloat = 0;     settingWrite(NK_UseFloat, "0"); }
+        if (MaintainMode != 0) { MaintainMode = 0; settingWrite(NK_MaintainMode, "0"); }
+        queueConsoleMessage("Battery shunt marked absent: State of Charge, battery health, the battery current limit, load-dump detection and float charging are disabled. The alternator current limit now protects the battery.");
+      }
     }
     if (request->hasParam("MaxDuty")) {
       foundParameter = true;
@@ -4130,6 +4155,7 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("UseFloat")->value();
       UseFloat = constrain(inputMessage.toInt(), 0, 2);  // 0=idle, 1=voltage float, 2=zero-current float
+      if (!HAS_BATT_SHUNT) UseFloat = 0;  // no battery-current sensor → float forced off; refuse enable
       settingWrite(NK_UseFloat, String(UseFloat).c_str());
     }
     if (request->hasParam("RebulkCurrent_A")) {
@@ -4857,7 +4883,7 @@ void setupServer() {
       // new breakpoints instead of silently re-applied at shifted RPMs.
       if (rpmPointChanged) {
         kneeLearnResetDefaults();   // zero floors/knees, unfreeze, drop rpmMinDutyTable to 0
-        commissionClearStage(7);    // Min% floor stage now stale (demotes a commissioned device to in-progress)
+        commissionClearStage(2);    // Min% floor stage now stale (demotes a commissioned device to in-progress)
         queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor step");
       }
 
@@ -6595,6 +6621,58 @@ void setupServer() {
     request->send(200, "application/json", buf);
   });
 
+  // CV plant-fit status + result (commissioning Step 8 polls this). "aborted" reported independently of
+  // "active" (same rationale as /fieldcurve.json — a protection cut can leave active latched).
+  server.on("/cvplantfit.json", HTTP_GET, [](AsyncWebServerRequest *request) {
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(768), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
+    snprintf(buf, 768,
+             "{\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"aborted\":%d,"
+             "\"K_mVpA\":%.1f,\"dV_mV\":%.0f,\"dI\":%.2f,\"snr\":%.0f,\"horizonS\":%.1f,"
+             "\"Kp\":%.2f,\"Ki\":%.2f,\"stepA\":%.1f,\"warn\":%d,\"abort\":\"%s\"}",
+             cvPlantFitActive ? 1 : 0, (int)cvpfPhase, cvpfReady ? 1 : 0, cvpfOk ? 1 : 0, (cvpfState == 3) ? 1 : 0,
+             cvpfK * 1000.0f, cvpfDV * 1000.0f, cvpfDI, cvpfSNR, cvpfHorizonS,
+             cvpfKp, cvpfKi, cvpfStepA, (int)cvpfWarn, cvpfAbortMsg);
+    request->send(200, "application/json", buf);
+  });
+
+  // CV plant-fit raw trace (offline audit) — chunked so a full buffer never lands in internal RAM.
+  server.on("/cvfit.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!cvpfBuf || cvpfBufCount == 0) { request->send(200, "text/csv", "# no cvfit data\n"); return; }
+    struct CvfExp { int stage; int idx; char line[128]; int llen, lpos; uint32_t t0; char hdr[448]; int hlen; };
+    auto st = std::make_shared<CvfExp>();
+    st->stage = 0; st->idx = 0; st->llen = 0; st->lpos = 0; st->t0 = cvpfBuf[0].tMs;
+    st->hlen = snprintf(st->hdr, sizeof(st->hdr),
+                        "# cvfit confidence record (firmware)\n"
+                        "# K_mV_per_A,%.2f\n# horizon_S,%.2f\n# dV_mV,%.1f\n# dI_A,%.3f\n# snr,%.1f\n"
+                        "# Kp,%.2f,Ki,%.2f\n# stepA,%.1f,warnBits,%d\n"
+                        "t_s,IBV_V,Bcur_A,MeasuredAmps_A\n",
+                        cvpfK * 1000.0f, cvpfHorizonS, cvpfDV * 1000.0f, cvpfDI, cvpfSNR,
+                        cvpfKp, cvpfKi, cvpfStepA, (int)cvpfWarn);
+    AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
+      [st](uint8_t *out, size_t maxLen, size_t) mutable -> size_t {
+        size_t w = 0;
+        while (st->stage == 0 && w < maxLen) {
+          if (st->idx >= st->hlen) { st->stage = 1; st->idx = 0; break; }
+          out[w++] = (uint8_t)st->hdr[st->idx++];
+        }
+        while (st->stage == 1 && w < maxLen) {
+          if (st->lpos >= st->llen) {
+            if (st->idx >= cvpfBufCount) break;   // fully drained → return w (0 on the final call)
+            CvPlantFitSample &s = cvpfBuf[st->idx++];
+            st->llen = snprintf(st->line, sizeof(st->line), "%.3f,%.4f,%.3f,%.3f\n",
+                                (s.tMs - st->t0) / 1000.0f, s.v, s.iBat, s.iAlt);
+            st->lpos = 0;
+          }
+          while (st->lpos < st->llen && w < maxLen) out[w++] = (uint8_t)st->line[st->lpos++];
+        }
+        return w;
+      });
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
   // Min% onset-knee sweep status + committed anchors (commissioning step polls this).
   server.on("/kneesweep.json", HTTP_GET, [](AsyncWebServerRequest *request) {
     std::shared_ptr<char> bufPtr((char *)ps_malloc(1024), [](char *p) { if (p) free(p); });
@@ -8225,7 +8303,8 @@ void SendWifiData() {
                                "%d,"  // SocAlarmLow
                                "%d,"  // battMaxMode
                                "%d,"  // IExcessBaseA
-                               "%d",  // IExcessCcOffsetA
+                               "%d,"  // IExcessCcOffsetA
+                               "%d",  // CSV3_BatteryShuntPresent
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8562,7 +8641,8 @@ void SendWifiData() {
                                SafeInt(SocAlarmLow),                            // CSV3_SocAlarmLow (%, integer; 0 = disabled)
                                SafeInt(battMaxMode),                            // CSV3_battMaxMode (0 = Average, 1 = Max)
                                SafeInt(IExcessBaseA, 10),                       // CSV3_IExcessBaseA — ×10, 1 decimal
-                               SafeInt(IExcessCcOffsetA, 10)                    // CSV3_IExcessCcOffsetA — ×10, 1 decimal
+                               SafeInt(IExcessCcOffsetA, 10),                   // CSV3_IExcessCcOffsetA — ×10, 1 decimal
+                               SafeInt(BatteryShuntPresent)                     // CSV3_BatteryShuntPresent — bool 0/1
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

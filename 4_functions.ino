@@ -1080,6 +1080,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     InvertBattAmps = settingRead(NK_InvertBattAmps).toInt();
   }
+  if (!settingExists(NK_BatteryShuntPresent)) {
+    settingWrite(NK_BatteryShuntPresent, String(BatteryShuntPresent).c_str());
+  } else {
+    BatteryShuntPresent = settingRead(NK_BatteryShuntPresent).toInt();
+  }
   if (!settingExists(NK_LimpHome)) {
     settingWrite(NK_LimpHome, String(LimpHome).c_str());
   } else {
@@ -1389,6 +1394,13 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_UseFloat, String(UseFloat).c_str());
   } else {
     UseFloat = settingRead(NK_UseFloat).toInt();
+  }
+  // No battery shunt → float (needs tail current) and MaintainMode (needs 0-net-amps) can't run. Reconcile
+  // at boot (runs after all three are read) so a config-import pairing shunt-absent with float/maintain-on
+  // can't leave the stage machine regulating a meaningless Bcur. /get does the same on a live toggle.
+  if (!BatteryShuntPresent) {
+    if (UseFloat != 0)     { UseFloat = 0;     settingWrite(NK_UseFloat, "0"); }
+    if (MaintainMode != 0) { MaintainMode = 0; settingWrite(NK_MaintainMode, "0"); }
   }
 
   if (!settingExists(NK_AutoShuntGainCorrection)) {  // BOOLEAN
