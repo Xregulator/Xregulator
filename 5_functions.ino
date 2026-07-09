@@ -918,8 +918,10 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
     coulombAccumulator_Ah -= (deltaAh_scaled / 100.0f);  // Keep remainder
   }
 
-  CoulombCount_Ah_scaled = constrain(CoulombCount_Ah_scaled, 0, BatteryCapacity_Ah * 100);
-  float SoC_float = (float)CoulombCount_Ah_scaled / (BatteryCapacity_Ah * 100.0f) * 100.0f;
+  int capAhX100 = BatteryCapacity_Ah * 100;
+  if (capAhX100 < 1) capAhX100 = 1;  // guard: 0 Ah capacity (bad import / unset NVS) must not divide-by-zero into SOC
+  CoulombCount_Ah_scaled = constrain(CoulombCount_Ah_scaled, 0, capAhX100);
+  float SoC_float = (float)CoulombCount_Ah_scaled / (float)capAhX100 * 100.0f;
   SOC_percent = (int)(SoC_float * 100);  // Store as percentage × 100 for 2 decimals
   wmIgnUpdate(wmIgn_SOC, SoC_float);     // ignition-cycle watermark (float percent, 0..100)
 
@@ -2182,9 +2184,11 @@ bool zeroFitCompute() {
 void zeroFitService() {
   uint32_t now = millis();
 
-  static uint32_t nextComputeMs = 0;                      // 0 → first attempt as soon as everything's off
+  static uint32_t nextComputeMs = 0;                      // 0 → first attempt as soon as everything's off. Under the
+                                                          // signed compare below that only holds while uptime < 24.8 d;
+                                                          // reachable only if the field never rested once in 24.8 days.
   bool everythingOff = (RPM < 200) && (fieldActiveStatus == 0);
-  if (now >= nextComputeMs && everythingOff) {
+  if ((int32_t)(now - nextComputeMs) >= 0 && everythingOff) {  // signed-delta compare survives the millis() rollover
     bool accepted = zeroFitCompute();
     nextComputeMs = now + (accepted ? ZFIT_INTERVAL_MS : ZFIT_RETRY_MS);  // retry sooner if it held
   }
@@ -3939,7 +3943,7 @@ void queueConsoleMessageF(const char *format, ...) {
     return;  // Skip during OTA
   }
   if (!consoleQueue || !format) return;
-  char formattedMsg[128];
+  char formattedMsg[CONSOLE_MSG_LEN];
   va_list args;
   va_start(args, format);
   vsnprintf(formattedMsg, sizeof(formattedMsg), format, args);
@@ -3951,8 +3955,8 @@ void queueConsoleMessageF(const char *format, ...) {
     consoleTail = (consoleTail + 1) % CONSOLE_QUEUE_SIZE;
     consoleCount = CONSOLE_QUEUE_SIZE - 1;
   }
-  strncpy(consoleQueue[consoleHead].message, formattedMsg, 127);
-  consoleQueue[consoleHead].message[127] = '\0';
+  strncpy(consoleQueue[consoleHead].message, formattedMsg, CONSOLE_MSG_LEN - 1);
+  consoleQueue[consoleHead].message[CONSOLE_MSG_LEN - 1] = '\0';
   consoleQueue[consoleHead].timestamp = millis();
   consoleHead = (consoleHead + 1) % CONSOLE_QUEUE_SIZE;
   consoleCount++;
@@ -3970,9 +3974,9 @@ void queueConsoleMessage(const char *msg) {
     consoleTail = (consoleTail + 1) % CONSOLE_QUEUE_SIZE;
     consoleCount = CONSOLE_QUEUE_SIZE - 1;
   }
-  // Copy directly into queue slot (truncate to 127)
-  strncpy(consoleQueue[consoleHead].message, msg, 127);
-  consoleQueue[consoleHead].message[127] = '\0';
+  // Copy directly into queue slot
+  strncpy(consoleQueue[consoleHead].message, msg, CONSOLE_MSG_LEN - 1);
+  consoleQueue[consoleHead].message[CONSOLE_MSG_LEN - 1] = '\0';
   consoleQueue[consoleHead].timestamp = millis();
   consoleHead = (consoleHead + 1) % CONSOLE_QUEUE_SIZE;
   consoleCount++;
@@ -3985,43 +3989,36 @@ void queueConsoleMessage(const String &message) {
   }
   queueConsoleMessage(message.c_str());
 }
-// Pop up to maxPop messages into provided buffers; returns count popped.
-int popConsoleMessages(char outMsgs[][128], unsigned long *outTs, int maxPop) {
-  if (!consoleQueue || maxPop <= 0) return 0;
+// Copy the oldest queued message out under the lock (the SSE send must happen outside it). False when empty.
+// One message per call, one caller-side buffer: the old 5-slot variant cost 5×CONSOLE_MSG_LEN of caller stack
+// and filled a timestamp array nothing ever read (the client stamps app-received time).
+bool popConsoleMessage(char *out) {
+  if (!consoleQueue || !out) return false;
 
-  int popped = 0;
-
+  bool got = false;
   portENTER_CRITICAL(&consoleMux);
-
-  while (popped < maxPop && consoleCount > 0) {
-    int idx = consoleTail;
-    strncpy(outMsgs[popped], consoleQueue[idx].message, 127);
-    outMsgs[popped][127] = '\0';
-    if (outTs) outTs[popped] = consoleQueue[idx].timestamp;
-
+  if (consoleCount > 0) {
+    strncpy(out, consoleQueue[consoleTail].message, CONSOLE_MSG_LEN - 1);
+    out[CONSOLE_MSG_LEN - 1] = '\0';
     consoleTail = (consoleTail + 1) % CONSOLE_QUEUE_SIZE;
     consoleCount--;
-    popped++;
+    got = true;
   }
-
   portEXIT_CRITICAL(&consoleMux);
 
-  return popped;
+  return got;
 }
 void trySendConsoleSSE(bool &sentSomething, unsigned long now) {
   if (sentSomething) return;
   if (now - lastConsoleMessageTime < CONSOLE_MESSAGE_INTERVAL) return;
 
-  char msgs[5][128];
-  unsigned long ts[5];
-
-  int n = popConsoleMessages(msgs, ts, 5);
-  if (n <= 0) return;
-
-  // Send outside lock
-  for (int i = 0; i < n; i++) {
-    events.send(msgs[i], "console");
+  char msg[CONSOLE_MSG_LEN];   // copy under the lock, send outside it — same discipline, one buffer
+  int sent = 0;
+  while (sent < 5 && popConsoleMessage(msg)) {
+    events.send(msg, "console");
+    sent++;
   }
+  if (sent == 0) return;
 
   lastConsoleMessageTime = now;
   lastEventSourceSend = now;  // DELETE THIS LINE TO UNTHROTTLE CONSOLE
@@ -4360,6 +4357,12 @@ void seedSocFromVoltage() {
               + ",\"soc\":" + String(estimatedSoC) + "}";
   settingWrite(NK_SocSeedSnap, snap.c_str());
   settingWrite(NK_SocSeedAck, "0");
+}
+
+// A boot that carries a persisted SoC forward runs no new estimate, so a leftover un-acked
+// commissioning snapshot would re-open the popup on every reboot/OTA. Only ever flips 0 -> 1.
+void socSeedAutoAck() {
+  if (settingExists(NK_SocSeedAck) && settingRead(NK_SocSeedAck) != "1") settingWrite(NK_SocSeedAck, "1");
 }
 
 void loadNVSData() {

@@ -630,7 +630,9 @@ done:
 // ----------------------------------------------------------------------------
 // One ALLOWLIST (CONFIG_MANIFEST) is the single source of truth for which NVS
 // "settings" keys are shareable. tier 1 = free clone; tier 2 = install/hardware
-// topology (sensor/shunt/polarity) — exported but applied only with includeHardware.
+// topology (sensor/shunt/polarity) — exported but applied only with includeHardware;
+// tier 3 = per-device history, always exported (fleet snapshot / support) but NEVER
+// imported, since adopting another boat's value would corrupt this device's own record.
 // The alt-health / boat-perf registry knobs (ALT_SETTINGS / PERF_SETTINGS in
 // 7_functions.ino) are ALSO shareable but save through generic loops the literal
 // manifest can't reference — they are emitted/imported programmatically (tier-1)
@@ -728,6 +730,9 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "vTgtRampDn", NK_vTgtRampDn, 1 },
   { "setpointSlewEnable", NK_setpointSlewEnable, 1 },
   { "cvRiseGovEnable", NK_cvRiseGovEnable, 1 },
+  { "cvRecovEnable", NK_cvRecovEnable, 1 },
+  { "cvRecovSec", NK_cvRecovSec, 1 },
+  { "cvRecovEmaxV", NK_cvRecovEmaxV, 1 },
   { "dutySlewEnable", NK_dutySlewEnable, 1 },
   { "coldChargeLockoutEnable", NK_coldChargeLockoutEnable, 1 },
   { "MinChargeTempF", NK_MinChargeTempF, 1 },
@@ -885,7 +890,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "yyMax", NK_yyMax, 1 },
   { "bhStepLowA", NK_bhStepLowA, 1 },
   { "bhStepDeltaA", NK_bhStepDeltaA, 1 },
-  { "bhDwellSec", NK_bhDwellMs, 1 },   // raw NVS value is MILLISECONDS (UI param is seconds)
+  { "bhDwellMs", NK_bhDwellMs, 1 },   // export key names the STORED unit (ms); the UI param bhDwellSec is seconds
   { "bhNumEdges", NK_bhNumEdges, 1 },
   { "capRestFrac", NK_capRestFrac, 1 },
   { "capRestFloor", NK_capRestFloor, 1 },
@@ -909,8 +914,10 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "AutoAltCurrentZero", NK_AutoAltCurrentZero, 2 },
   { "AutoShuntGainCorrection", NK_AutoShuntGainCorrection, 2 },
   { "BatteryVoltage", NK_BatteryVoltage, 2 },
-  { "cvPlantK", NK_cvPlantK, 2 },
+  { "cvPlantKa", NK_cvPlantKa, 2 },
+  { "cvPlantKb", NK_cvPlantKb, 2 },
   { "CommissionTempF", NK_CommissionTempF, 2 },
+  { "CommissionEpoch", NK_CommissionEpoch, 3 },
   { "systemIDPlantTauMs", NK_sysidPlantTau, 2 },
   { "ripFitAlt", NK_ripFitAlt, 2 },
   { "imu_zero", NK_imu_zero, 2 },
@@ -1142,7 +1149,7 @@ static int applyImportTables(const char *body) {
   if (havePts) {
     bool moved = false;
     for (int i = 0; i < RPM_TABLE_SIZE; i++) if (pts[i] != rpmTableRPMPoints[i]) moved = true;
-    if (moved) { kneeLearnResetDefaults(); commissionClearStage(2); }
+    if (moved) { kneeLearnResetDefaults(); commissionClearStage(3); }
   }
   int applied = 0;
   nvs_handle_t h;
@@ -1188,6 +1195,7 @@ int applyImportConfig(const char *body, bool includeHardware) {
   int applied = 0;
   for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
     if (CONFIG_MANIFEST[i].tier == 2 && !includeHardware) continue;
+    if (CONFIG_MANIFEST[i].tier == 3) continue;   // export-only: this device's own history, never adopted
     String val;
     if (cfgJsonExtract(cfg, CONFIG_MANIFEST[i].param, val)) {
       if (settingWrite(CONFIG_MANIFEST[i].nvsKey, val.c_str())) applied++;
@@ -1368,6 +1376,17 @@ static const float    CVPF_REST_SLOPE_MVPS = 0.5f;     // "settled" = |dV/dt| un
 static const uint32_t CVPF_SKIP_MS = 1500;             // current-loop settle before the horizon read
 static const float    CVPF_DI_MAX = 40.0f;
 static const float    CVPF_V_RESERVE = 0.15f;          // keep the projected step peak this far below the hard-OV cut
+static const float    CVPF_GASSING_V_12V = 14.2f;      // ~2.37 V/cell — oxygen-evolution onset on lead-acid
+static const uint32_t CVPF_FIT_T0_MS = 2000;           // fit starts here: past CVPF_SKIP_MS, current has settled
+static const uint32_t CVPF_FIT_T1_MS = 22000;          // ...and ends past CVPF_H_MAX_S, so every legal ω_c interpolates
+static const uint32_t CVPF_STEP_HOLD_MS = 23000;       // total step hold; last 1 s excluded from the fit (release transient)
+static const float    CVPF_LONG_K_MULT = 1.3f;         // K(20s)/K(2s) — pilotK reads the fast end, the peak lands at the slow end
+
+// Lithium does not evolve gas at any charge voltage we permit; every other chemistry does. "other" is treated
+// as gassing: a false refusal costs the user a retry, a false pass ships an over-gained loop.
+static bool cvpfChemGasses() {
+  return !BATTERY_TYPE.equalsIgnoreCase("lifepo4");
+}
 
 void cvpfSample(uint32_t nowMs) {
   if (!cvpfBuf || cvpfBufCount >= cvpfBufCap) return;
@@ -1412,11 +1431,14 @@ static int cvpfWinStats(uint32_t t0, uint32_t t1, int field, float &mean, float 
 
 // Size the main step for cvpfTargetDV, capped by OV headroom (never below the pilot — need signal).
 static void cvpfSizeStep() {
-  float Kupper   = cvpfPilotK * 1.5f;                                        // pessimistic (bigger K → smaller ΔI)
+  // cvpfPilotK is a ~2 s chord, but the step is now held to 20 s and the voltage keeps climbing on the
+  // diffusion tail. Size against the LONG-horizon gain or the peak overshoots the target by ~27%.
+  float Klong    = cvpfPilotK * CVPF_LONG_K_MULT;
+  float Kupper   = Klong * 1.5f;                                             // pessimistic (bigger K → smaller ΔI)
   float headroom = fmaxf(0.05f, AlternatorHardShutdownV - cvpfPilotVbase - CVPF_V_RESERVE);
   float di = CVPF_DI_MAX;
   di = fminf(di, headroom / fmaxf(1e-3f, Kupper));
-  di = fminf(di, cvpfTargetDV / fmaxf(1e-3f, cvpfPilotK));
+  di = fminf(di, cvpfTargetDV / fmaxf(1e-3f, Klong));
   di = roundf(di);
   if (di < cvpfPilotA) di = cvpfPilotA;
   if (di > CVPF_DI_MAX) di = CVPF_DI_MAX;
@@ -1463,6 +1485,20 @@ void cvPlantFit_advance(uint32_t nowMs) {
       }
       if (settled || timedOut) {
         if (timedOut && !settled) cvpfWarn |= 0x04;   // baseline still moving at the cap
+        // Gassing gate. Past ~2.37 V/cell an incremental charge current is partly carried by oxygen evolution,
+        // whose Tafel branch has differential resistance ∝ 1/I_gas — that drags the measured dV/dI DOWN, so K
+        // reads low, Kp comes out high, and the loop ships over-gained. The HPPC standard omits charge pulses
+        // at high SoC for exactly this reason. Refuse rather than measure. Judged on the settled baseline PLUS
+        // the step we are about to command, because it is the step's peak that gasses, not the rest voltage.
+        if (cvpfChemGasses()) {
+          float vRest, sl2, rs2;
+          int nRest = cvpfWinStats(nowMs - 2000, nowMs, 0, vRest, sl2, rs2);
+          if (nRest < 4 || !isfinite(vRest)) vRest = IBV;   // buffer full / no samples — never skip the check
+          if (vRest + cvpfTargetDV > CVPF_GASSING_V_12V * (float)BATTERY_VOLTAGE / 12.0f) {
+            cvpfAbort("bank too full to measure — the step would drive it into gassing, which reads the resistance low and over-tunes the loop. Draw the bank down with some loads, then re-run.");
+            break;
+          }
+        }
         cvpfPhase = 3; cvpfPhaseStartMs = nowMs; cvpfStepT0Ms = nowMs;
       }
       break; }
@@ -1481,8 +1517,9 @@ void cvPlantFit_advance(uint32_t nowMs) {
         }
         break;
       }
-      float hMs = fmaxf(2500.0f, cvpfHorizonS * 1000.0f);   // read horizon, floored so the current has settled
-      if (elapsed >= CVPF_SKIP_MS + (uint32_t)hMs + 2000) { cvpfPhase = 4; cvpfPhaseStartMs = nowMs; cvpfReleasing = true; }
+      // Hold for the whole curve, not just this ω_c's read point: one fixed span the fit can interpolate
+      // across, so moving the response-time slider later never needs a re-run.
+      if (elapsed >= CVPF_STEP_HOLD_MS) { cvpfPhase = 4; cvpfPhaseStartMs = nowMs; cvpfReleasing = true; }
       break; }
     case 4:  // RELEASE — ease back to baseline, then hand to normal AUTO (bumpless via the setpoint slew)
       cvpfCmdA = cvpfBaseA;
@@ -1493,42 +1530,83 @@ void cvPlantFit_advance(uint32_t nowMs) {
 
 // Fit the captured buffer once the sequence ends (called from cvpfServiceCompletion). Flat pre-step baseline
 // (NO forward-extrapolated slope — that was the contamination bug), read at the 1/ω_c horizon.
+// Least-squares ΔV(t) = A + B·√t over [tS+t0, tS+t1], t measured in seconds from the step edge. The √t term is
+// the Warburg diffusion tail; A is the ohmic + charge-transfer intercept. resid = RMS residual about the fitted
+// curve — a better ripple proxy than the old detrended window, because it removes the real curvature first.
+static int cvpfFitSqrt(uint32_t tS, uint32_t t0, uint32_t t1, float vBase, float &A, float &B, float &resid) {
+  double sx = 0, sy = 0, sxx = 0, sxy = 0; int n = 0;
+  for (int i = 0; i < cvpfBufCount; i++) {
+    uint32_t t = cvpfBuf[i].tMs;
+    if (t < tS + t0 || t > tS + t1) continue;
+    double x = sqrt((double)(t - tS) / 1000.0), y = (double)cvpfBuf[i].v - vBase;
+    sx += x; sy += y; sxx += x * x; sxy += x * y; n++;
+  }
+  A = B = resid = 0.0f;
+  if (n < 8) return n;
+  double d = (double)n * sxx - sx * sx;
+  if (fabs(d) < 1e-9) return 0;
+  B = (float)(((double)n * sxy - sx * sy) / d);
+  A = (float)((sy - (double)B * sx) / n);
+  double ss = 0;
+  for (int i = 0; i < cvpfBufCount; i++) {
+    uint32_t t = cvpfBuf[i].tMs;
+    if (t < tS + t0 || t > tS + t1) continue;
+    double x = sqrt((double)(t - tS) / 1000.0);
+    double e = ((double)cvpfBuf[i].v - vBase) - ((double)A + (double)B * x);
+    ss += e * e;
+  }
+  resid = (float)sqrt(ss / n);
+  return n;
+}
+
 void cvpfProcess() {
   uint32_t tP = micros();
   cvpfReady = true;
   if (cvpfBufCount < 8 || cvpfStepT0Ms == 0) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = "no usable samples — re-run"; return; }
-  uint32_t tS  = cvpfStepT0Ms;
-  uint32_t hMs = (uint32_t)fmaxf(2500.0f, cvpfHorizonS * 1000.0f);
-  uint32_t rC  = tS + hMs;
-  float vBase, iaBase, ibBase, vRead, iaRead, ibRead, sl, rs, ripple;
+  uint32_t tS = cvpfStepT0Ms;
+  float vBase, iaBase, ibBase, iaRead, ibRead, sl, rs;
   cvpfWinStats(tS - 2000, tS - 300, 0, vBase,  sl, rs);   // FLAT baseline means just before the step
   cvpfWinStats(tS - 2000, tS - 300, 1, iaBase, sl, rs);
   cvpfWinStats(tS - 2000, tS - 300, 2, ibBase, sl, rs);
-  int nRead = cvpfWinStats(rC - 1000, rC + 1000, 0, vRead, sl, ripple);   // ripple = residual RMS about the trend
-  cvpfWinStats(rC - 1000, rC + 1000, 1, iaRead, sl, rs);
-  cvpfWinStats(rC - 1000, rC + 1000, 2, ibRead, sl, rs);
-  if (isnan(vBase) || isnan(vRead) || nRead < 3) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = "step too short to read the horizon — re-run"; return; }
+  cvpfWinStats(tS + CVPF_FIT_T0_MS, tS + CVPF_FIT_T1_MS, 1, iaRead, sl, rs);
+  cvpfWinStats(tS + CVPF_FIT_T0_MS, tS + CVPF_FIT_T1_MS, 2, ibRead, sl, rs);
+  if (isnan(vBase) || isnan(iaRead)) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = "no usable samples across the step — re-run"; return; }
+
+  // Residual baseline creep (the rest gate allows 0.5 mV/s) leaks into B, inflating the long-horizon end by
+  // ~2.7%. Adding a linear drift term to absorb it was measured and REJECTED: √t and t are near-collinear
+  // over this span, so it trades a 2.7% bias for ±5% of noise. Two parameters, and honour warn bit 0x04.
+  float A, B, ripple;
+  int nFit = cvpfFitSqrt(tS, CVPF_FIT_T0_MS, CVPF_FIT_T1_MS, vBase, A, B, ripple);
+  if (nFit < 8) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = "step ended too early to fit the plant curve — re-run"; return; }
+
   bool  noShunt = !HAS_BATT_SHUNT;
   float dIalt = iaRead - iaBase, dIbat = ibRead - ibBase;
   float dI = noShunt ? dIalt : dIbat;
-  float dV = vRead - vBase;
-  cvpfDV = dV; cvpfDI = dI;
+  cvpfDI = dI;
   if (fabsf(dI) < 0.5f) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = noShunt ? "no alternator-current step (weak alternator? raise RPM)" : "no battery-current step"; return; }
-  float K = dV / dI;
+
+  cvpfKa = A / dI;
+  cvpfKb = B / dI;
+  // A falling tail means the voltage dropped as the step went on — a load switched, or the baseline drifted.
+  // Zero it rather than let a negative √t term invert the curve at long horizons.
+  if (cvpfKb < 0.0f) { cvpfKb = 0.0f; cvpfWarn |= 0x20; }
+
+  float K = cvpfKa + cvpfKb * sqrtf(cvpfHorizonS);   // horizon already clamped to [H_MIN, H_MAX] at start
   if (!(K > 1e-4f)) { cvpfOk = false; cvpfState = 3; cvpfAbortMsg = "voltage moved the wrong way — check current-sensor sign/wiring"; return; }
-  cvpfK   = K;
-  cvpfSNR = dV / fmaxf(1e-4f, ripple);
+  cvpfK  = K;
+  cvpfDV = K * dI;                                  // ΔV the fitted curve predicts at this horizon
+  cvpfSNR = cvpfDV / fmaxf(1e-4f, ripple);
   // advisory gates (never block — the wizard shows them and the user still chooses Apply)
   if (fabsf(dIalt) / fmaxf(1e-3f, cvpfStepA) < 0.6f) cvpfWarn |= 0x01;   // delivery came up short
   if (cvpfSNR < 12.0f) cvpfWarn |= 0x02;                                 // weak signal vs ripple
   if (!noShunt) {   // gap-drift: alt-minus-battery current MOVING across the step ⇒ a load switched mid-test
     float iaM, iaSl, iaR, ibM, ibSl, ibR;
-    cvpfWinStats(tS + CVPF_SKIP_MS, rC + 1000, 1, iaM, iaSl, iaR);
-    cvpfWinStats(tS + CVPF_SKIP_MS, rC + 1000, 2, ibM, ibSl, ibR);
-    float gapDriftA = fabsf(iaSl - ibSl) * (float)((rC + 1000) - (tS + CVPF_SKIP_MS));
+    cvpfWinStats(tS + CVPF_SKIP_MS, tS + CVPF_FIT_T1_MS, 1, iaM, iaSl, iaR);
+    cvpfWinStats(tS + CVPF_SKIP_MS, tS + CVPF_FIT_T1_MS, 2, ibM, ibSl, ibR);
+    float gapDriftA = fabsf(iaSl - ibSl) * (float)(CVPF_FIT_T1_MS - CVPF_SKIP_MS);
     if (gapDriftA / fmaxf(1.0f, fabsf(dIalt)) > 0.15f) cvpfWarn |= 0x08;
   }
-  // display Kp/Ki (mirrors recomputeCvGains; recomputeCvGains is authoritative when the user Applies cvPlantK)
+  // display Kp/Ki (mirrors recomputeCvGains; recomputeCvGains is authoritative when the user Applies Ka/Kb)
   float vNorm = 12.0f / (float)BATTERY_VOLTAGE;
   float Knorm = K * vNorm;
   float wc = (cvCrossover > 1e-3f) ? cvCrossover : 0.20f;
@@ -1538,8 +1616,8 @@ void cvpfProcess() {
   cvpfKp = clamp_f(kp, 2.0f, 120.0f);
   cvpfKi = clamp_f(ki, 1.0f, 80.0f);
   cvpfOk = true; cvpfState = 2;
-  queueConsoleMessageF("CV plant-fit: K=%.1f mV/A dV=%.0f mV dI=%.2f A horizon=%.1fs SNR=%.0f -> Kp %.1f Ki %.1f warn=%d (%luus)",
-                       K * 1000.0f, dV * 1000.0f, dI, cvpfHorizonS, cvpfSNR, kp, cvpfKi, (int)cvpfWarn, (unsigned long)(micros() - tP));
+  queueConsoleMessageF("CV plant-fit: Ka=%.1f Kb=%.1f mV/A -> K=%.1f mV/A at %.1fs (n=%d) dI=%.2f A SNR=%.0f -> Kp %.1f Ki %.1f warn=%d (%luus)",
+                       cvpfKa * 1000.0f, cvpfKb * 1000.0f, K * 1000.0f, cvpfHorizonS, nFit, dI, cvpfSNR, kp, cvpfKi, (int)cvpfWarn, (unsigned long)(micros() - tP));
 }
 
 bool cvpfStartTest() {
@@ -1557,7 +1635,11 @@ bool cvpfStartTest() {
   cvpfBaseA = 10.0f; cvpfPilotA = 6.0f; cvpfStepA = 6.0f;
   cvpfTargetDV = 0.30f; cvpfFellBack = false; cvpfReleasing = false;
   cvpfCmdA = cvpfBaseA;
-  cvpfHorizonS = 1.0f / ((cvCrossover > 1e-3f) ? cvCrossover : 0.20f);
+  float hReq = 1.0f / ((cvCrossover > 1e-3f) ? cvCrossover : 0.20f);
+  cvpfHorizonS = clamp_f(hReq, CVPF_H_MIN_S, CVPF_H_MAX_S);
+  if (hReq < CVPF_H_MIN_S)
+    queueConsoleMessageF("CV plant-fit: response time %.0fs asks for a %.2fs read, below the %.1fs the current loop can settle in — gains derived at the floor",
+                         4.0f / cvCrossover, hReq, CVPF_H_MIN_S);
   cvpfReady = false; cvpfOk = false; cvpfWarn = 0; cvpfAbortMsg = "";
   cvpfK = cvpfDV = cvpfDI = cvpfSNR = 0.0f; cvpfKp = cvpfKi = 0.0f;
   cvPlantFitActive = true;
@@ -2003,6 +2085,9 @@ void debugFillMax(AsyncWebServerRequest *request) {
       r.validMask = 0xFFFFFFFFu; r.chargeStage = 1;
     }
     longTermCount = LONGTERM_RING_SIZE; longTermHead = 0;
+    // Without this, dumpLongTermRing early-outs (delta == 0 && FileRecords > 0) and &persist=yes silently
+    // writes nothing — the timing report then shows ~0 ms for a saver that never ran.
+    longTermPushSeq = longTermCount; longTermFlushedSeq = 0; longTermFileRecords = 0;
   }
 
   // Zero-drift log → cap, temp span < ZFIT_MIN_SPAN_F so zeroFitRegress can't early-exit (true worst case)
@@ -2014,6 +2099,7 @@ void debugFillMax(AsyncWebServerRequest *request) {
       r.boardTempFx10 = (int16_t)lroundf(dbgRand(700.0f, 720.0f));
     }
     zeroLogCount = ZEROLOG_RING_SIZE; zeroLogHead = 0;
+    zeroLogPushSeq = zeroLogCount; zeroLogFlushedSeq = 0; zeroLogFileRecords = 0;  // same early-out as above
   }
 
   // Battery-capacity ring → cap. (The sensor upload ring is deliberately NOT faked: bumping its

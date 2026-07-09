@@ -556,7 +556,7 @@ static int altFrontEmitCount = 0;        // episode points emitted (whether or n
 float altRpmSec       = 3.0f;    // RPM steady time (s)
 float altDutySec      = 3.0f;    // field-duty % steady time (s)
 float altVbusSec      = 3.0f;    // bus-voltage steady time (s)
-float altThermDegF    = 2.0f;    // temperature deviation bound (°F) — record only at thermal equilibrium
+float altThermDegF    = 4.0f;    // temperature deviation bound (°F) — record only at thermal equilibrium. 0.105 A/°F at cruise; also gates the altThermSec dwell, so it is the biggest yield knob
 float altThermSec     = 80.0f;   // STEADY_TEMP_SEC — FULL-steady temp dwell (s). Feeds the surface + trend + orange ring.
 // SESSION-steady temp dwell is DERIVED as half of altThermSec (see altSessTempDwell()) — no separate
 // knob, so the session gate auto-tracks whenever the full dwell above is changed.
@@ -567,8 +567,8 @@ float altTrendFeedSec   = 10.0f;    // TREND_FEED_SEC — min spacing between gr
 float altTrendMinSamp   = 2.0f;     // MIN_SAMPLES — a bucket needs ≥ this many graded steady-run samples before it commits
 // Output-steadiness band (5th criterion: the measured amps themselves must hold steady — directly
 // guards what gets recorded, letting the input bands stay tight) + detector signal conditioning:
-float altAmpsTolPct   = 4.0f;    // output-amps band, % of the filtered reading
-float altAmpsFloorA   = 1.5f;    // output-amps band floor (A) — governs at low output where ripple dominates
+float altAmpsTolPct   = 2.5f;    // output-amps band, % of the filtered reading — backstop sitting above the ~1.9% p-p the four input bands can pass
+float altAmpsFloorA   = 1.0f;    // output-amps band floor (A) — governs below ~40 A where ripple dominates
 float altAmpsSec      = 3.0f;    // output-amps steady time (s)
 float altEmaSec       = 0.5f;    // EMA time constant (s) on detector inputs RPM/duty/Vbus/amps (0 = off)
 float altMinRunSec    = 2.0f;    // minimum steady-run length to emit a point (s)

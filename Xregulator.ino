@@ -33,7 +33,7 @@
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.46";
+const char *FIRMWARE_VERSION = "0.0.4";
 
 // OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
 // proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
@@ -264,9 +264,11 @@ static bool    altHiFieldAlert = false;    // high-field-low-output alert (indep
 // altIdwPower/altPruneK live with the engine instance in 7_functions.ino):
 // Bands apply to the EMA-FILTERED detector inputs (altEmaSec), so they're sized for real
 // operating-point drift, not raw loop dither / sensor jitter (which the filter strips):
-float altDutyTolPct    = 1.5f;   // field-duty stability band (% points, filtered; raw CV dither is ~3 p-p)
-float altRpmTol        = 30.0f;  // RPM deviation band (filtered; raw idle jitter is ~50 p-p)
-float altVbusTol       = 0.05f;  // bus-voltage deviation band (V, filtered)
+// Band widths are sized by each axis's measured output sensitivity (Alt_Health_Dev_Summary.md §3):
+// output smear from a band = band × dI/dx, and the four add in quadrature.
+float altDutyTolPct    = 0.4f;   // field-duty band (% points, filtered; raw CV dither ~3 p-p). 1.76 A/pt — dominates the smear budget
+float altRpmTol        = 30.0f;  // RPM band (filtered; raw idle jitter ~50 p-p). 0.004 A/RPM at cruise but 0.045 below the ~1200 knee — do NOT widen on the cruise number
+float altVbusTol       = 0.20f;  // bus-voltage band (V, filtered). |dI/dV| < 1.8 and sign-unstable across fits — output cost is near zero
 // Admission floors:
 float altMinAmps = 2.0f;
 float altMinDuty = 5.0f;
@@ -557,6 +559,7 @@ float imu_slam_peak_lifetime = 0;
 
 // --- MOUNTING ORIENTATION ---
 uint8_t imuMountOrientation = 0;  // 0-3, persisted via /vessel_info.json on LittleFS
+constexpr uint8_t IMU_ORIENT_COUNT = 4;  // must equal the axisRemap[] row count — static_assert in 4_functions.ino
 bool vesselInfoSaved = false;  // /vessel_info.json exists — until then IMU metrics and the first-boot SoC seed hold off (orientation/chemistry unknown)
 
 // --- COMPLEMENTARY FILTER STATE ---
@@ -570,6 +573,36 @@ float imuPitchOffsetDeg = 0;  // accel-derived pitch at rest; subtracted from fi
 float imuGxBias = 0;          // gyro pitch-rate bias at rest (dps, vessel frame)
 float imuGyBias = 0;          // gyro heel-rate bias at rest (dps)
 float imuGzBias = 0;          // gyro yaw-rate bias at rest (dps)
+
+// --- IMU INSTALL VALIDATION ---
+// Mount state is a latched FACT (is the board's Y axis really vertical?), decided at Zero capture and
+// cleared only by another Zero. az = -sensorY in every axisRemap row, so az ≈ +1 g at a level, still Zero
+// iff the board is truly mounted vertical — independent of which of the four facings the user picked. It is
+// judged from the CAPTURE, never from a running window: a monohull sailing at 34° heel has a window-mean
+// az of cos(34°) = 0.83 g, which would latch BAD forever on a perfectly mounted board. The heel/pitch bias
+// check is a per-window JUDGEMENT, not a fact: one freak window must not condemn a boat. Suspect data is
+// flagged, never discarded.
+enum : uint8_t { IMU_MOUNT_UNKNOWN = 0, IMU_MOUNT_OK = 1, IMU_MOUNT_BAD = 2 };
+uint8_t imuMountState = IMU_MOUNT_UNKNOWN;
+constexpr float IMU_MOUNT_VACC_MIN_G = 0.85f;   // az at Zero below this → up axis >32° off vertical (signed: catches upside-down)
+constexpr float IMU_MOUNT_TACC_MIN_G = 0.85f;   // |a| at Zero outside [min,max] → sensor dead, saturated or mis-scaled
+constexpr float IMU_MOUNT_TACC_MAX_G = 1.15f;
+constexpr float IMU_BIAS_SUSPECT_DEG = 45.0f;   // per-window |avg heel| or |avg pitch| above this → flag the window
+constexpr float IMU_ZERO_WARN_DEG    = 20.0f;   // captured offset above this → warn; a level boat at the dock is near 0
+constexpr float IMU_ZERO_WARN_AMAG_G = 0.05f;   // mean |a| off 1 g by more than this → boat moved during the capture
+constexpr uint64_t IMU_WINDOW_MIN_VALID_US = 60000000ULL;  // ≥60 s of samples before a window may judge its own bias
+bool imuZeroCaptured = false;   // mirrors settingExists(NK_imu_zero) — keeps an NVS read out of the payload path
+
+// Live install status for the dashboard warning. The per-window 45° bias is deliberately NOT here: that is
+// a property of one window, not of the install. Code 4 is not "verified" — a board with no IMU has nothing
+// to verify, and nothing to tell the user either.
+inline uint8_t imuInstallCode() {   // 0 = OK, 1 = never zeroed, 2 = mount not vertical,
+  if (!imuEnabled)                        return 4;   // 3 = zeroed before the mount check existed, 4 = no IMU
+  if (!imuZeroCaptured)                   return 1;
+  if (imuMountState == IMU_MOUNT_BAD)     return 2;
+  if (imuMountState == IMU_MOUNT_UNKNOWN) return 3;
+  return 0;
+}
 
 // Zero-capture state machine (averages ~2s of samples before storing)
 volatile bool imuZeroInProgress = false;
@@ -823,8 +856,12 @@ const uint32_t GLOBAL_TIMEOUT = 14000;    // ms (must stay < WDT)
 unsigned long lastConsoleMessageTime = 0;
 const unsigned long CONSOLE_MESSAGE_INTERVAL = 700;  //
 // Fixed-size circular buffer:
+// 128 silently truncated 14 diagnostics mid-sentence (every INA228 over-voltage line, both SystemID failure
+// explanations) — always the tail, which is the part that says what to do. Queue is ps_malloc'd, so the extra
+// 1280 B is PSRAM. Also caps queueConsoleMessageF's vsnprintf.
+#define CONSOLE_MSG_LEN 256
 struct ConsoleMessage {
-  char message[128];
+  char message[CONSOLE_MSG_LEN];
   unsigned long timestamp;
 };
 #define CONSOLE_QUEUE_SIZE 10
@@ -1077,10 +1114,10 @@ int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) 
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
-uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished); drives the Commissioning tab checklist
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…8=CV plant fit, 9=finished); drives the Commissioning tab checklist
 // Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
-// 0=Prep 1=Field curve 2=Min% floor 3=Plant fit 4=Verify 5=Disturbances 6=Thresholds 7=CV plant fit. Drives the
-// per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0xFF.
+// 0=Prep 1=RPM Alignment 2=Field curve 3=Min% floor 4=Plant fit 5=Verify 6=Disturbances 7=Thresholds 8=CV plant fit. Drives the
+// per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0x1FF.
 uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
 volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
 
@@ -1694,6 +1731,7 @@ struct ImuSnapshot {
   // Events this window
   uint32_t slam_count;
   int32_t  slam_peak_max;  // ×1000 (millig's)
+  bool     suspicious;     // frozen at roll: install unvalidated/bad, or this window's heel/pitch bias is implausible
 };
 
 // PSRAM ring of completed sensor snapshots, waiting to upload to Supabase.
@@ -2256,6 +2294,12 @@ int ShuntResistanceMicroOhm = 100;    // Shunt resistance in microohms
 // current limit, CV plant fit). True only with a declared shunt AND nonzero resistance — the nonzero
 // resistance also keeps the Bcur divide finite. Defined here (compiled first) so every file sees it.
 #define HAS_BATT_SHUNT (BatteryShuntPresent && ShuntResistanceMicroOhm > 0)
+// Zero-current float (UseFloat=2) parks the CV target at BulkVoltage and relies on zeroFloatActive forcing
+// uTargetAmps=0 to keep the bank from ever reaching it. That regulation needs Bcur, so with no usable shunt
+// the mode MUST degrade to a plain voltage float — otherwise the float stage holds absorption voltage with no
+// current cap and no duration expiry. Every UseFloat==2 branch reads this, never UseFloat directly, so the
+// target, the timeout, the stage label and zeroFloatActive can never disagree.
+#define EFFECTIVE_USE_FLOAT ((UseFloat == 2 && !HAS_BATT_SHUNT) ? 1 : UseFloat)
 int ChargedDetectionTime = 180;       // Time at charged state to consider 100% (seconds) (3 mins, industry standard for lithium)
 int IgnoreTemperature = 0;            // If no temp sensor, set to 1
 int IgnoreRPM = 0;                    // If RPM sensor absent or malfunctioning, set to 1 to bypass RPM gate
@@ -2815,13 +2859,21 @@ volatile uint8_t cvpfState = 0;           // 0 IDLE, 1 RUNNING, 2 DONE-OK, 3 ABO
 volatile uint8_t cvpfPhase = 0;           // 0 SETTLE, 1 PILOT, 2 REST, 3 STEP, 4 RELEASE (UI progress)
 volatile bool cvpfReady = false;          // a run finished (ok or not) — poller shows result
 volatile bool cvpfOk    = false;          // fit produced a usable gain
-float    cvpfK        = 0.0f;             // V/A — measured gain (→ cvPlantK on Apply)
+// Horizon bounds. The fit reads the step at 1/ω_c — the loop's own timescale, which is what the crossover
+// formula needs. H_MIN is where the commanded current has finished settling; below it the plant is not
+// measurable, only guessable. H_MAX = 1/0.05 is the slowest ω_c the slider allows. The step is held long
+// enough to span BOTH, so a later ω_c change re-derives K by interpolation, never extrapolation.
+static const float CVPF_H_MIN_S = 2.5f;
+static const float CVPF_H_MAX_S = 20.0f;
+float    cvpfK        = 0.0f;             // V/A — gain at the CURRENT horizon, derived from Ka/Kb
+float    cvpfKa       = 0.0f;             // V/A    — K(t) = Ka + Kb·√t : ohmic + charge-transfer intercept
+float    cvpfKb       = 0.0f;             // V/A/√s —                     Warburg diffusion tail
 float    cvpfDV       = 0.0f;             // V — step ΔV at the read horizon
 float    cvpfDI       = 0.0f;             // A — measured current step (alt or battery)
 float    cvpfSNR      = 0.0f;
 float    cvpfKp       = 0.0f, cvpfKi = 0.0f;   // display gains (recomputeCvGains is authoritative on Apply)
 float    cvpfHorizonS = 5.0f;             // read horizon actually used = 1/ω_c
-uint8_t  cvpfWarn     = 0;                 // bit0 delivery bit1 SNR bit2 baseline-moving bit3 gap-drift bit4 OV-fallback
+uint8_t  cvpfWarn     = 0;                 // bit0 delivery bit1 SNR bit2 baseline-moving bit3 gap-drift bit4 OV-fallback bit5 falling-tail
 const char *cvpfAbortMsg = "";
 // phase-machine internals (init in cvpfStartTest, advanced in cvPlantFit_advance)
 uint32_t cvpfPhaseStartMs = 0, cvpfStepT0Ms = 0, cvpfSampleLastMs = 0, cvpfTestStartMs = 0, cvpfRestChkMs = 0;
@@ -3004,6 +3056,7 @@ double   accThermBindingSec = 0.0;   // binding-and-settled seconds — containm
 double   accThermInbandSec = 0.0;    // of those, |tempFiltered − tempPIDSetpoint_d| ≤ ACC_T_BAND_F
 float    accThermWorstOverF = 0.0f;  // worst °F over TemperatureLimitF — unconditional (coast-down peaks)
 uint32_t accThermBindingStartMs = 0; // millis() binding went true (0 = not binding) — settle timer
+bool     accThermSettledPrev = false; // previous-tick settled state — session rising edge; reset paths read it
 
 uint32_t accScorerLastMs = 0;        // last electrical-scorer tick — raw-gap guard
 uint32_t accCurActiveUntilMs = 0;    // ACTIVE bucket holds until here (0 = never armed)
@@ -3025,6 +3078,7 @@ const uint32_t ACC_CUR_EXIT_HOLD_MS = 500;      // sustained re-entry that ends 
 const uint32_t ACC_V_EXIT_HOLD_MS = 1000;
 const uint32_t ACC_GAP_VOID_MS = 250;           // raw scorer-tick gap: skip the tick, discard live stopwatches
 const uint32_t ACC_SETTLE_THERMAL_MS = 120000;  // thermal: require sustained binding (kept from v2)
+const uint32_t ACC_THERM_CV_YIELD_MS = 10000;   // CV must own the command this long straight to end a containment session; below it the plant (25s slope window) cannot move enough to corrupt the score
 
 // === CV Loop Tuning Score System ===
 float cvWaveAmplitudeV = 0.30f;   // V — target rises by this during HIGH phase (LOW phase sits at the real target)
@@ -3171,7 +3225,12 @@ uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) —
                                   // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply.
 // cvLambdaMult's old CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged
 // (gains come from cvCrossover/ω_c).
-float   cvPlantK     = 0.0216f;   // measured plant gain K20 (V/A at the pack); default = 2026-07-03 bench seed so Auto mode has sane gains pre-commissioning; the CV plant-fit step overwrites
+// K(t) = cvPlantKa + cvPlantKb·√t — the plant gain as a function of read horizon (V/A at the pack). Storing
+// the CURVE, not one point, is what lets the response-time slider move after commissioning: recomputeCvGains()
+// re-evaluates K at the new 1/ω_c. Defaults = 2026-07-03 bench seed (flat) so Auto has sane gains pre-commission.
+float   cvPlantKa    = 0.0216f;
+float   cvPlantKb    = 0.0f;      // 0 = flat: hand-entered gains and the pre-commission seed have no measured tail
+float   cvPlantK     = 0.0216f;   // DERIVED, not persisted: Ka + Kb·√(clamped 1/ω_c). Telemetry + dashboard only.
 // Measured ripple projection (RIPPLE_DETECTION_REARCH_SPEC §3.3). The commissioning current-check
 // runs a 3-level test per detector and line-fits ripple(I) = a0 + a1·I to the IExcessTau-filtered
 // excess pk-pk (the same quantity the detector trips on). This is REFERENCE DATA ONLY — it drives the
@@ -3227,7 +3286,18 @@ float   cvPiZero     = 0.70f;     // rad/s — PI integral zero ρ (CV_PI_ZERO);
 // never commissioned → no derate. See recomputeCvGains()/computeCvTempScale() in 6_functions.ino.
 float   CommissionTempF      = NAN;   // board temp (°F) when K_dc was measured; reference for the derate
 bool    battTempDerateEnable = true;  // master on/off for the battery-temp gain derate
-float   battTempCoeff        = 0.03f; // battery fractional resistance change per °C (R rises as T falls)
+float   battTempCoeff        = 0.024f; // fractional resistance change per °C BELOW 25°C (R rises as T falls); cvResistanceRatio()
+                                       // halves it above 25°C. One value for every chemistry — LFP and lead-acid measure
+                                       // within 12% of each other over −20…+55°C, so a per-chemistry split isn't supported.
+// Re-commission nagging. The bank's internal resistance — the CV plant gain the commissioning fit
+// measured — roughly doubles over a bank's life, and a Vessel Info voltage/capacity/chemistry change
+// invalidates the fit outright. Both drift the loop the same way: gain too high, response too fast.
+// Epoch is stamped from the BROWSER clock at commissionDone (the device soft clock can be unset at sea,
+// and a bad stamp would silence the prompt forever). 0 = never finished a pass ⇒ never nag.
+time_t  CommissionEpoch      = 0;
+bool    commissionAgeAck     = false; // user pressed Silence on the age prompt; cleared by the next pass
+bool    commissionChangeFlag = false; // tuning-affecting Vessel Info change since the last pass
+uint8_t regulatorMountLoc    = 0;     // 0 = battery compartment (board temp tracks the bank), 1 = engine room
 float   cvTempDerateScale    = 1.0f;  // live multiplier recomputeCvGains() applies to the active gains (dashboard diag)
 // CV voltage-target slew (bidirectional ramp). ChargingVoltageTarget ramps toward ...Req at these rates so a
 // COMMANDED target change (absorption→float, manual setpoint) no longer steps instantly and trips fast-OV; the
@@ -3299,7 +3369,7 @@ float g_slopeBleedAmpsThisTick = 0.0f;   // slope bleed drain applied this volta
 float Icv = 0.0f;                         // CV PID output — direct current setpoint (A)
 float cv_I = 0.0f;                        // CV integrator state (A)
 bool voltageControlActive = false;        // true when voltage PID is active (non-idle stages)
-uint32_t thermalScoreLastExternalMs = 0;  // last ms in a voltage-binding stage (absorption/float/TV/maintain, NOT bulk); gates 3-min blanking
+uint32_t thermalCvOwnStartMs = 0;         // millis() the CV loop took the current command (0 = it has not); de-glitch timer for the thermal accuracy gate
 // =====================================================================================
 // Table Bounds & Safety
 // "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
@@ -3442,6 +3512,9 @@ float SetpointRiseRate = 30.0f;  // A/sec
 float SetpointFallRate = 50.0f;  // A/sec
 uint8_t setpointSlewEnable = 1;  // master switch for the inner-loop current setpoint slew. 0 = setpoint steps instantly (drops startup ramp / big-step gentling too); applies in the CC test and normal operation
 uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise governor (anti-windup clamp). 0 = rises are not clamped — integrator can wind up into an OV trip on an up-step; applies in the CV test and normal operation
+uint8_t cvRecovEnable = 1;   // master switch for the post-protection CV recovery window (timed cv_I re-injection + error cap). 0 = legacy behavior: recovery pace scales with the post-cut voltage error, so it crawls at low targets and can re-trip predictive OV at high ones
+float cvRecovSec = 2.5f;     // recovery time target (s): cv_I ramps from its ReseedFrac seed back to the pre-event value over this span, at any target voltage / chemistry / bank size
+float cvRecovEmaxV = 0.25f;  // recovery error cap (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use): max positive error the CV PI sees during recovery, so P+I drive can't scale with the post-cut collapse
 bool    g_autoTestActive  = false;  // set per control-loop tick: an automated/guided test owns the limiters now (commissioning / battery-health DCIR / resonance / system-ID). While true the four user limiter toggles above are inert so a stray user setting can't corrupt a measurement; each test's own built-in slew behavior governs.
 const float TEST_ENTRY_RATE_A = 8.0f;  // A/s — FIXED, conservative ramp rate for an automated test's transition up from the rest floor and back down (NOT the user's SetpointRiseRate/FallRate, which a user could set aggressively). Used by DCIR, the resonance check, and the TuningMode entry ramp so a test never slams the field coming on/off. Current-domain, so no bus-voltage scaling.
 bool    g_tuningEntrySettled = false;  // set per tick from tuningEntryRamped: false while a TuningMode test is still ramping up from rest, true once settled. Gates the sine duty-slew bypass so the entry eases in (duty slew engaged) before the actuator is unclamped for the clean sine.
@@ -3512,6 +3585,7 @@ uint32_t g_fastOvClampCount = 0;   // rising-edge counter across all protections
 volatile bool g_cvAwRecovering = false;
 
 float g_I_cap = 0.0f;  // RPM table current ceiling this tick (A); set each AUTO tick
+bool g_thermalOwnsCeiling = false;  // the thermal derate, not warmup/HiLo/battery-limit/fastOV/MaxTableValue, set uTargetAmps this tick
 
 
 
@@ -4716,7 +4790,7 @@ void setup() {
   // CV plant-fit sample buffer (40ms gated: 4096 covers ~164s ≥ the worst-case 300→180mV OV re-step at the
   // slowest ω_c — two 45s settled-rests + two horizon-scaled step-holds + release — so the measured edge is
   // never lost to a full buffer and the buffer isn't the limiter before the watchdog (cvpfServiceCompletion)).
-  cvpfBufCap = 4096;
+  cvpfBufCap = 6144;   // 246 s at 25 Hz — worst case is 148 s (45 s rest + 23 s step, twice, on the OV fallback)
   cvpfBuf = (CvPlantFitSample *)ps_malloc(cvpfBufCap * sizeof(CvPlantFitSample));
   if (!cvpfBuf) Serial.println("FATAL: cvpfBuf ps_malloc failed");
   bhResults = (BattHealthResult *)ps_malloc(bhResultCap * sizeof(BattHealthResult));
@@ -5082,7 +5156,9 @@ void setup() {
     ReadAnalogInputs();  // Second reading to be sure
   }
   applyChemistryOcvPreset();  // repair a stale/wrong-chemistry rested-voltage curve (idempotent) before the seed reads it
+  const bool socSeedWasPending = socSeedPending;  // seedSocFromVoltage() clears it — capture whether this boot really estimates
   seedSocFromVoltage();  // deferred first-boot SoC estimate — needs the reads above (IBV) + vessel info (battery type/voltage/capacity)
+  if (!socSeedWasPending) socSeedAutoAck();  // SoC carried over from NVS — don't re-nag the commissioning popup
 
   const esp_partition_t *running_partition = esp_ota_get_running_partition();
   const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
@@ -5162,7 +5238,7 @@ void loop() {
   static bool otaCheckDone = false;
 
   if (!otaCheckDone && millis() > 3000) {  // 3 seconds after boot
-    if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered) {
+    if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && currentPartitionType != 0) {
       // Only proceed if no uploads in progress
       if (!core0Busy) {
         Serial.println("OTA: Running one-time firmware/version checks after 3s...");
@@ -5193,8 +5269,9 @@ void loop() {
       }
       // If blocked, will retry next loop iteration
     } else {
-      // Still not ready (no WiFi or not client mode) – log once and give up
-      Serial.println("OTA: Skipping one-time checks - not in CLIENT mode or no WiFi/registration");
+      // Factory partition is skipped on purpose: a GPIO41 refuge boot must stay put, and the
+      // transient factory boot mid-install would otherwise report the golden image's stale version.
+      Serial.println("OTA: Skipping one-time checks - not CLIENT mode, no WiFi/registration, or factory partition");
       otaCheckDone = true;
     }
   }

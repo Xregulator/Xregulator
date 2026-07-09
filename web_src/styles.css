@@ -49,6 +49,8 @@ body.no-batt-current .req-batt-current { display: none !important; }
   /* Reading text color */
   --radius: 4px;
   /* Border radius */
+  --text-muted: #5f6368;
+  /* Muted secondary text (AA contrast on --card-light) */
 }
 
 /* Reserve the scrollbar gutter on every tab so the sticky header is the same width whether
@@ -1359,13 +1361,14 @@ input[type="submit"]:hover {
   align-items: center;
   gap: 5px;
   height: 15px;
+  padding: 7px 0 5px;  /* no border-box reset here: 1px border + 7 + 15 content + 5 = 28px measured tap target */
   margin-top: -6px;
   cursor: pointer;
-  opacity: 0.5;
+  opacity: 0.75;
   border-top: 1px solid rgba(0, 161, 154, 0.15);
 }
 #header-collapse-bar:hover { opacity: 1; color: var(--accent); }
-#header-collapse-bar .hcb-label { font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase; opacity: 0.4; }
+#header-collapse-bar .hcb-label { font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; opacity: 0.7; }
 #header-collapse-bar .hcb-chevron { font-size: 15px; line-height: 1; }
 
 /* Sticky header for tablets and desktops (not phones, and conditionally disabled via JS) */
@@ -3049,6 +3052,7 @@ input:checked+.slider:before {
   --card-light: #1e1e1e;
   --border: #444444;
   --reading: gray;
+  --text-muted: #9aa0a6;
 }
 
 /* Elements with hardcoded white backgrounds that need dark mode overrides */
@@ -5064,8 +5068,20 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
 
 /* XREG_END */
 
-/* Phones: the six (short-labelled) main tabs always share one row — they shrink
-   instead of wrapping. Appended last so it beats the min-width rules above. */
+/* Motion-sensor install warning (Comfort & Motion). Amber for a real problem, muted while still validating. */
+.imu-install-warn { font-size: 12px; line-height: 1.4; font-weight: 600; color: #a06b12; margin: 6px 0 10px; }
+.imu-install-warn.info { font-weight: 400; color: var(--text-muted); }
+.dark-mode .imu-install-warn { color: #e0a83a; }
+.dark-mode .imu-install-warn.info { color: var(--text-muted); }
+
+/* Diagnostic log panels: last-good stamp, and an explicit note when a poll fails to refresh. */
+.panel-fetch-note { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
+.panel-fetch-note.stale { color: #a06b12; font-weight: 600; }
+.dark-mode .panel-fetch-note.stale { color: #e0a83a; }
+
+/* Phones: the four main tabs always share one row — they shrink instead of wrapping
+   (only Cloud Features carries a short label). Appended last so it beats the min-width
+   rules above. */
 @media (max-width: 600px) {
   .main-tabs { flex-wrap: nowrap; }
   .main-tab {

@@ -288,8 +288,12 @@ bool fsRemove(const char *path) {
 #define NK_vTgtRampDn "vTgtRampDn"
 #define NK_setpointSlewEnable "setptSlewEn"
 #define NK_cvRiseGovEnable "cvRiseGovEn"
+#define NK_cvRecovEnable "cvRecovEn"
+#define NK_cvRecovSec "cvRecovSec"
+#define NK_cvRecovEmaxV "cvRecovEmaxV"
 #define NK_dutySlewEnable "dutySlewEn"
-#define NK_cvPlantK "cvPlantK"
+#define NK_cvPlantKa "cvPlantKa"
+#define NK_cvPlantKb "cvPlantKb"
 // Measured ripple projection (§3.3) — one CSV-encoded string: "a0,a1,rpm,i0,i1,i2,pk0,pk1,pk2,n"
 #define NK_ripFitAlt  "ripFitAlt"
 // Measured-ripple capture admission gates (§10.8/§11) — own knobs, deliberately DECOUPLED from the
@@ -299,8 +303,12 @@ bool fsRemove(const char *path) {
 #define NK_ripDriftFloorA "ripDriftFloorA"
 #define NK_ripDriftPct "ripDriftPct"
 // RETIRED NVS keys — never reuse these key strings for a new setting (old devices still hold
-// stored values under them): "cvPlantTau", "cvPlantL" (removed 2026-07-03; τ/L fit retired).
+// stored values under them): "cvPlantTau", "cvPlantL" (removed 2026-07-03; τ/L fit retired);
+// "cvPlantK" (2026-07-08 — the single-point gain became the derived Ka + Kb·√t curve).
 #define NK_CommissionTempF "CommissionTmpF"
+#define NK_CommissionEpoch "CommissionEpch"
+#define NK_cmAgeAck "cmAgeAck"
+#define NK_cmChangeFlag "cmChangeFlag"
 #define NK_battMaxMode "battMaxMode"   // battery V/I plot sampling: 0=window mean, 1=max-magnitude
 #define NK_battTempDerateEn "battTmpDerEn"
 #define NK_battTempCoeff "battTmpCoeff"
@@ -319,7 +327,7 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished)
+#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…8=CV plant fit, 9=finished)
 #define NK_commissionDoneMask "commissnDoneMsk" // per-stage completion bitmask (bit i = stage i done); 15-char max
 #define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
 #define NK_T0_C "T0_C"
@@ -438,6 +446,7 @@ bool fsRemove(const char *path) {
 #define NK_password "password"
 #define NK_passwordHash "passwordHash"
 #define NK_imu_zero "imu_zero"
+#define NK_imu_mnt_state "imu_mnt_state"
 
 // Fast alt-current diagnostic knobs (Pattern B). Value strings ≤15 chars (NVS key limit).
 #define NK_faEnabled "faEnabled"
@@ -523,14 +532,16 @@ bool settingRemove(const char *key) {
 // positional CSV in a single NVS key, so an explicit abort reverts to the
 // pre-commissioning tune. The field order is fixed and MUST match between save and
 // restore. (Positional CSV, not JSON — dependency-free, matches the codebase ethos.)
+// Field count of the positional snapshot CSV. Bump when adding a field — commissionRestore accepts only an
+// exact match, so a snapshot from a different field set is refused rather than misread slot-for-slot.
+static const int COMMISSION_SNAP_FIELDS = 15;
+
 void commissionSnapshot() {
   char buf[180];
   // 13th field = HiLow (charge-rate mode). Captured so an abort/reboot restores the mode too —
-  // a commissioning run must never strand the user in the wrong mode. Older 12-field snapshots
-  // are still accepted on restore (the mode is simply left untouched).
-  // Fields 14/15 = IExcessBaseA/CcOffsetA — the affine trip-line the Thresholds step now writes, so an
-  // abort reverts them too. Prep rewrites this snapshot at the start of every run, so a device can never
-  // restore stale pre-affine values into these slots.
+  // a commissioning run must never strand the user in the wrong mode.
+  // Fields 14/15 = IExcessBaseA/CcOffsetA — the affine trip-line the Thresholds step writes, so an
+  // abort reverts them too. Prep rewrites this snapshot at the start of every run.
   snprintf(buf, sizeof(buf),
            "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d,%.1f,%.1f",
            PidKp, PidKi, InputFilterTC, OutputPIDFilterTC, VoltageFilterTC,
@@ -546,11 +557,20 @@ void commissionSnapshot() {
 bool commissionRestore() {
   if (!settingExists(NK_commissionSnap)) return false;
   String s = settingRead(NK_commissionSnap);
-  float v[16];
+  float v[COMMISSION_SNAP_FIELDS];
   int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
                  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
                  &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14]);
-  if (n < 12) return false;  // accept 12 (legacy) / 13 (+HiLow) / 15 (+IExcessBaseA,CcOffsetA)
+  // Exact count only. A short read means a truncated/corrupt snapshot, or one written by a build with a
+  // different field set — either way the slots no longer mean what this code assumes. Refuse rather than
+  // half-apply values into live control parameters. Log here, not at the call sites: the boot path discards
+  // the return value, and leaving the snapshot in NVS would make every later abort repeat this silently.
+  if (n != COMMISSION_SNAP_FIELDS) {
+    queueConsoleMessageF("Commissioning: pre-state snapshot unreadable (%d of %d fields) - settings NOT reverted",
+                         n, COMMISSION_SNAP_FIELDS);
+    settingRemove(NK_commissionSnap);
+    return false;
+  }
   PidKp = v[0];                  settingWrite(NK_PidKp, String(PidKp, 4).c_str());
   PidKi = v[1];                  settingWrite(NK_PidKi, String(PidKi, 4).c_str());
   InputFilterTC = v[2];          settingWrite(NK_InputFilterTC, String(InputFilterTC, 2).c_str());
@@ -563,19 +583,16 @@ bool commissionRestore() {
   IExcessFracBulk = v[9];        settingWrite(NK_IExcessFracBulk, String(IExcessFracBulk, 3).c_str());
   SystemIDStabilizeAmps = v[10]; settingWrite(NK_SystemIDStabilizeAmps, String(SystemIDStabilizeAmps, 2).c_str());
   SystemIDStepAmplitude = v[11]; settingWrite(NK_SystemIDStepAmplitude, String(SystemIDStepAmplitude, 3).c_str());
-  // HiLow (13th field). Older 12-field snapshots omit it — leave the current mode as-is. When
-  // present and different, restore the mode AND swap the active cap tables to match.
-  if (n >= 13) {
-    int snapMode = (int)(v[12] + 0.5f);
-    if (snapMode != HiLow) {
-      HiLow = snapMode;
-      settingWrite(NK_HiLow, String(HiLow).c_str());
-      loadCapTablesForMode(HiLow);
-    }
+  // HiLow (13th field). When it differs, restore the mode AND swap the active cap tables to match.
+  int snapMode = (int)(v[12] + 0.5f);
+  if (snapMode != HiLow) {
+    HiLow = snapMode;
+    settingWrite(NK_HiLow, String(HiLow).c_str());
+    loadCapTablesForMode(HiLow);
   }
-  // Affine trip-line intercept + CC offset (14th/15th fields). Absent in pre-affine snapshots — leave as-is.
-  if (n >= 14) { IExcessBaseA = v[13];     settingWrite(NK_IExcessBaseA, String(IExcessBaseA, 1).c_str()); }
-  if (n >= 15) { IExcessCcOffsetA = v[14]; settingWrite(NK_IExcessCcOffsetA, String(IExcessCcOffsetA, 1).c_str()); }
+  // Affine trip-line intercept + CC offset (14th/15th fields, always written as a pair).
+  IExcessBaseA = v[13];     settingWrite(NK_IExcessBaseA, String(IExcessBaseA, 1).c_str());
+  IExcessCcOffsetA = v[14]; settingWrite(NK_IExcessCcOffsetA, String(IExcessCcOffsetA, 1).c_str());
   recomputeCcGains();  // re-apply CC gains live (normalized to BATTERY_VOLTAGE)
   commissionRestoreMinPct();      // revert the Min% floor table + knee tracker (also clears the backup)
   settingRemove(NK_commissionSnap);
@@ -588,7 +605,7 @@ void commissionSetState(uint8_t st) {
   settingWrite(NK_commissionState, String((int)st).c_str());
 }
 
-// Persist the furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished). Drives
+// Persist the furthest wizard phase reached (0=Prep…8=CV plant fit, 9=finished). Drives
 // the Commissioning tab checklist so step progress survives a page reload / new client.
 void commissionSetPhase(uint8_t p) {
   commissionPhase = p;
@@ -596,28 +613,30 @@ void commissionSetPhase(uint8_t p) {
 }
 
 // ── Per-stage completion tracking ─────────────────────────────────────────────
-// commissionDoneMask carries one bit per stage (0=Prep … 6=Thresholds, 7=CV plant fit). It is the
+// commissionDoneMask carries one bit per stage (0=Prep, 1=RPM Alignment … 7=Thresholds, 8=CV plant fit). It is the
 // source of truth for the per-step ✓ marks and for the default checkbox selection of a
 // partial re-run. commissionState (0/1/2) is the lifecycle badge and is DERIVED from the
 // mask wherever it is recomputed below.
-#define COMMISSION_STAGE_COUNT 8
-#define COMMISSION_ALL_DONE    0xFF   // bits 0..7 set = every stage complete
+#define COMMISSION_STAGE_COUNT 9
+#define COMMISSION_ALL_DONE    0x1FF   // bits 0..8 set = every stage complete
 
 // Downstream stages invalidated when an upstream stage is (re)completed — see the coupling
-// analysis: Field curve(1) feeds Plant fit(3) + Verify(4); Plant fit(3) feeds Verify(4);
-// Disturbances(5) feeds Thresholds(6). CV plant fit(7) measures the current→voltage plant, which
-// sits downstream of the whole inner current loop — so any current-loop retune (Field curve 1,
-// Plant fit 3, or Verify 4) makes the CV fit stale and clears bit 7. Min% floor(2) is independent
-// (nothing feeds it, it feeds nothing) and runs early — 2nd, right after Field curve — so the measured
-// knee floors every later current-control step. Prep requires the engine already warm because Min% floor
-// sweeps to max RPM this early. Re-doing an upstream stage clears its dependents' done bits; the wizard forces them into the same run to be re-measured.
+// analysis: Field curve(2) feeds Plant fit(4) + Verify(5); Plant fit(4) feeds Verify(5);
+// Disturbances(6) feeds Thresholds(7). CV plant fit(8) measures the current→voltage plant, which
+// sits downstream of the whole inner current loop — so any current-loop retune (Field curve 2,
+// Plant fit 4, or Verify 5) makes the CV fit stale and clears bit 8. RPM Alignment(1) (tach-scaling
+// settings step) and Min% floor(3) are independent (nothing feeds them, they feed nothing here);
+// RPM Alignment runs first so every later RPM-binned table bins correctly, Min% floor runs 2nd after
+// Field curve so the measured knee floors every later current-control step. Prep requires the engine
+// already warm because Min% floor sweeps to max RPM this early. Re-doing an upstream stage clears its
+// dependents' done bits; the wizard forces them into the same run to be re-measured.
 static uint16_t commissionDependentsMask(int stage) {
   switch (stage) {
-    case 1: return (1 << 3) | (1 << 4) | (1 << 7);  // Field curve → Plant fit, Verify, CV plant fit
-    case 3: return (1 << 4) | (1 << 7);             // Plant fit   → Verify, CV plant fit
-    case 4: return (1 << 7);                        // Verify      → CV plant fit
-    case 5: return (1 << 6);                        // Disturbances → Thresholds
-    default: return 0;                              // Min% floor(2) independent — no dependents
+    case 2: return (1 << 4) | (1 << 5) | (1 << 8);  // Field curve → Plant fit, Verify, CV plant fit
+    case 4: return (1 << 5) | (1 << 8);             // Plant fit   → Verify, CV plant fit
+    case 5: return (1 << 8);                        // Verify      → CV plant fit
+    case 6: return (1 << 7);                        // Disturbances → Thresholds
+    default: return 0;                              // RPM Alignment(1), Min% floor(3) independent — no dependents
   }
 }
 
@@ -2194,7 +2213,8 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     "\"firmware_version_int\":%d,"
     // payload_v = ingest payload schema version; bump when this body's shape changes.
     // Edge fn inserts an explicit column whitelist, so it safely ignores this. See CLOUD_PLATFORM.md §3a.
-    "\"payload_v\":1,"
+    // v2 adds imu_suspicious (IMU install-validation flag).
+    "\"payload_v\":2,"
     "\"current_time_source\":%d,"
     // Battery
     "\"batt_volt_min\":%.2f,\"batt_volt_max\":%.2f,\"batt_volt_avg\":%.2f,"
@@ -2242,7 +2262,10 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     "\"imu_wave_period_sec\":%.2f,"
     // IMU events (counters for this window)
     "\"imu_slam_count_window\":%u,"
-    "\"imu_slam_peak_max_window\":%.3f"
+    "\"imu_slam_peak_max_window\":%.3f,"
+    // true = this window's IMU data is not trustworthy (install unvalidated/bad, or implausible heel/pitch
+    // bias). The row still uploads in full — the cloud filters on the flag rather than losing the window.
+    "\"imu_suspicious\":%s"
     "}",
     device_id_hex,
     authToken.c_str(),
@@ -2307,7 +2330,8 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     snap.imu.anchorage_comfort,
     snap.imu.wave_period / 1000.0,
     (unsigned int)snap.imu.slam_count,
-    snap.imu.slam_peak_max / 1000.0);
+    snap.imu.slam_peak_max / 1000.0,
+    snap.imu.suspicious ? "true" : "false");
 #undef SAFE_AVG_100
 #undef SAFE_AVG_1000
   if (written <= 0 || written >= PAYLOAD_BUFFER_SIZE) return 0;
@@ -2617,6 +2641,19 @@ void pushSensorSnapshot(time_t collectionTime) {
   is.wave_period               = imuWindow->wave_period;
   is.slam_count                = imuWindow->slam_count;
   is.slam_peak_max             = imuWindow->slam_peak_max;
+  // Per-window bias judgement. The mount verdict is NOT decided here — imuZeroFinalizeIfDue owns it, because
+  // a running window cannot tell a bad mount from a heeled boat. This path must stay free of NVS writes: it
+  // runs on the Core-1 control tick with the field live. SAFE_AVG_* is #undef'd above buildSnapshotJson, so
+  // the averages are inline.
+  const bool haveImuData = imuWindow->total_accel_valid_us >= IMU_WINDOW_MIN_VALID_US;
+  bool biasSuspect = false;
+  if (haveImuData) {
+    float heelAvg  = imuWindow->heel_valid_us  ? (float)((double)imuWindow->heel_area_v_us  / (double)imuWindow->heel_valid_us)  / 100.0f : 0.0f;
+    float pitchAvg = imuWindow->pitch_valid_us ? (float)((double)imuWindow->pitch_area_v_us / (double)imuWindow->pitch_valid_us) / 100.0f : 0.0f;
+    biasSuspect = (fabsf(heelAvg) > IMU_BIAS_SUSPECT_DEG || fabsf(pitchAvg) > IMU_BIAS_SUSPECT_DEG);
+  }
+  is.suspicious = !haveImuData || !imuZeroCaptured
+                  || imuMountState != IMU_MOUNT_OK || biasSuspect;
   // Charge stage at window-roll time (cloud upload is deferred minutes/hours, so
   // we can't read live state at JSON-build time). Matches the LT-ring capture.
   sensorRing[sensorRingHead].chargeStage = getChargeStageDisplayCode();
@@ -3106,6 +3143,12 @@ void clearSensorBuffer() {
 // Field names and grouping mirror configsnapshot_picker.html.
 // All checked-box fields included; "Not in HTML — JS-driven" picker notes are noted but
 // the firmware variables still exist and are emitted normally.
+// snprintf's size argument is size_t. Once offset passes the buffer end, (cfgRemain(offset))
+// goes negative and converts to an enormous size_t, defeating the bound. Clamp to 0.
+static inline size_t cfgRemain(int off) {
+  return (off >= CONFIG_PAYLOAD_SIZE) ? (size_t)0 : (size_t)(CONFIG_PAYLOAD_SIZE - off);
+}
+
 bool buildConfigPayload() {
   time_t now_ts = time(NULL);
   const char *timestampStr = formatTimestamp(now_ts);
@@ -3126,15 +3169,15 @@ bool buildConfigPayload() {
   // added. update-config-snapshot stores it verbatim as one jsonb column (no per-key DB).
   {
     String cfgObj = manifestConfigObject(true);   // true = include tier-2 install/topology keys
-    offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "%s", cfgObj.c_str());
+    offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "%s", cfgObj.c_str());
   }
 
   // ─── State ─────────────────────────────────────────────────────────────────
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, ",\"state\":{");
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), ",\"state\":{");
 
   // Lifetime accumulators — every field also UPSERTs into device_statistics.
   // eng_hrs / alt_hrs sent as RAW SECONDS (firmware-canonical).
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
     "\"voltage_avg_lifetime\":%.4f,\"voltage_sample_time\":%lu,"
     "\"soc_avg_lifetime\":%.4f,\"soc_sample_time\":%lu,"
     "\"speed_avg_lifetime\":%.4f,\"speed_sample_time\":%lu,"
@@ -3163,7 +3206,7 @@ bool buildConfigPayload() {
     sailing_dist_alltime, alt_power_max_alltime_w, solar_power_max_alltime_w);
 
   // Session totals (point values at upload time; owner-visible only, no leaderboard)
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
     ",\"total_dist_session\":%.3f,\"solar_kwh_session\":%.3f,"
     "\"charged_energy_session\":%.3f,\"discharged_energy_session\":%.3f,"
     "\"alt_charged_energy_session\":%.3f",
@@ -3172,7 +3215,7 @@ bool buildConfigPayload() {
     AlternatorChargedEnergy / 1000.0);
 
   // Slow-changing runtime scalars
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
     ",\"current_weather_mode\":%d,\"uv_today\":%.2f",
     currentWeatherMode, UVToday);
 
@@ -3181,7 +3224,7 @@ bool buildConfigPayload() {
   // device_state_daily INSERT (flattenForInsert) — an unknown key 500s the whole daily
   // snapshot. The fa_pkpk_worst_session / fa_peak_worst_a_session / fa_peak_worst_hz_session
   // columns MUST exist in device_state_daily before this firmware is flashed.
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
     ",\"fa_pkpk_worst_session\":%.2f,\"fa_peak_worst_a_session\":%.2f,\"fa_peak_worst_hz_session\":%.1f",
     faSesPkpkWorstA, faSesPeakWorstA, faSesPeakWorstHz);
 
@@ -3196,7 +3239,7 @@ bool buildConfigPayload() {
   // *_peak columns keep their physical units (worst damaging overshoot: A, 12V-equiv mV, °F over
   // limit). NOT trend-continuous with v2/v3 rows — filter fleet trends on firmware_version_int.
   // -1 = never challenged today (distinguishes "not observed" from "0% tracking").
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
     ",\"acc_cur_rms_a\":%.2f,\"acc_cur_peak_a\":%.2f,"
     "\"acc_volt_rms_mv\":%.0f,\"acc_volt_peak_mv\":%.0f,"
     "\"acc_therm_rms_f\":%.2f,\"acc_therm_peak_f\":%.2f",
@@ -3208,7 +3251,7 @@ bool buildConfigPayload() {
     accThermWorstOverF);
 
   // Close state, close root object
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "}}");
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "}}");
 
   if (offset >= CONFIG_PAYLOAD_SIZE - 1) {
     Serial.println("ERROR: Config payload truncated");

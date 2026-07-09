@@ -794,7 +794,9 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
         ALTERNATOR_BRAND_MODEL = alt_brand;
 
         SolarWatts = doc["solar_watts"] | 0;
-        imuMountOrientation = doc["imu_mount_orientation"] | 0;
+        // Unclamped, an out-of-range value indexes past axisRemap[] and wild-reads through src[]
+        imuMountOrientation = (uint8_t)constrain((int)(doc["imu_mount_orientation"] | 0), 0, IMU_ORIENT_COUNT - 1);
+        regulatorMountLoc = doc["regulator_mount_loc"] | 0;
         IMU_DIST_BOW_FT = doc["imu_dist_bow_ft"] | 0.0f;
         IMU_DIST_CL_FT = doc["imu_dist_cl_ft"] | 0.0f;
         IMU_HEIGHT_WL_FT = doc["imu_height_wl_ft"] | 0.0f;
@@ -825,17 +827,23 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
       Serial.println("IMU zero calibration loaded");
     }
   }
+  imuZeroCaptured = settingExists(NK_imu_zero);
+  // Stamped by the Zero capture. Absent = zeroed by a build with no mount check, or never zeroed — either
+  // way UNKNOWN, which flags uploads suspicious until the user Zeroes once on this build.
+  imuMountState = settingExists(NK_imu_mnt_state)
+                    ? (uint8_t)settingRead(NK_imu_mnt_state).toInt()
+                    : IMU_MOUNT_UNKNOWN;
 
   if (!settingExists(NK_InstallId)) {
     settingWrite(NK_InstallId, String((unsigned long)esp_random(), HEX).c_str());
   }
   installId = settingRead(NK_InstallId);
 
-  if (!settingExists(NK_BatteryCapacity_Ah)) {
-    settingWrite(NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());
-  } else {
-    BatteryCapacity_Ah = settingRead(NK_BatteryCapacity_Ah).toInt();
-  }
+  if (settingExists(NK_BatteryCapacity_Ah)) BatteryCapacity_Ah = settingRead(NK_BatteryCapacity_Ah).toInt();
+  // Choke point for every ingress (vessel JSON, /get, and applyImportConfig which writes NVS raw then reboots).
+  // 0 Ah zeroes the full-charge tail threshold (TailCurrent × capacity), so absorption would never end.
+  BatteryCapacity_Ah = constrain(BatteryCapacity_Ah, 1, 100000);
+  settingWrite(NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());   // compare-first: heals a bad import
   PeukertRatedCurrent_A = BatteryCapacity_Ah / 20.0f;  // derived; recomputed every run regardless of branch
   if (!settingExists(NK_ChargeEfficiency)) {
     // Save user-readable form (e.g. "99.0"), NOT the scaled integer, so the load path always
@@ -1395,12 +1403,17 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     UseFloat = settingRead(NK_UseFloat).toInt();
   }
-  // No battery shunt → float (needs tail current) and MaintainMode (needs 0-net-amps) can't run. Reconcile
-  // at boot (runs after all three are read) so a config-import pairing shunt-absent with float/maintain-on
-  // can't leave the stage machine regulating a meaningless Bcur. /get does the same on a live toggle.
+  // Shunt declared absent → float (needs tail current) and MaintainMode can never run. Clear them at boot
+  // (runs after shunt-present, UseFloat and MaintainMode are all read) so a config import pairing no-shunt
+  // with float-on can't leave the stage machine acting on a meaningless Bcur. /get does the same on a live
+  // toggle. A present-but-unset resistance is deliberately NOT reconciled — it is a recoverable calibration
+  // gap, and the destroyed setting could not be restored by fixing the resistance.
   if (!BatteryShuntPresent) {
     if (UseFloat != 0)     { UseFloat = 0;     settingWrite(NK_UseFloat, "0"); }
     if (MaintainMode != 0) { MaintainMode = 0; settingWrite(NK_MaintainMode, "0"); }
+  } else if (!HAS_BATT_SHUNT) {
+    queueConsoleMessage("Battery shunt resistance is not set: State of Charge, battery health, battery current limit and float charging are off.");
+    queueConsoleMessage("Enter the shunt resistance to enable them. Your float setting is kept.");
   }
 
   if (!settingExists(NK_AutoShuntGainCorrection)) {  // BOOLEAN
@@ -1641,15 +1654,32 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvRiseGovEnable = (uint8_t)settingRead(NK_cvRiseGovEnable).toInt();
   }
+  if (!settingExists(NK_cvRecovEnable)) {
+    settingWrite(NK_cvRecovEnable, String((int)cvRecovEnable).c_str());
+  } else {
+    cvRecovEnable = (uint8_t)settingRead(NK_cvRecovEnable).toInt();
+  }
+  if (!settingExists(NK_cvRecovSec)) {
+    settingWrite(NK_cvRecovSec, String(cvRecovSec, 2).c_str());
+  } else {
+    cvRecovSec = settingRead(NK_cvRecovSec).toFloat();
+  }
+  if (!settingExists(NK_cvRecovEmaxV)) {
+    settingWrite(NK_cvRecovEmaxV, String(cvRecovEmaxV, 3).c_str());
+  } else {
+    cvRecovEmaxV = settingRead(NK_cvRecovEmaxV).toFloat();
+  }
   if (!settingExists(NK_dutySlewEnable)) {
     settingWrite(NK_dutySlewEnable, String((int)dutySlewEnable).c_str());
   } else {
     dutySlewEnable = (uint8_t)settingRead(NK_dutySlewEnable).toInt();
   }
-  if (!settingExists(NK_cvPlantK)) {
-    settingWrite(NK_cvPlantK, String(cvPlantK, 5).c_str());
+  if (!settingExists(NK_cvPlantKa)) {
+    settingWrite(NK_cvPlantKa, String(cvPlantKa, 5).c_str());
+    settingWrite(NK_cvPlantKb, String(cvPlantKb, 5).c_str());
   } else {
-    cvPlantK = settingRead(NK_cvPlantK).toFloat();
+    cvPlantKa = settingRead(NK_cvPlantKa).toFloat();
+    cvPlantKb = settingExists(NK_cvPlantKb) ? settingRead(NK_cvPlantKb).toFloat() : 0.0f;
   }
   if (settingExists(NK_ripFitAlt))  ripFitDecode(settingRead(NK_ripFitAlt),  ripFitAlt);   // measured ripple projection (§3.3); absent → nPts=0 → plot shows threshold only
   // CommissionTempF — board temp stamped when the CV plant fit was applied; reference for the battery-
@@ -1657,6 +1687,12 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   if (settingExists(NK_CommissionTempF)) {
     CommissionTempF = settingRead(NK_CommissionTempF).toFloat();
   }
+  // Same rule for the re-commission nag state: absence = never commissioned = never nag.
+  if (settingExists(NK_CommissionEpoch)) {
+    CommissionEpoch = (time_t)strtoll(settingRead(NK_CommissionEpoch).c_str(), nullptr, 10);
+  }
+  if (settingExists(NK_cmAgeAck))     commissionAgeAck     = settingRead(NK_cmAgeAck).toInt() != 0;
+  if (settingExists(NK_cmChangeFlag)) commissionChangeFlag = settingRead(NK_cmChangeFlag).toInt() != 0;
   if (!settingExists(NK_battTempDerateEn)) {
     settingWrite(NK_battTempDerateEn, String((int)battTempDerateEnable).c_str());
   } else {
@@ -2234,6 +2270,8 @@ const AxisRemap axisRemap[4] = {
   { { 0, 2, 1, 0, 2, 1 }, { -1, +1, -1, -1, +1, -1 } },  // 2: Port wall, facing stbd
   { { 0, 2, 1, 0, 2, 1 }, { +1, -1, -1, +1, -1, -1 } },  // 3: Stbd wall, facing port
 };
+static_assert(sizeof(axisRemap) / sizeof(axisRemap[0]) == IMU_ORIENT_COUNT,
+              "IMU_ORIENT_COUNT must match the axisRemap[] row count");
 
 
 // Complementary filter parameters
@@ -2373,9 +2411,30 @@ void imuZeroFinalizeIfDue() {
       settingWrite(NK_imu_zero, zout.c_str());
 
       cf_heel = 0; cf_pitch = 0;  // snap filter to new level reference (feels instant)
+      imuZeroCaptured = true;
+      // The install verdict is decided here, from the capture the user just took with the boat level and
+      // still — the one moment az is unambiguous. az0 keeps its sign, so a board mounted upside-down
+      // (az0 = -1 g, both offsets ≈ 0) is caught, which a magnitude test would miss.
+      float aMag = sqrtf(ax0 * ax0 + ay0 * ay0 + az0 * az0);
+      imuMountState = (aMag >= IMU_MOUNT_TACC_MIN_G && aMag <= IMU_MOUNT_TACC_MAX_G
+                       && az0 >= IMU_MOUNT_VACC_MIN_G) ? IMU_MOUNT_OK : IMU_MOUNT_BAD;
+      settingWrite(NK_imu_mnt_state, String((int)imuMountState).c_str());
+
       queueConsoleMessage("IMU ZERO: captured (heel " + String(imuHeelOffsetDeg, 1) +
                           "°, pitch " + String(imuPitchOffsetDeg, 1) +
                           (targetMet ? "°)" : "°, partial — timed out)"));
+      // Warn, never refuse. A capture taken while heeled bakes that heel in permanently, and no later window
+      // check can see it — the offsets cancel it at rest and the vertical axis still reads 1 g.
+      if (imuMountState == IMU_MOUNT_BAD) {
+        queueConsoleMessage("IMU: install check failed (up axis " + String(az0, 2) + " g, |a| " +
+                            String(aMag, 2) + " g). Heel, pitch and slam are flagged suspicious.");
+        queueConsoleMessage("IMU: mount the regulator on a vertical bulkhead, level the boat, and Zero again.");
+      }
+      if (fabsf(imuHeelOffsetDeg) > IMU_ZERO_WARN_DEG || fabsf(imuPitchOffsetDeg) > IMU_ZERO_WARN_DEG)
+        queueConsoleMessage("IMU ZERO: large offset captured — if the boat was not level and still, re-zero at the dock.");
+      if (fabsf(aMag - 1.0f) > IMU_ZERO_WARN_AMAG_G)
+        queueConsoleMessage("IMU ZERO: motion during capture (mean |a| = " + String(aMag, 3) +
+                            " g, expected 1.000). Offsets may be wrong — re-zero when the boat is still.");
     } else {
       // Not enough samples even after the timeout (IMU barely streaming) — abort, keep old offsets.
       queueConsoleMessage("IMU ZERO: aborted — too few samples (is the IMU streaming?)");
@@ -2503,11 +2562,13 @@ void updateAccelMetrics() {
         if ((uint32_t)now - lastSlamMs >= 300) {
           lastSlamMs = (uint32_t)now;
           imuWindow->slam_count++;
-          imu_slam_count_lifetime++;
+          // A non-vertical board's "up" axis isn't up, so its slam count is meaningless — keep it out of the
+          // lifetime total that feeds the leaderboard. The window value still uploads, flagged suspicious.
+          if (imuMountState != IMU_MOUNT_BAD) imu_slam_count_lifetime++;
         }
         // Always update peak — capture the worst reading within the event
         if (vert_accel_scaled > imuWindow->slam_peak_max) imuWindow->slam_peak_max = vert_accel_scaled;
-        if (vert_accel > imu_slam_peak_lifetime) imu_slam_peak_lifetime = vert_accel;
+        if (imuMountState != IMU_MOUNT_BAD && vert_accel > imu_slam_peak_lifetime) imu_slam_peak_lifetime = vert_accel;
       }
     }
 

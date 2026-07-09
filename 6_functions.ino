@@ -103,19 +103,37 @@ float clamp_f(float x, float lo, float hi) {
 // computeCvTempScale — battery-temperature gain derate factor (see the globals block in Xregulator.ino).
 // Board temp (ambientTemp, °F) is a proxy for battery temp; the battery's internal resistance — which IS
 // the CV plant gain K_dc — rises as it cools, so gains set at the commissioning temperature run too hot
-// when colder. Returns R(T_commission)/R(T_now) = exp(coeff·(T_now−T_comm)) (coeff = fractional resistance
-// rise per °C): colder now → exponent<0 → factor<1 → gains scaled DOWN (the safe direction). Returns 1.0
-// (no change) when disabled, never commissioned, or the proxy is stale/invalid — never amplifies blindly.
-// Temps clamped to [0,100]°C; result clamped to [0.30,1.20] so a wild proxy reading can't make the gains
-// dangerous. This is a Kp+Ki scale, NOT a λ/ω change — ω and ρ are held fixed.
+// when colder. Returns R(T_commission)/R(T_now): both ends go through cvResistanceRatio(), so the
+// saturation there — not a clamp on the ratio — is what bounds the result. That makes the bite point an
+// absolute temperature instead of a function of whatever the board happened to read when the fit was
+// applied. Returns 1.0 when disabled, never commissioned, or the proxy is stale — never amplifies blindly.
+// This is a Kp+Ki scale, NOT a λ/ω change — ω and ρ are held fixed.
+static const float CVTS_T_MIN_C = -40.0f, CVTS_T_MAX_C = 70.0f;   // BMP388 rated span; also the charging envelope
+static const float CVTS_WARM_RATIO = 0.5f;
+static const float CVTS_R_HOT = 0.55f, CVTS_R_COLD = 7.0f;
+static const float CVTS_SCALE_MIN = 0.10f, CVTS_SCALE_MAX = 2.50f;
+
+// R(T)/R(25°C) for the pack. TWO segments pivoting at 25°C (continuous there by construction): a battery's
+// apparent activation energy roughly halves above room temperature — measured 0.026→0.010 /°C for LFP
+// (Gotion IFP50160116A charge DCIR) and 0.023→0.015 /°C for lead-acid electrolyte (NBS RP738). One
+// exponential misses by up to 30%; this misses by ≤12% across −20…+55°C on BOTH chemistries, which is why
+// there is no per-chemistry coefficient. The clamps are backstops against a hand-cranked battTempCoeff, NOT
+// physical asymptotes — nothing actually floors: a VRLA's impedance keeps falling as it heats, and that is
+// precisely the thermal-runaway mechanism.
+static float cvResistanceRatio(float tC) {
+  float c = (tC < 25.0f) ? battTempCoeff : (battTempCoeff * CVTS_WARM_RATIO);
+  return clamp_f(expf(-c * (tC - 25.0f)), CVTS_R_HOT, CVTS_R_COLD);
+}
+
 float computeCvTempScale() {
   if (!battTempDerateEnable) return 1.0f;
   if (isnan(CommissionTempF)) return 1.0f;
   if (IS_STALE(IDX_AMBIENT_TEMP) || !isfinite(ambientTemp)) return 1.0f;
-  float tCommC = clamp_f((CommissionTempF - 32.0f) / 1.8f, 0.0f, 100.0f);
-  float tNowC  = clamp_f((ambientTemp     - 32.0f) / 1.8f, 0.0f, 100.0f);
-  float s = expf(battTempCoeff * (tNowC - tCommC));
-  return clamp_f(s, 0.30f, 1.20f);
+  float tCommC = clamp_f((CommissionTempF - 32.0f) / 1.8f, CVTS_T_MIN_C, CVTS_T_MAX_C);
+  float tNowC  = clamp_f((ambientTemp     - 32.0f) / 1.8f, CVTS_T_MIN_C, CVTS_T_MAX_C);
+  // Asymmetric: a boost raises loop gain, and an over-large coefficient inflates it further, so the boost
+  // is capped tighter than the cut. It only bites below ~0°C commissioning.
+  return clamp_f(cvResistanceRatio(tCommC) / cvResistanceRatio(tNowC), CVTS_SCALE_MIN, CVTS_SCALE_MAX);
 }
 
 // recomputeCvGains — derive the gains the CV loop actually uses (VoltageKp_active / VoltageKi_active)
@@ -128,7 +146,12 @@ float computeCvTempScale() {
 // changes with temperature regardless of how the base gains were chosen). See CV_AUTOTUNE_PLAN.md §E.
 void recomputeCvGains() {
   float vNorm = 12.0f / (float)BATTERY_VOLTAGE;     // 1, 0.5, 0.25 for 12/24/48 V
-  bool plantValid = (cvPlantK > 1e-6f);             // only K_dc is required (τ/L unused)
+  // Re-evaluate the measured curve at THIS loop's timescale. The crossover formula wants |P(jω_c)|, which the
+  // step response approximates at t = 1/ω_c — so the plant gain is a function of the response-time setting,
+  // not a constant. Clamped to the span the fit actually measured: never extrapolated.
+  float h = 1.0f / ((cvCrossover > 1e-3f) ? cvCrossover : 0.20f);
+  cvPlantK = cvPlantKa + cvPlantKb * sqrtf(clamp_f(h, CVPF_H_MIN_S, CVPF_H_MAX_S));
+  bool plantValid = (cvPlantK > 1e-6f);             // only K is required (τ/L unused)
   float kpNorm, kiNorm;                             // 12V-equivalent gains (what the user sees)
   if (cvGainMode == 1 && plantValid) {
     // AUTO (measured-K_dc rule). Normalize the measured pack-space K_dc into 12V-equivalent space so
@@ -309,7 +332,9 @@ int clamp_i(int x, int lo, int hi) {
  * @return         Slew-limited value
  */
 float slew_limit_f(float prev, float target, float rise_per_s, float fall_per_s, float dt_sec) {
-  if (dt_sec <= 0.0f) return prev;  // no time elapsed → no change; also guards negative/NaN dt
+  // Negated form, not (dt_sec <= 0): every comparison with NaN is false, so the plain form would let a
+  // NaN dt fall through and return target completely unslewed.
+  if (!(dt_sec > 0.0f)) return prev;
   float max_rise = rise_per_s * dt_sec;
   float max_fall = fall_per_s * dt_sec;
   float delta = target - prev;
@@ -1024,9 +1049,10 @@ static bool accBindingReady(uint32_t &bindingStartMs, bool binding, uint32_t now
 }
 
 // Zero all accumulators. clearLive=true (manual Reset button) also discards the live excursion
-// stopwatches. The daily auto-reset passes false: an in-progress excursion carries WHOLE into the
-// new window (counted there, out-of-band time preserved), so a failure spanning midnight lands in
-// the next day's row rather than being erased.
+// stopwatches and the live thermal containment session — the next scored second costs a fresh
+// ACC_SETTLE_THERMAL_MS. The daily auto-reset passes false: an in-progress excursion or containment
+// session carries WHOLE into the new window (counted there, out-of-band time preserved), so a
+// failure spanning midnight lands in the next day's row rather than being erased.
 void resetAccuracyScores(bool clearLive) {
   accCur4 = {};
   accVolt4 = {};
@@ -1037,9 +1063,12 @@ void resetAccuracyScores(bool clearLive) {
   if (clearLive) {
     excCur = {};
     excVolt = {};
+    accThermBindingStartMs = 0;
+    accThermSettledPrev = false;
   } else {
     if (excCur.state) accCur4.excursions = 1;
     if (excVolt.state) accVolt4.excursions = 1;
+    if (accThermSettledPrev) accThermSessions = 1;
   }
 }
 
@@ -1344,30 +1373,35 @@ void commitTuningSweepRecord() {
 // Accuracy containment score (v4: binding seconds + in-band seconds), authority-gated.
 void thermalAccuracyScore_tick(uint32_t nowMs, float dtSec) {
   // ===== Thermal Control Accuracy — containment while binding =====
-  // Authority gate: only score when the thermal loop is the binding constraint with no other
-  // limiter in charge. The actuator here is the penalty-amps derate; a SUSTAINED penalty IS the
-  // definition of "thermal is controlling" — the REVERSE PID floors penalty at 0 when cool, so a
-  // penalty held > 2A for 120 s (ACC_SETTLE_THERMAL_MS) can only happen while the loop is actively
-  // holding temperature at the limit. That sustained-penalty requirement is why g_I_cap > 10A is no
-  // longer needed: penalty can't stay up without sustained current, which needs adequate RPM.
-  //   voltage-binding stage  — absorption/float/TargetVoltage: there the CV loop pulls current to
-  //                           hold voltage, so thermal error no longer reflects thermal control
-  //                           quality. 3-min blanking after it clears (sustained bias). BULK is NOT
-  //                           blanked: bulk is current-limited at the RPM/thermal ceiling, so
-  //                           thermal IS the binding constraint and we DO want to score it.
-  //   g_fastOvClampActive   — OV supervisor cutting current for voltage, not thermal
-  //   MaintainMode          — output forced to zero; thermal loop does nothing
-  //   thermalPenaltyAmps    — must be > 2A (the binding-constraint signal; see above)
-  bool voltageBindingStage = voltageControlActive && (getChargeStageDisplayCode() != CHARGE_STAGE_BULK);
-  if (voltageBindingStage) thermalScoreLastExternalMs = nowMs;
+  // Authority gate: only score while the thermal derate actually OWNS the current command.
+  //   g_thermalOwnsCeiling — the penalty (>2A) set uTargetAmps; false when warmup/HiLo/battery
+  //                          limit/fastOV/MaxTableValue capped it lower, i.e. someone else binds
+  //   cvOwnsCommand        — CV regulating BELOW that ceiling: its output is the real command and
+  //                          thermal error stops reflecting thermal control quality
+  //   g_fastOvClampActive  — OV supervisor cutting current for voltage, not thermal
+  //   MaintainMode         — output forced to zero; thermal loop does nothing
+  // Icv/uTargetAmps are one tick stale here (tempPID_tick runs before the ceiling+CV chain) but
+  // stale as a consistent pair, so the comparison holds. This ownership test replaced a charge-stage
+  // proxy (score only in BULK, 3-min blanking otherwise) that latched the score off for whole
+  // sessions: one absorption tick re-armed the blanking even while the derate was plainly binding.
+  bool cvOwnsCommand = voltageControlActive && (Icv < (float)uTargetAmps - 0.5f);
+
+  // A CV handoff shorter than ACC_THERM_CV_YIELD_MS only PAUSES accumulation (below); only a
+  // sustained one ends the containment session. The plant cannot move far enough in 10 s to corrupt
+  // the score — ~0.2°F at typical ramp rates, against a ±3°F band and a 25 s slope window — and
+  // tearing down on every 0.5A chatter across the ceiling would never let the 120 s settle finish.
+  if (!cvOwnsCommand) thermalCvOwnStartMs = 0;
+  else if (thermalCvOwnStartMs == 0) thermalCvOwnStartMs = nowMs;
+  bool cvOwnSustained = cvOwnsCommand
+                        && (uint32_t)(nowMs - thermalCvOwnStartMs) >= ACC_THERM_CV_YIELD_MS;
+
   bool thermalBinding = tempPIDActive && thermalSlopeBufFull && !isnan(tempFiltered)
-                        && !g_fastOvClampActive && (MaintainMode == 0) && thermalPenaltyAmps > 2.0f
-                        && (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
+                        && !g_fastOvClampActive && (MaintainMode == 0)
+                        && g_thermalOwnsCeiling && !cvOwnSustained;
   bool thermalSettled = accBindingReady(accThermBindingStartMs, thermalBinding, nowMs, ACC_SETTLE_THERMAL_MS);
-  static bool thermalSettledPrev = false;
-  if (thermalSettled && !thermalSettledPrev) accThermSessions++;  // containment-session counter
-  thermalSettledPrev = thermalSettled;
-  if (thermalSettled) {
+  if (thermalSettled && !accThermSettledPrev) accThermSessions++;  // containment-session counter
+  accThermSettledPrev = thermalSettled;
+  if (thermalSettled && !cvOwnsCommand) {
     // Containment is referenced to the loop's ACTUAL regulation target (limit −7°F once the slope
     // buffer is full — tempPIDSetpoint_d), NOT TemperatureLimitF: limit-referencing gave a perfectly
     // regulating loop a built-in ~7°F error floor. worstOver stays limit-referenced (damage metric)
@@ -1510,6 +1544,25 @@ void AdjustFieldLearnMode() {
   if (!g_fastOvClampActive) {
     preEventCvI = cv_I;  // refresh while no protection is clamping
   }
+  // Post-protection recovery window (timed cv_I re-injection + PI error cap). Normalizes
+  // recovery time across target voltages: at a low target the post-cut error is tiny so the
+  // plain PI rebuild is glacial; at a high target the error is huge so the rebuild slams the
+  // predictive-OV trip slope. The window ramps cv_I from its ReseedFrac seed back to the
+  // pre-event value over cvRecovSec, and caps the positive PI error at cvRecovEmaxV so drive
+  // cannot scale with the post-cut voltage collapse. Protections are untouched; any new fire
+  // cancels the window (and preEventCvI mid-ramp keeps the de-escalation ratchet).
+  //
+  // Icv is additionally ceilinged at recovCvGoal for the life of the window: the pre-trip current
+  // is the current that held the target, so commanding more than it on the way back can only
+  // overshoot — that ceiling is what stops a recovery from re-arming the protection that fired.
+  // Premise: the plant did not change. recovStarveTicks detects when it did (goal handed back in
+  // full, bus still low and not rising) and releases the window instead of starving the field.
+  static bool recovActive = false;
+  static float recovCvGoal = 0.0f;  // preEventCvI snapshot at release — the re-injection target AND the Icv ceiling
+  static float recovCvSeed = 0.0f;  // cv_I as seeded at release (ReseedFrac fraction)
+  static uint32_t recovStartMs = 0;
+  static bool recovRampHold = false;    // latched by the first slope-bleed tick: the brake outranks the ramp
+  static uint8_t recovStarveTicks = 0;  // consecutive ticks the goal ceiling is pinned and the bus is low + not rising
   // Post-protection fast-rise window — opened by the falling-edge handler below.
   // 0 = window inactive. Gated again at slew site by FastSetpointRiseWindowMs cap
   // and FastSetpointRiseHeadroomV vs ChargingVoltageTarget.
@@ -2385,7 +2438,7 @@ void AdjustFieldLearnMode() {
         // Zero-current float (UseFloat=2): same zero-command regulation as MaintainMode, but entered
         // automatically by the float stage — alternator carries the house loads, battery rests at 0 A.
         // Unlike the manual MaintainMode override, the stage machine (and its rebulk criteria) stays live.
-        zeroFloatActive = (UseFloat == 2) && HAS_BATT_SHUNT && !inBulkStage && !inAbsorptionStage && !inIdleStage
+        zeroFloatActive = (EFFECTIVE_USE_FLOAT == 2) && !inBulkStage && !inAbsorptionStage && !inIdleStage
                           && MaintainMode == 0 && TargetVoltageMode == 0 && !CVTuningMode;
         if (MaintainMode == 1 || zeroFloatActive) uTargetAmps = 0;
 
@@ -2758,6 +2811,14 @@ void AdjustFieldLearnMode() {
         // ── Apply fastOvCurrentCap to uTargetAmps (fastOV + iExcess + load dump) ──
         uTargetAmps = fminf((float)uTargetAmps, fastOvCurrentCap);
 
+        // Who set the ceiling? uTargetAmps starts at I_cap − thermalPenaltyAmps and every stage above
+        // can only lower it, so surviving that chain unchanged means the thermal derate is the binding
+        // ceiling. Read one tick later by thermalAccuracyScore_tick as its authority gate. The 2 A floor
+        // is the binding-constraint signal: the REVERSE PID floors penalty at 0 when cool, so a penalty
+        // this large only exists while the loop is actively holding temperature down.
+        g_thermalOwnsCeiling = (thermalPenaltyAmps > 2.0f)
+                               && ((float)uTargetAmps >= g_I_cap - thermalPenaltyAmps - 0.5f);
+
         // ── CV command ceiling ──
         // Icv/cv_I is the upper-loop output the inner PID tracks — an ALTERNATOR-current command.
         // Its ceiling is the fully-derated alternator command ceiling (RPM/thermal/user/battery
@@ -3003,6 +3064,7 @@ void AdjustFieldLearnMode() {
             cv_I_track = seed;
             cv_I_aw_cap = (float)MaxTableValue;    // clear AW cap — stale values constrain CV entry
             awSeedProtectStartMs = currentMillis;  // start seed-protection window
+            recovActive = false;                   // stale recovery window must not survive a CV re-entry
           }
           // ── Unified protection-release reseed + unified telemetry export ───────────
           // Single falling-edge handler for ALL three protection paths (Group 1/2 OV,
@@ -3020,12 +3082,21 @@ void AdjustFieldLearnMode() {
             cv_I_track = cv_I;
             awSeedProtectStartMs = currentMillis;     // engage seed-protection window
             postProtectRiseStartMs = currentMillis;   // open fast-rise window (closed by either time cap or voltage gate at slew site)
+            if (cvRecovEnable) {
+              recovActive = true;
+              recovCvGoal = clamp_f(preEventCvI, 0.0f, icvHi_seed);  // snapshot NOW — preEventCvI refreshes to the seed next tick
+              recovCvSeed = cv_I;
+              recovStartMs = currentMillis;
+              recovRampHold = false;
+              recovStarveTicks = 0;
+            }
           }
           // Unified-flag rising-edge counter — counts every distinct activation of
           // ANY protection (G1/2 OV, iExcess, LoadDump). Must be incremented BEFORE
           // g_fastOvClampActive is updated for next tick.
           if (fastOvClampActive && !g_fastOvClampActive) {
             g_fastOvClampCount++;
+            recovActive = false;  // a new fire cancels the recovery ramp; the mid-ramp cv_I becomes the next reseed base (de-escalation ratchet)
           }
           g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
           g_fastOvCapReason = capReasonTick;      // export reason atomically with the cap — CV log reads a coherent pair
@@ -3065,6 +3136,7 @@ void AdjustFieldLearnMode() {
 
           float icvHi_bt = fminf(clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue), cv_I_aw_cap);
           if (!voltageControlActive) {
+            recovActive = false;  // CV exited mid-recovery — bumpless tracker owns cv_I now
             if (!seedProtected) {
               float e_bt = ChargingVoltageTarget - IBV;  // raw INA228 — no filter lag on bumpless tracker
               float cv_I_target = clamp_f(g_pidI_filtered - VoltageKp_active * e_bt, 0.0f, icvHi_bt);
@@ -3106,12 +3178,38 @@ void AdjustFieldLearnMode() {
             pidLog_enteringCV = enteringCV ? 1 : 0;
 
             float e = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on PI error (governor output)
+            // Recovery window: end once the ramp has completed AND voltage has reached target
+            // (first eRaw<=0 alone is too early — cv_I may still be below need and V would sag
+            // back into a small-error crawl), hard-capped at 4×cvRecovSec so a weak-alt stall
+            // can't leave the error cap engaged indefinitely. While active, cap the positive
+            // error so P+I drive cannot scale with the post-cut voltage collapse.
+            if (recovActive) {
+              float eRaw = e;
+              uint32_t recovTMs = (uint32_t)(fmaxf(cvRecovSec, 0.2f) * 1000.0f);
+              uint32_t recovElapsed = currentMillis - recovStartMs;
+              // Premise-void exit: cv_I has been handed the whole pre-trip current, yet the bus is
+              // still below target and not rising — so that current no longer holds the target (load
+              // or plant changed) and the ceiling would starve the field for the 4× backstop.
+              // cvDSlope is last tick's value here; one tick of lag is immaterial over 5 ticks.
+              bool starved = (cv_I >= recovCvGoal - 0.05f) && (eRaw > 0.0f) && (cvDSlope <= 0.0f);
+              recovStarveTicks = starved ? (uint8_t)(recovStarveTicks + 1) : 0;
+              if ((recovElapsed >= recovTMs && eRaw <= 0.0f) || recovElapsed >= 4u * recovTMs
+                  || recovStarveTicks >= 5) {
+                recovActive = false;
+              } else {
+                float eCap = cvRecovEmaxV * ((float)BATTERY_VOLTAGE / 12.0f);
+                if (e > eCap) e = eCap;
+              }
+            }
             float dtSec = (prevVoltageLoopMs == 0)
                             ? ((float)VoltageLoopInterval / 1000.0f)
                             : ((float)(currentMillis - prevVoltageLoopMs) / 1000.0f);
             dtSec = constrain(dtSec, 0.001f, 0.5f);
 
             float icvHi = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
+            // Recovery ceiling — never command more than the pre-trip current. Folded into icvHi (not a
+            // late fminf on Icv) so satHi anti-windup stops cv_I integrating against it.
+            if (recovActive) icvHi = fminf(icvHi, recovCvGoal);
             float icvLo = 0.0f;
 
             // cvDSlope: backward diff of getFiltV() over one voltage loop interval (V/s).
@@ -3158,17 +3256,37 @@ void AdjustFieldLearnMode() {
               }
 
               // Slope-aware integrator bleed — drains cv_I when voltage is rising faster than
-              // SlopeBleedThresh (V/s). proxGain scales bleed linearly with proximity to setpoint:
-              // zero when e >= SlopeBleedProxV (far below target), full when e <= 0 (at or above).
-              // Prevents bleed from firing during a legitimate fast rise toward a distant target.
+              // SlopeBleedThresh (V/s). proxGain gates on the PROJECTED arrival voltage, not the
+              // present distance: the field needs ~one fall TC to respond and the bus can cross the
+              // last SlopeBleedProxV in less than that (measured 2.5 V/s on a 14.5 V recovery = 80 ms
+              // of runway against a ~100 ms fall). brakeTauS must cover BOTH how stale cvDSlope already
+              // is and how long the field takes to answer: 0.5×interval (backward difference is centred
+              // half a window back) + VoltageFilterTC (getFiltV's own lag) + 1×interval (PI dead time)
+              // + field fall. With cvDSlope <= 0 the projection collapses to IBV and the gate is
+              // identical to the old proximity gate, so a flat bus far below target still never bleeds.
+              // Distance uses the RAW error — the recovery cap must not move this gate.
               // KiDown still handles steady-state correction above setpoint independently.
               // Gated by cvHelpersEnabled — OFF disables slope bleed entirely for clean symmetric-PI tuning.
               if (cvHelpersEnabled && cvDSlope > SlopeBleedThresh) {
-                float proxGain = clamp_f(1.0f - e / SlopeBleedProxV, 0.0f, 1.0f);
+                const float kFieldFallS = 0.10f;  // alternator field fall TC — physical, ~universal
+                float brakeTauS = kFieldFallS + 0.0015f * (float)VoltageLoopInterval + 0.001f * VoltageFilterTC;
+                float vArrive = IBV + cvDSlope * brakeTauS;
+                float proxGain = clamp_f(1.0f - (voltageTargetSlewed - vArrive) / SlopeBleedProxV, 0.0f, 1.0f);
                 float slopeBleedAmps = SlopeBleedK * (cvDSlope - SlopeBleedThresh) * dtSec * proxGain;
                 cv_I = fmaxf(0.0f, cv_I - slopeBleedAmps);
                 g_slopeBleedAmpsThisTick = slopeBleedAmps;  // captured for cvLog; cleared by cvLog_tick after logging
+                if (slopeBleedAmps > 0.0f) recovRampHold = true;  // brake has spoken; the ramp must not answer back
                 // cv_I_track synced on next tick by bumpless tracker (out of scope here)
+              }
+
+              // Timed re-injection: lift cv_I along a ramp from its reseed toward the pre-event
+              // value over cvRecovSec. Floor-lift only (fmaxf) and only while V is below target.
+              // recovRampHold latches on the first bleed tick: without it the floor re-lifts cv_I to
+              // the schedule on the very tick the brake drained it, and the brake can only win once
+              // the bus is already above target — i.e. after the overshoot it exists to prevent.
+              if (recovActive && !recovRampHold && (voltageTargetSlewed - IBV) > 0.0f) {
+                float frac = fminf(1.0f, (float)(currentMillis - recovStartMs) / (fmaxf(cvRecovSec, 0.2f) * 1000.0f));
+                cv_I = fmaxf(cv_I, fminf(recovCvSeed + (recovCvGoal - recovCvSeed) * frac, icvHi));
               }
 
               Icv = clamp_f(VoltageKp_active * e + cv_I, icvLo, icvHi);
@@ -3188,7 +3306,12 @@ void AdjustFieldLearnMode() {
         // cv_I still updates only on VoltageLoopInterval cadence.
         {
           float e_now = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on per-tick proportional (governor output)
+          if (recovActive) {
+            float eCapT = cvRecovEmaxV * ((float)BATTERY_VOLTAGE / 12.0f);
+            if (e_now > eCapT) e_now = eCapT;  // same recovery error cap as the 100ms PI path
+          }
           float icvHi_tick = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
+          if (recovActive) icvHi_tick = fminf(icvHi_tick, recovCvGoal);    // same pre-trip-current ceiling as the PI path
           if (!enteringCV) {
             Icv = clamp_f(VoltageKp_active * e_now + cv_I, 0.0f, icvHi_tick);
           }
@@ -3348,6 +3471,7 @@ void AdjustFieldLearnMode() {
       // ===== MANUAL mode: no setpoint management =====
       voltageControlActive = false;
       lastVoltageControlActive = false;  // keep tracker in sync so AUTO re-entry from MANUAL fires the bumpless CV seed
+      g_thermalOwnsCeiling = false;      // ceiling chain does not run here; must not read stale-true on AUTO re-entry
       uTargetAmps = 0;
       setpointLimited = 0.0f;
       ctrlLimiter = 0;
@@ -3626,6 +3750,9 @@ void setDutyPercent(float percent) {
   static uint32_t lastFrequency = 0;
   static bool pwmInitialized = false;
 
+  // constrain(NaN,…) returns NaN (both compares false) and (uint32_t)NaN is undefined. This is the single
+  // final write to the field PWM for every duty path, so it is the place to hard-stop a NaN.
+  if (isnan(percent)) percent = 0.0f;
   percent = constrain(percent, 0.0f, 100.0f);
 
   // Field-duty safety net for higher-voltage banks. Every duty path (Auto/manual/limp/fault) lands
@@ -3728,7 +3855,7 @@ void updateChargingStage() {
         floatStartTime = now;
         absorptionTailTimer = 0;
         rebulkTimer = 0;
-        const char *nextStage = (UseFloat == 0) ? "IDLE" : (UseFloat == 2) ? "FLOAT (zero-current)" : "FLOAT";
+        const char *nextStage = (EFFECTIVE_USE_FLOAT == 0) ? "IDLE" : (EFFECTIVE_USE_FLOAT == 2) ? "FLOAT (zero-current)" : "FLOAT";
         queueConsoleMessageF(
           "Stage: ABSORPTION→%s (tail current) | battV=%.2fV Bcur=%.1fA tailThresh=%.1fA",
           nextStage, v, Bcur, TailCurrent_A);
@@ -3744,7 +3871,7 @@ void updateChargingStage() {
       floatStartTime = now;
       absorptionTailTimer = 0;
       rebulkTimer = 0;
-      const char *nextStage = (UseFloat == 0) ? "IDLE" : (UseFloat == 2) ? "FLOAT (zero-current)" : "FLOAT";
+      const char *nextStage = (EFFECTIVE_USE_FLOAT == 0) ? "IDLE" : (EFFECTIVE_USE_FLOAT == 2) ? "FLOAT (zero-current)" : "FLOAT";
       queueConsoleMessageF(
         "Stage: ABSORPTION→%s (timeout %.0f min) | battV=%.2fV Bcur=%.1fA",
         nextStage, (float)AbsorptionTimeoutMs / 60000.0f, v, Bcur);
@@ -3810,18 +3937,18 @@ void updateChargingStage() {
     // Zero-current float (UseFloat=2): the voltage PI runs at BulkVoltage purely as an over-voltage
     // guard (same pattern as MaintainMode) — uTargetAmps=0 caps the setpoint, so no voltage is chased.
     // Voltage-float mode holds FloatVoltage as a real target.
-    ChargingVoltageTargetReq = (UseFloat == 2) ? BulkVoltage : FloatVoltage;
+    ChargingVoltageTargetReq = (EFFECTIVE_USE_FLOAT == 2) ? BulkVoltage : FloatVoltage;
 
     const uint32_t tFloat = (uint32_t)(now - floatStartTime);
     // Zero-current float has no duration expiry (like idle): the battery isn't discharging, so a
     // periodic forced rebulk buys nothing. Only voltage-float rotates back to bulk on the timer.
-    const bool floatTimedOut = (UseFloat != 2) && (tFloat >= (uint32_t)(FLOAT_DURATION * 1000UL));
+    const bool floatTimedOut = (EFFECTIVE_USE_FLOAT != 2) && (tFloat >= (uint32_t)(FLOAT_DURATION * 1000UL));
 
     static uint32_t lastFloatDebugMs = 0;
     if ((uint32_t)(now - lastFloatDebugMs) >= 30000) {
       lastFloatDebugMs = now;
       float vErr = FloatVoltage - v;
-      if (UseFloat == 2) {
+      if (EFFECTIVE_USE_FLOAT == 2) {
         queueConsoleMessageF("Float status (zero-current) | battV=%.2fV Bcur=%.1fA tFloat=%lus rebulkV=%.2fV minFloatTime=%lus",
                              v, Bcur,
                              (unsigned long)(tFloat / 1000),
