@@ -232,7 +232,6 @@
       <button class="sub-tab" onclick="showSubTab('settings', 'battery', event)">Battery</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'boatperformance', event)">Boat</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'weathersolar', event)">Weather/Solar</button>
-      <button class="sub-tab" onclick="showSubTab('settings', 'diag', event)">Diag</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'alarms', event)">Alarms</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'vessel-info', event)">Vessel Info</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'system', event)">System</button>
@@ -575,31 +574,30 @@
                   </div>
                 </div>
 
-                <!-- Thermal Location Subsection -->
+                <!-- Regulator Location Subsection -->
                 <div class="pri-subsection">
-                  <h4 class="pri-subsection-title">Thermal Location</h4>
-                  <p class="pri-subsection-description">
-                    Where the regulator sits decides whether its own board temperature can stand in for the
-                    battery's. The voltage control loop uses that reading to correct its gains as the bank
-                    warms and cools, so an engine-room mount must not be used as a battery proxy.
-                  </p>
+                  <h4 class="pri-subsection-title">Regulator Location</h4>
 
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Regulator Mounting Location:</span>
+                      <span>Mounting Location:</span>
                       <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                        <span class="tooltip-box">A battery's internal resistance rises as it cools, and that resistance <strong>is</strong> the quantity the voltage loop's gains were tuned against at commissioning. Mounted in the battery compartment — or any space that tracks it — the board temperature follows the bank closely enough to correct for this. Mounted in the engine room, the board reads engine heat instead: it will report a warm battery while the bank is still cold, and push the gains the wrong way. Saving Vessel Info proposes the matching setting for the Battery-Temp Gain Derate.</span>
+                        <span class="tooltip-box">A battery's internal resistance rises as it cools, and that resistance <strong>is</strong> the quantity the voltage loop's gains were tuned against at commissioning. Mounted near the bank — or any space that tracks it — the regulator's board temperature follows the batteries closely enough to correct for this. Otherwise (example: regulator in engine room, batteries in bilge), it will incorrectly report a hot battery, and push the gains the wrong way.</span>
                       </span>
                     </div>
                     <div class="form-input">
-                      <label style="display:block;margin-bottom:6px;">
-                        <input type="radio" name="regulatorMountLoc" value="0" required>
-                        Battery compartment, or a space at a similar temperature
-                      </label>
-                      <label style="display:block;">
-                        <input type="radio" name="regulatorMountLoc" value="1" required>
-                        Engine room, or another space that runs hotter than the batteries
-                      </label>
+                      <div class="seg seg-choice">
+                        <label>
+                          <input type="radio" name="regulatorMountLoc" value="0" required>
+                          <span>Near Battery</span>
+                          <small>Preferred — battery temperature can be approximated with regulator temperature</small>
+                        </label>
+                        <label>
+                          <input type="radio" name="regulatorMountLoc" value="1" required>
+                          <span>Somewhere Else</span>
+                          <small>Battery temperature is not approximately the same as regulator temperature</small>
+                        </label>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -667,17 +665,21 @@
           <div class="settings-card">
 
             <!-- SINGLE TAB GROUP -->
+            <!-- data-alt-panel drives the active-pill match in showAltTab; the button's onclick
+                 cannot be relied on (goToTuning() never contains its panel id "tuning"). -->
             <div class="alt-tabs alt-tabs-primary">
-              <button class="alt-tab-btn alt-tab-btn-primary active"
+              <button class="alt-tab-btn alt-tab-btn-primary active" data-alt-panel="alt-panel-alt-setup"
                       onclick="showAltTab('primary', 'alt-panel-alt-setup')">Basic</button>
-              <button class="alt-tab-btn alt-tab-btn-primary"
+              <button class="alt-tab-btn alt-tab-btn-primary" data-alt-panel="alt-panel-quick-view"
                       onclick="showAltTab('primary', 'alt-panel-quick-view')">RPM Table</button>
-              <button class="alt-tab-btn alt-tab-btn-primary"
+              <button class="alt-tab-btn alt-tab-btn-primary" data-alt-panel="alt-panel-vt-mode"
                       onclick="showAltTab('primary', 'alt-panel-vt-mode')">CV Mode</button>
-              <button class="alt-tab-btn alt-tab-btn-primary"
+              <button class="alt-tab-btn alt-tab-btn-primary" data-alt-panel="alt-panel-protections"
                       onclick="showAltTab('primary', 'alt-panel-protections')">Protections</button>
-              <button class="alt-tab-btn alt-tab-btn-primary"
-                      onclick="goToTuning()">Tuning Tools</button>
+              <button class="alt-tab-btn alt-tab-btn-primary" data-alt-panel="tuning"
+                      onclick="goToTuning()">Tuning</button>
+              <button class="alt-tab-btn alt-tab-btn-primary" data-alt-panel="settings-diag"
+                      onclick="showAltTab('primary', 'settings-diag')">Diag</button>
             </div>
 
             <div id="alt-panel-quick-view" class="alt-panel alt-panel-primary">
@@ -2256,14 +2258,14 @@
                   <article class="protections-param" data-groups="g2">
                     <div class="protections-name">
                       <span class="protections-tag g2">G2</span>
-                      OvMeasMargin — Group 2 Trigger Margin (V) (<span id="OvMeasMarginV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lower = engages sooner above target. Set it above the normal voltage variation you see above target, so ordinary fluctuation doesn't trip it. Does not affect the iExcess detectors (Group 3/4) — see their own Strict Over-Current Band.</span></span>
+                      Trip Margin Above Target (OvMeasMargin) (V) (<span id="OvMeasMarginV_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Group 2 trips when the filtered battery voltage exceeds the charge target by this margin. Lower = engages sooner. Set it above the worst filtered-signal ripple you see while holding target, so ordinary fluctuation can't trip it. Rescales automatically with the system voltage set in Vessel Info. Does not affect the iExcess detectors (Group 3/4) — see their own Strict Over-Current Band.</span></span>
                       <span class="sinfo" data-sinfo="ovG2" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
-                        <input name="OvMeasMarginV" type="number" step="0.005" min="0.02" max="0.5" />
+                        <input name="OvMeasMarginV" type="number" step="0.005" min="0.02" max="2" />
                         <span class="protections-unit">V</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
@@ -2307,7 +2309,7 @@
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
-                      Safety Margin — amps above ripple
+                      Safety Margin — amps above ripple (<span id="IExcessSafetyMargin_echo">?</span>)
                       <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps the over-current trip line sits above the measured alternator ripple. Larger means fewer nuisance trips but less sensitivity to a genuine over-current. Applying it sets the trip line parallel to the ripple this alternator produces (Slope and CV base below are set for you). Requires a ripple measurement from Commissioning ▸ Step 7.</span></span>
                     </div>
                     <div class="protections-edit-row">
@@ -2317,7 +2319,6 @@
                     </div>
                   </article>
 
-                  <hr>
 
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
@@ -2332,7 +2333,6 @@
                     </div>
                   </article>
 
-                  <hr>
 
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
@@ -2350,7 +2350,6 @@
                     </form>
                   </article>
 
-                  <hr>
 
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
@@ -2368,7 +2367,6 @@
                     </form>
                   </article>
 
-                  <hr>
 
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
@@ -2387,7 +2385,6 @@
                     </form>
                   </article>
 
-                  <hr>
 
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
@@ -2694,7 +2691,7 @@
 
             </div><!-- END alt-panel-protections -->
 
-            <!-- Tuning Tools alt-tab panel (was the standalone #tuning main tab) -->
+            <!-- Tuning alt-tab panel (was the standalone #tuning main tab) -->
   <div id="tuning" class="alt-panel alt-panel-primary">
     <!-- Tuning Sub-tabs -->
     <div class="sub-tabs">
@@ -3004,25 +3001,8 @@
 
         <hr />
         <p class="card-group-title" style="margin:12px 0 10px 0;">Apply Results</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">The test measures the field coil's electrical lag (plant delay). The "Set All Filters" button inside the modal writes <strong>plant/3</strong> to the two alternator-current filters (the PID feedback and the on-screen display) and the <strong>full plant delay</strong> to the voltage filter — see each tooltip below for the reasoning. You can also override any value individually.</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">The test measures the field coil's electrical lag (plant delay). The "Set All Filters" button inside the modal writes <strong>plant/3</strong> to the alternator-current PID feedback filter and the <strong>full plant delay</strong> to the voltage filter — see each tooltip below for the reasoning. You can also override any value individually.</p>
 
-        <div class="form-row">
-          <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-            <span>Alternator current display filter (ms) (<span id="InputFilterTC_echo">?</span>):</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant that smooths the alternator-current value shown on the dashboard and written to the logs. It does not feed any control loop, and it does not feed the iExcess over-current detector (Group 3/4) — that detector does its own averaging (its Averaging Time Constant, on the Current tab) on the raw current signal. Set All Filters writes <strong>plant/3</strong> here, which keeps the on-screen reading responsive while taking the edge off sensor noise. Lower values track faster but look noisier; higher values are smoother but lag the real current.</span>
-            </span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="InputFilterTC" type="number" step="1" min="1" max="2000" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Output current PID feedback filter (ms) (<span id="OutputPIDFilterTC_echo">?</span>):</span>
@@ -4168,7 +4148,6 @@
                         <th style="padding:3px 4px;">LDT2</th>
                         <th style="padding:3px 4px;">LDT1</th>
                         <th style="padding:3px 4px;">LDT3</th>
-                        <th style="padding:3px 4px;">TC</th>
                         <th style="padding:3px 4px;">WA</th>
                         <th style="padding:3px 4px;">WP</th>
                         <th style="padding:3px 4px;">KO</th>
@@ -4262,7 +4241,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                       <span>CV Response Time (s) (<span id="cvRespS_echo">?</span>):<span id="cvRespPreview" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">&nbsp;</span></span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how fast the auto gain mode pulls battery voltage back to target after a disturbance or target change. Valid range 5–80 s. <strong>Recommended ~18–22 s; the default 20 s is intentionally conservative.</strong> Shorter (faster) settings raise Kp/Ki and the overshoot risk — exactly when over-voltage matters most. The <strong>Battery-Temp Gain Derate</strong> handles most of the temperature swing, but it infers battery temperature from a <strong>board-temperature proxy</strong> with a generic per-°C coefficient, is clamped to a safe band, and can be switched off — so it can under-correct a cold-soaked battery. This response-time margin is the cheap backstop for that residual: sluggish-when-cold is harmless, over-voltage is not. The other floor is the field ramp-rate limit (currently <strong><span id="cvRespRampNote">—</span> %/s</strong> of duty), so stay well clear of that or recovery goes linear instead of exponential. Only affects Auto mode.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">With CV Gain Source = Auto, sets how fast the auto gain mode pulls battery voltage back to target after a disturbance or target change. Valid range 5–80 s. <strong>Longer is safer, shorter is faster.</strong> Margin here is a cheap backstop for errors in things like the modeled response of battery ESR to temperature and many others. The other floor is the field ramp-rate limit (currently <strong><span id="cvRespRampNote">—</span> %/s</strong> of duty), so stay well clear of that or recovery goes linear instead of exponential. Only affects Auto mode. Calculated using the existing stored plant fit, no need to re-commission after adjustment.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4277,7 +4256,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                       <span>CV auto-tune Ki/Kp ratio ρ (<span id="cvPiZero_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">In <strong>Auto</strong> gain mode the integral gain is set as a fixed fraction of the proportional gain: <strong>Ki = ρ × Kp</strong>. This places the integrator's corner (where it starts pulling out steady-state error) relative to the loop's response speed. Lower ρ = lazier integral (slower to erase residual error, less windup); higher ρ = more aggressive integral. Default 0.70. Only affects Auto mode. (Was a hard-coded constant; exposed here for bench tuning.)</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">With CV Gain Source = Auto, the integral gain is tied to the proportional gain by this ratio: <strong>Ki = ρ × Kp</strong>. Sets where the integrator's corner sits — the point at which it takes over from proportional action to pull out steady-state error — relative to the loop's response speed, which the <strong>Response Time</strong> knob above sets separately. Lower ρ = lazier integral: gentler and more damped. Higher ρ = more aggressive integral, at the cost of more overshoot. Calculated using the existing stored plant fit, no need to re-commission after adjustment.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -5004,6 +4983,685 @@
 
 
 
+
+            <!-- Diag alt-tab panel (was the standalone Setup > Diag sub-tab). Checkpoint (C1-C4) gates &
+                 tuning knobs, filtered flat by the View pills. Results display on Live Data > Diag. -->
+        <div id="settings-diag" class="alt-panel alt-panel-primary">
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;line-height:1.5;">
+        Four independent checkpoints decide what data gets recorded on the Live Data → Diag tab. These are their gates &amp; tuning knobs — pick a pill to see only that checkpoint's settings; a setting shared by two checkpoints shows under both of them.
+      </p>
+      <div class="checkpoint-filters">
+        <span class="checkpoint-filter-label">View:</span>
+        <button type="button" data-filter="all" class="active single-line">All</button>
+        <button type="button" data-filter="c1">
+          <span class="group-label">C1</span>
+          <span class="nick-label">Anomaly Detection</span>
+        </button>
+        <button type="button" data-filter="c2">
+          <span class="group-label">C2</span>
+          <span class="nick-label">Resonance &amp; Ripple Map</span>
+        </button>
+        <button type="button" data-filter="c3">
+          <span class="group-label">C3</span>
+          <span class="nick-label">Charging System Health</span>
+        </button>
+        <button type="button" data-filter="c4">
+          <span class="group-label">C4</span>
+          <span class="nick-label">Ripple Measurements</span>
+        </button>
+      </div>
+
+      <div class="checkpoint-intro">
+        <p data-intro="c1"><strong>C1 — Anomaly Detection</strong> watches the fast current sensor for rectifier/stator fault signatures. It shares the fast channel and its steady-state admission gates (current drift floor/slope, input-range switching) with C2 — those live in the shared Fast Current Channel section. Its own pieces: the fault alarm, the fault-class and lifetime-anomaly readouts, and the anomaly snapshots in the Waveforms flipbook. Arming ignores engine speed entirely, so it keeps working with a dead tach.</p>
+        <p data-intro="c2"><strong>C2 — Resonance &amp; Ripple Map</strong> learns the strongest current-ripple tones at every engine speed and load, from the same fast channel as C1. It uses the shared current-drift gates plus two gates of its own: the steady-state RPM margin (a window is discarded when the engine sits on a speed-bin edge) and the minimum tone amplitude. Its results: the map itself, the worst ripple &amp; tone table, and the biggest actionable disturbance.</p>
+        <p data-intro="c3"><strong>C3 — Charging System Health</strong> grades output amps against the best this machine has ever done at the same operating point. A point is admitted only after every signal — RPM, field duty, voltage, temperature, amps — holds steady. Those admission gates and the curve-fit tuning are the knobs under Gates &amp; Tuning in this section; the resulting health gauge, session plot, and engine-hours trend appear on Live Data → Diag → Alternator.</p>
+        <p data-intro="c4"><strong>C4 — Ripple Measurements</strong> is one measurement engine with two collectors: the RPM ripple table is filled <em>only</em> by the commissioning game, and the ripple-vs-current line on the Protections plots is filled <em>only</em> by Commissioning Step 7. These gates define what counts as a valid measurement for both. They are deliberately separate from C1/C2’s gates, so tuning them can never loosen fault-detector arming.</p>
+      </div>
+
+          <!-- Flat, pill-filtered knob cards (Protections pattern): each block tags the checkpoint(s)
+               it affects; the View pills show/hide by membership. Shared fast-channel cards carry C1 and C2. -->
+          <div class="checkpoint-param" data-checkpoints="c1 c2">
+            <div class="checkpoint-param-chips"><span class="checkpoint-tag c1">C1</span> <span class="checkpoint-tag c2">C2</span></div>
+<!-- Master on/off for the whole fast channel — shared by C1 and C2 -->
+      <div class="settings-card">
+        <div class="form-row">
+          <div class="form-label">Fast Current Channel (<span id="faEnabled_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master on/off for this whole diagnostic channel. Off stops sampling entirely — no map learning, no fault detection, no oscilloscope.</span></span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input id="faEnabled" name="faEnabled" type="number" value="" style="display:none;" />
+              <div class="cap-mode-toggle">
+                <button type="button" id="faEnabled_off" class="cap-mode-btn" onclick="faSegSet('faEnabled',0,this.closest('form'))">Off</button>
+                <button type="button" id="faEnabled_on" class="cap-mode-btn" onclick="faSegSet('faEnabled',1,this.closest('form'))">On</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+          </div>
+
+          <div class="checkpoint-param" data-checkpoints="c1 c2">
+            <div class="checkpoint-param-chips"><span class="checkpoint-tag c1">C1</span> <span class="checkpoint-tag c2">C2</span></div>
+<!-- Steady-state gates + input range: these govern BOTH the C1 detector and the C2 map -->
+      <div class="settings-card">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:14px; font-weight:600;">Steady-State Gates &amp; Input Range — feed both C1 and C2</span>
+        </div>
+        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">A capture window counts only while output current holds steady, judged on a smoothed signal so the ripple being measured is not what is judged. These knobs and the input-range switching govern both consumers of the fast channel: the anomaly detector (C1) and the Resonance &amp; Ripple Map (C2). The map applies two further gates of its own — RPM margin and minimum tone amplitude, in the C2 section. The measured-ripple capture (C4) has fully separate gates.</div>
+
+        <div class="form-row">
+          <div class="form-label">Steady-State Current Drift Floor (A) (<span id="faAmpsDriftFloorA_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A window is discarded unless the smoothed output current drifts less than the larger of this floor or the slope % (below) across the window. The smoothing removes the ripple being measured, so the gate sees only slow drift, not the tones.</span></span>
+            <span class="sinfo" data-sinfo="faDrift" onclick="sinfoToggle(this)"></span>
+            <span id="faAmpsDriftFloorA_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak drift: —</span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="faAmpsDriftFloorA" type="number" step="0.5" min="0" max="50" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Steady-State Current Drift Slope (%) (<span id="faAmpsDriftPct_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, as a percent of the window's mean current. Same smoothed current; the gate allows whichever is larger — this percentage or the fixed floor.</span></span>
+            <span class="sinfo" data-sinfo="faDrift" onclick="sinfoToggle(this)"></span>
+            <span id="faAmpsDriftPct_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak drift: —</span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="faAmpsDriftPct" type="number" step="0.5" min="0" max="50" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Range Switch-Up Current (A) (<span id="faAttenUpAmps_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Above this the channel drops to its less-sensitive 12 dB input range so high-current ripple doesn't clip; below the Switch-Down value it returns to the sensitive 6 dB range. The gap between the two prevents chattering at the threshold.</span></span>
+            <span class="sinfo" data-sinfo="faAtten" onclick="sinfoToggle(this)"></span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="faAttenUpAmps" type="number" step="1" min="0" max="500" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Range Switch-Down Current (A) (<span id="faAttenDownAmps_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Below this the channel returns to its sensitive 6 dB input range. The gap between Up and Down prevents chattering near the threshold.</span></span>
+            <span class="sinfo" data-sinfo="faAtten" onclick="sinfoToggle(this)"></span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="faAttenDownAmps" type="number" step="1" min="0" max="500" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        
+      </div>
+          </div>
+
+          <div class="checkpoint-param" data-checkpoints="c1">
+            <div class="checkpoint-param-chips"><span class="checkpoint-tag c1">C1</span></div>
+<!-- Fault alarm — C1’s only knob beyond the shared gates -->
+      <div class="settings-card">
+        <div class="form-row">
+          <div class="form-label">Sound Alarm on Fault (<span id="faAlarmEnable_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Recommend leaving this off — the fault alarm is still unproven and in development.</span></span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input id="faAlarmEnable" name="faAlarmEnable" type="number" value="" style="display:none;" />
+              <div class="cap-mode-toggle">
+                <button type="button" id="faAlarmEnable_off" class="cap-mode-btn" onclick="faSegSet('faAlarmEnable',0,this.closest('form'))">Off</button>
+                <button type="button" id="faAlarmEnable_on" class="cap-mode-btn" onclick="faSegSet('faAlarmEnable',1,this.closest('form'))">On</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+          </div>
+
+          <div class="checkpoint-param" data-checkpoints="c2">
+            <div class="checkpoint-param-chips"><span class="checkpoint-tag c2">C2</span></div>
+<!-- Map-only admission gates (the C1 detector ignores RPM, so these never affect it) -->
+      <div class="settings-card">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:14px; font-weight:600;">Map-Only Gates</span>
+        </div>
+
+        <div class="form-row">
+          <div class="form-label">Steady-State RPM Margin (RPM) (<span id="faRpmEdgeMargin_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A 0.5-second window is discarded unless the smoothed RPM stays at least this many RPM inside one internal 50-RPM speed bin (not the wide flipbook bands) for the whole window. Unlike the drift readouts, here bigger is stricter: the "10s worst margin" line must be at or above this value to pass, so a small number (engine sitting right on a bin edge) is a fail. Governs the Resonance &amp; Ripple Map ONLY — the anomaly detector's arming ignores RPM entirely.</span></span>
+            <span class="sinfo" data-sinfo="faRpmEdgeMargin" onclick="sinfoToggle(this)"></span>
+            <span id="faRpmEdgeMargin_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s worst margin: —</span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="faRpmEdgeMargin" type="number" step="0.5" min="0" max="50" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        
+        <hr />
+
+        <div class="form-row">
+          <div class="form-label">Minimum Tone Amplitude (A) (<span id="faPeakMinA_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to each detected tone's amplitude. Tones quieter than this never enter the Resonance &amp; Ripple Map. Raise to log only strong tones; lower to capture faint ones.</span></span>
+            <span class="sinfo" data-sinfo="faPeakMinA" onclick="sinfoToggle(this)"></span>
+            <span id="faPeakMinA_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak tone: —</span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="faPeakMinA" type="number" step="0.05" min="0" max="20" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+      </div>
+          </div>
+
+          <div class="checkpoint-param" data-checkpoints="c3">
+            <div class="checkpoint-param-chips"><span class="checkpoint-tag c3">C3</span> <span class="checkpoint-param-title">Charging System Health — Gates &amp; Tuning</span></div>
+            <div class="settings-card">
+<!-- Alternator Health — Steady-State Tuning (settings) -->
+              <div class="tuning-section">
+                <div style="font-size:12px;color:var(--text-muted);margin:6px 0;">
+                  All steady-state definitions are tunable (build it, then tune live). Values echo live.
+                </div>
+                <p class="card-group-title" style="margin:12px 0 4px;">Steady-State Detection</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How stable a reading must hold, and for how long, before a point is recordable. Bands are judged on smoothed signals (see the smoothing filter below), so size them for real operating-point movement, not sensor noise.</div>
+                <div class="form-row">
+                  <div class="form-label"><span>RPM band (RPM) (<span id="altRpmTol_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandRpm" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altRpmTol" type="number" step="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>RPM steady time (s) (<span id="altRpmSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandRpm" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altRpmSec" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Field-duty band (%) (<span id="altDutyTolPct_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandDuty" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altDutyTolPct" type="number" step="0.1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Field-duty steady time (s) (<span id="altDutySec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandDuty" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altDutySec" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Bus-voltage band (V) (<span id="altVbusTol_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandVbus" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altVbusTol" type="number" step="0.001" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Bus-voltage steady time (s) (<span id="altVbusSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandVbus" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altVbusSec" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Temperature band (<span class="temp-unit-label">°F</span>) (<span id="altThermDegF_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandTemp" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'altThermDegF',true)">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altThermDegF" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Temperature steady time, full (s) (<span id="altThermSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long alternator temperature must hold steady before a run counts as a full steady run — the points that get the orange ring and that update the reference surface and the engine-hours trend. The This Session plot automatically uses half this time for its lighter "brief point" gate, so there is only one number to set.</span></span>
+                    <span class="sinfo" data-sinfo="altBandTemp" onclick="sinfoToggle(this)"></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altThermSec" type="number" step="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Trend bucket length (s) (<span id="altTrendBuckSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Engine-seconds per point on the % vs Engine-Hours trend. 3600 = one point per engine-hour (production). Set 600 to see points fill in every 10 minutes for testing.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altTrendBuckSec" type="number" step="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Trend sample spacing (s) (<span id="altTrendFeedSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Minimum spacing between full steady-run samples that feed a trend bucket. Throttles a long steady run so it contributes several spread-out samples rather than a flood.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altTrendFeedSec" type="number" step="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Trend min samples per bucket (<span id="altTrendMinSamp_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A trend bucket needs at least this many full steady-run samples before it commits a point. A sparser bucket shows a gap instead of a single-reading artifact.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altTrendMinSamp" type="number" step="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Output-amps band (% of reading) (<span id="altAmpsTolPct_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The alternator output itself must also hold steady before a point is recorded. The band scales with the reading so one setting works at low float current and full bulk current; the floor below takes over at low output.</span></span>
+                    <span class="sinfo" data-sinfo="altBandAmps" onclick="sinfoToggle(this)"></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altAmpsTolPct" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Output-amps band floor (A) (<span id="altAmpsFloorA_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandAmps" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altAmpsFloorA" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Output-amps steady time (s) (<span id="altAmpsSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandAmps" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altAmpsSec" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Signal smoothing filter (s) (<span id="altEmaSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Strips control-loop dither and sensor jitter so the bands above can stay tight enough to reject real transients. 0 = off. Heavier than about 1 second starts hiding real movement.</span></span>
+                    <span class="sinfo" data-sinfo="altEmaSec" onclick="sinfoToggle(this)"></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altEmaSec" type="number" step="0.1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Minimum steady-run length (s) (<span id="altMinRunSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altMinRun" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altMinRunSec" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <p class="card-group-title" style="margin:12px 0 4px;">Point Admission</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Minimum output before a steady point is admitted at all.</div>
+                <div class="form-row">
+                  <div class="form-label"><span>Admission: min amps (A) (<span id="altMinAmps_echo">?</span>):</span><span class="sinfo" data-sinfo="altAdmit" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altMinAmps" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Admission: min duty (%) (<span id="altMinDuty_echo">?</span>):</span><span class="sinfo" data-sinfo="altAdmit" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altMinDuty" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <p class="card-group-title" style="margin:12px 0 4px;">Curve Fitting</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How the best-ever surface is built from recorded points.</div>
+                <div class="form-row">
+                  <div class="form-label"><span>Safety margin (A) (<span id="altSafetyMargin_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altSafetyMargin" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Interpolation power (IDW) (<span id="altIdwPower_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altIdwPower" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Reference validity radius (<span id="altRefRadius_echo">?</span>):</span>
+                    <span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How close (in normalized axis units) the nearest recorded point must be for the health % to be trusted. Operating farther than this from all recorded points shows "no reference" instead of comparing against a guess, and the trend skips those readings. Larger = more coverage from sparse data, less honest far from support.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altRefRadius" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Prune neighbors (k, cloud) (<span id="altPruneK_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altPruneK" type="number" step="1" min="5" max="20" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Local fit stiffness (<span id="altRidgeFrac_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How strongly the local trend fit (the one-per-second health comparison) is held flat when the recorded points around the live point line up poorly. Higher = steadier but less responsive to real local slope; lower = follows the records more exactly but can wobble where data is thin. Default 0.10.</span></span>
+                    <span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altRidgeFrac" type="number" step="0.05" min="0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Learning-state risk threshold (<span id="altRiskThresh_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much could-be-wrong (as a fraction of the predicted output) is tolerated before the panel says "Learning this operating region" instead of showing a %. Raise to show numbers in more places at the cost of less trustworthy ones; lower to be stricter. Default 0.15 — values 0.10–0.20 classified the validation data identically.</span></span>
+                    <span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altRiskThresh" type="number" step="0.05" min="0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <p class="card-group-title" style="margin:12px 0 4px;">High-Field Alert</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Independent safety net: flags low output despite high field drive, even where the health gauge is still learning.</div>
+                <div class="form-row">
+                  <div class="form-label"><span>Alert: field drive at least (% of Max Field) (<span id="altHiFieldPct_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altHiFieldPct" type="number" step="5" min="0" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Alert: output at or below (A) (<span id="altLowOutAmps_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altLowOutAmps" type="number" step="1" min="0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Alert: must persist (s) (<span id="altHiFieldSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField" onclick="sinfoToggle(this)"></span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altHiFieldSec" type="number" step="5" min="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <p class="card-group-title" style="margin:12px 0 4px;">Reference &amp; Data</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Choose which reference to grade against, pause or continue learning, back it up, simulate, or reset.</div>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Reference source (<span id="alt-mode-label">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Which reference surface grades the live % and the trend. "My History" is what this device learned. "Uploaded File" is a borrowed surface from Load CSV — selecting it defaults Pause ON, but you can Continue to keep learning My History while graded against the uploaded one. Learning never modifies an uploaded surface.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <div class="cap-mode-toggle">
+                      <button type="button" id="alt-src-hist" class="cap-mode-btn" onclick="altSetSource(0)">My History</button>
+                      <button type="button" id="alt-src-file" class="cap-mode-btn" onclick="altSetSource(1)">Uploaded File</button>
+                    </div>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Learning</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Pause / Continue learning into My History. Independent of the reference source — you can pause learning and still grade against either surface. Live display and the trend keep updating either way.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <div class="cap-mode-toggle">
+                      <button type="button" id="alt-learn-on" class="cap-mode-btn" onclick="altSetPaused(0)">Continue Learning</button>
+                      <button type="button" id="alt-learn-off" class="cap-mode-btn" onclick="altSetPaused(1)">Pause Learning</button>
+                    </div>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Simulator</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Injects synthetic operating points for bench testing without a running engine, so the curve fills and the health trend visibly declines. Leave off for real use; simulated data is not saved.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <div class="cap-mode-toggle">
+                      <button type="button" id="alt-sim-off" class="cap-mode-btn" onclick="altSetSim(0)">Off</button>
+                      <button type="button" id="alt-sim-on" class="cap-mode-btn" onclick="altSetSim(1)">On</button>
+                    </div>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Debug data</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Downloads a single CSV with everything useful for debugging this subsystem: all parameters, live/gate state, both reference surfaces (My History + Uploaded), the trend buckets (committed + in-progress), and the engine-hour frame. Hand it to an AI or engineer to diagnose behaviour.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <input type="button" value="Download Debug CSV" class="btn-secondary" onclick="altDownloadDebug()" />
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Reset / Start Over</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Clears the learned reference surface (My History), the entire % vs Engine-Hours trend (committed buckets AND the current partial hour), and the session stats, then restarts the engine-hour axis at zero and reverts the reference source to My History. Your tuning settings are kept. Do this after replacing the alternator, regulator, or drive belt. Cannot be undone.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <input type="button" value="Reset / Start Over" class="btn-danger"
+                      onclick="if(!currentAdminPassword){xAlert('Please unlock settings first');return;} xConfirm('Clear My History, the whole % vs Engine-Hours trend (including the current partial hour) and the session stats, restart the engine-hour axis at 0, and revert the source to My History? Tuning settings are kept. Do this after replacing the alternator, regulator, or belt. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}})" />
+                  </div>
+                </div>
+              </div><!-- END Alternator Health Tuning -->
+            </div>
+          </div>
+
+          <div class="checkpoint-param" data-checkpoints="c4">
+            <div class="checkpoint-param-chips"><span class="checkpoint-tag c4">C4</span></div>
+<div class="settings-card">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:14px; font-weight:600;">Ripple Measurements</span>
+        </div>
+        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">One measurement engine, two collectors: the <strong>RPM ripple table</strong> is filled only by the commissioning game, and the <strong>ripple-vs-current line</strong> on the Protections plots only by Commissioning Step 7. These gates define what counts as a valid measurement for both. A measurement counts only if conditions were <strong>stationary</strong>: the window's two halves must have (nearly) the same average — a throttle or load transient walks the average in one direction and is rejected, while a rough-but-repeating condition (a hunting idle, cycling loads) swings hard yet averages the same in both halves and is admitted. This is deliberate: a "dirty speed" is exactly what the over-current protections experience, so it must make it into the table. Each gate shows its worst value over the last 10 s (green = passing). Never relaxed during commissioning: a stationary number cannot be measured while ramping — the wizard's instructed pauses are when measurements admit.</div>
+
+        <div class="form-row">
+          <div class="form-label">Capture Window (ms) (<span id="ripWinMs_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long each ripple measurement lasts. Each HALF of the window must hold at least one full cycle of the slowest disturbance you care about — a hunting idle wanders with a ~1–2 second period, hence the 2000 ms default; shorter windows see slow hunt as drift and reject or under-read it. <strong>Changing this changes the measured quantity itself</strong> — map cells and the current-check fit captured under a different window length are not comparable. After changing it: clear the map and re-run the commissioning current check.</span></span>
+            <span class="sinfo" data-sinfo="ripWinMs" onclick="sinfoToggle(this)"></span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="ripWinMs" type="number" step="100" min="500" max="4000" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Current Drift Floor (A) (<span id="ripDriftFloorA_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The shared tolerance floor, used two ways. (1) Command gate: the current <em>command</em> must not travel more than the larger of this floor or the slope % below (rejects deliberate ramps — test steps, warm-up, mode glides). (2) Stationarity gates: each sensor's two half-window averages must agree within the larger of this floor or a quarter of that window's own full swing — self-scaling, so a rough-but-repeating signal gets proportionally more tolerance while a one-way ramp is still rejected. Each line shows (worst value − its limit) over the last 10 s: at or below zero (green) = passing. Separate from the C1/C2 drift knobs above, so tuning capture admission never loosens fault-detector arming.</span></span>
+            <span class="sinfo" data-sinfo="ripDriftFloorA" onclick="sinfoToggle(this)"></span>
+            <span id="ripAltGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">alt mean-shift beyond limit (larger of Floor / ¼ window swing), 10s worst, ≤0 passes: —</span>
+            <span id="ripBattGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">batt mean-shift beyond limit (larger of Floor / ¼ window swing), 10s worst, ≤0 passes: —</span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="ripDriftFloorA" type="number" step="0.5" min="0" max="50" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Current Drift Slope (%) (<span id="ripDriftPct_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, for the <em>command</em> gate only: the command may travel up to this percent of the window's mean alternator current (or the fixed floor, whichever is larger). The sensor gates don't use it — their tolerance self-scales on each window's own measured swing (see the floor's tooltip).</span></span>
+            <span class="sinfo" data-sinfo="ripDriftPct" onclick="sinfoToggle(this)"></span>
+            <span id="ripCmdGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">command travel beyond limit (larger of Floor / Slope % × mean), 10s worst, ≤0 passes: —</span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="ripDriftPct" type="number" step="0.5" min="0" max="50" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Steady-State RPM:
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The engine speed must also be stationary across the window — same two-half test as the currents. Its limit is automatic — the larger of 10 RPM or a quarter of the window's own RPM swing — so there is nothing to set. The readout shows (shift − limit): a negative number means that many RPM inside the limit.</span></span>
+            <span id="ripRpmGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">RPM mean-shift beyond limit (larger of 10 RPM / ¼ window swing), 10s worst, ≤0 passes: —</span>
+          </div>
+          <div class="form-input"></div>
+        </div>
+      </div>
+          </div>
+        </div><!-- END settings-diag -->
           </div> <!-- close settings-card -->
         </div> <!-- close settings-alternator -->
 
@@ -6400,686 +7058,6 @@
           </div>
         </div>
 
-        <!-- Diag Settings Sub-tab — checkpoint (C1–C4) gates & tuning knobs, filtered flat by the View pills
-             (same card-filter pattern as Setup → Alternator → Protections). Results display on Live Data → Diag. -->
-        <div id="settings-diag" class="sub-tab-content">
-      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;line-height:1.5;">
-        Four independent checkpoints decide what data gets recorded on the Live Data → Diag tab. These are their gates &amp; tuning knobs — pick a pill to see only that checkpoint's settings; a setting shared by two checkpoints shows under both of them.
-      </p>
-      <div class="checkpoint-filters">
-        <span class="checkpoint-filter-label">View:</span>
-        <button type="button" data-filter="all" class="active single-line">All</button>
-        <button type="button" data-filter="c1">
-          <span class="group-label">C1</span>
-          <span class="nick-label">Anomaly Detection</span>
-        </button>
-        <button type="button" data-filter="c2">
-          <span class="group-label">C2</span>
-          <span class="nick-label">Resonance &amp; Ripple Map</span>
-        </button>
-        <button type="button" data-filter="c3">
-          <span class="group-label">C3</span>
-          <span class="nick-label">Charging System Health</span>
-        </button>
-        <button type="button" data-filter="c4">
-          <span class="group-label">C4</span>
-          <span class="nick-label">Ripple Measurements</span>
-        </button>
-      </div>
-
-      <div class="checkpoint-intro">
-        <p data-intro="c1"><strong>C1 — Anomaly Detection</strong> watches the fast current sensor for rectifier/stator fault signatures. It shares the fast channel and its steady-state admission gates (current drift floor/slope, input-range switching) with C2 — those live in the shared Fast Current Channel section. Its own pieces: the fault alarm, the fault-class and lifetime-anomaly readouts, and the anomaly snapshots in the Waveforms flipbook. Arming ignores engine speed entirely, so it keeps working with a dead tach.</p>
-        <p data-intro="c2"><strong>C2 — Resonance &amp; Ripple Map</strong> learns the strongest current-ripple tones at every engine speed and load, from the same fast channel as C1. It uses the shared current-drift gates plus two gates of its own: the steady-state RPM margin (a window is discarded when the engine sits on a speed-bin edge) and the minimum tone amplitude. Its results: the map itself, the worst ripple &amp; tone table, and the biggest actionable disturbance.</p>
-        <p data-intro="c3"><strong>C3 — Charging System Health</strong> grades output amps against the best this machine has ever done at the same operating point. A point is admitted only after every signal — RPM, field duty, voltage, temperature, amps — holds steady. Those admission gates and the curve-fit tuning are the knobs under Gates &amp; Tuning in this section; the resulting health gauge, session plot, and engine-hours trend appear on Live Data → Diag → Alternator.</p>
-        <p data-intro="c4"><strong>C4 — Ripple Measurements</strong> is one measurement engine with two collectors: the RPM ripple table is filled <em>only</em> by the commissioning game, and the ripple-vs-current line on the Protections plots is filled <em>only</em> by Commissioning Step 7. These gates define what counts as a valid measurement for both. They are deliberately separate from C1/C2’s gates, so tuning them can never loosen fault-detector arming.</p>
-      </div>
-
-          <!-- Flat, pill-filtered knob cards (Protections pattern): each block tags the checkpoint(s)
-               it affects; the View pills show/hide by membership. Shared fast-channel cards carry C1 and C2. -->
-          <div class="checkpoint-param" data-checkpoints="c1 c2">
-            <div class="checkpoint-param-chips"><span class="checkpoint-tag c1">C1</span> <span class="checkpoint-tag c2">C2</span></div>
-<!-- Master on/off for the whole fast channel — shared by C1 and C2 -->
-      <div class="settings-card">
-        <div class="form-row">
-          <div class="form-label">Fast Current Channel (<span id="faEnabled_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master on/off for this whole diagnostic channel. Off stops sampling entirely — no map learning, no fault detection, no oscilloscope.</span></span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input id="faEnabled" name="faEnabled" type="number" value="" style="display:none;" />
-              <div class="cap-mode-toggle">
-                <button type="button" id="faEnabled_off" class="cap-mode-btn" onclick="faSegSet('faEnabled',0,this.closest('form'))">Off</button>
-                <button type="button" id="faEnabled_on" class="cap-mode-btn" onclick="faSegSet('faEnabled',1,this.closest('form'))">On</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
-          </div>
-
-          <div class="checkpoint-param" data-checkpoints="c1 c2">
-            <div class="checkpoint-param-chips"><span class="checkpoint-tag c1">C1</span> <span class="checkpoint-tag c2">C2</span></div>
-<!-- Steady-state gates + input range: these govern BOTH the C1 detector and the C2 map -->
-      <div class="settings-card">
-        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
-          <span style="font-size:14px; font-weight:600;">Steady-State Gates &amp; Input Range — feed both C1 and C2</span>
-        </div>
-        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">A capture window counts only while output current holds steady, judged on a smoothed signal so the ripple being measured is not what is judged. These knobs and the input-range switching govern both consumers of the fast channel: the anomaly detector (C1) and the Resonance &amp; Ripple Map (C2). The map applies two further gates of its own — RPM margin and minimum tone amplitude, in the C2 section. The measured-ripple capture (C4) has fully separate gates.</div>
-
-        <div class="form-row">
-          <div class="form-label">Steady-State Current Drift Floor (A) (<span id="faAmpsDriftFloorA_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A window is discarded unless the smoothed output current drifts less than the larger of this floor or the slope % (below) across the window. The smoothing removes the ripple being measured, so the gate sees only slow drift, not the tones.</span></span>
-            <span class="sinfo" data-sinfo="faDrift" onclick="sinfoToggle(this)"></span>
-            <span id="faAmpsDriftFloorA_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak drift: —</span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="faAmpsDriftFloorA" type="number" step="0.5" min="0" max="50" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Steady-State Current Drift Slope (%) (<span id="faAmpsDriftPct_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, as a percent of the window's mean current. Same smoothed current; the gate allows whichever is larger — this percentage or the fixed floor.</span></span>
-            <span class="sinfo" data-sinfo="faDrift" onclick="sinfoToggle(this)"></span>
-            <span id="faAmpsDriftPct_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak drift: —</span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="faAmpsDriftPct" type="number" step="0.5" min="0" max="50" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Range Switch-Up Current (A) (<span id="faAttenUpAmps_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Above this the channel drops to its less-sensitive 12 dB input range so high-current ripple doesn't clip; below the Switch-Down value it returns to the sensitive 6 dB range. The gap between the two prevents chattering at the threshold.</span></span>
-            <span class="sinfo" data-sinfo="faAtten" onclick="sinfoToggle(this)"></span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="faAttenUpAmps" type="number" step="1" min="0" max="500" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Range Switch-Down Current (A) (<span id="faAttenDownAmps_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Below this the channel returns to its sensitive 6 dB input range. The gap between Up and Down prevents chattering near the threshold.</span></span>
-            <span class="sinfo" data-sinfo="faAtten" onclick="sinfoToggle(this)"></span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="faAttenDownAmps" type="number" step="1" min="0" max="500" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        
-      </div>
-          </div>
-
-          <div class="checkpoint-param" data-checkpoints="c1">
-            <div class="checkpoint-param-chips"><span class="checkpoint-tag c1">C1</span></div>
-<!-- Fault alarm — C1’s only knob beyond the shared gates -->
-      <div class="settings-card">
-        <div class="form-row">
-          <div class="form-label">Sound Alarm on Fault (<span id="faAlarmEnable_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Recommend leaving this off — the fault alarm is still unproven and in development.</span></span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input id="faAlarmEnable" name="faAlarmEnable" type="number" value="" style="display:none;" />
-              <div class="cap-mode-toggle">
-                <button type="button" id="faAlarmEnable_off" class="cap-mode-btn" onclick="faSegSet('faAlarmEnable',0,this.closest('form'))">Off</button>
-                <button type="button" id="faAlarmEnable_on" class="cap-mode-btn" onclick="faSegSet('faAlarmEnable',1,this.closest('form'))">On</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
-          </div>
-
-          <div class="checkpoint-param" data-checkpoints="c2">
-            <div class="checkpoint-param-chips"><span class="checkpoint-tag c2">C2</span></div>
-<!-- Map-only admission gates (the C1 detector ignores RPM, so these never affect it) -->
-      <div class="settings-card">
-        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
-          <span style="font-size:14px; font-weight:600;">Map-Only Gates</span>
-        </div>
-
-        <div class="form-row">
-          <div class="form-label">Steady-State RPM Margin (RPM) (<span id="faRpmEdgeMargin_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A 0.5-second window is discarded unless the smoothed RPM stays at least this many RPM inside one internal 50-RPM speed bin (not the wide flipbook bands) for the whole window. Unlike the drift readouts, here bigger is stricter: the "10s worst margin" line must be at or above this value to pass, so a small number (engine sitting right on a bin edge) is a fail. Governs the Resonance &amp; Ripple Map ONLY — the anomaly detector's arming ignores RPM entirely.</span></span>
-            <span class="sinfo" data-sinfo="faRpmEdgeMargin" onclick="sinfoToggle(this)"></span>
-            <span id="faRpmEdgeMargin_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s worst margin: —</span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="faRpmEdgeMargin" type="number" step="0.5" min="0" max="50" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        
-        <hr />
-
-        <div class="form-row">
-          <div class="form-label">Minimum Tone Amplitude (A) (<span id="faPeakMinA_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to each detected tone's amplitude. Tones quieter than this never enter the Resonance &amp; Ripple Map. Raise to log only strong tones; lower to capture faint ones.</span></span>
-            <span class="sinfo" data-sinfo="faPeakMinA" onclick="sinfoToggle(this)"></span>
-            <span id="faPeakMinA_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak tone: —</span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="faPeakMinA" type="number" step="0.05" min="0" max="20" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-      </div>
-          </div>
-
-          <div class="checkpoint-param" data-checkpoints="c3">
-            <div class="checkpoint-param-chips"><span class="checkpoint-tag c3">C3</span> <span class="checkpoint-param-title">Charging System Health — Gates &amp; Tuning</span></div>
-            <div class="settings-card">
-<!-- Alternator Health — Steady-State Tuning (settings) -->
-              <div class="tuning-section">
-                <div style="font-size:12px;color:var(--text-muted);margin:6px 0;">
-                  All steady-state definitions are tunable (build it, then tune live). Values echo live.
-                </div>
-                <p class="card-group-title" style="margin:12px 0 4px;">Steady-State Detection</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How stable a reading must hold, and for how long, before a point is recordable. Bands are judged on smoothed signals (see the smoothing filter below), so size them for real operating-point movement, not sensor noise.</div>
-                <div class="form-row">
-                  <div class="form-label"><span>RPM band (RPM) (<span id="altRpmTol_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandRpm" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altRpmTol" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>RPM steady time (s) (<span id="altRpmSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandRpm" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altRpmSec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Field-duty band (%) (<span id="altDutyTolPct_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandDuty" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altDutyTolPct" type="number" step="0.1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Field-duty steady time (s) (<span id="altDutySec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandDuty" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altDutySec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Bus-voltage band (V) (<span id="altVbusTol_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandVbus" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altVbusTol" type="number" step="0.001" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Bus-voltage steady time (s) (<span id="altVbusSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandVbus" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altVbusSec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Temperature band (<span class="temp-unit-label">°F</span>) (<span id="altThermDegF_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandTemp" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'altThermDegF',true)">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altThermDegF" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Temperature steady time, full (s) (<span id="altThermSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long alternator temperature must hold steady before a run counts as a full steady run — the points that get the orange ring and that update the reference surface and the engine-hours trend. The This Session plot automatically uses half this time for its lighter "brief point" gate, so there is only one number to set.</span></span>
-                    <span class="sinfo" data-sinfo="altBandTemp" onclick="sinfoToggle(this)"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altThermSec" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Trend bucket length (s) (<span id="altTrendBuckSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Engine-seconds per point on the % vs Engine-Hours trend. 3600 = one point per engine-hour (production). Set 600 to see points fill in every 10 minutes for testing.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altTrendBuckSec" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Trend sample spacing (s) (<span id="altTrendFeedSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Minimum spacing between full steady-run samples that feed a trend bucket. Throttles a long steady run so it contributes several spread-out samples rather than a flood.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altTrendFeedSec" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Trend min samples per bucket (<span id="altTrendMinSamp_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A trend bucket needs at least this many full steady-run samples before it commits a point. A sparser bucket shows a gap instead of a single-reading artifact.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altTrendMinSamp" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Output-amps band (% of reading) (<span id="altAmpsTolPct_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The alternator output itself must also hold steady before a point is recorded. The band scales with the reading so one setting works at low float current and full bulk current; the floor below takes over at low output.</span></span>
-                    <span class="sinfo" data-sinfo="altBandAmps" onclick="sinfoToggle(this)"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altAmpsTolPct" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Output-amps band floor (A) (<span id="altAmpsFloorA_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandAmps" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altAmpsFloorA" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Output-amps steady time (s) (<span id="altAmpsSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandAmps" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altAmpsSec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Signal smoothing filter (s) (<span id="altEmaSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Strips control-loop dither and sensor jitter so the bands above can stay tight enough to reject real transients. 0 = off. Heavier than about 1 second starts hiding real movement.</span></span>
-                    <span class="sinfo" data-sinfo="altEmaSec" onclick="sinfoToggle(this)"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altEmaSec" type="number" step="0.1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Minimum steady-run length (s) (<span id="altMinRunSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altMinRun" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altMinRunSec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <p class="card-group-title" style="margin:12px 0 4px;">Point Admission</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Minimum output before a steady point is admitted at all.</div>
-                <div class="form-row">
-                  <div class="form-label"><span>Admission: min amps (A) (<span id="altMinAmps_echo">?</span>):</span><span class="sinfo" data-sinfo="altAdmit" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altMinAmps" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Admission: min duty (%) (<span id="altMinDuty_echo">?</span>):</span><span class="sinfo" data-sinfo="altAdmit" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altMinDuty" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <p class="card-group-title" style="margin:12px 0 4px;">Curve Fitting</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How the best-ever surface is built from recorded points.</div>
-                <div class="form-row">
-                  <div class="form-label"><span>Safety margin (A) (<span id="altSafetyMargin_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altSafetyMargin" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Interpolation power (IDW) (<span id="altIdwPower_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altIdwPower" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Reference validity radius (<span id="altRefRadius_echo">?</span>):</span>
-                    <span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How close (in normalized axis units) the nearest recorded point must be for the health % to be trusted. Operating farther than this from all recorded points shows "no reference" instead of comparing against a guess, and the trend skips those readings. Larger = more coverage from sparse data, less honest far from support.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altRefRadius" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Prune neighbors (k, cloud) (<span id="altPruneK_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altPruneK" type="number" step="1" min="5" max="20" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Local fit stiffness (<span id="altRidgeFrac_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How strongly the local trend fit (the one-per-second health comparison) is held flat when the recorded points around the live point line up poorly. Higher = steadier but less responsive to real local slope; lower = follows the records more exactly but can wobble where data is thin. Default 0.10.</span></span>
-                    <span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altRidgeFrac" type="number" step="0.05" min="0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Learning-state risk threshold (<span id="altRiskThresh_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much could-be-wrong (as a fraction of the predicted output) is tolerated before the panel says "Learning this operating region" instead of showing a %. Raise to show numbers in more places at the cost of less trustworthy ones; lower to be stricter. Default 0.15 — values 0.10–0.20 classified the validation data identically.</span></span>
-                    <span class="sinfo" data-sinfo="altFit" onclick="sinfoToggle(this)"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altRiskThresh" type="number" step="0.05" min="0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <p class="card-group-title" style="margin:12px 0 4px;">High-Field Alert</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Independent safety net: flags low output despite high field drive, even where the health gauge is still learning.</div>
-                <div class="form-row">
-                  <div class="form-label"><span>Alert: field drive at least (% of Max Field) (<span id="altHiFieldPct_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altHiFieldPct" type="number" step="5" min="0" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Alert: output at or below (A) (<span id="altLowOutAmps_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altLowOutAmps" type="number" step="1" min="0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Alert: must persist (s) (<span id="altHiFieldSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField" onclick="sinfoToggle(this)"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altHiFieldSec" type="number" step="5" min="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <p class="card-group-title" style="margin:12px 0 4px;">Reference &amp; Data</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Choose which reference to grade against, pause or continue learning, back it up, simulate, or reset.</div>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Reference source (<span id="alt-mode-label">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Which reference surface grades the live % and the trend. "My History" is what this device learned. "Uploaded File" is a borrowed surface from Load CSV — selecting it defaults Pause ON, but you can Continue to keep learning My History while graded against the uploaded one. Learning never modifies an uploaded surface.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <div class="cap-mode-toggle">
-                      <button type="button" id="alt-src-hist" class="cap-mode-btn" onclick="altSetSource(0)">My History</button>
-                      <button type="button" id="alt-src-file" class="cap-mode-btn" onclick="altSetSource(1)">Uploaded File</button>
-                    </div>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Learning</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Pause / Continue learning into My History. Independent of the reference source — you can pause learning and still grade against either surface. Live display and the trend keep updating either way.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <div class="cap-mode-toggle">
-                      <button type="button" id="alt-learn-on" class="cap-mode-btn" onclick="altSetPaused(0)">Continue Learning</button>
-                      <button type="button" id="alt-learn-off" class="cap-mode-btn" onclick="altSetPaused(1)">Pause Learning</button>
-                    </div>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Simulator</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Injects synthetic operating points for bench testing without a running engine, so the curve fills and the health trend visibly declines. Leave off for real use; simulated data is not saved.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <div class="cap-mode-toggle">
-                      <button type="button" id="alt-sim-off" class="cap-mode-btn" onclick="altSetSim(0)">Off</button>
-                      <button type="button" id="alt-sim-on" class="cap-mode-btn" onclick="altSetSim(1)">On</button>
-                    </div>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Debug data</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Downloads a single CSV with everything useful for debugging this subsystem: all parameters, live/gate state, both reference surfaces (My History + Uploaded), the trend buckets (committed + in-progress), and the engine-hour frame. Hand it to an AI or engineer to diagnose behaviour.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <input type="button" value="Download Debug CSV" class="btn-secondary" onclick="altDownloadDebug()" />
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Reset / Start Over</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Clears the learned reference surface (My History), the entire % vs Engine-Hours trend (committed buckets AND the current partial hour), and the session stats, then restarts the engine-hour axis at zero and reverts the reference source to My History. Your tuning settings are kept. Do this after replacing the alternator, regulator, or drive belt. Cannot be undone.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <input type="button" value="Reset / Start Over" class="btn-danger"
-                      onclick="if(!currentAdminPassword){xAlert('Please unlock settings first');return;} xConfirm('Clear My History, the whole % vs Engine-Hours trend (including the current partial hour) and the session stats, restart the engine-hour axis at 0, and revert the source to My History? Tuning settings are kept. Do this after replacing the alternator, regulator, or belt. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}})" />
-                  </div>
-                </div>
-                <hr>
-              </div><!-- END Alternator Health Tuning -->
-            </div>
-          </div>
-
-          <div class="checkpoint-param" data-checkpoints="c4">
-            <div class="checkpoint-param-chips"><span class="checkpoint-tag c4">C4</span></div>
-<div class="settings-card">
-        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
-          <span style="font-size:14px; font-weight:600;">Ripple Measurements</span>
-        </div>
-        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">One measurement engine, two collectors: the <strong>RPM ripple table</strong> is filled only by the commissioning game, and the <strong>ripple-vs-current line</strong> on the Protections plots only by Commissioning Step 7. These gates define what counts as a valid measurement for both. A measurement counts only if conditions were <strong>stationary</strong>: the window's two halves must have (nearly) the same average — a throttle or load transient walks the average in one direction and is rejected, while a rough-but-repeating condition (a hunting idle, cycling loads) swings hard yet averages the same in both halves and is admitted. This is deliberate: a "dirty speed" is exactly what the over-current protections experience, so it must make it into the table. Each gate shows its worst value over the last 10 s (green = passing). Never relaxed during commissioning: a stationary number cannot be measured while ramping — the wizard's instructed pauses are when measurements admit.</div>
-
-        <div class="form-row">
-          <div class="form-label">Capture Window (ms) (<span id="ripWinMs_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long each ripple measurement lasts. Each HALF of the window must hold at least one full cycle of the slowest disturbance you care about — a hunting idle wanders with a ~1–2 second period, hence the 2000 ms default; shorter windows see slow hunt as drift and reject or under-read it. <strong>Changing this changes the measured quantity itself</strong> — map cells and the current-check fit captured under a different window length are not comparable. After changing it: clear the map and re-run the commissioning current check.</span></span>
-            <span class="sinfo" data-sinfo="ripWinMs" onclick="sinfoToggle(this)"></span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="ripWinMs" type="number" step="100" min="500" max="4000" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Current Drift Floor (A) (<span id="ripDriftFloorA_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The shared tolerance floor, used two ways. (1) Command gate: the current <em>command</em> must not travel more than the larger of this floor or the slope % below (rejects deliberate ramps — test steps, warm-up, mode glides). (2) Stationarity gates: each sensor's two half-window averages must agree within the larger of this floor or a quarter of that window's own full swing — self-scaling, so a rough-but-repeating signal gets proportionally more tolerance while a one-way ramp is still rejected. Each line shows (worst value − its limit) over the last 10 s: at or below zero (green) = passing. Separate from the C1/C2 drift knobs above, so tuning capture admission never loosens fault-detector arming.</span></span>
-            <span class="sinfo" data-sinfo="ripDriftFloorA" onclick="sinfoToggle(this)"></span>
-            <span id="ripAltGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">alt mean-shift beyond limit (larger of Floor / ¼ window swing), 10s worst, ≤0 passes: —</span>
-            <span id="ripBattGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">batt mean-shift beyond limit (larger of Floor / ¼ window swing), 10s worst, ≤0 passes: —</span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="ripDriftFloorA" type="number" step="0.5" min="0" max="50" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Current Drift Slope (%) (<span id="ripDriftPct_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, for the <em>command</em> gate only: the command may travel up to this percent of the window's mean alternator current (or the fixed floor, whichever is larger). The sensor gates don't use it — their tolerance self-scales on each window's own measured swing (see the floor's tooltip).</span></span>
-            <span class="sinfo" data-sinfo="ripDriftPct" onclick="sinfoToggle(this)"></span>
-            <span id="ripCmdGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">command travel beyond limit (larger of Floor / Slope % × mean), 10s worst, ≤0 passes: —</span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="ripDriftPct" type="number" step="0.5" min="0" max="50" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Steady-State RPM:
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The engine speed must also be stationary across the window — same two-half test as the currents. Its limit is automatic — the larger of 10 RPM or a quarter of the window's own RPM swing — so there is nothing to set. The readout shows (shift − limit): a negative number means that many RPM inside the limit.</span></span>
-            <span id="ripRpmGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">RPM mean-shift beyond limit (larger of 10 RPM / ¼ window swing), 10s worst, ≤0 passes: —</span>
-          </div>
-          <div class="form-input"></div>
-        </div>
-      </div>
-          </div>
-        </div>
-
         <!-- System Settings Sub-tab -->
         <div id="settings-system" class="sub-tab-content">
           <div class="settings-card">
@@ -7275,13 +7253,15 @@
                   <span>RPM Scaling Factor (<span id="RPMScalingFactor_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
                     ℹ️
-                    <span class="tooltip-box">Used to convert measured stator frequency (Hz) into RPM. Adjust until RPM
-                      in
-                      this App matches your tachometer. Decent guess = 1100.</span>
+                    <span class="tooltip-box">Scales the tachometer signal into engine RPM. Adjust until the RPM shown
+                      here matches your engine's tachometer. Changing it erases every table and record measured against
+                      the old RPM axis, on the device and in the cloud, and requires re-commissioning. The alternator
+                      must be off.</span>
                   </span>
                 </div>
                 <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="rpmScaleFormSubmit(this); return false;">
                     <input type="hidden" name="password" class="password_field">
                     <input name="RPMScalingFactor" type="number" step="1" min="1" max="1000000" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -7572,11 +7552,6 @@
                 Configuration Backup &amp; Sharing</summary>
 
               <div class="form-row">
-                <div class="form-label">Save this regulator's complete configuration to a file:
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Saves
-                    every setting this regulator has — charge profile, tuning, RPM and fuel tables, and per-install
-                    hardware (sensor type, shunt resistance, polarity) and calibration. What to keep is decided when
-                    the file is loaded onto a regulator, not here.</span></span></div>
                 <div class="form-input">
                   <input type="button" value="Export Config from Regulator" class="btn-primary"
                     onclick="exportConfigDownload()" />
@@ -7586,13 +7561,7 @@
               <hr />
 
               <div class="form-row">
-                <div class="form-label">Apply a configuration file to this regulator:
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Shows
-                    every setting the file would change before anything is written — nothing applies until you
-                    approve. Settings the file does not contain keep their current values. The regulator reboots to
-                    apply; reconnect after about 30 seconds.</span></span></div>
-                <div class="form-input" style="flex-wrap: wrap; gap: 6px; justify-content: flex-end;">
-                  <label style="flex-basis: 100%; text-align: right;"><input type="checkbox" id="configIncludeHardware" /> Also apply this file's hardware settings (sensor type, shunt resistance, polarity) — identical hardware only</label>
+                <div class="form-input" style="flex-wrap: wrap; gap: 6px;">
                   <input type="file" id="importConfigFile" accept="application/json,.json" />
                   <input type="button" value="Send Config to Regulator" class="btn-secondary"
                     onclick="importConfigFromFile()" />
@@ -7602,12 +7571,7 @@
               <hr />
 
               <div class="form-row">
-                <div class="form-label">Share this configuration to the community library:
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Uploads
-                    this regulator's full configuration for review. What ends up publicly shared is decided during
-                    review, not on the boat. Submissions are reviewed before appearing publicly. Requires cloud
-                    registration.</span></span></div>
-                <div class="form-input" style="flex-wrap: wrap; gap: 6px; justify-content: flex-end;">
+                <div class="form-input" style="flex-wrap: wrap; gap: 6px;">
                   <input type="text" id="shareConfigName" placeholder="Name" />
                   <input type="button" value="Share to Library" class="btn-secondary"
                     onclick="shareConfigToLibrary()" />
@@ -8828,7 +8792,6 @@
             <input type="file" id="perf-load-file" accept=".csv,text/csv,text/plain" style="display:none;" onchange="perfUploadCsvFile(this)" />
           </div>
         </div>
-        <hr />
       </div>
 
       <!-- Quick View: compact at-a-glance tiles directly under the polar. Each reuses the live
@@ -11801,8 +11764,8 @@
           <div style="max-width:560px;margin:0 auto;font-size:13px;color:#555;line-height:1.55;">
             <p>This subtab is the health station for the charging system — the alternator, its
               rectifier and belt drive, and the control loops driving them. Everything here is
-              results; the detection gates and tuning knobs live in Setup → Diag (link at the
-              bottom of the page).</p>
+              results; the detection gates and tuning knobs live in Setup → Alternator → Diag.</p>
+            <p><a class="xnav-link" onclick="goToDiagSettings()">Shortcut to the Diag gates &amp; tuning knobs <span class="xnav-arrow">&rarr;</span></a></p>
             <p><b>Charging System Health</b> grades today's alternator output against the best
               it's ever done under the same conditions. The engine-hours trend is the plot to
               watch: a healthy system holds roughly flat in the mid-90s+, and a steady downward
@@ -11832,7 +11795,7 @@
               the engine has spent time at more speeds and loads.</p>
             <p><b>Replaced the alternator, regulator, or belt?</b> Reset the learned baselines so
               old data doesn't grade the new hardware: Start Over (health record book, in Setup →
-              Diag), Re-baseline (reference pages), and Clear Map (ripple map).</p>
+              Alternator → Diag), Re-baseline (reference pages), and Clear Map (ripple map).</p>
           </div>
         </div>
       </details>
@@ -12506,10 +12469,9 @@
           </div>
         </div>
 
-        <hr />
-
         <!-- Update Status -->
         <div id="update-status" style="display: none;">
+          <hr />
           <div class="form-row">
             <div class="form-label">Update Status:</div>
             <div class="form-value">
@@ -12679,9 +12641,7 @@
     <span id="bulkVoltageHoldMs_echo" style="display:none;">0</span>
     <span id="capLimitMode_echo" style="display:none;">0</span>
     <span id="BatteryV_rawID" style="display:none"></span>
-<span id="MeasuredAmps_filtered_ID" style="display:none"></span>
-<span id="InputFilterTC_ID" style="display:none"></span>   <!-- This one is a total mess to clean at some point! -->
-
+<span id="pidAltPV_ID" style="display:none"></span>
     <!-- Input id's are for User input aka Settings
  Form submission - values that get sent to the server
  Two-way data binding - both read and write -->
@@ -13157,7 +13117,7 @@
       <div id="commprep-body" style="padding:14px 16px; overflow-y:auto; flex:1; min-height:0;"></div>
       <div style="padding:12px 16px; border-top:1px solid #333; display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
         <button onclick="commPrepFinish(false)" style="background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">I'll do this later</button>
-        <button onclick="commPrepFinish(true)" style="background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; border:none; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Start Commissioning →</button>
+        <button id="commprep-start-btn" onclick="commPrepFinish(true)" style="background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Start Commissioning →</button>
       </div>
     </div>
   </div><!-- END commprep-modal-overlay -->

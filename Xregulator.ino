@@ -171,7 +171,8 @@ enum HttpsRequestType {
   HTTPS_CHECK_FORCED_UPDATE,
   HTTPS_CLEAR_FORCED_UPDATE,
   HTTPS_GET_PENDING_CONFIG,    // admin config push: fetch a queued config at boot
-  HTTPS_CLEAR_PENDING_CONFIG   // clear the queued config after applying it
+  HTTPS_CLEAR_PENDING_CONFIG,  // clear the queued config after applying it
+  HTTPS_RESET_RPM_AXIS         // tach rescaled: delete the device's RPM-indexed cloud data
 };
 
 struct HttpsRequest {
@@ -908,20 +909,19 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // α = dt / (TC + dt), computed per-sample from actual elapsed time so
 // variable loop cadence is handled correctly without a fixed assumption.
 // _filtered variables are the smoothed outputs; originals are unchanged.
-// Protections continue to read originals. Control loops will migrate to
-// _filtered in a subsequent pass via getBatteryVoltage() / getTargetAmps().
+// Protections read the RAW originals — iExcess runs its own IExcessTau EMA on the
+// excess (measured − command), never on a _filtered signal. Each _filtered signal
+// carries its own TC so CC PID and CV loop are tuned independently.
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
-float InputFilterTC = 37.0f;       // ms — iExcess EMA TC, NVS-backed (τ/3 at commissioning plant τ=112ms)
 float OutputPIDFilterTC = 37.0f;   // ms — Output Current PID EMA TC, NVS-backed (τ/3 at commissioning plant τ=112ms)
 float VoltageFilterTC = 112.0f;    // ms — IBV EMA TC for CV voltage loop, NVS-backed (full plant τ at commissioning, τ=112ms)
-float MeasuredAmps_filtered = 0.0f;  // iExcess EMA signal
 float g_pidI_filtered = 0.0f;        // Output Current PID EMA signal
 float IBV_filtered = 0.0f;           // EMA of INA228 bus voltage — used by getFiltV()
 
 // ── SystemID — plant delay measurement ───────────────────────────────────
 // Step test: baseline → 3× (duty up / duty down) → post-process.
 // Samples stored in PSRAM. Buffer allocated on first test run, never freed.
-// Results populate the JS popup and optionally update InputFilterTC in flash.
+// Results populate the JS popup and optionally update the current-loop and voltage filter TCs in flash.
 // Legal in any SYS_MODE_AUTO state (bulk, absorption, float, target voltage).
 // Manual mode is banned: duty is locked to ManualDutyTarget so the test's duty commands are silently ignored.
 // Note: voltageControlActive = !inIdleStage, so it is true even in bulk — do NOT gate on !voltageControlActive.
@@ -940,6 +940,7 @@ uint8_t systemIDSineCycles    = 2;     // analysed cycles per frequency (1 settl
 // re-fit when the plant changes (alternator, belt, field wiring).
 uint16_t systemIDPlantTauMs   = 112;   // ms — default from the 2026-07-03 commissioning plant fit; overwritten by each fit
 #define SYSID_SINE_NPOINTS 10          // log-spaced sweep points
+#define SYSID_STEP_HOLD_MS 5000        // ms — fixed step-test per-phase dwell; sized to plant settling (several plant τ)
 struct SysIDBodePoint { float freqHz; float gainApPct; float phaseDeg; };  // gain = A output per %duty
 SysIDBodePoint systemIDBode[SYSID_SINE_NPOINTS] = {};
 uint8_t systemIDBodeCount = 0;         // valid Bode points after a sine run (served by /sysidbode)
@@ -3121,8 +3122,6 @@ struct CVTuningRecord {
   float iExcessKBleed;
   // Load dump
   float loadDumpDtThresh, loadDumpDtThresh1, loadDumpDtThresh3;
-  // Filter
-  float inputFilterTC;
   // Test setup
   float waveAmplitudeV;
   uint16_t wavePeriodSec;
@@ -3209,11 +3208,15 @@ float pidError = 0.0f;  // PID error for display (A)
 // recomputeCcGains() bakes in ×(12/BATTERY_VOLTAGE) to get the duty-space gains the loop actually
 // applies (PidK*_active), because field current per duty-% scales with bus voltage. Mirror of the CV
 // loop's recomputeCvGains(). Do NOT scale these per-class by hand — the normalization does it.
-float PidKp = 0.827f;  // 12V-equivalent proportional gain (2026-07-03 commissioning plant fit: τ 112ms, IMC seed)
-float PidKi = 7.357f;  // 12V-equivalent integral gain (2026-07-03 commissioning plant fit)
+// Seed gains are the 2026-07-03 plant fit (τ 112ms, IMC) de-rated 30%: that fit is one alternator at one
+// operating point, and a fresh/uncommissioned install on a different plant oscillates at full gain. Ki/Kp
+// ratio (integral zero, 8.9 rad/s) is preserved — this is loop gain only, not a reshape. Commissioning
+// overwrites both.
+float PidKp = 0.579f;  // 12V-equivalent proportional gain
+float PidKi = 5.150f;  // 12V-equivalent integral gain
 float PidKd = 0.01f;  // 12V-equivalent derivative gain
-volatile float PidKp_active = 0.812f;  // DERIVED duty-space gain the PID uses (PidKp × 12/BATTERY_VOLTAGE). Set by recomputeCcGains().
-volatile float PidKi_active = 7.884f;  // DERIVED duty-space Ki.
+volatile float PidKp_active = 0.579f;  // DERIVED duty-space gain the PID uses (PidKp × 12/BATTERY_VOLTAGE). Set by recomputeCcGains().
+volatile float PidKi_active = 5.150f;  // DERIVED duty-space Ki.
 volatile float PidKd_active = 0.01f;  // DERIVED duty-space Kd.
 // --- Voltage (CV) PID ---
 // ── CV gain-mode system (Auto λ-based vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
@@ -3221,7 +3224,7 @@ volatile float PidKd_active = 0.01f;  // DERIVED duty-space Kd.
 // them directly — it reads VoltageKp_active/VoltageKi_active, which recomputeCvGains() derives from the
 // selected mode and bakes the 12V-block normalization (×12/BATTERY_VOLTAGE) into.
 uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) — DEFAULT, so a fresh/never-commissioned
-                                  // device shows Manual 30/25; 1 = AUTO (measured-K_dc, see CV_AUTOTUNE_PLAN.md §E).
+                                  // device runs the seeded manual gains; 1 = AUTO (measured-K_dc, see CV_AUTOTUNE_PLAN.md §E).
                                   // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply.
 // cvLambdaMult's old CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged
 // (gains come from cvCrossover/ω_c).
@@ -3304,8 +3307,8 @@ float   cvTempDerateScale    = 1.0f;  // live multiplier recomputeCvGains() appl
 // CV loop AND the OV protections see the smooth value. 0 = instant for that direction. Hard-shutdown unaffected.
 uint8_t vTgtRampEnable = 1;       // master switch for the target slew (1=on, default). 0 = instant target,
                                   // byte-identical to pre-ramp behaviour; lets you A/B the limiter, incl. in CV tuning.
-float   vTgtRampUp   = 0.025f;    // V/s — max rate the target may RISE  (up-steps are loop-limited anyway)
-float   vTgtRampDn   = 0.025f;    // V/s — max rate the target may FALL  (the knob that prevents the OV trip)
+float   vTgtRampUp   = 0.050f;    // V/s — max rate the target may RISE  (up-steps are loop-limited anyway)
+float   vTgtRampDn   = 0.050f;    // V/s — max rate the target may FALL  (the knob that prevents the OV trip)
 volatile float VoltageKp_active = 8.5f;  // DERIVED pack-space Kp the loop uses (selected gain × 12/BATTERY_VOLTAGE). Set by recomputeCvGains().
 volatile float VoltageKi_active = 6.0f;  // DERIVED pack-space Ki the loop uses.
 volatile float VoltageKp = 8.5f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID); from commissioning CV plant fit (K20=32.2 mV/A, 12 V-equiv)
@@ -3318,7 +3321,7 @@ bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 // --- FastOV supervisor ---
 float KHard = 35.0f;  // A/V — OV cap slope (Group 1: Vpred > target+OvPredMarginV; Group 2: IBV > target+OvMeasMarginV)
-bool  OvGroup1Enable  = true;   // Group 1 — prediction-based cap enable (Vpred > target + OvPredMarginV)
+bool  OvGroup1Enable  = false;  // Group 1 — prediction-based cap (Vpred > target + OvPredMarginV). OFF by default: its predictive lead amplifies belt ripple 1:1 with the extra margin it buys (CV_RECOVERY_AND_OV_HANDOFF.md). Provisioned devices keep their NVS value.
 bool  OvGroup2Enable  = true;   // Group 2 — measured-voltage threshold enable (IBV > target + OvMeasMarginV)
 int   OutputPIDSigSrc = 0;      // Output current PID — 0=EMA(TC), 1=MA(N), 2=Raw
 int   OutputPIDMA_N   = 2;      // Output current PID — MA window size (1–10 samples)
@@ -3400,6 +3403,8 @@ volatile bool pendingSaveSysidSweepLog = false;
 volatile bool pendingResetAlternatorHealth = false;
 volatile bool pendingResetBoatPerformance = false;
 volatile bool pendingClearOverheatHistory = false;
+volatile bool pendingRpmAxisWipe = false;  // /get?RPMScalingFactor changed value → local wipes run on Core 1
+volatile bool rpmAxisWipePending = false;  // NK_RpmAxisWipePend: cloud half still owed; suppresses front sync
 volatile bool pendingSaveUserTableEdits = false;
 volatile bool pendingSaveVesselInfo = false;
 bool pendingShutdownFlush = false;     // set on ignition-off edge; cleared after full flush
@@ -3612,6 +3617,9 @@ int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 300, 600, 1100, 1500, 2000, 2650, 
 // above this ceiling. Factory reset restores defaultCapCurrentValues.
 float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 0, 70, 70, 70, 70, 70, 70, 70, 70, 70 };
 float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 0, 70, 70, 70, 70, 70, 70, 70, 70, 70 };
+// Low charge-rate factory default, as a fraction of the Normal cap table. Seeds capTableLo
+// and is the fallback whenever that blob is missing; a user-edited Low table overrides it.
+#define LOW_MODE_CAP_FRACTION 0.5f
 
 // ===== CAP POWER TABLE =====
 // Alternative cap expressed in kW instead of amps (active only when capLimitMode=1).
@@ -3678,9 +3686,9 @@ void kneeLearnResetDefaults();
 String kneeLearnStateJson();
 
 // Config Sharing (8_functions.ino) — export/import the cloneable settings set
-String manifestConfigObject(bool includeHardware);
-String exportConfigJson(bool includeHardware);
-int applyImportConfig(const char *body, bool includeHardware);
+String manifestConfigObject();
+String exportConfigJson();
+int applyImportConfig(const char *body);
 int doCloudPOST(const char *endpointPath, const char *payload, char *responseBuf, size_t responseBufSize);  // 3_functions.ino — lean raw-TLS POST
 
 // Admin config push (4_functions.ino) — boot-time pull of a cloud-queued config
@@ -3958,7 +3966,6 @@ struct PidLogEntry {
   float voltageKd;  // reserved — always 0.0 (no CV D term)
   // ── Filtered signals ─────────────────────────────────────────────
   float battV_filt;  // IBV
-  float iMeas_filt;  // MeasuredAmps_filtered
   // ── Protection flags & signals ───────────────────────────────────────────
   float dBcur_dt;    // g_dBcur_dt (A/s) — battery current derivative for load dump
   float battI;       // getBatteryCurrent() (A) — INA228 or Victron
@@ -4010,7 +4017,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 // CV / Voltage Tuner Log
 // Logs every CH1 sample (fresh CH1 arrives 5–25ms apart, assume ~30ms) — no internal rate limiter.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
-// 51 bytes/entry × 6000 entries = 306 KB PSRAM → ~28 sec at full rate.
+// 53 bytes/entry × 6000 entries = 318 KB PSRAM → ~28 sec at full rate.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
@@ -4035,24 +4042,26 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //  28      flags            —          see bit definitions below
 //  29      pad              —          zero
 //  30      rpm              raw        RPM, clamped to int16 range
-//  32      battV_filt_x100  ×100       IBV (raw battery voltage)
-//  34      iMeas_filt_x10   ×10        MeasuredAmps_filtered (EMA)
-//  36      ch1IntervalMs    raw ms     last CH1 inter-sample gap
-//  38      cvDSlope_x10000  ×10000     cvDSlope (500ms backward diff on filtered V)
-//  40      battI_x10        ×10        getBatteryCurrent() — INA228 or Victron
-//  42      dBcur_dt_Aps     raw A/s    g_dBcur_dt clamped to int16
-//  44      voltLoopIntervalMs  raw ms  actual voltage loop interval when fired this tick; 0 if not fired
-//  46      inaIntervalMs       raw ms  ina_last_ms at log time — INA228 read freshness
-//  48      slopeBleedAmps_x1000 ×1000  cv_I drain applied this voltage loop tick (A×1000); 0 on non-VL ticks
+//  32      battV_filt_x100  ×100       IBV_filtered (display EMA, VoltageFilterTC)
+//  34      ch1IntervalMs    raw ms     last CH1 inter-sample gap
+//  36      cvDSlope_x10000  ×10000     cvDSlope (500ms backward diff on filtered V)
+//  38      battI_x10        ×10        getBatteryCurrent() — INA228 or Victron
+//  40      dBcur_dt_Aps     raw A/s    g_dBcur_dt clamped to int16
+//  42      voltLoopIntervalMs  raw ms  actual voltage loop interval when fired this tick; 0 if not fired
+//  44      inaIntervalMs       raw ms  ina_last_ms at log time — INA228 read freshness
+//  46      slopeBleedAmps_x1000 ×1000  cv_I drain applied this voltage loop tick (A×1000); 0 on non-VL ticks
+//  48      capReason            —      which layer set fastOvCap this tick
+//  49      ovFilt_x100          ×100   g_ovIbvFilt — Group 2's comparator input (plant-tau EMA of IBV)
 //
 //  flags bits:
 //    b0  fastOvActive    any OV clamp fired this tick
 //    b1  voltLoopFired   voltage PI ran this tick (100ms cadence)
 //    b2  cvActive        voltageControlActive
-//    b3  reserved
+//    b3  iExcessBulk     iExcess BULK sub-mode (current-control phase)
 //    b4  hardClamp       Group 1 (prediction cap) or Group 2 (voltage threshold) applied
 //    b5  iExcess         iExcess supervisor (Group 3 alternator or Group 4 battery) fired this tick
 //    b6  loadDumpActive  load dump feedforward active this tick
+//    b7  recovActive     post-protection recovery window (Icv ceiling + error cap engaged)
 
 
 
@@ -4071,11 +4080,10 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t spLimited;
   int16_t iMeas;
   int16_t duty;
-  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive b7=reserved
+  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive b7=recovActive
   uint8_t awState; // 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
   int16_t rpm;
-  int16_t battV_filt_x100;  // IBV × 100    (V)
-  int16_t iMeas_filt_x10;   // MeasuredAmps_filtered × 10 (A)
+  int16_t battV_filt_x100;  // IBV_filtered × 100 (V) — display EMA, VoltageFilterTC
   int16_t ch1IntervalMs;    // last CH1 inter-sample gap   (ms)
   int16_t cvDSlope_x10000;  // cvDSlope × 10000 (V/s × 10000 → ~0.0001 V/s per count)
   int16_t battI_x10;        // getBatteryCurrent() × 10 (A) — INA228 or Victron
@@ -4084,6 +4092,7 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t inaIntervalMs;           // ina_last_ms at log time — INA228 read freshness (ms)
   int16_t slopeBleedAmps_x1000;    // cv_I drain applied this voltage loop tick (A × 1000); 0 on non-VL ticks
   uint8_t capReason;               // which layer set fastOvCap this tick: 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk
+  int16_t ovFilt_x100;             // g_ovIbvFilt × 100 (V) — Group 2's comparator input (plant-tau EMA of IBV)
 };
 static_assert(sizeof(CvLogEntry) == 51, "CvLogEntry must be 51 bytes");
 
@@ -4126,6 +4135,8 @@ static uint32_t cvLogPausedAtMs = 0;
 float g_fastOvDvdt = 0.0f;        // filtered dV/dt (V/s), updated every IBV fresh tick
 float g_dBcur_dt = 0.0f;          // dBcur/dt (A/s), updated every INA228 read; positive = load dump
 float g_fastOvVpred = 0.0f;       // predicted voltage, updated when voltageControlActive
+float g_ovIbvFilt = 0.0f;         // Group 2 comparator input: plant-tau-derived EMA of IBV (see fast-OV block)
+bool g_cvRecovActive = false;     // post-protection recovery window state, exported for cvLog flags b7
 bool g_fastOvHardActive = false;  // K_HARD or hysteresis block fired this tick
 uint32_t g_fastOvHardCount = 0;
 
@@ -5271,11 +5282,24 @@ void loop() {
     } else {
       // Factory partition is skipped on purpose: a GPIO41 refuge boot must stay put, and the
       // transient factory boot mid-install would otherwise report the golden image's stale version.
+      // Also load-bearing: pre-0.0.3 golden images serve a factory_fs web bundle whose
+      // disableAllInputs() disables the forced-update confirm dialog itself — unclickable deadlock.
       Serial.println("OTA: Skipping one-time checks - not CLIENT mode, no WiFi/registration, or factory partition");
       otaCheckDone = true;
     }
   }
   // // === END OTA UPDATE ===
+
+  // Cloud half of the tach-rescale wipe. Retried until it returns 200; front sync stays suppressed
+  // meanwhile, so a device rescaled offline can never have its old-scaled front shipped back to it.
+  static unsigned long lastRpmAxisWipeTry = 0;
+  if (rpmAxisWipePending && currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED
+      && isRegistered && !core0Busy && WiFi.RSSI() >= -76
+      && (lastRpmAxisWipeTry == 0 || millis() - lastRpmAxisWipeTry > 60000)) {
+    lastRpmAxisWipeTry = millis();
+    HttpsRequest req = { .type = HTTPS_RESET_RPM_AXIS };
+    xQueueSend(httpsQueue, &req, 0);  // queue-full → next retry picks it up
+  }
 
   // === ADMIN CONFIG PUSH: one-shot pending-config check after the OTA checks ===
   // Boot-only, like the forced-update check. Fires once after otaCheckDone so it doesn't
@@ -5387,6 +5411,10 @@ void loop() {
     pendingSaveTuningSweepLog = false;
     saveTuningSweepLog();
   }
+  if (pendingRpmAxisWipe) {  // must run BEFORE the flags it raises, so they drain in this same pass
+    pendingRpmAxisWipe = false;
+    rpmAxisWipeExecute();
+  }
   if (pendingResetAlternatorHealth) {
     pendingResetAlternatorHealth = false;
     resetAlternatorHealth();
@@ -5481,6 +5509,10 @@ void loop() {
             if (pendingSaveTuningSweepLog) {
               pendingSaveTuningSweepLog = false;
               saveTuningSweepLog();
+            }
+            if (pendingRpmAxisWipe) {  // before the flags it raises, so they drain in this same pass
+              pendingRpmAxisWipe = false;
+              rpmAxisWipeExecute();
             }
             if (pendingResetAlternatorHealth) {
               pendingResetAlternatorHealth = false;
@@ -5768,7 +5800,9 @@ void loop() {
         }
 
         // Boat-performance aggregates → cloud (field-off gated; sim never uploads).
-        if (hardwarePresent == 1 && fieldOffSettled(10000) && millis() - lastBoatPerfUploadTime >= BOATPERF_UPLOAD_INTERVAL) {
+        // rpmAxisWipePending: the upload RESPONSE carries the cloud-rebuilt front, which would
+        // overwrite the local wipe with old-scaled points. Stay silent until the cloud wipe lands.
+        if (hardwarePresent == 1 && !rpmAxisWipePending && fieldOffSettled(10000) && millis() - lastBoatPerfUploadTime >= BOATPERF_UPLOAD_INTERVAL) {
           lastBoatPerfUploadTime = millis();
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -76) {
             HttpsRequest req = {};
@@ -5790,7 +5824,7 @@ void loop() {
         // Alt-health LEARNS with the field ON, but uploads (like all flash/HTTPS) are field-OFF:
         // records bank during charging and flush at the next field-off. buildAltHealthPayload
         // is dirty-gated, so this is a no-op when nothing new has been banked.
-        if (hardwarePresent == 1 && fieldOffSettled(10000) && millis() - lastAltHealthUploadTime >= ALTHEALTH_UPLOAD_INTERVAL) {
+        if (hardwarePresent == 1 && !rpmAxisWipePending && fieldOffSettled(10000) && millis() - lastAltHealthUploadTime >= ALTHEALTH_UPLOAD_INTERVAL) {
           lastAltHealthUploadTime = millis();
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -76) {
             HttpsRequest req = {};

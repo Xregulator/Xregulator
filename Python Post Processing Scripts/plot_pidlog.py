@@ -213,7 +213,7 @@ EXPECTED_HEADER = [
     "pidUnsatOutput", "pidOutput", "innerTermP", "innerTermI", "innerTermD",
     "dutyRequest", "dutyApplied", "enteringCV", "enteringTargetVoltageMode",
     "rpm", "measAmps", "innerKp", "innerKi", "innerKd", "voltageKp",
-    "voltageKi", "voltageKd", "battV_filt_V", "iMeas_filt_A", "flags",
+    "voltageKi", "voltageKd", "battV_filt_V", "flags",
     "ovFlags", "dBcur_dt", "battI", "ch1IntervalMs", "voltLoopIntervalMs",
     "inaIntervalMs", "mExcessEma", "iExcessThreshold",
 ]
@@ -251,15 +251,13 @@ if "ts_ms" not in df.columns:
     )
 
 # ── FIX 2: normalise column names ──────────────────────────────────────────
-# The firmware logs "battV_filt_V" and "iMeas_filt_A" but the rest of the
-# script uses the shorter aliases "battV_filt" and "iMeas_filt".
+# The firmware logs "battV_filt_V" but the rest of the
+# script uses the shorter alias "battV_filt".
 # Rename once here so every downstream reference works without change.
 _rename = {}
 for _col in list(df.columns):
     if _col == "battV_filt_V":
         _rename["battV_filt_V"] = "battV_filt"
-    elif _col == "iMeas_filt_A":
-        _rename["iMeas_filt_A"] = "iMeas_filt"
 if _rename:
     df.rename(columns=_rename, inplace=True)
     print(f"Renamed columns: {_rename}")
@@ -279,7 +277,7 @@ numeric_cols = [
     "innerKp", "innerKi", "innerKd",  # new log format — inner current-loop gains
     "voltageKp", "voltageKi", "voltageKd",  # new log format — outer voltage loop gains; voltageKd tombstoned (always 0, D term removed)
     "flags",
-    "battV_filt", "iMeas_filt",
+    "battV_filt",
     "ovFlags", "dBcur_dt", "battI",
     "ch1IntervalMs", "voltLoopIntervalMs", "inaIntervalMs",
     "mExcessEma", "iExcessThreshold",   # iExcess detector: averaged excess vs fire threshold E (A)
@@ -565,8 +563,6 @@ ax3a.plot(df["t_plot"], df["pidSetpoint"],
           color="#e91e63", lw=2.5, linestyle="--", label="pidSetpoint")
 ax3a.plot(df["t_plot"], df["pidInput"],
           color="#c62828", lw=2.2, label="pidInput (loop PV: battery current in §G amber spans, else alternator measAmps)")
-ax3a.plot(df["t_plot"], df["iMeas_filt"],
-          color="#00838f", lw=2.5, label="iMeas_filt (filtered)", alpha=0.90)
 ax3a.plot(df["t_plot"], df["pidOutput"],
           color="#2e7d32", lw=2.2, label="pidOutput (→ dutyReq)")
 ax3a.plot(df["t_plot"], df["pidUnsatOutput"],
@@ -637,8 +633,6 @@ ax4.fill_between(df["t_plot"], df["dutyRequest"], df["dutyApplied"],
 
 ax4b.plot(df["t_plot"], df["measAmps"],
           color="#c62828", lw=2.2, label="measAmps", alpha=0.9)
-ax4b.plot(df["t_plot"], df["iMeas_filt"],
-          color="#00838f", lw=2.5, linestyle="--", label="iMeas_filt", alpha=0.85)
 
 ax4.set_ylabel("Duty (%)")
 ax4b.set_ylabel("Measured Amps (A)", color="#c62828")

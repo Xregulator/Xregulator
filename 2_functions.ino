@@ -203,7 +203,6 @@ bool fsRemove(const char *path) {
 #define NK_IgnoreLearningDuringPenalty "IgnrLrnngDrngPn"
 #define NK_IgnoreRPM "IgnoreRPM"
 #define NK_IgnoreTemperature "IgnoreTemperatr"
-#define NK_InputFilterTC "InputFilterTC"
 #define NK_InstallId       "InstallId"       // random device identity; survives reflash, regenerated only when NVS is erased
 #define NK_InvertAltAmps "InvertAltAmps"
 #define NK_InvertBattAmps "InvertBattAmps"
@@ -261,6 +260,8 @@ bool fsRemove(const char *path) {
 #define NK_PidSampleDivisor "PidSampleDivisr"
 #define NK_PulleyRatio "PulleyRatio"
 #define NK_RPMScalingFactor "RPMScalingFactr"
+#define NK_RpmAxisWipePend "RpmAxWipePend"
+#define NK_RpmAxisWipeLoc "RpmAxWipeLoc"
 #define NK_R_fixed "R_fixed"
 #define NK_RebulkCurrent_A "RebulkCurrent_A"
 #define NK_RebulkVoltage "RebulkVoltage"
@@ -534,17 +535,17 @@ bool settingRemove(const char *key) {
 // restore. (Positional CSV, not JSON — dependency-free, matches the codebase ethos.)
 // Field count of the positional snapshot CSV. Bump when adding a field — commissionRestore accepts only an
 // exact match, so a snapshot from a different field set is refused rather than misread slot-for-slot.
-static const int COMMISSION_SNAP_FIELDS = 15;
+static const int COMMISSION_SNAP_FIELDS = 14;
 
 void commissionSnapshot() {
   char buf[180];
-  // 13th field = HiLow (charge-rate mode). Captured so an abort/reboot restores the mode too —
+  // 12th field = HiLow (charge-rate mode). Captured so an abort/reboot restores the mode too —
   // a commissioning run must never strand the user in the wrong mode.
-  // Fields 14/15 = IExcessBaseA/CcOffsetA — the affine trip-line the Thresholds step writes, so an
+  // Fields 13/14 = IExcessBaseA/CcOffsetA — the affine trip-line the Thresholds step writes, so an
   // abort reverts them too. Prep rewrites this snapshot at the start of every run.
   snprintf(buf, sizeof(buf),
-           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d,%.1f,%.1f",
-           PidKp, PidKi, InputFilterTC, OutputPIDFilterTC, VoltageFilterTC,
+           "%.4f,%.4f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d,%.1f,%.1f",
+           PidKp, PidKi, OutputPIDFilterTC, VoltageFilterTC,
            IExcessTau, IExcessFloorA, IExcessCeilA, IExcessFrac, IExcessFracBulk,
            SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow, IExcessBaseA, IExcessCcOffsetA);
   settingWrite(NK_commissionSnap, buf);
@@ -558,9 +559,9 @@ bool commissionRestore() {
   if (!settingExists(NK_commissionSnap)) return false;
   String s = settingRead(NK_commissionSnap);
   float v[COMMISSION_SNAP_FIELDS];
-  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
+  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
                  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
-                 &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13], &v[14]);
+                 &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13]);
   // Exact count only. A short read means a truncated/corrupt snapshot, or one written by a build with a
   // different field set — either way the slots no longer mean what this code assumes. Refuse rather than
   // half-apply values into live control parameters. Log here, not at the call sites: the boot path discards
@@ -573,26 +574,25 @@ bool commissionRestore() {
   }
   PidKp = v[0];                  settingWrite(NK_PidKp, String(PidKp, 4).c_str());
   PidKi = v[1];                  settingWrite(NK_PidKi, String(PidKi, 4).c_str());
-  InputFilterTC = v[2];          settingWrite(NK_InputFilterTC, String(InputFilterTC, 2).c_str());
-  OutputPIDFilterTC = v[3];      settingWrite(NK_OutputPIDFilterTC, String(OutputPIDFilterTC, 2).c_str());
-  VoltageFilterTC = v[4];        settingWrite(NK_VoltageFilterTC, String(VoltageFilterTC, 2).c_str());
-  IExcessTau = v[5];             settingWrite(NK_IExcessTau, String(IExcessTau, 1).c_str());
-  IExcessFloorA = v[6];          settingWrite(NK_IExcessFloorA, String(IExcessFloorA, 1).c_str());
-  IExcessCeilA = v[7];           settingWrite(NK_IExcessCeilA, String(IExcessCeilA, 1).c_str());
-  IExcessFrac = v[8];            settingWrite(NK_IExcessFrac, String(IExcessFrac, 3).c_str());
-  IExcessFracBulk = v[9];        settingWrite(NK_IExcessFracBulk, String(IExcessFracBulk, 3).c_str());
-  SystemIDStabilizeAmps = v[10]; settingWrite(NK_SystemIDStabilizeAmps, String(SystemIDStabilizeAmps, 2).c_str());
-  SystemIDStepAmplitude = v[11]; settingWrite(NK_SystemIDStepAmplitude, String(SystemIDStepAmplitude, 3).c_str());
-  // HiLow (13th field). When it differs, restore the mode AND swap the active cap tables to match.
-  int snapMode = (int)(v[12] + 0.5f);
+  OutputPIDFilterTC = v[2];      settingWrite(NK_OutputPIDFilterTC, String(OutputPIDFilterTC, 2).c_str());
+  VoltageFilterTC = v[3];        settingWrite(NK_VoltageFilterTC, String(VoltageFilterTC, 2).c_str());
+  IExcessTau = v[4];             settingWrite(NK_IExcessTau, String(IExcessTau, 1).c_str());
+  IExcessFloorA = v[5];          settingWrite(NK_IExcessFloorA, String(IExcessFloorA, 1).c_str());
+  IExcessCeilA = v[6];           settingWrite(NK_IExcessCeilA, String(IExcessCeilA, 1).c_str());
+  IExcessFrac = v[7];            settingWrite(NK_IExcessFrac, String(IExcessFrac, 3).c_str());
+  IExcessFracBulk = v[8];        settingWrite(NK_IExcessFracBulk, String(IExcessFracBulk, 3).c_str());
+  SystemIDStabilizeAmps = v[9];  settingWrite(NK_SystemIDStabilizeAmps, String(SystemIDStabilizeAmps, 2).c_str());
+  SystemIDStepAmplitude = v[10]; settingWrite(NK_SystemIDStepAmplitude, String(SystemIDStepAmplitude, 3).c_str());
+  // HiLow (12th field). When it differs, restore the mode AND swap the active cap tables to match.
+  int snapMode = (int)(v[11] + 0.5f);
   if (snapMode != HiLow) {
     HiLow = snapMode;
     settingWrite(NK_HiLow, String(HiLow).c_str());
     loadCapTablesForMode(HiLow);
   }
-  // Affine trip-line intercept + CC offset (14th/15th fields, always written as a pair).
-  IExcessBaseA = v[13];     settingWrite(NK_IExcessBaseA, String(IExcessBaseA, 1).c_str());
-  IExcessCcOffsetA = v[14]; settingWrite(NK_IExcessCcOffsetA, String(IExcessCcOffsetA, 1).c_str());
+  // Affine trip-line intercept + CC offset (13th/14th fields, always written as a pair).
+  IExcessBaseA = v[12];     settingWrite(NK_IExcessBaseA, String(IExcessBaseA, 1).c_str());
+  IExcessCcOffsetA = v[13]; settingWrite(NK_IExcessCcOffsetA, String(IExcessCcOffsetA, 1).c_str());
   recomputeCcGains();  // re-apply CC gains live (normalized to BATTERY_VOLTAGE)
   commissionRestoreMinPct();      // revert the Min% floor table + knee tracker (also clears the backup)
   settingRemove(NK_commissionSnap);
@@ -674,6 +674,16 @@ void commissionClearStage(int stage) {
   if (commissionState == 2) commissionSetState(1);
 }
 
+// A tach rescale moves the engine-RPM axis every stage after RPM Alignment was measured against,
+// so all of them must be re-run. Hangs off the SETTING change, not off commissionDependentsMask(1),
+// because that would also fire when the user merely clicks Next through an unchanged alignment step.
+// RPM Alignment itself stays marked done — the wizard reopens it pre-populated.
+void commissionClearRpmDependents() {
+  commissionDoneMask &= ~((1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8));
+  commissionWriteDoneMask();
+  if (commissionState == 2) commissionSetState(1);
+}
+
 // One-time sweep at boot: move any pre-NVS settings file into NVS, then delete
 // the file. No-op once the filesystem is clean; a virgin device finds nothing
 // and falls through to hardcoded defaults in InitSystemSettings.
@@ -728,7 +738,6 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/IgnoreLearningDuringPenalty.txt", NK_IgnoreLearningDuringPenalty },
   { "/IgnoreRPM.txt", NK_IgnoreRPM },
   { "/IgnoreTemperature.txt", NK_IgnoreTemperature },
-  { "/InputFilterTC.txt", NK_InputFilterTC },
   { "/InvertAltAmps.txt", NK_InvertAltAmps },
   { "/InvertBattAmps.txt", NK_InvertBattAmps },
   { "/BatteryShuntPresent.txt", NK_BatteryShuntPresent },
@@ -1624,6 +1633,10 @@ void httpsTask(void *param) {
           break;
         case HTTPS_CLEAR_PENDING_CONFIG:
           executeClearPendingConfig();
+          opSuccess = true;
+          break;
+        case HTTPS_RESET_RPM_AXIS:
+          executeResetRpmAxis();
           opSuccess = true;
           break;
       }
@@ -3163,12 +3176,12 @@ bool buildConfigPayload() {
   if (offset < 0 || offset >= CONFIG_PAYLOAD_SIZE) return false;
 
   // ─── Settings ───────────────────────────────────────────────────────────────
-  // Manifest-driven: the complete tier-1 + tier-2 settings set as raw NVS strings,
+  // Manifest-driven: the complete settings set as raw NVS strings,
   // sharing CONFIG_MANIFEST (8_functions.ino) with /exportConfig — one source of truth,
   // so the fleet config snapshot can never drift behind the dashboard as settings are
   // added. update-config-snapshot stores it verbatim as one jsonb column (no per-key DB).
   {
-    String cfgObj = manifestConfigObject(true);   // true = include tier-2 install/topology keys
+    String cfgObj = manifestConfigObject();
     offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "%s", cfgObj.c_str());
   }
 
@@ -4295,6 +4308,7 @@ static FaFlipPage *faFlip = NULL;  // PSRAM: slots 0..4 = reference bands, 5..8 
 static bool faFlipDirty = false;
 static uint8_t faAnomNext = 0;
 static volatile bool faPendingRebaseline = false;  // set by /get handler (Core 0), executed on Core 1
+static volatile bool faPendingFlipWipeAll = false;  // tach rescale: wipe ALL 9 pages, anomaly captures included
 
 // Detector outputs for the dashboard (CSV2) + console rate limiting
 uint8_t faDetectLastK = 0;  // dashboard field: winning fault class of the last FAULT verdict, 0 = quiet
@@ -5140,6 +5154,17 @@ void faMatrixMaybeFlush() {
     filtRippleArmed = false;  // reseed the low-pass EMAs on the next sample
     faDomReset();  // map wiped — clear the Highest Tone in Map headline too (persists at the next save)
     queueConsoleMessage("Resonance & Ripple Map cleared");
+    return;
+  }
+  if (faPendingFlipWipeAll) {  // tach rescale — every page is labelled by an engine-RPM band that just moved
+    faPendingFlipWipeAll = false;
+    if (faFlip) {
+      memset(faFlip, 0, sizeof(FaFlipPage) * FA_FLIP_SLOTS);  // all 9: reference bands AND anomaly captures
+      faAnomNext = 0;
+      faFlipDirty = true;
+      faFlipFlush();
+      queueConsoleMessage("Fast alt-current flipbook fully cleared (reference + anomaly) -- engine-RPM axis rescaled");
+    }
     return;
   }
   if (faPendingRebaseline) {  // user-clicked (password-gated /get) — clears the REFERENCE pages only

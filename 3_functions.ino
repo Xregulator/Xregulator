@@ -48,7 +48,7 @@ enum Csv1Index {
   CSV1_perfCountersResetElapsedS,  // seconds since "Reset Peak Values" press (or boot if never pressed); UI formats as "last X min" / "last X.X hr"
   CSV1_shutdownPhase,
   CSV1_BatteryV_raw,
-  CSV1_MeasuredAmps_filtered,  // CC current-PID process variable — the OutputPIDSigSrc-selected signal (EMA/MA/raw), NOT the InputFilterTC display EMA (name kept for JS compatibility)
+  CSV1_pidAltPV,  // CC current-PID process variable — the OutputPIDSigSrc-selected signal (EMA/MA/raw)
   CSV1_voltageTarget,
   CSV1_Icv,
   CSV1_WaterDepth_ft,  // NMEA2k depth ×3.28084 (meters → feet), scaled ×10 (0.1 ft); 0 if stale
@@ -853,7 +853,6 @@ enum Csv3Index {
   CSV3_rpmCapPowerTable_8,
   CSV3_rpmCapPowerTable_9,
   CSV3_reserved_VoltageTrimLimit,  // dead slot, sends 0
-  CSV3_InputFilterTC,
   CSV3_SystemIDStepAmplitude,
   CSV3_HardOCTripAmps,
   CSV3_HardOCDebounceMs,
@@ -2023,7 +2022,6 @@ void setupServer() {
                 "voltageKi,"
                 "voltageKd,"
                 "battV_filt_V,"
-                "iMeas_filt_A,"
                 "flags,"
                 "ovFlags,"
                 "dBcur_dt,"
@@ -2063,7 +2061,7 @@ void setupServer() {
                 "%.0f,%.2f,"
                 "%.4f,%.4f,%.4f,"   // innerKp, innerKi, innerKd
                 "%.4f,%.4f,%.4f,"   // voltageKp, voltageKi, voltageKd
-                "%.3f,%.3f,"  // battV_filt, iMeas_filt
+                "%.3f,"  // battV_filt
                 "%u,%u,"          // flags, ovFlags
                 "%.2f,%.3f,"      // dBcur_dt, battI
                 "%d,%d,%d,"       // ch1IntervalMs, voltLoopIntervalMs, inaIntervalMs
@@ -2099,7 +2097,6 @@ void setupServer() {
                 e.voltageKi,
                 e.voltageKd,
                 e.battV_filt,
-                e.iMeas_filt,
                 (unsigned)e.flags,
                 (unsigned)e.ovFlags,
                 e.dBcur_dt,
@@ -2619,20 +2616,17 @@ void setupServer() {
     });
 
   // Config Sharing — export the cloneable settings set as one JSON blob (for download
-  // or cloud submission). ?includeHardware=1 adds the tier-2 install/topology keys.
-  // Password-gated like the upload endpoints.
+  // or cloud submission). Password-gated like the upload endpoints.
   server.on("/exportConfig", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
       request->send(403, "text/plain", "Forbidden"); return;
     }
-    bool hw = request->hasParam("includeHardware") && request->getParam("includeHardware")->value().toInt() != 0;
-    request->send(200, "application/json", exportConfigJson(hw));
+    request->send(200, "application/json", exportConfigJson());
   });
 
   // Config Sharing — apply an imported config blob (POST the /exportConfig JSON as the body).
   // Only allowlisted manifest keys are written; everything else in the body is ignored.
-  // ?includeHardware=1 also applies the tier-2 install/topology keys (default OFF — different
-  // hardware). Reboots after applying so InitSystemSettings re-reads the whole set consistently
+  // Reboots after applying so InitSystemSettings re-reads the whole set consistently
   // (suppress with ?noReboot=1). Mirrors /perfUploadFront's body-accumulator pattern.
   server.on("/importConfig", HTTP_POST,
     [](AsyncWebServerRequest *request) {
@@ -2645,8 +2639,7 @@ void setupServer() {
       char *bodyc = strdup(importConfigBuf.c_str());
       importConfigBuf = "";
       if (!bodyc) { request->send(500, "text/plain", "Out of memory"); return; }
-      bool hw = request->hasParam("includeHardware") && request->getParam("includeHardware")->value().toInt() != 0;
-      int n = applyImportConfig(bodyc, hw);
+      int n = applyImportConfig(bodyc);
       free(bodyc);
       if (n < 0) { request->send(400, "text/plain", "No config object in body"); return; }
       bool reboot = !request->hasParam("noReboot") || request->getParam("noReboot")->value().toInt() == 0;
@@ -2982,7 +2975,12 @@ void setupServer() {
     ALTERNATOR_BRAND_MODEL = doc["alternator_brand_model"].as<String>();
     SolarWatts = doc["solar_watts"];
     // Unclamped, an out-of-range value indexes past axisRemap[] and wild-reads through src[]
+    uint8_t prevOrient = imuMountOrientation;
     imuMountOrientation = (uint8_t)constrain((int)(doc["imu_mount_orientation"] | 0), 0, IMU_ORIENT_COUNT - 1);
+    if (imuMountOrientation != prevOrient && imuMountState != IMU_MOUNT_UNKNOWN) {
+      imuMountState = IMU_MOUNT_UNKNOWN;   // verdict was judged in the old frame; next Zero re-latches it
+      settingRemove(NK_imu_mnt_state);
+    }
     regulatorMountLoc = doc["regulator_mount_loc"] | 0;
     IMU_DIST_BOW_FT = doc["imu_dist_bow_ft"];
     IMU_DIST_CL_FT = doc["imu_dist_cl_ft"];
@@ -3122,14 +3120,6 @@ void setupServer() {
     if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
       request->send(403, "text/plain", "Forbidden");
       return;
-    }
-
-    if (request->hasParam("InputFilterTC")) {
-      foundParameter = true;
-      inputMessage = request->getParam("InputFilterTC")->value();
-      settingWrite(NK_InputFilterTC, inputMessage.c_str());
-      InputFilterTC = inputMessage.toFloat();
-      if (CVTuningMode) cvTuningParamChanged = true;
     }
 
     if (request->hasParam("SystemIDStepAmplitude")) {
@@ -4080,8 +4070,26 @@ void setupServer() {
     if (request->hasParam("RPMScalingFactor")) {
       foundParameter = true;
       inputMessage = request->getParam("RPMScalingFactor")->value();
-      settingWrite(NK_RPMScalingFactor, inputMessage.c_str());
-      RPMScalingFactor = inputMessage.toInt();
+      int newScale = inputMessage.toInt();
+      // Linear gain on the engine-RPM axis, so any real change invalidates every RPM-indexed
+      // artifact. Refuse while the field is driving rather than wipe learning out from under it.
+      bool axisMoved = (newScale > 0 && newScale != RPMScalingFactor);
+      if (axisMoved && fieldActiveStatus > 0) {
+        request->send(409, "text/plain", "Turn the alternator off before changing RPM scaling");
+        return;
+      }
+      if (newScale > 0) {
+        if (axisMoved) {
+          // Persist wipe-owed (local + cloud) BEFORE the scale itself: a reboot between the writes
+          // re-runs the wipe at boot instead of keeping old-axis learning under the new scale.
+          settingWrite(NK_RpmAxisWipeLoc, "1");
+          settingWrite(NK_RpmAxisWipePend, "1");
+          rpmAxisWipePending = true;
+        }
+        settingWrite(NK_RPMScalingFactor, inputMessage.c_str());
+        RPMScalingFactor = newScale;
+      }
+      if (axisMoved) pendingRpmAxisWipe = true;  // Core 1 runs the wipe
     }
     if (request->hasParam("FieldResistance")) {
       foundParameter = true;
@@ -5596,6 +5604,9 @@ void setupServer() {
       IExcessTau = constrain(inputMessage.toFloat(), 20.0f, 300.0f);
       settingWrite(NK_IExcessTau, String(IExcessTau, 1).c_str());
       queueConsoleMessageF("IExcess averaging TC set to: %.0f ms", IExcessTau);
+      // The ripple map and the a0+a1·I fit are captured THROUGH this filter (detector-eye ripple),
+      // so changing it invalidates them — same hazard as ripWinMs.
+      queueConsoleMessage("IExcess averaging TC changed — stored ripple map/fit values from the old TC are not comparable (clear map + re-run current check)");
       if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("IExcessRelFrac")) {
@@ -6480,6 +6491,7 @@ void setupServer() {
           // The boot checks latched otaCheckDone while this device was still unregistered, so
           // nothing would report our version or see a forced update until the next reboot.
           // Version first: the cloud clears a forced flag once the reported version reaches it.
+          // Factory partition excluded for the same reasons as the boot check in Xregulator.ino.
           if (currentPartitionType != 0) {
             HttpsRequest verReq = { .type = HTTPS_UPDATE_FW_VERSION };
             HttpsRequest forcedReq = { .type = HTTPS_CHECK_FORCED_UPDATE };
@@ -7026,7 +7038,7 @@ void setupServer() {
         "\"ks\":%.1f,\"kh\":%.1f,"
         "\"iefr\":%.3f,\"ietau\":%.0f,\"iekb\":%.2f,"
         "\"lddt\":%.0f,\"ldt1\":%.0f,\"ldt3\":%.0f,"
-        "\"tc\":%.0f,\"wa\":%.2f,\"wp\":%d,\"ko\":%.1f,\"cr\":%d,"
+        "\"wa\":%.2f,\"wp\":%d,\"ko\":%.1f,\"cr\":%d,"
         "\"rpm\":%.0f,\"tmp\":%.1f,\"bv\":%.2f,\"soc\":%.1f,\"cvt\":%.2f,\"cs\":%d,\"ts\":%u}",
         i > 0 ? "," : "",
         r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootV,
@@ -7039,7 +7051,7 @@ void setupServer() {
         r.slopeBleedK, r.kHard,
         r.iExcessFrac, r.iExcessTau, r.iExcessKBleed,
         r.loadDumpDtThresh, r.loadDumpDtThresh1, r.loadDumpDtThresh3,
-        r.inputFilterTC, r.waveAmplitudeV, (int)r.wavePeriodSec, r.kOvershoot, (int)r.consecutiveReads,
+        r.waveAmplitudeV, (int)r.wavePeriodSec, r.kOvershoot, (int)r.consecutiveReads,
         r.avgRPM, r.avgAltTempF, r.battVAtStart, r.socAtStart * 100.0f, r.chargingVoltageTarget,
         (int)r.chargeStage, (unsigned)r.epoch);
     }
@@ -7143,11 +7155,7 @@ void setupServer() {
   });
 
   server.on("/resetsystemidlog", HTTP_POST, [](AsyncWebServerRequest *request) {
-    systemIDLogCount    = 0;
-    systemIDLogHead     = 0;
-    systemIDRunCounter  = 0;
-    if (systemIDLog) memset(systemIDLog, 0, 50 * sizeof(SystemIDRecord));
-    pendingSaveSystemIDLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
+    systemIDLogClearAll();  // persist deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
 
@@ -7502,8 +7510,7 @@ void SendWifiData() {
     g_protEventLatch &= ~protMask;
 
     // The "Alt Current filtered" plot trace must show the SAME signal the CC current PID
-    // acts on — the OutputPIDSigSrc-selected PV (mirrors the ternary in AdjustFieldLearnMode),
-    // not MeasuredAmps_filtered's InputFilterTC display EMA.
+    // acts on — the OutputPIDSigSrc-selected PV (mirrors the ternary in AdjustFieldLearnMode).
     float pidAltPV = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                     : g_pidI_filtered;
 
@@ -7556,7 +7563,7 @@ void SendWifiData() {
                                SafeInt((int32_t)((millis() - perfCountersResetMs) / 1000UL)),  // seconds since perf-counters reset (0 = boot)
                                SafeInt(shutdownPhase),
                                SafeInt(BatteryV, 100),                  // raw ADS1115
-                               SafeInt(pidAltPV, 100),  // CSV1_MeasuredAmps_filtered — CC PID PV (OutputPIDSigSrc-selected)
+                               SafeInt(pidAltPV, 100),  // CSV1_pidAltPV
                                SafeInt(ChargingVoltageTarget * 100),
                                SafeInt(Icv * 100),
                                // Water depth in feet ×10 (0.1 ft resolution). 0 if NMEA depth stale or unavailable.
@@ -8359,7 +8366,7 @@ void SendWifiData() {
   // PRIORITY 5: CSVData3 — sent immediately when settingsDirty (event-driven), or every 60s fallback
   if (!sentSomething && (settingsDirty || now - lastpayload3send >= 60000) && events.count() > 0) {
     static char *payload3 = nullptr;
-    static const size_t PAYLOAD3_SIZE = 3000;  // (339 fields + 1) × 7 = 2380; rounded up to 3000 for wide-field headroom
+    static const size_t PAYLOAD3_SIZE = 3000;  // (342 fields + 1) × 7 = 2401; rounded up to 3000 for wide-field headroom
     if (!payload3) {
       payload3 = (char *)ps_malloc(PAYLOAD3_SIZE);  // allocated to PSRAM
       if (!payload3) {
@@ -8391,7 +8398,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -8616,7 +8623,6 @@ void SendWifiData() {
                                (int)rpmCapPowerTable[8],
                                (int)rpmCapPowerTable[9],
                                0,  // CSV3_reserved_VoltageTrimLimit — dead slot
-                               (int)InputFilterTC,
                                SafeInt(SystemIDStepAmplitude, 10),               // ×10, 1 decimal
                                SafeInt(HardOCTripAmps, 10),                      // ×10, 1 decimal
                                SafeInt(HardOCDebounceMs),                        // raw ms

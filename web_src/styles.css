@@ -2363,6 +2363,35 @@ input:focus {
 .dark-mode .seg > button.on { background: #3a3f44; color: #fff; }
 .seg.accent > button.on { background: var(--accent, #00a19a); color: #fff; }
 .dark-mode .seg.accent > button.on { background: var(--accent, #00a19a); color: #fff; }
+/* `.seg-choice` — a segmented control whose segments are radio-backed <label>s with a
+   caption line, for a two-way form choice that needs more than a word to state. The
+   radio stays in the DOM (visually hidden) so the form still reads/writes it directly. */
+.seg-choice { display: flex; width: 100%; align-items: stretch; }
+.seg-choice > label {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-muted, #888);
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.seg-choice > label > input { position: absolute; opacity: 0; pointer-events: none; }
+.seg-choice > label > span { font-size: 13px; font-weight: 600; line-height: 1.2; }
+.seg-choice > label > small { font-size: 11px; line-height: 1.3; opacity: 0.85; }
+.seg-choice > label:has(input:checked) {
+  background: var(--card-light, #fff);
+  color: var(--text-dark, #333);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+.dark-mode .seg-choice > label:has(input:checked) { background: #3a3f44; color: #fff; }
+@media (max-width: 520px) {
+  .seg-choice { flex-direction: column; }
+}
+
 .seg-field { display: inline-flex; flex-direction: column; gap: 5px; }
 .seg-label {
   font-size: 11px;
@@ -4617,7 +4646,7 @@ body.dark-mode #alt-panel-protections .protections-intro p strong {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   Setup → Diag — checkpoint (C1–C4) filter pills. Mirrors the
+   Setup → Alternator → Diag — checkpoint (C1–C4) filter pills. Mirrors the
    Protections pill pattern above, but the pills show/hide whole
    <details class="checkpoint-section"> blocks instead of cards.
    Scoped under #settings-diag (Live Data → Diag is results-only, unfiltered).
@@ -4747,7 +4776,7 @@ body.dark-mode #settings-diag .checkpoint-intro p strong {
   color: #fff;
 }
 
-/* Setup → Diag flat knob blocks — one per logical group, chip-tagged, shown/hidden by pill membership
+/* Setup → Alternator → Diag flat knob blocks — one per logical group, chip-tagged, shown/hidden by pill membership
    (JS toggles display). No accordions; the inner .settings-card supplies the box. */
 #settings-diag .checkpoint-param {
   margin: 0 0 16px;

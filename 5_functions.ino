@@ -1516,9 +1516,6 @@ float getTargetAmps() {
   return MeasuredAmps;
 }
 
-float getFiltI() {
-  return MeasuredAmps_filtered;
-}
 float getFiltV() {
   // Never use for safety checks — use IBV directly.
   return IBV_filtered;
@@ -2736,24 +2733,20 @@ void _ReadAnalogInputs_inner() {
                              wmIgnUpdate(wmIgn_amps, MeasuredAmps);  // ignition-cycle watermark
                              aggAltCur.add(MeasuredAmps);
                              ch1FreshFlag = true;  // Signal PID that fresh current data is available
-                             // ── EMA filters ────────────────────────────────────────────────────────
-                             // Display/log EMA (InputFilterTC → MeasuredAmps_filtered) and Output PID EMA
-                             // (OutputPIDFilterTC → g_pidI_filtered) run independently so each can be tuned
-                             // for its role. iExcess uses NEITHER — its own EMA reads raw MeasuredAmps into
-                             // mExcessEma (see the MA block below). InputFilterTC is display/logging only now.
+                             // ── EMA filter ─────────────────────────────────────────────────────────
+                             // Output PID EMA (OutputPIDFilterTC → g_pidI_filtered) — the signal the CC
+                             // current loop acts on. iExcess uses its own EMA on raw MeasuredAmps into
+                             // mExcessEma (see the MA block below), not this one.
                              {
                                static bool amps_filter_init = false;
                                static uint32_t lastAmpsFilterMs = 0;
                                if (!amps_filter_init) {
-                                 MeasuredAmps_filtered = MeasuredAmps;
-                                 g_pidI_filtered       = MeasuredAmps;
+                                 g_pidI_filtered = MeasuredAmps;
                                  amps_filter_init = true;
                                } else {
                                  float dt_f = fmaxf(1.0f, (float)(now - lastAmpsFilterMs));
-                                 float alpha_ie  = dt_f / (InputFilterTC      + dt_f);
-                                 float alpha_pid = dt_f / (OutputPIDFilterTC  + dt_f);
-                                 MeasuredAmps_filtered = alpha_ie  * MeasuredAmps + (1.0f - alpha_ie)  * MeasuredAmps_filtered;
-                                 g_pidI_filtered       = alpha_pid * MeasuredAmps + (1.0f - alpha_pid) * g_pidI_filtered;
+                                 float alpha_pid = dt_f / (OutputPIDFilterTC + dt_f);
+                                 g_pidI_filtered = alpha_pid * MeasuredAmps + (1.0f - alpha_pid) * g_pidI_filtered;
                                }
                                lastAmpsFilterMs = now;
                              }
@@ -2934,12 +2927,14 @@ void _ReadAnalogInputs_inner() {
                          if (isfinite(newTemp) && newTemp > -40.0f && newTemp < 85.0f) {  // BMP388 rated range in °C
                            ambientTemp = newTemp * 1.8f + 32.0f;  // convert °C to °F for storage
                            MARK_FRESH(IDX_AMBIENT_TEMP);
-                           // Board temp drifted → refresh the battery-temp gain derate. Gated to a ≥0.5°F move
-                           // and only when a commissioned reference exists, so it's near-free. recomputeCvGains
-                           // is already called cross-core from Core-0 web handlers; this task is also Core 0.
+                           // Board temp drifted → refresh the battery-temp gain derate. Gated to a ≥5°F move
+                           // (~2.8°C ≈ 6% gain change at 0.024/°C — finer steps are noise vs the board-as-
+                           // battery-proxy's own error) and only when a commissioned reference exists.
+                           // recomputeCvGains is already called cross-core from Core-0 web handlers; this
+                           // task is also Core 0.
                            static float lastDerateTempF = NAN;
                            if (battTempDerateEnable && !isnan(CommissionTempF) &&
-                               (isnan(lastDerateTempF) || fabsf(ambientTemp - lastDerateTempF) >= 0.5f)) {
+                               (isnan(lastDerateTempF) || fabsf(ambientTemp - lastDerateTempF) >= 5.0f)) {
                              lastDerateTempF = ambientTemp;
                              recomputeCvGains();
                            }

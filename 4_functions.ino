@@ -892,7 +892,15 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     if (v != 12 && v != 24 && v != 48) v = 12;  // reject corrupt NVS value (guards vNorm = 12/BATTERY_VOLTAGE div-by-zero/NaN)
     BATTERY_VOLTAGE = (uint8_t)v;  // NVS wins over the vessel-JSON mirror
   }
+  // First-creation class scaling. Every hardcoded default below is a 12V value; volt-domain seeds
+  // scale ×(V/12), duty-domain seeds ×(12/V) — the same two domains applyNominalVoltageChange
+  // rescales on a live class change. Existing keys always load verbatim, so this only fires when a
+  // key is first created on a device already provisioned 24/48V (fresh NVS with the class known, or
+  // a firmware update introducing a new setting).
+  const float seedVScale = (float)BATTERY_VOLTAGE / 12.0f;
+  const float seedDScale = 12.0f / (float)BATTERY_VOLTAGE;
   if (!settingExists(NK_BulkVoltage)) {
+    BulkVoltage *= seedVScale;
     settingWrite(NK_BulkVoltage, String(BulkVoltage).c_str());
   } else {
     BulkVoltage = settingRead(NK_BulkVoltage).toFloat();
@@ -908,6 +916,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TailCurrent_A = settingRead(NK_TailCurrent_A).toFloat();
   }
   if (!settingExists(NK_RebulkVoltage)) {
+    RebulkVoltage *= seedVScale;
     settingWrite(NK_RebulkVoltage, String(RebulkVoltage).c_str());
   } else {
     RebulkVoltage = settingRead(NK_RebulkVoltage).toFloat();
@@ -964,13 +973,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     tuningSweepCycles = (uint8_t)settingRead(NK_tuningSweepCycles).toInt();
   }
 
-  if (!settingExists(NK_InputFilterTC)) {
-      settingWrite(NK_InputFilterTC, String(InputFilterTC).c_str());
-    } else {
-      InputFilterTC = settingRead(NK_InputFilterTC).toFloat();
-    }
-
-    if (!settingExists(NK_SystemIDStepAmplitude)) {
+  if (!settingExists(NK_SystemIDStepAmplitude)) {
       settingWrite(NK_SystemIDStepAmplitude, String(SystemIDStepAmplitude).c_str());
     } else {
       SystemIDStepAmplitude = settingRead(NK_SystemIDStepAmplitude).toFloat();
@@ -996,6 +999,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     } else {
       systemIDPlantTauMs = (uint16_t)settingRead(NK_sysidPlantTau).toInt();
     }
+    // Survives reboots on purpose: a device rescaled while offline must keep suppressing front
+    // sync until the cloud wipe lands, or the cloud ships the old-scaled front straight back.
+    rpmAxisWipePending = (settingExists(NK_RpmAxisWipePend) && settingRead(NK_RpmAxisWipePend) == "1");
+    // Reboot interrupted the local wipe → re-run it whole (every clear it drives is idempotent)
+    if (settingExists(NK_RpmAxisWipeLoc) && settingRead(NK_RpmAxisWipeLoc) == "1") pendingRpmAxisWipe = true;
     if (!settingExists(NK_systemIDSineCycles)) {
       settingWrite(NK_systemIDSineCycles, String(systemIDSineCycles).c_str());
     } else {
@@ -1013,6 +1021,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     SwitchingFrequency = settingRead(NK_SwitchingFrequency).toInt();
   }
   if (!settingExists(NK_FloatVoltage)) {
+    FloatVoltage *= seedVScale;
     settingWrite(NK_FloatVoltage, String(FloatVoltage).c_str());
   } else {
     FloatVoltage = settingRead(NK_FloatVoltage).toFloat();
@@ -1141,6 +1150,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     }
   }
   if (!settingExists(NK_ChargedVoltage)) {
+    ChargedVoltage_Scaled = (int)lroundf(ChargedVoltage_Scaled * seedVScale);
     settingWrite(NK_ChargedVoltage, String(ChargedVoltage_Scaled).c_str());
   } else {
     float cv = settingRead(NK_ChargedVoltage).toFloat();
@@ -1198,11 +1208,13 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TempAlarmLow = settingRead(NK_TempAlarmLow).toInt();
   }
   if (!settingExists(NK_VoltageAlarmHigh)) {
+    VoltageAlarmHigh *= seedVScale;
     settingWrite(NK_VoltageAlarmHigh, String(VoltageAlarmHigh, 2).c_str());
   } else {
     VoltageAlarmHigh = settingRead(NK_VoltageAlarmHigh).toFloat();  // pre-float NVS strings ("15") parse fine
   }
   if (!settingExists(NK_VoltageAlarmLow)) {
+    VoltageAlarmLow *= seedVScale;
     settingWrite(NK_VoltageAlarmLow, String(VoltageAlarmLow, 2).c_str());
   } else {
     VoltageAlarmLow = settingRead(NK_VoltageAlarmLow).toFloat();
@@ -1251,6 +1263,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   CVTuningMode = 0;
   if (settingExists(NK_CVTuningMode) && settingRead(NK_CVTuningMode).toInt() != 0) settingWrite(NK_CVTuningMode, "0");
   if (!settingExists(NK_cvWaveAmplitudeV)) {
+    cvWaveAmplitudeV *= seedVScale;
     settingWrite(NK_cvWaveAmplitudeV, String(cvWaveAmplitudeV).c_str());
   } else {
     cvWaveAmplitudeV = settingRead(NK_cvWaveAmplitudeV).toFloat();
@@ -1558,11 +1571,13 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     PIDTrackingGain = settingRead(NK_PIDTrackingGain).toFloat();
   }
   if (!settingExists(NK_AbsorptionVoltage)) {
+    AbsorptionVoltage *= seedVScale;
     settingWrite(NK_AbsorptionVoltage, String(AbsorptionVoltage).c_str());
   } else {
     AbsorptionVoltage = settingRead(NK_AbsorptionVoltage).toFloat();
   }
   if (!settingExists(NK_TargetVoltageSetpoint)) {
+    TargetVoltageSetpoint *= seedVScale;
     settingWrite(NK_TargetVoltageSetpoint, String(TargetVoltageSetpoint).c_str());
   } else {
     TargetVoltageSetpoint = settingRead(NK_TargetVoltageSetpoint).toFloat();
@@ -1585,11 +1600,13 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     VoltageKi = settingRead(NK_VoltageKi).toFloat();
   }
   if (!settingExists(NK_SlopeBleedThresh)) {
+    SlopeBleedThresh *= seedVScale;
     settingWrite(NK_SlopeBleedThresh, String(SlopeBleedThresh, 3).c_str());
   } else {
     SlopeBleedThresh = settingRead(NK_SlopeBleedThresh).toFloat();
   }
   if (!settingExists(NK_SlopeBleedK)) {
+    SlopeBleedK *= seedDScale;
     settingWrite(NK_SlopeBleedK, String(SlopeBleedK, 1).c_str());
   } else {
     SlopeBleedK = settingRead(NK_SlopeBleedK).toFloat();
@@ -1635,11 +1652,13 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     vTgtRampEnable = (uint8_t)settingRead(NK_vTgtRampEnable).toInt();
   }
   if (!settingExists(NK_vTgtRampUp)) {
+    vTgtRampUp *= seedVScale;
     settingWrite(NK_vTgtRampUp, String(vTgtRampUp, 3).c_str());
   } else {
     vTgtRampUp = settingRead(NK_vTgtRampUp).toFloat();
   }
   if (!settingExists(NK_vTgtRampDn)) {
+    vTgtRampDn *= seedVScale;
     settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
   } else {
     vTgtRampDn = settingRead(NK_vTgtRampDn).toFloat();
@@ -1716,6 +1735,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     MinChargeTempF = settingRead(NK_MinChargeTempF).toFloat();
   }
   if (!settingExists(NK_SlopeBleedProxV)) {
+    SlopeBleedProxV *= seedVScale;
     settingWrite(NK_SlopeBleedProxV, String(SlopeBleedProxV, 2).c_str());
   } else {
     SlopeBleedProxV = settingRead(NK_SlopeBleedProxV).toFloat();
@@ -1779,6 +1799,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     PidKd = settingRead(NK_PidKd).toFloat();
   }
   if (!settingExists(NK_DutySlowRampRate)) {
+    DutySlowRampRate *= seedDScale;
     settingWrite(NK_DutySlowRampRate, String(DutySlowRampRate, 2).c_str());
   } else {
     DutySlowRampRate = settingRead(NK_DutySlowRampRate).toFloat();
@@ -1974,6 +1995,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     commissionWriteDoneMask();
   }
   if (!settingExists(NK_IExcessArmMarginV)) {
+    IExcessArmMarginV *= seedVScale;
     settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
   } else {
     IExcessArmMarginV = settingRead(NK_IExcessArmMarginV).toFloat();
@@ -2000,11 +2022,13 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     FastSetpointRiseWindowMs = (uint32_t)settingRead(NK_FastSetpointRiseWindowMs).toInt();
   }
   if (!settingExists(NK_FastSetpointRiseHeadroomV)) {
+    FastSetpointRiseHeadroomV *= seedVScale;
     settingWrite(NK_FastSetpointRiseHeadroomV, String(FastSetpointRiseHeadroomV, 2).c_str());
   } else {
     FastSetpointRiseHeadroomV = settingRead(NK_FastSetpointRiseHeadroomV).toFloat();
   }
   if (!settingExists(NK_KHard)) {
+    KHard *= seedDScale;
     settingWrite(NK_KHard, String(KHard, 1).c_str());
   } else {
     KHard = settingRead(NK_KHard).toFloat();
@@ -2062,13 +2086,15 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TdPred = settingRead(NK_TdPred).toFloat();
   }
   if (!settingExists(NK_OvMeasMarginV)) {
-    if (settingExists(NK_VSoftMarginV)) { OvMeasMarginV = settingRead(NK_VSoftMarginV).toFloat(); }
+    if (settingExists(NK_VSoftMarginV)) { OvMeasMarginV = settingRead(NK_VSoftMarginV).toFloat(); }  // migrated value is already per-bus
+    else OvMeasMarginV *= seedVScale;
     settingWrite(NK_OvMeasMarginV, String(OvMeasMarginV, 3).c_str());
   } else {
     OvMeasMarginV = settingRead(NK_OvMeasMarginV).toFloat();
   }
   if (!settingExists(NK_OvPredMarginV)) {
-    if (settingExists(NK_VHardMarginV)) { OvPredMarginV = settingRead(NK_VHardMarginV).toFloat(); }
+    if (settingExists(NK_VHardMarginV)) { OvPredMarginV = settingRead(NK_VHardMarginV).toFloat(); }  // migrated value is already per-bus
+    else OvPredMarginV *= seedVScale;
     settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
   } else {
     OvPredMarginV = settingRead(NK_OvPredMarginV).toFloat();
@@ -2085,6 +2111,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_DvdtTC, String(DvdtTC, 1).c_str());
   }
   if (!settingExists(NK_VoltageDisagreeThreshold)) {
+    VoltageDisagreeThreshold *= seedVScale;
     settingWrite(NK_VoltageDisagreeThreshold, String(VoltageDisagreeThreshold, 2).c_str());
   } else {
     VoltageDisagreeThreshold = settingRead(NK_VoltageDisagreeThreshold).toFloat();
@@ -4152,6 +4179,50 @@ void executeClearForcedUpdate() {
   http.end();
 }
 
+// Cloud half of the tach-rescale wipe: deletes this device's RPM-indexed cloud data (alt_points,
+// the motoring boat_points, the RPM watermarks, the sensor_history RPM columns). The local half
+// already ran; front sync stays suppressed until this confirms, otherwise the cloud would ship the
+// old-scaled front straight back. Retried every boot/reconnect until it returns 200.
+void executeResetRpmAxis() {
+  // Called by HTTPS task on Core 0
+  if (!rpmAxisWipePending) return;
+  if (!isRegistered || authToken.length() == 0) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (currentMode != MODE_CLIENT) return;
+
+  Serial.println("RESET_RPM_AXIS: Requesting cloud wipe");
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(8);
+
+  HTTPClient http;
+  String url = String(SUPABASE_URL) + "/functions/v1/reset-rpm-axis";
+
+  if (!http.begin(client, url)) {
+    Serial.println("RESET_RPM_AXIS: HTTP begin failed");
+    return;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", "Bearer " + String(SUPABASE_ANON_KEY));
+  http.setTimeout(8000);
+
+  String payload = "{\"token\":\"" + authToken + "\"}";
+  int httpCode = http.POST(payload);
+
+  if (httpCode == 200) {
+    Serial.println("RESET_RPM_AXIS: Success - cloud RPM data wiped, front sync re-enabled");
+    rpmAxisWipePending = false;
+    settingWrite(NK_RpmAxisWipePend, "0");
+    queueConsoleMessage("Cloud RPM-indexed data wiped; alternator record book starts over");
+  } else {
+    Serial.printf("RESET_RPM_AXIS: HTTP %d - will retry\n", httpCode);
+  }
+
+  http.end();
+}
+
 // Extract a flat top-level "field":"value" string from a JSON body (returns "" for
 // missing or null). Used for the short id fields in the pending-config response; the
 // big config blob itself is handled by applyImportConfig's string scan, not ArduinoJson.
@@ -4184,7 +4255,7 @@ void executeGetPendingConfig() {
   // http.begin(client,url) pattern uses far more internal RAM (CLAUDE.md) and getString() can hang,
   // which made this call return -1 when contiguous RAM was tight (e.g. right after the registration
   // handshake). doCloudPOST adds the anon-key Bearer + Content-Type itself. Response holds the full
-  // tier-1 config blob (exportConfigJson reserves 14 KB), so stage it in a 24 KB PSRAM scratch buffer,
+  // config blob (exportConfigJson reserves 14 KB), so stage it in a 24 KB PSRAM scratch buffer,
   // copy to the String the parsing below expects, and free the scratch immediately.
   String response;
   int httpCode = -1;
@@ -4220,9 +4291,10 @@ void executeGetPendingConfig() {
     return;
   }
 
-  // Apply tier-1 only (never push hardware/calibration to a device remotely). applyImportConfig
-  // scans the response for the embedded "config" object, so no big JSON parse is needed.
-  int n = applyImportConfig(response.c_str(), 0);
+  // A remote push writes every importable key, hardware/calibration included — sensor range,
+  // shunt resistance, current zero offsets. applyImportConfig scans the response for the
+  // embedded "config" object, so no big JSON parse is needed.
+  int n = applyImportConfig(response.c_str());
   if (n < 0) {
     Serial.println("PENDING_CONFIG: malformed blob, not applied");
     return;

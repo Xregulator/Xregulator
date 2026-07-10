@@ -629,8 +629,8 @@ done:
 // Config Sharing — export/import of the cloneable settings set (Phase 1)
 // ----------------------------------------------------------------------------
 // One ALLOWLIST (CONFIG_MANIFEST) is the single source of truth for which NVS
-// "settings" keys are shareable. tier 1 = free clone; tier 2 = install/hardware
-// topology (sensor/shunt/polarity) — exported but applied only with includeHardware;
+// "settings" keys are shareable. tier 1 = imported like any other setting, including
+// the install/hardware topology (sensor/shunt/polarity) and per-install calibration;
 // tier 3 = per-device history, always exported (fleet snapshot / support) but NEVER
 // imported, since adopting another boat's value would corrupt this device's own record.
 // The alt-health / boat-perf registry knobs (ALT_SETTINGS / PERF_SETTINGS in
@@ -638,12 +638,12 @@ done:
 // manifest can't reference — they are emitted/imported programmatically (tier-1)
 // minus CFG_REGISTRY_SKIP, so a knob added to either registry is covered automatically.
 // Philosophy: the export captures essentially EVERY persisted setting — including UI
-// prefs and per-install calibration/measured fits (those are tier 2). Paring down to
-// what's appropriate to apply happens at import/share time (tier gate + the import
-// diff checkboxes), never by omitting from the export. Only identity/secrets (WiFi
-// creds, passwords, InstallId), device lifecycle/history state, learned per-device
-// state, and momentary actions stay out (see config_drift_check.py — it fails the
-// build if any settingWrite key is in neither the manifest nor its EXCLUDE list).
+// prefs and per-install calibration/measured fits. Paring down to what's appropriate to
+// apply happens at import time via the diff checkboxes, never by omitting from the
+// export. Only identity/secrets (WiFi creds, passwords, InstallId), device
+// lifecycle/history state, learned per-device state, and momentary actions stay out
+// (see config_drift_check.py — it fails the build if any settingWrite key is in neither
+// the manifest nor its EXCLUDE list).
 // The user-editable RPM tables are raw blobs in the "learning" namespace, carried by
 // a separate "tables" export section (exportTablesObject), not this manifest.
 //
@@ -696,7 +696,9 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "StartupRiseRate", NK_StartupRiseRate, 1 },
   { "FieldResistance", NK_FieldResistance, 1 },
   { "PulleyRatio", NK_PulleyRatio, 1 },
-  { "RPMScalingFactor", NK_RPMScalingFactor, 1 },
+  // Tier 3, not 1: adopting another boat's tach calibration would silently rescale this device's
+  // engine-RPM axis via a direct settingWrite, bypassing the /get guard that arms the wipe.
+  { "RPMScalingFactor", NK_RPMScalingFactor, 3 },
   { "SwitchingFrequency", NK_SwitchingFrequency, 1 },
   { "PidKp", NK_PidKp, 1 },
   { "PidKi", NK_PidKi, 1 },
@@ -706,7 +708,6 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "OutputPIDFilterTC", NK_OutputPIDFilterTC, 1 },
   { "OutputPIDMA_N", NK_OutputPIDMA_N, 1 },
   { "OutputPIDSigSrc", NK_OutputPIDSigSrc, 1 },
-  { "InputFilterTC", NK_InputFilterTC, 1 },
   { "VoltageFilterTC", NK_VoltageFilterTC, 1 },
   { "DvdtTC", NK_DvdtTC, 1 },
   { "VoltageKp", NK_VoltageKp, 1 },
@@ -903,24 +904,24 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "capTempCoeff", NK_capTempCoeff, 1 },
   { "capTempRef", NK_capTempRef, 1 },
   { "capOcv", NK_capOcvBlob, 1 },
-  { "BatteryCurrentSource", NK_BatteryCurrentSource, 2 },
-  { "ShuntResistanceMicroOhm", NK_ShuntResistanceMicroOhm, 2 },
-  { "AmpSensorRange", NK_AmpSensorRange, 2 },
-  { "InvertAltAmps", NK_InvertAltAmps, 2 },
-  { "InvertBattAmps", NK_InvertBattAmps, 2 },
-  { "BatteryShuntPresent", NK_BatteryShuntPresent, 2 },
-  { "AlternatorCOffset", NK_AlternatorCOffset, 2 },
-  { "BatteryCOffset", NK_BatteryCOffset, 2 },
-  { "AutoAltCurrentZero", NK_AutoAltCurrentZero, 2 },
-  { "AutoShuntGainCorrection", NK_AutoShuntGainCorrection, 2 },
-  { "BatteryVoltage", NK_BatteryVoltage, 2 },
-  { "cvPlantKa", NK_cvPlantKa, 2 },
-  { "cvPlantKb", NK_cvPlantKb, 2 },
-  { "CommissionTempF", NK_CommissionTempF, 2 },
+  { "BatteryCurrentSource", NK_BatteryCurrentSource, 1 },
+  { "ShuntResistanceMicroOhm", NK_ShuntResistanceMicroOhm, 1 },
+  { "AmpSensorRange", NK_AmpSensorRange, 1 },
+  { "InvertAltAmps", NK_InvertAltAmps, 1 },
+  { "InvertBattAmps", NK_InvertBattAmps, 1 },
+  { "BatteryShuntPresent", NK_BatteryShuntPresent, 1 },
+  { "AlternatorCOffset", NK_AlternatorCOffset, 1 },
+  { "BatteryCOffset", NK_BatteryCOffset, 1 },
+  { "AutoAltCurrentZero", NK_AutoAltCurrentZero, 1 },
+  { "AutoShuntGainCorrection", NK_AutoShuntGainCorrection, 1 },
+  { "BatteryVoltage", NK_BatteryVoltage, 1 },
+  { "cvPlantKa", NK_cvPlantKa, 1 },
+  { "cvPlantKb", NK_cvPlantKb, 1 },
+  { "CommissionTempF", NK_CommissionTempF, 1 },
   { "CommissionEpoch", NK_CommissionEpoch, 3 },
-  { "systemIDPlantTauMs", NK_sysidPlantTau, 2 },
-  { "ripFitAlt", NK_ripFitAlt, 2 },
-  { "imu_zero", NK_imu_zero, 2 },
+  { "systemIDPlantTauMs", NK_sysidPlantTau, 1 },
+  { "ripFitAlt", NK_ripFitAlt, 1 },
+  { "imu_zero", NK_imu_zero, 1 },
 };
 static const size_t CONFIG_MANIFEST_COUNT = sizeof(CONFIG_MANIFEST)/sizeof(CONFIG_MANIFEST[0]);
 
@@ -951,16 +952,15 @@ static void cfgAppendJsonStr(String &out, const String &val) {
 // Emit the manifest settings as a complete JSON object {"param":"rawNvsStr",...}.
 // Single source of truth for BOTH /exportConfig (sharing) and the daily fleet config
 // snapshot (buildConfigPayload's "settings") — so neither can drift as settings are added.
-// includeHardware adds the tier-2 install/topology keys. Keys never set are omitted.
+// Keys never set are omitted.
 // The alt-health/boat-perf registries are appended generically (minus CFG_REGISTRY_SKIP),
 // so knobs added to those registries are covered without touching the manifest.
-String manifestConfigObject(bool includeHardware) {
+String manifestConfigObject() {
   String j;
   j.reserve(12288);
   j = "{";
   bool first = true;
   for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
-    if (CONFIG_MANIFEST[i].tier == 2 && !includeHardware) continue;
     if (!settingExists(CONFIG_MANIFEST[i].nvsKey)) continue;   // key never set -> omit, destination keeps its default
     String v = settingRead(CONFIG_MANIFEST[i].nvsKey);
     if (!first) j += ',';
@@ -1058,9 +1058,9 @@ String exportTablesObject() {
 
 // Build the shareable config blob: fw_version + vessel metadata (for the cloud
 // table-of-contents) + the manifest "config" object + the RPM "tables" object.
-// includeHardware adds tier-2 keys. payload_v 2 = tables section added; older
-// firmware ignores unknown sections, so blobs remain cross-rev compatible both ways.
-String exportConfigJson(bool includeHardware) {
+// payload_v 2 = tables section added; older firmware ignores unknown sections, so
+// blobs remain cross-rev compatible both ways.
+String exportConfigJson() {
   String j;
   j.reserve(14336);
   j = "{\"fw_version\":\"";
@@ -1075,7 +1075,7 @@ String exportConfigJson(bool includeHardware) {
   j += ",\"battery_make_model\":";    cfgAppendJsonStr(j, BATTERY_MAKE_MODEL);
   j += ",\"alternator_brand_model\":";cfgAppendJsonStr(j, ALTERNATOR_BRAND_MODEL);
   j += "},\"config\":";
-  j += manifestConfigObject(includeHardware);
+  j += manifestConfigObject();
   j += ",\"tables\":";
   j += exportTablesObject();
   j += "}";
@@ -1188,21 +1188,20 @@ static int applyImportTables(const char *body) {
 // "tables" section are written — anything else in the body is ignored by construction.
 // Returns count applied, or -1 if the body has no "config" object. settingWrite is
 // compare-first so unchanged values cost no flash. Caller reboots so the new set loads cleanly.
-int applyImportConfig(const char *body, bool includeHardware) {
+int applyImportConfig(const char *body) {
   if (!body) return -1;
   const char *cfg = strstr(body, "\"config\"");
   if (!cfg) return -1;   // malformed / wrong shape — reject, don't half-apply
   int applied = 0;
   for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
-    if (CONFIG_MANIFEST[i].tier == 2 && !includeHardware) continue;
     if (CONFIG_MANIFEST[i].tier == 3) continue;   // export-only: this device's own history, never adopted
     String val;
     if (cfgJsonExtract(cfg, CONFIG_MANIFEST[i].param, val)) {
       if (settingWrite(CONFIG_MANIFEST[i].nvsKey, val.c_str())) applied++;
     }
   }
-  // Registry knobs — generic import mirroring the export side (all tier-1, so not
-  // gated on includeHardware). Macro for the same auto-prototype reason as the emit.
+  // Registry knobs — generic import mirroring the export side.
+  // Macro for the same auto-prototype reason as the emit.
   #define CFG_IMPORT_REGISTRY(REG, COUNT) \
     for (size_t i = 0; i < COUNT; i++) { \
       if (cfgRegistrySkipped(REG[i].name)) continue; \
@@ -1658,12 +1657,10 @@ void cvpfAbort(const char *reason) {
 void cvpfServiceCompletion() {
   if (cvpfState != 1) return;
   if (!cvPlantFitActive) { cvpfProcess(); return; }   // branch finished the RELEASE phase
-  // Worst case = two settled-rests at the cap + two step-holds (each scales with the read horizon 1/ω_c) +
-  // release, for a 300→180mV OV re-step. The step-hold term MUST track cvpfHorizonS or a slow ω_c fit gets
-  // killed mid-measurement; keep this ≥ the sample-buffer coverage so neither is the limiter.
-  uint32_t hMs = (uint32_t)fmaxf(2500.0f, cvpfHorizonS * 1000.0f);
+  // Worst case = two settled-rests at the cap + two fixed step-holds + release, for a 300→180mV
+  // OV re-step. The hold no longer scales with ω_c — one 23 s span covers the whole fitted curve.
   uint32_t budget = CVPF_T_SETTLE_MS + CVPF_T_PILOT_MS + 2 * CVPF_REST_MAX_MS
-                    + 2 * (CVPF_SKIP_MS + hMs + 2000) + 6000;
+                    + 2 * (CVPF_STEP_HOLD_MS + 2000) + 6000;
   if (millis() - cvpfTestStartMs > budget) cvpfAbort("timed out (engine stopped or left AUTO?)");
 }
 
@@ -1917,7 +1914,8 @@ void bhInitSettings() {
   // Capacity tracker config (Pattern B) + the editable OCV table
   if (!settingExists(NK_capRestFrac))   settingWrite(NK_capRestFrac, String(capRestCurrentFrac, 4).c_str());   else capRestCurrentFrac = settingRead(NK_capRestFrac).toFloat();
   if (!settingExists(NK_capRestFloor))  settingWrite(NK_capRestFloor, String(capRestFloorMin).c_str());        else capRestFloorMin   = (uint16_t)settingRead(NK_capRestFloor).toInt();
-  if (!settingExists(NK_capSettleRate)) settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str());  else capSettleRateMv10 = settingRead(NK_capSettleRate).toFloat();
+  // capSettleRate is volt-domain (mV/10min): first creation scales the 12V default ×(V/12), same rule as InitSystemSettings seeds
+  if (!settingExists(NK_capSettleRate)) { capSettleRateMv10 *= (float)BATTERY_VOLTAGE / 12.0f; settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str()); }  else capSettleRateMv10 = settingRead(NK_capSettleRate).toFloat();
   if (!settingExists(NK_capSocLowMax))  settingWrite(NK_capSocLowMax, String(capSocLowMax, 1).c_str());        else capSocLowMax      = settingRead(NK_capSocLowMax).toFloat();
   if (!settingExists(NK_capMinSpan))    settingWrite(NK_capMinSpan, String(capMinSpan, 1).c_str());            else capMinSpan        = settingRead(NK_capMinSpan).toFloat();
   if (!settingExists(NK_capFullSoc))    settingWrite(NK_capFullSoc, String(capFullSoc, 1).c_str());            else capFullSoc        = settingRead(NK_capFullSoc).toFloat();

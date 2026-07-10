@@ -161,8 +161,8 @@ void recomputeCvGains() {
     // Exact PI magnitude condition at the target crossover (CV_AUTOTUNE_PLAN.md §F.3). With the plant a
     // pure gain in this regime (P≈K_norm) and C = Kp·(1 + ρ/(jω)), |C·P| = 1 at ω_c gives
     //   Kp = 1 / ( K_norm · sqrt(1 + (ρ/ω_c)²) ),   Ki = ρ·Kp.
-    // cvCrossover holds the TRUE crossover ω_c (CV_CROSSOVER_TARGET, ≈0.20 rad/s); cvPiZero is the PI
-    // integral zero ρ (CV_PI_ZERO, ≈0.70 rad/s).
+    // cvCrossover holds the TRUE crossover ω_c (default 0.20 rad/s); cvPiZero is the PI
+    // integral zero ρ (default 0.70 rad/s).
     float omega_c = (cvCrossover > 1e-3f) ? cvCrossover : 0.20f;
     float rho     = cvPiZero;
     kpNorm = 1.0f / (Knorm * sqrtf(1.0f + (rho / omega_c) * (rho / omega_c)));
@@ -997,7 +997,6 @@ void commitCVTuningRecord() {
   rec.loadDumpDtThresh = LoadDumpDtThresh;
   rec.loadDumpDtThresh1 = LoadDumpDtThresh1;
   rec.loadDumpDtThresh3 = LoadDumpDtThresh3;
-  rec.inputFilterTC = InputFilterTC;
   rec.waveAmplitudeV = cvWaveAmplitudeV;
   rec.wavePeriodSec = (uint16_t)cvWavePeriodSec;
   rec.kOvershoot = cvKOvershoot;
@@ -1082,6 +1081,15 @@ void saveSystemIDLog() {
   f.write((uint8_t *)&systemIDRunCounter, sizeof(systemIDRunCounter));
   f.write((uint8_t *)systemIDLog,         50 * sizeof(SystemIDRecord));
   f.close();
+}
+
+// Shared by /resetsystemidlog and the tach-rescale wipe. Persist is deferred to Core 1.
+void systemIDLogClearAll() {
+  systemIDLogCount   = 0;
+  systemIDLogHead    = 0;
+  systemIDRunCounter = 0;
+  if (systemIDLog) memset(systemIDLog, 0, 50 * sizeof(SystemIDRecord));
+  pendingSaveSystemIDLog = true;
 }
 
 void loadSystemIDLog() {
@@ -1573,6 +1581,7 @@ void AdjustFieldLearnMode() {
     static uint32_t vPrevMs = 0;
     static float dvdt = 0.0f;
     static bool ovActive = false;
+    static float ibvFilt = 0.0f;
 
     g_fastOvHardActive = false;
     g_fastOvVpred = IBV;
@@ -1585,12 +1594,23 @@ void AdjustFieldLearnMode() {
           float raw = (IBV - vPrev) / ((float)dtMs * 0.001f);  // V/s
           float alpha = (float)dtMs / (DvdtTC + (float)dtMs);   // dt-aware EMA: TC stays constant across sample-rate jitter
           dvdt = alpha * raw + (1.0f - alpha) * dvdt;
+          // Group 2 level filter: raw IBV false-fires on belt ripple (full crest vs a fixed margin).
+          // TC is DERIVED from the commissioned plant tau — never a user knob; a display/log
+          // filter must not pace a safety layer.
+          float ovFiltTC = clamp_f((float)systemIDPlantTauMs / 3.0f, 10.0f, 80.0f);
+          float aOv = (float)dtMs / (ovFiltTC + (float)dtMs);
+          ibvFilt = aOv * IBV + (1.0f - aOv) * ibvFilt;
+        } else if (dtMs > 100) {
+          ibvFilt = IBV;  // I2C stall — restart the level filter from live rather than trust a stale value
         }
+      } else {
+        ibvFilt = IBV;  // first sample after boot
       }
       vPrev = IBV;
       vPrevMs = currentMillis;
     }
     g_fastOvDvdt = dvdt;
+    g_ovIbvFilt = ibvFilt;
 
     if (voltageControlActive) {  // Groups 1/2 target-relative; gated only on voltageControlActive
       const float TD_PRED = TdPred;
@@ -1620,8 +1640,8 @@ void AdjustFieldLearnMode() {
         }
       }
 
-      if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
-        float ovExcess = IBV - (ChargingVoltageTarget + OvMeasMarginV);
+      if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && ibvFilt > ChargingVoltageTarget + OvMeasMarginV) {
+        float ovExcess = ibvFilt - (ChargingVoltageTarget + OvMeasMarginV);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
         if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; capReasonTick = CAP_REASON_KHARD_G2; }
         fastOvClampActive = true;
@@ -1629,29 +1649,31 @@ void AdjustFieldLearnMode() {
         g_fastOvHardActive = true;
       }
       // Hysteresis-band hold: keep the Group 2 clamp continuous while ovActive is latched
-      // but IBV has dipped below the firing threshold (between target+OvMeasMarginV and target).
-      // Without this, fastOvClampActive drops in the band, setpointLimited recovers at
+      // but the filtered level has dipped below the firing threshold (between target+OvMeasMarginV
+      // and target). Without this, fastOvClampActive drops in the band, setpointLimited recovers at
       // SetpointRiseRate, voltage rises, Group 2 re-fires — producing on/off flicker.
-      // Softer reference (IBV - target) so the cap relaxes linearly as voltage falls toward
+      // Softer reference (ibvFilt - target) so the cap relaxes linearly as voltage falls toward
       // the release point. No g_fastOvHardActive — this is the soft hold, not a fresh fire.
-      else if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && ovActive && IBV > ChargingVoltageTarget) {
-        float ovExcessSoft = IBV - ChargingVoltageTarget;
+      else if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && ovActive && ibvFilt > ChargingVoltageTarget) {
+        float ovExcessSoft = ibvFilt - ChargingVoltageTarget;
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcessSoft);
         if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; capReasonTick = CAP_REASON_KHARD_G2; }
         fastOvClampActive = true;
       }
 
-      // Group 1/2 release condition: battV back at/under target AND prediction safe.
+      // Group 1/2 release condition: filtered level back at/under target AND, only while Group 1
+      // is enabled, prediction safe — a disabled G1 must not be able to prolong a clamp via Vpred.
       // cv_I reseed itself is handled by the unified falling-edge reseed in the
       // bumpless tracker block — fires only when ALL protection paths (G1/2, iExcess,
       // LoadDump) have cleared, using the single preEventCvI snapshot.
       if (ovActive
-          && (IBV <= ChargingVoltageTarget)
-          && (Vpred <= V_HARD)) {
+          && (ibvFilt <= ChargingVoltageTarget)
+          && (!OvGroup1Enable || Vpred <= V_HARD)) {
         ovActive = false;
       }
     } else {
       ovActive = false;  // !voltageControlActive (idle only — MaintainMode sets voltageControlActive=true)
+      ibvFilt = IBV;     // track raw while idle so CV entry starts the level filter from the live bus
     }
   }
 
@@ -1672,8 +1694,8 @@ void AdjustFieldLearnMode() {
     // reaching MinDuty in 1–2 inner PID cycles. PID stays in AUTOMATIC —
     // recovery rebuilds from integrator=0 once fastOV clears.
     currentPID.ResetIntegratorTo(0.0);
-    queueConsoleMessageF("FastOV hard #%lu: V=%.2fV target=%.2fV — inner PID integrator reset",
-                         (unsigned long)g_fastOvHardCount, IBV, ChargingVoltageTarget);
+    queueConsoleMessageF("FastOV hard #%lu: V=%.2fV (filt %.2fV) target=%.2fV — inner PID integrator reset",
+                         (unsigned long)g_fastOvHardCount, IBV, g_ovIbvFilt, ChargingVoltageTarget);
   }
   g_fastOvHardActive_prev = g_fastOvHardActive;
 
@@ -3101,6 +3123,7 @@ void AdjustFieldLearnMode() {
           g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
           g_fastOvCapReason = capReasonTick;      // export reason atomically with the cap — CV log reads a coherent pair
           g_fastOvClampActive = fastOvClampActive;  // commit unified flag for next tick
+          g_cvRecovActive = recovActive;            // export recovery-window state for cvLog flags b7
           // Latch which protection bound the cap this tick into the Plots-tab marker
           // bitmask (consumed + cleared by the CSV1 sender). capReasonTick is a faithful
           // proxy for fastOvClampActive — every clamp site sets both.
@@ -3270,12 +3293,16 @@ void AdjustFieldLearnMode() {
               if (cvHelpersEnabled && cvDSlope > SlopeBleedThresh) {
                 const float kFieldFallS = 0.10f;  // alternator field fall TC — physical, ~universal
                 float brakeTauS = kFieldFallS + 0.0015f * (float)VoltageLoopInterval + 0.001f * VoltageFilterTC;
-                float vArrive = IBV + cvDSlope * brakeTauS;
+                // Project from getFiltV(), NOT raw IBV: cvDSlope is the slope OF getFiltV, and the
+                // VoltageFilterTC term in brakeTauS exists to undo that signal's lag. Projecting a
+                // filtered slope off a raw level double-counts the lag and rides the ripple crest —
+                // the exact defect that makes fastOV's Vpred fire on belt ripple.
+                float vArrive = getFiltV() + cvDSlope * brakeTauS;
                 float proxGain = clamp_f(1.0f - (voltageTargetSlewed - vArrive) / SlopeBleedProxV, 0.0f, 1.0f);
                 float slopeBleedAmps = SlopeBleedK * (cvDSlope - SlopeBleedThresh) * dtSec * proxGain;
                 cv_I = fmaxf(0.0f, cv_I - slopeBleedAmps);
                 g_slopeBleedAmpsThisTick = slopeBleedAmps;  // captured for cvLog; cleared by cvLog_tick after logging
-                if (slopeBleedAmps > 0.0f) recovRampHold = true;  // brake has spoken; the ramp must not answer back
+                if (recovActive && slopeBleedAmps > 0.0f) recovRampHold = true;  // brake has spoken; the ramp must not answer back
                 // cv_I_track synced on next tick by bumpless tracker (out of scope here)
               }
 
@@ -4772,13 +4799,13 @@ void resetLearningTableToDefaults() {
   {
     float loDefaults[RPM_TABLE_SIZE];
     float loDefaultsPwr[RPM_TABLE_SIZE] = { 0 };
-    for (int i = 0; i < RPM_TABLE_SIZE; i++) loDefaults[i] = defaultCapCurrentValues[i] * 0.25f;
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) loDefaults[i] = defaultCapCurrentValues[i] * LOW_MODE_CAP_FRACTION;
     nvs_handle_t nvs_h;
     if (nvs_open("learning", NVS_READWRITE, &nvs_h) == ESP_OK) {
       nvs_set_blob(nvs_h, "rpmPoints", rpmTableRPMPoints, sizeof(rpmTableRPMPoints));
       nvs_set_blob(nvs_h, "capTable", defaultCapCurrentValues, sizeof(defaultCapCurrentValues));   // Normal/High
       nvs_set_blob(nvs_h, "capPowerTable", defaultCapPowerValues, sizeof(defaultCapPowerValues));  // Normal/High
-      nvs_set_blob(nvs_h, "capTableLo", loDefaults, sizeof(loDefaults));                            // Low (25%)
+      nvs_set_blob(nvs_h, "capTableLo", loDefaults, sizeof(loDefaults));                            // Low
       nvs_set_blob(nvs_h, "capPowerTableLo", loDefaultsPwr, sizeof(loDefaultsPwr));                 // Low
       nvs_set_u8(nvs_h, "capLimitMode", capLimitMode);
       nvs_set_blob(nvs_h, "minDutyTable", rpmMinDutyTable, sizeof(rpmMinDutyTable));
@@ -4817,7 +4844,7 @@ void loadLearningTableFromNVS() {
     err = nvs_get_blob(nvs_handle, capKey, rpmCapCurrentTable, &required_size);
     if (err != ESP_OK || required_size != sizeof(rpmCapCurrentTable)) {
       for (int i = 0; i < RPM_TABLE_SIZE; i++)
-        rpmCapCurrentTable[i] = (HiLow == 1) ? defaultCapCurrentValues[i] : defaultCapCurrentValues[i] * 0.25f;
+        rpmCapCurrentTable[i] = (HiLow == 1) ? defaultCapCurrentValues[i] : defaultCapCurrentValues[i] * LOW_MODE_CAP_FRACTION;
     }
     required_size = sizeof(rpmCapPowerTable);
     err = nvs_get_blob(nvs_handle, capPwrKey, rpmCapPowerTable, &required_size);
@@ -4912,7 +4939,7 @@ void loadCapTablesForMode(int mode) {
   esp_err_t err = nvs_open("learning", NVS_READONLY, &nvs_handle);
   if (err != ESP_OK) {
     for (int i = 0; i < RPM_TABLE_SIZE; i++) {
-      rpmCapCurrentTable[i] = (mode == 1) ? defaultCapCurrentValues[i] : defaultCapCurrentValues[i] * 0.25f;
+      rpmCapCurrentTable[i] = (mode == 1) ? defaultCapCurrentValues[i] : defaultCapCurrentValues[i] * LOW_MODE_CAP_FRACTION;
       rpmCapPowerTable[i] = 0.0f;
     }
     return;
@@ -4924,7 +4951,7 @@ void loadCapTablesForMode(int mode) {
   err = nvs_get_blob(nvs_handle, capKey, rpmCapCurrentTable, &sz);
   if (err != ESP_OK || sz != sizeof(rpmCapCurrentTable)) {
     for (int i = 0; i < RPM_TABLE_SIZE; i++)
-      rpmCapCurrentTable[i] = (mode == 1) ? defaultCapCurrentValues[i] : defaultCapCurrentValues[i] * 0.25f;
+      rpmCapCurrentTable[i] = (mode == 1) ? defaultCapCurrentValues[i] : defaultCapCurrentValues[i] * LOW_MODE_CAP_FRACTION;
   }
   sz = sizeof(rpmCapPowerTable);
   err = nvs_get_blob(nvs_handle, capPwrKey, rpmCapPowerTable, &sz);
@@ -5490,6 +5517,29 @@ void commissionClearMinPctBackup() {
   nvs_close(h);
 }
 
+// RPMScalingFactor is a linear gain on the engine-RPM axis, so everything learned or measured
+// against the old axis is stale. Runs on Core 1 (flash writes). Drives the SAME clear paths the
+// individual Clear buttons use, so there is one implementation per artifact. Deliberately does NOT
+// touch: alternator wear accumulators (real integrated damage), the fuel curve (entered in true
+// engine RPM), the Hi/Lo cap tables and rpmPoints (user-entered), or the sail front (no RPM axis).
+// The cloud half is owed separately — NK_RpmAxisWipePend gates front sync until it lands.
+void rpmAxisWipeExecute() {
+  kneeLearnResetDefaults();       // Min% floor table + knee-learner state
+  commissionClearMinPctBackup();  // its NVS backup snapshot
+  commissionClearRpmDependents(); // commissioning stages after RPM Alignment
+  systemIDLogClearAll();          // step-test ring (records are RPM-stamped)
+  resetMotorFrontOnly();          // motoring front only; sail front kept
+  pendingResetAlternatorHealth = true;  // best-ever front + engine-hour trend + baseline
+  pendingClearOverheatHistory  = true;  // per-RPM-bin thermal history
+  faPendingMatrixClear = true;          // /famatrix.bin  (50-RPM x amp cells)
+  ripTabPendingWipe    = true;          // /riptab.bin    (50-RPM bins)
+  faPendingFlipWipeAll = true;          // /faflip.bin    (all 9 pages)
+  rpmAxisWipePending = true;
+  settingWrite(NK_RpmAxisWipePend, "1");
+  settingWrite(NK_RpmAxisWipeLoc, "0");  // local half done; cloud half still gated by NK_RpmAxisWipePend
+  queueConsoleMessage("RPM scaling changed -- engine-RPM-indexed learning wiped; re-commission required");
+}
+
 // Throttled saver — called from loop() (NOT the control tick). Flash commit is gated on field-off
 // (like dumpLongTermRing) so the NVS write never stalls the control loop while the field is on.
 // Learned state accrues to RAM during field-on float/low-demand and is persisted once the field
@@ -6037,7 +6087,6 @@ void pidLog_tick(uint32_t nowMs) {
   e.voltageKd = 0.0f;  // no D term; field kept for struct layout compatibility
 
   e.battV_filt = IBV_filtered;
-  e.iMeas_filt = MeasuredAmps_filtered;
   e.dBcur_dt = g_dBcur_dt;
   e.battI = getBatteryCurrent();
   e.ch1IntervalMs = (int16_t)g_ch1LastIntervalMs;

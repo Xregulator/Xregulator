@@ -3,7 +3,7 @@ plot_cvlog.py
 Diagnostic plotter for CVlog data from the ESP32 alternator regulator.
 
 3 plot windows:
-  Plot 1 — Voltage: battV, battV_filt_V, targV, vPred | duty% right axis
+  Plot 1 — Voltage: battV, battV_filt_V, ovFilt_V, targV, vPred | duty% right axis
   Plot 2 — Current command chain (top) + overvoltage protection layers (bottom)
   Plot 3 — Engine RPM + CH1 scheduling jitter | duty% right axis
 
@@ -257,13 +257,15 @@ numeric_cols = [
     "fastOvActive", "voltLoopFired", "cvActive",
     "hardClamp",
     "rpm",
-    "battV_filt_V", "iMeas_filt_A",
+    "battV_filt_V",
     "ch1_last_ms", "iExcess", "iExcessBulk",
     "battI_A", "dBcur_dt_Aps", "loadDumpActive",
     "cvDSlope_Vps", "awState",
     "voltLoopInterval_ms", "inaInterval_ms",
     "slopeBleedAmps_A",
     "capReason",
+    "ovFilt_V",
+    "recovActive",
 ]
 
 for col in numeric_cols:
@@ -301,6 +303,7 @@ df["hardClamp"]      = _to_int("hardClamp")
 df["iExcess"]        = _to_int("iExcess")
 df["iExcessBulk"]    = _to_int("iExcessBulk")   # Group 3 BULK sub-mode (current-control phase); older logs lack it → all 0
 df["loadDumpActive"] = _to_int("loadDumpActive")
+df["recovActive"]    = _to_int("recovActive")   # post-protection recovery window (flags b7; blank/0 on pre-ovFilt logs)
 df["capReason"]      = _to_int("capReason")   # 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk (binding cap; older logs lack it → all 0)
 df["chargeStageDisplay"] = _to_int("chargeStageDisplay")   # 8 = COMMISSIONING (older logs lack it → all 0, band never drawn)
 
@@ -522,7 +525,7 @@ def draw_flag_bars(ax, df):
     """Mode bar + duration bars + VLoop ticks — replaces state strip on all plots."""
     flag_h  = 0.18
     spacing = 0.26
-    n_rows  = 7   # capReason + cvActive + voltLoopFired + 4 protection flags
+    n_rows  = 8   # capReason + cvActive + voltLoopFired + recovery + 4 protection flags
     top     = (n_rows - 1) * spacing + flag_h + 0.06
 
     span = df["t_plot"].iloc[-1] - df["t_plot"].iloc[0]
@@ -530,7 +533,7 @@ def draw_flag_bars(ax, df):
     # --- Row 6 (top): capReason — which layer was the BINDING cap (colored segments) ---
     # Only non-"none" segments are drawn, so any color here = a protection actually set
     # the current ceiling. Colours are max-distinct: G1 blue, G2 orange, iExcess purple, loadDump red.
-    cr_offset = 6 * spacing
+    cr_offset = 7 * spacing
     if "capReason" in df.columns:
         cr_vals = df["capReason"].values
         t_arr   = df["t_plot"].values
@@ -569,7 +572,7 @@ def draw_flag_bars(ax, df):
     # --- Row 5: mode bar — brown=COMMISSIONING (stage 8), green=CV active, grey=CV off ---
     # COMMISSIONING is a charge-stage mode, not a protection event, so it lives in this
     # mode row (overriding cv on/off) the same way it does in plot_pidlog / plot_thermallog.
-    cv_offset = 5 * spacing
+    cv_offset = 6 * spacing
     _cv  = df["cvActive"].values
     _stg = (df["chargeStageDisplay"].values if "chargeStageDisplay" in df.columns
             else np.zeros(len(df), dtype="int64"))
@@ -589,14 +592,15 @@ def draw_flag_bars(ax, df):
             prev_t   = t
             prev_col = col
 
-    # --- Row 4: voltLoopFired — tick marks (fires every loop tick) ---
-    vl_offset = 4 * spacing
+    # --- Row 5: voltLoopFired — tick marks (fires every loop tick) ---
+    vl_offset = 5 * spacing
     for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
         ax.axvline(x=t, ymin=vl_offset / top, ymax=(vl_offset + flag_h) / top,
                    color=EV_COLOR_VLOOP, linewidth=0.8, alpha=0.7)
 
-    # --- Rows 3–0: protection duration bars ---
+    # --- Rows 4–0: recovery window + protection duration bars ---
     bar_rows = [
+        (4 * spacing, "recovActive",    "#2e96d1", "recovActive   (post-protection recovery window)"),
         (3 * spacing, "fastOvActive",   "#17becf", "fastOvActive  (FastOV or iExcess; load dump separate)"),
         (2 * spacing, "hardClamp",      "#8c564b", "hardClamp     (layer 2/3 — hard ceiling)"),
         (1 * spacing, "iExcess",        "#9467bd", "iExcess       (current excess protection)"),
@@ -624,8 +628,8 @@ def draw_flag_bars(ax, df):
     ax.set_ylim(-0.03, top + 0.30)   # headroom for inline capReason episode tags
     # Row names in the left gutter (y-tick labels) — never painted over the data.
     row_centers = [k * spacing + flag_h / 2 for k in range(n_rows)]
-    row_names   = ["loadDump", "iExcess", "hardClamp", "fastOV",
-                   "voltLoop", "mode", "binding cap"]   # rows 0..6, bottom -> top (row 5 = CV on/off + COMMISSIONING)
+    row_names   = ["loadDump", "iExcess", "hardClamp", "fastOV", "recovery",
+                   "voltLoop", "mode", "binding cap"]   # rows 0..7, bottom -> top (row 6 = CV on/off + COMMISSIONING)
     ax.set_yticks(row_centers)
     ax.set_yticklabels(row_names, fontsize=7.5)
     ax.tick_params(axis="y", length=0, pad=2)
@@ -638,6 +642,7 @@ def draw_flag_bars(ax, df):
         Patch(color=CAP_REASON_COLORS[3], label="iExcess (current excess)"),
         Patch(color=CAP_REASON_COLORS[4], label="LD load dump"),
         Patch(color="#17becf",            label="fastOvActive"),
+        Patch(color="#2e96d1",            label="recovActive (recovery window)"),
         Patch(color="#8c564b",            label="hardClamp"),
         Patch(color="#2e7d32",            label="cvActive (CV on)"),
         Patch(color=EV_COLOR_VLOOP,       label="voltLoop tick"),
@@ -704,6 +709,10 @@ ax1.plot(df["t_plot"], df["battV"],
          color="#1565c0", lw=2.5, label="battV (measured)")
 ax1.plot(df["t_plot"], df["battV_filt_V"],
          color="#90caf9", lw=1.6, linestyle="--", alpha=0.85, label="battV_filt_V (EMA)")
+if "ovFilt_V" in df.columns and df["ovFilt_V"].notna().any():
+    # Group 2's actual comparator input (plant-tau EMA) — the trip fires on THIS vs targV+OvMeasMarginV
+    ax1.plot(df["t_plot"], df["ovFilt_V"],
+             color="#6a1b9a", lw=1.8, alpha=0.90, label="ovFilt_V (G2 comparator input)")
 ax1.plot(df["t_plot"], df["targV"],
          color="#e91e63", lw=2.2, linestyle="--", label="targV (setpoint)")
 if "vPred" in df.columns:
@@ -755,9 +764,6 @@ if "spLimited_A" in df.columns:
 if "iMeas_A" in df.columns:
     ax2a.plot(df["t_plot"], df["iMeas_A"],
               color="#c62828", lw=2.0, label="Actual current  (iMeas_A)", alpha=0.90)
-if "iMeas_filt_A" in df.columns:
-    ax2a.plot(df["t_plot"], df["iMeas_filt_A"],
-              color="#ef9a9a", lw=1.4, linestyle="--", label="Actual current EMA  (iMeas_filt_A)", alpha=0.75)
 if "battI_A" in df.columns:
     # In amber-shaded spans (cvBattActive) THIS is the regulated PV the loop tracks against spLimited_A.
     _batt_lbl = "Battery current  (battI_A — tracked PV in shaded spans)" if "cvBattActive" in df.columns else "Battery current  (battI_A)"
@@ -786,7 +792,6 @@ _p2_key = (
     "  FastOV voltage ceiling   =  fastOvCap_A    (A)\n"
     "  PID command              =  spLimited_A    (A)\n"
     "  Actual current (raw)     =  iMeas_A        (A)\n"
-    "  Actual current (EMA)     =  iMeas_filt_A   (A)\n"
     "  Battery current          =  battI_A        (A)\n"
     "  Field duty               =  duty_pct       (%)\n"
     "  Amber band = CV regulating BATTERY current (§G):\n"
@@ -934,11 +939,11 @@ fig4.subplots_adjust(top=0.90, right=0.80)
 
 # Compute P term from header gains + logged signals.
 # D term removed — VoltageKd was always 0 and is tombstoned in the log format.
-# P term uses (targV - battV_filt_V): the firmware always uses raw IBV for the voltage error.
+# P term uses (targV - battV): the firmware PI error runs on RAW IBV (no filter lag).
 # voltageTargetSlewed (the slewed target) is not logged; targV is used as the target
 # approximation — differs only briefly on CV entry or setpoint change.
 if not np.isnan(_kp):
-    df["pid_P"] = _kp * (df["targV"] - df["battV_filt_V"])
+    df["pid_P"] = _kp * (df["targV"] - df["battV"])
     _have_gains = True
 else:
     _have_gains = False
@@ -952,7 +957,7 @@ if _have_gains and "cv_I_A" in df.columns:
 # --- Plot P, I, and total ---
 if _have_gains:
     ax4.plot(df["t_plot"], df["pid_P"],
-             color="#1565c0", lw=2.0, label=f"P term  =  Kp({_kp:.4g}) × (targV − battV_filt_V)  (A)")
+             color="#1565c0", lw=2.0, label=f"P term  =  Kp({_kp:.4g}) × (targV − battV)  (A)")
 if "cv_I_A" in df.columns:
     ax4.plot(df["t_plot"], df["cv_I_A"],
              color="#2e7d32", lw=2.0, label="I term  =  cv_I_A  (running integral, A)")
@@ -988,13 +993,13 @@ _leg4.set_draggable(True)
 add_ov_shading(ax4, df)
 add_voltloop_vlines(ax4, df)
 
-# vError context panel — shows the filtered error the P term actually reacted to.
-# Uses (targV - battV_filt_V) to match what the firmware feeds to Kp.
+# vError context panel — the RAW error is what the firmware feeds to Kp; the filtered
+# error is shown for reference only (display EMA, VoltageFilterTC).
 df["filt_error_V"] = df["targV"] - df["battV_filt_V"]
-ax4b.plot(df["t_plot"], df["filt_error_V"],
-          color="#212121", lw=1.8, alpha=0.90, label="targV − battV_filt_V  (filtered error fed to P term)")
 ax4b.plot(df["t_plot"], df["vError_V"],
-          color="#9e9e9e", lw=1.2, linestyle="--", alpha=0.70, label="vError_V  (raw IBV, logged reference)")
+          color="#212121", lw=1.8, alpha=0.90, label="vError_V  (raw error fed to P term)")
+ax4b.plot(df["t_plot"], df["filt_error_V"],
+          color="#9e9e9e", lw=1.2, linestyle="--", alpha=0.70, label="targV − battV_filt_V  (display EMA, reference)")
 ax4b.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
 ax4b.set_ylabel("vError (V)")
 

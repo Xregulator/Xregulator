@@ -231,7 +231,7 @@ const CSV1_FIELDS = [
     "perfCountersResetElapsedS",  // seconds since "Reset Peak Values" press (0 = boot)
     "shutdownPhase",
     "BatteryV_raw",
-    "MeasuredAmps_filtered",  // CC current-PID PV (OutputPIDSigSrc-selected) — name kept for span/scaling compatibility
+    "pidAltPV",  // CC current-PID PV (OutputPIDSigSrc-selected)
     "voltageTarget",
     "Icv",
     "WaterDepth_ft",
@@ -1260,16 +1260,11 @@ function downloadRippleBundle(){
 // ── Configuration Backup & Sharing ──────────────────────────────────────────
 // Export the whole config (/exportConfig), load one back (/importConfig, reboots),
 // and submit the current config to the cloud library for review (submit-config).
-// Export and library-share always send the FULL config (tier-2 included) — the ingesting
-// side decides what to accept, never the exporter. The "Include hardware" checkbox now
-// gates the LOAD/import path only (whether a file's tier-2 keys overwrite this regulator).
-function configHwFlag(){
-  const cb=document.getElementById('configIncludeHardware');
-  return (cb && cb.checked) ? 1 : 0;
-}
+// Every path carries the FULL config, hardware/calibration keys included; the import
+// diff checkboxes are the only place anything gets held back.
 function exportConfigDownload(){
   if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware=1'),{},10000)
+  fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)),{},10000)
     .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
     .then(txt=>{
       const d=new Date(), p=n=>String(n).padStart(2,'0');
@@ -1281,16 +1276,12 @@ function exportConfigDownload(){
       setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     }).catch(e=>xAlert('Export failed: '+(e&&e.message?e.message:e)));
 }
-// Pre-apply diff preview. Fetches this regulator's current config twice (with and
-// without hardware keys — the difference identifies tier-2 keys, which the browser
-// otherwise can't distinguish from never-set tier-1 keys) and shows current → new for
-// every key the incoming blob would change, each with a checkbox (all checked by
-// default). Apply POSTs a REBUILT blob holding only the checked keys — unchecked rows
-// and already-matching keys are left out entirely. Resolves with the filtered body
-// text to POST, or null on cancel. Nothing is written until the user approves.
-// Residual imprecision: a tier-2 key never set in NVS on this device is invisible to
-// both exports, so with hardware excluded it's listed as "will apply" though the
-// firmware skips it — harmless direction (over-warns, never under-warns).
+// Pre-apply diff preview. Fetches this regulator's current config and shows current → new
+// for every key the incoming blob would change, each with a checkbox (all checked by
+// default). Apply POSTs a REBUILT blob holding only the checked keys — unchecked rows and
+// already-matching keys are left out entirely. Resolves with the filtered body text to
+// POST, or null on cancel. Nothing is written until the user approves. Hardware and
+// calibration keys are ordinary rows here — uncheck them to keep this device's own.
 let _cfgDiffResolve=null,_cfgDiffIncoming=null;
 const _CFG_TABLE_LABELS={rpmPoints:'RPM Breakpoints',capTable:'Current Cap Table — Normal (A)',
   capPowerTable:'Power Cap Table — Normal (W)',capTableLo:'Current Cap Table — Low (A)',
@@ -1325,25 +1316,19 @@ function cfgDiffToggleAll(){
   if(b) b.textContent=target?'Uncheck All':'Check All';
 }
 function _cfgEsc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-async function cfgDiffPreview(blobText, hw, sourceLabel){
+async function cfgDiffPreview(blobText, sourceLabel){
   let incoming;
   try{ incoming=JSON.parse(blobText); }catch(e){ xAlert('That is not a valid configuration file.'); return null; }
   if(!incoming || typeof incoming.config!=='object'){ xAlert('That file has no "config" section — not a regulator configuration.'); return null; }
-  const base='/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware=';
-  // sequential, not Promise.all — each export builds a ~14KB String in internal heap on the device
-  const rFull=await fetchWithTimeout(buildURL(base+'1'),{},10000);
-  const rT1=await fetchWithTimeout(buildURL(base+'0'),{},10000);
-  if(!rFull.ok||!rT1.ok){ xAlert('Could not read the current configuration for comparison (HTTP '+(rFull.ok?rT1.status:rFull.status)+').'); return null; }
+  const rFull=await fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)),{},10000);
+  if(!rFull.ok){ xAlert('Could not read the current configuration for comparison (HTTP '+rFull.status+').'); return null; }
   const fullJ=await rFull.json();
   const curFull=fullJ.config||{};
   const curTables=fullJ.tables||{};
-  const tier1=(await rT1.json()).config||{};
-  const tier2=new Set(Object.keys(curFull).filter(k=>!(k in tier1)));
-  const changed=[],fresh=[],skipped=[];
+  const changed=[],fresh=[];
   let unchanged=0;
   for(const k of Object.keys(incoming.config).sort()){
     const nv=String(incoming.config[k]);
-    if(!hw && tier2.has(k)){ skipped.push(k); continue; }
     if(k in curFull){
       if(String(curFull[k])===nv) unchanged++;
       else changed.push({k,cur:String(curFull[k]),nv});
@@ -1365,11 +1350,10 @@ async function cfgDiffPreview(blobText, hw, sourceLabel){
   const body=document.getElementById('cfgdiff-body');
   const vNow=incoming.vessel&&incoming.vessel.battery_voltage;
   sum.innerHTML='Loading <b>'+_cfgEsc(sourceLabel)+'</b>'+(incoming.fw_version?' (saved on firmware '+_cfgEsc(incoming.fw_version)+')':'')+'.<br>'
-    +'<b>'+nChange+'</b> settings change, <b>'+nFresh+'</b> are new here, <b>'+unchanged+'</b> already match'
-    +(skipped.length?', <b>'+skipped.length+'</b> hardware settings skipped (box unchecked)':'')+'.'
+    +'<b>'+nChange+'</b> settings change, <b>'+nFresh+'</b> are new here, <b>'+unchanged+'</b> already match.'
     +'<br>Only checked rows are applied.'
     +(vNow?'<br>Source system voltage: <b>'+_cfgEsc(vNow)+' V</b> — confirm this matches your bank.':'')
-    +(hw?'<br><span style="color:#fca5a5;">Hardware settings (sensor/shunt/polarity) WILL be applied — identical hardware only.</span>':'');
+    +'<br><span style="color:#fca5a5;">Hardware and calibration settings (sensor/shunt/polarity/offsets) WILL be applied — uncheck them unless the hardware is identical.</span>';
   const row=(kind,k,label,cur,nv)=>'<tr>'
     +'<td style="padding:3px 6px 3px 0;"><input type="checkbox" class="cfgdiff-cb" data-kind="'+kind+'" data-key="'+_cfgEsc(k)+'" checked style="width:16px; height:16px; margin:0; vertical-align:middle;"></td>'
     +'<td style="padding:3px 8px 3px 0; color:#9cc; word-break:break-all;">'+_cfgEsc(label)+'</td>'
@@ -1394,8 +1378,8 @@ async function cfgDiffPreview(blobText, hw, sourceLabel){
   document.getElementById('cfgdiff-modal-overlay').style.display='flex';
   return new Promise(res=>{ _cfgDiffResolve=res; });
 }
-function _cfgPostImport(bodyText, hw){
-  fetchWithTimeout(buildURL('/importConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware='+hw),
+function _cfgPostImport(bodyText){
+  fetchWithTimeout(buildURL('/importConfig?password='+encodeURIComponent(currentAdminPassword)),
     {method:'POST',body:bodyText},12000)
     .then(r=>{ if(!r.ok){ return r.text().then(t=>{ throw new Error(t||('HTTP '+r.status)); }); } return r.json(); })
     .then(res=>xAlert('Applied '+res.applied+' settings. '+(res.reboot?'The regulator is rebooting — reconnect in ~30 s.':'')))
@@ -1405,12 +1389,11 @@ function importConfigFromFile(){
   if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
   const inp=document.getElementById('importConfigFile');
   if(!inp || !inp.files || !inp.files.length){ xAlert('Choose a configuration file first.'); return; }
-  const hw=configHwFlag();
   const reader=new FileReader();
   reader.onload=function(){
     const txt=reader.result;
-    cfgDiffPreview(txt, hw, inp.files[0].name)
-      .then(body=>{ if(body) _cfgPostImport(body, hw); })
+    cfgDiffPreview(txt, inp.files[0].name)
+      .then(body=>{ if(body) _cfgPostImport(body); })
       .catch(e=>xAlert('Preview failed: '+(e&&e.message?e.message:e)));
   };
   reader.readAsText(inp.files[0]);
@@ -1422,7 +1405,7 @@ async function shareConfigToLibrary(){
   try{
     const token=await ensureCloudToken();
     if(!token){ xAlert('This regulator is not registered for cloud features. Complete registration first.'); return; }
-    const r=await fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware=1'),{},10000);
+    const r=await fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)),{},10000);
     if(!r.ok) throw new Error('export HTTP '+r.status);
     const config=await r.json();
     const resp=await fetch(`${SUPABASE_URL}/functions/v1/submit-config`,{
@@ -1915,6 +1898,13 @@ function perfSet(key, val){
 
 let perfView = 0;   // 0 = sailing, 1 = motoring (client-side display toggle)
 function setTxt(id, t){ const el=document.getElementById(id); if(el) el.textContent=t; }
+// Rows are authored as <hr> then row, so a row hidden on its own strands its separator.
+function setRowVisible(id, show){
+  const el=document.getElementById(id); if(!el) return;
+  el.style.display = show?'':'none';
+  const hr=el.previousElementSibling;
+  if(hr && hr.tagName==='HR') hr.style.display = show?'':'none';
+}
 function seaWord(s){ return s<0.5?'calm':s<1.5?'slight':s<3?'choppy':s<5?'rough':'very rough'; }
 function setPerfView(v){
   perfView = v;
@@ -1930,7 +1920,7 @@ function setPerfView(v){
     if(v===1){ hub.style.left='9%'; hub.style.top='11%'; hub.style.transform='none'; hub.style.textAlign='left'; }
     else { hub.style.left='50%'; hub.style.top='54%'; hub.style.transform='translate(-50%,-50%)'; hub.style.textAlign='center'; }
   }
-  const symRow=document.getElementById('perf-sym-row'); if(symRow) symRow.style.display = v===0?'':'none';
+  setRowVisible('perf-sym-row', v===0);
   const windTog=document.getElementById('perf-wind-toggle'); if(windTog) windTog.style.display = v===0?'':'none';
   renderPerf();
   if(v===0) queuePerfPlotUpdate(); else queueMotorPlotUpdate();
@@ -2414,7 +2404,6 @@ const CSV3_FIELDS = [
     "rpmCapPowerTable8",
     "rpmCapPowerTable9",
     "reserved_VoltageTrimLimit",  // obsolete setting removed — dead slot
-    "InputFilterTC",
     "SystemIDStepAmplitude",
     "HardOCTripAmps",
     "HardOCDebounceMs",
@@ -2551,7 +2540,7 @@ const CSV3_FIELDS = [
     "SystemIDStabilizeAmps",         // A ×10 — plant-delay baseline/trough current
     "tuningWaveFloor",               // A — Current Target Generator wave floor (trough), shared square + sine
     "commissionState",               // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-    "commissionPhase",               // furthest wizard phase reached: 0=Prep…7=CV plant fit (final)
+    "commissionPhase",               // furthest wizard phase reached: 0=Prep…8=CV plant fit, 9=finished
     "commissionDoneMask",            // per-stage completion bitmask (bit i = stage i done)
     "cvHelpersEnabled",              // master switch: asymmetric KiDown unwind + slope-aware integrator bleed (1=on)
     "MinChargeTempF",                // cold-charge lockout board-temp floor (°F)
@@ -4538,6 +4527,10 @@ function insertStreamGap(gapSec) {
         // Timestamp mode only (epoch x); the relative ramp is static and must not be shifted.
         // Park the seam mid-gap so x stays sorted — uPlot requires monotonic x.
         if (b[0][last] > 1e9) {
+            // The interp loop drags x[last] to wall-clock even while the stream is dead — clamp back
+            // to the true last-arrival stamp, or the seam lands in the future and the next appended
+            // frame breaks monotonicity.
+            b[0][last] = Math.min(b[0][last], Date.now() / 1000 - gapSec);
             const prevLast = b[0][last];
             for (let i = 1; i <= last; i++) b[0][i - 1] = b[0][i];
             b[0][last] = prevLast + gapSec / 2;
@@ -4585,7 +4578,7 @@ function processCSVDataOptimized(data) {
         // ALWAYS UPDATE DATA STRUCTURES - Current/Temperature plot data
         const battCurrent = 'Bcur' in data ? parseFloat(data.Bcur) / 100 : 0;
         const altCurrent = 'MeasuredAmps' in data ? parseFloat(data.MeasuredAmps) / 100 : 0;
-        const altCurrentFilt = 'MeasuredAmps_filtered' in data ? parseFloat(data.MeasuredAmps_filtered) / 100 : 0;
+        const altCurrentFilt = 'pidAltPV' in data ? parseFloat(data.pidAltPV) / 100 : 0;
         const fieldCurrent = 'iiout' in data ? parseFloat(data.iiout) / 100 : 0;
         const fieldPct = 'dutyCycle' in data ? parseFloat(data.dutyCycle) / 100 : 0;
         // Latch the real telemetry the alt-health session plot wants to show per dot — these live in
@@ -5300,8 +5293,6 @@ function updateAllEchosOptimized(data) {
         { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
         { key: 'bulkVoltageHoldMs', id: 'bulkVoltageHoldMs_echo', transform: v => (v / 1000).toFixed(2) },
         { key: 'capLimitMode', id: 'capLimitMode_echo', transform: v => v },
-        { key: 'InputFilterTC', id: 'InputFilterTC_echo',      transform: v => v },
-        { key: 'InputFilterTC', id: 'InputFilterTC_ID',        transform: v => v },
         { key: 'OutputPIDFilterTC', id: 'OutputPIDFilterTC_echo_pid', transform: v => v },
         { key: 'SlopeBleedThresh',      id: 'SlopeBleedThresh_echo',          transform: v => (v / 100).toFixed(2) },
         { key: 'SlopeBleedK',           id: 'SlopeBleedK_echo',               transform: v => v },
@@ -6038,7 +6029,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         if (!currentAdminPassword) return;
 
         // Current values from the device (raw NVS strings)
-        const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword) + '&includeHardware=1'), {}, 10000);
+        const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword)), {}, 10000);
         if (!r.ok) { _battDefSkipNote('Could not read the current device settings (HTTP ' + r.status + '), so the recommended battery defaults were skipped. Review them any time under Setup &rarr; Battery.'); return; }
         const cfg = (await r.json()).config || {};
         const battSrc = ('BatteryCurrentSource' in cfg) ? parseInt(cfg.BatteryCurrentSource, 10) : 0;  // 0 = INA228
@@ -6159,13 +6150,25 @@ let _commPrepTsInit = 0;         // TempSource at open (0 = DS18B20, 1 = Thermis
 let _commPrepTempSrc = 0;        // live TempSource selection
 let _commPrepFloatInit = '';     // UseFloat at open (Other-only charge block); written only if the select changed
 let _commPrepRpmActive = false;  // deep-linked into the RPM editor from the wizard: suppress the live blue row highlight
+let _commPrepRpmVisited = false; // green CTA hands off from "Set RPM table" to "Start Commissioning" once the table has been visited
+
+const CP_BTN_GREEN = 'background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; border:none;';
+const CP_BTN_GREY = 'background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); font-weight:400;';
+
+function commPrepPaintCta() {
+    const rpm = document.getElementById('commprep-rpm-btn');
+    const start = document.getElementById('commprep-start-btn');
+    if (rpm) rpm.style.cssText = 'width:100%; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em; ' + (_commPrepRpmVisited ? CP_BTN_GREY : CP_BTN_GREEN);
+    if (start) start.style.cssText = 'border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em; ' + (_commPrepRpmVisited ? CP_BTN_GREEN : CP_BTN_GREY);
+}
 
 async function maybeShowCommPrereqs() {
     try {
         if (!currentAdminPassword) return;
-        const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword) + '&includeHardware=1'), {}, 10000);
+        const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword)), {}, 10000);
         if (!r.ok) return;
         _commPrepCfg = (await r.json()).config || {};
+        _commPrepRpmVisited = false;
         commPrepRender(_commPrepCfg);
         document.getElementById('commprep-modal-overlay').style.display = 'flex';
         await new Promise(res => { _commPrereqResolve = res; });
@@ -6250,7 +6253,8 @@ function commPrepRender(cfg) {
         field('Shunt Resistance (µΩ)', 'commprep-shunt', raw('ShuntResistanceMicroOhm'), '1', '1', '5000') + hr +
         otherBlock +
         '<div style="' + rowCss + '"><label style="' + lblCss + '">Engine RPM vs. field table</label>' +
-        '<button type="button" onclick="commPrepGotoRpm()" style="width:100%; background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Set RPM table →</button></div>';
+        '<button type="button" id="commprep-rpm-btn" onclick="commPrepGotoRpm()">Set RPM table →</button></div>';
+    commPrepPaintCta();
 
     // Only inputs the user actually edits get written — snapshot their initial strings after render.
     _commPrepInit = {};
@@ -6339,17 +6343,23 @@ function commPrepGotoRpm() {
     _commPrepRpmActive = true;
     updateLearningTableHighlight({ currentRPMTableIndex: -1 });
     if (document.getElementById('commprep-back-pill')) return;
-    const pill = document.createElement('button');
+    const pill = document.createElement('div');
     pill.id = 'commprep-back-pill';
-    pill.type = 'button';
-    pill.innerHTML = 'Edit the RPM and Limit (A) columns then...<br><br>...press this button to return to Setup Wizard';
-    pill.onclick = commPrepBackFromRpm;
-    pill.style.cssText = 'position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:9300; max-width:min(360px,calc(100vw - 32px)); text-align:center; line-height:1.35; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:14px; border:none; border-radius:16px; padding:16px 22px; cursor:pointer; box-shadow:0 6px 24px rgba(0,0,0,0.55);';
+    pill.style.cssText = 'position:fixed; right:20px; top:50%; transform:translateY(-50%); z-index:9300; width:300px; max-width:calc(100vw - 32px); background:#1e1e1e; color:#ddd; border:1px solid #444; border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); box-sizing:border-box;';
+    pill.innerHTML = '<div style="padding:10px 16px 9px; border-bottom:1px solid #333; background:#252525; border-radius:8px 8px 0 0;">'
+        + '<span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Setup Wizard</span></div>'
+        + '<div style="padding:16px 18px 18px;">'
+        + '<div style="font-size:13px; line-height:1.5; color:#ccc;">Edit the RPM and Limit (A) columns to define the maximum output you\'d like at all engine speeds.</div>'
+        + '<button id="commprep-back-btn" type="button" style="width:100%; margin-top:16px; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:5px; padding:9px 16px; cursor:pointer;">Back to Setup Wizard</button>'
+        + '</div>';
+    pill.querySelector('#commprep-back-btn').onclick = commPrepBackFromRpm;
     document.body.appendChild(pill);
 }
 function commPrepBackFromRpm() {
     _commPrepRpmActive = false;
+    _commPrepRpmVisited = true;
     const pill = document.getElementById('commprep-back-pill'); if (pill) pill.remove();
+    commPrepPaintCta();
     document.getElementById('commprep-modal-overlay').style.display = 'flex';
 }
 
@@ -7260,7 +7270,6 @@ function renderCVTuningLog(data) {
             <td style="padding:2px 4px;">${r.lddt.toFixed(0)}</td>
             <td style="padding:2px 4px;">${r.ldt1.toFixed(0)}</td>
             <td style="padding:2px 4px;">${r.ldt3.toFixed(0)}</td>
-            <td style="padding:2px 4px;">${r.tc.toFixed(0)}</td>
             <td style="padding:2px 4px;">${r.wa.toFixed(2)}</td>
             <td style="padding:2px 4px;">${r.wp}</td>
             <td style="padding:2px 4px;">${r.ko.toFixed(1)}</td>
@@ -8263,8 +8272,8 @@ function _configShareHandleMessage(e) {
     if (!currentAdminPassword) { xAlert('Please unlock settings first'); return; }
     const label = e.data.name ? ('"' + e.data.name + '"') : 'this shared configuration';
     const txt = JSON.stringify(e.data.config);
-    cfgDiffPreview(txt, 0, label)
-        .then(body => { if (body) _cfgPostImport(body, 0); })
+    cfgDiffPreview(txt, label)
+        .then(body => { if (body) _cfgPostImport(body); })
         .catch(err => xAlert('Preview failed: ' + (err && err.message ? err.message : err)));
 }
 window.addEventListener('message', _configShareHandleMessage);
@@ -8654,6 +8663,11 @@ function initPlotDataStructures() {
         new Array(maxPoints).fill(null),
         new Array(maxPoints).fill(null)  // Field% (duty cycle)
     ];
+
+    // Marker arrays are index-aligned to these buffers — wipe them together, or stale gap /
+    // protection bands paint at meaningless positions after a time-axis-mode toggle.
+    protEventData = new Array(maxPoints).fill(0);
+    gapMarkData = new Array(maxPoints).fill(0);
 }
 
 // Splits factory for scales whose range can be user-pinned (manual). Auto mode
@@ -10365,7 +10379,7 @@ function gotoRpmTableHighlightFirstAmps() {
 function updateCvGainModeUI(data) {
     if (data.cvGainMode === undefined) return;
     // Refresh the live auto-tune constants from the device so the fit preview matches what it will apply.
-    if (data.cvCrossover !== undefined) CV_CROSSOVER_TARGET = (parseFloat(data.cvCrossover) || 20) / 100;
+    if (data.cvCrossover !== undefined) CV_CROSSOVER_TARGET = (parseFloat(data.cvCrossover) || 40) / 100;
     if (data.cvPiZero    !== undefined) CV_PI_ZERO          = (parseFloat(data.cvPiZero)    || 70) / 100;
     const auto = (parseInt(data.cvGainMode, 10) === 1);
     const autoBlk = document.getElementById('cvAutoBlock');
@@ -11300,7 +11314,7 @@ window.addEventListener("load", function () {
                         else if (abs >= 10)  newTextContent = amps.toFixed(1);
                         else                 newTextContent = amps.toFixed(2);
                     }
-                    else if (["BatteryV", "uTargetAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at", "pf_avg_10s", "pf_avg_2m", "pf_avg_at", "vl_avg_10s", "vl_avg_2m", "vl_avg_at", "BatteryV_raw", "MeasuredAmps_filtered"].includes(key)) {
+                    else if (["BatteryV", "uTargetAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at", "pf_avg_10s", "pf_avg_2m", "pf_avg_at", "vl_avg_10s", "vl_avg_2m", "vl_avg_at", "BatteryV_raw", "pidAltPV"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "dutyCycle") {
@@ -11400,7 +11414,7 @@ window.addEventListener("load", function () {
                 ["header-rpm", "RPM"],
                 ["currentModeID", "currentMode"],
                 ["BatteryV_rawID", "BatteryV_raw"],
-                ["MeasuredAmps_filtered_ID", "MeasuredAmps_filtered"],
+                ["pidAltPV_ID", "pidAltPV"],
                 // CV loop (voltageTarget/Icv — CSV1 indices 32, 33)
                 ["voltageTarget_display", "voltageTarget"],
                 ["Icv_display", "Icv"],
@@ -13647,14 +13661,18 @@ function showAltTab(group, panelId) {
     if (panel) panel.classList.add('active');
     document.querySelectorAll('#settings-alternator .alt-tab-btn-' + group)
         .forEach(t => {
-            if ((t.getAttribute('onclick') || '').includes(panelId)) {
-                t.classList.add('active');
-            }
+            // data-alt-panel is authoritative; the onclick fallback serves the secondary rows,
+            // whose buttons still call showAltTab(...) inline.
+            const declared = t.dataset.altPanel;
+            const match = declared
+                ? declared === panelId
+                : (t.getAttribute('onclick') || '').includes(panelId);
+            if (match) t.classList.add('active');
         });
 
 }
 
-// Dedicated switcher for the Tuning Tools alt-panel's inner tabs. NOT showSubTab: #tuning is
+// Dedicated switcher for the Tuning alt-panel's inner tabs. NOT showSubTab: #tuning is
 // nested under Setup > Alternator, so the generic showSubTab('settings',...) querySelectors would
 // clobber these panels — the same reason showBatteryPanel/showDiagPanel exist. Uses private
 // .tuning-tab/.tuning-panel classes so the outer sub-tab machinery can never reach them.
@@ -13674,7 +13692,7 @@ function showTuningPanel(name, evt = null) {
     resizeLivePlotsOnShow();   // charts in the revealed panel were built at width 0 while hidden
 }
 
-// Tuning Tools is a 5th alt-tab inside Setup > Alternator (id="tuning", .alt-panel). Route every
+// Tuning is an alt-tab inside Setup > Alternator (id="tuning", .alt-panel). Route every
 // deep-link through here so the main tab, sub-tab, and alt-tab are all set before the inner panel.
 function goToTuning(subTab) {
     if (!subTab) {
@@ -13703,6 +13721,14 @@ function goToCVMode() {
     showMainTab('settings');
     showSubTab('settings', 'alternator');
     showAltTab('primary', 'alt-panel-vt-mode');
+}
+
+// Live Data > Diag is results-only; its knobs are the 6th alt-tab under Setup > Alternator.
+function goToDiagSettings() {
+    showMainTab('settings');
+    showSubTab('settings', 'alternator');
+    showAltTab('primary', 'settings-diag');
+    window.scrollTo(0, 0);
 }
 
 // Frozen page response stuff
@@ -14475,8 +14501,9 @@ const SINFO = {
         ['Source', 'successive INA228 bus-voltage samples ~5&nbsp;ms apart'],
         ['Filter', 'this field IS the filter — moving-average low-pass (EMA) time constant'],    ],
     ovG2: () => [
-        ['Signal', 'measured battery voltage vs ' + svv('OvMeasMarginV_echo', 'V') + ' above target'],
-        ['Source', S_INA_V + ', unfiltered — fastest possible reaction'],
+        ['Signal', 'filtered battery voltage vs ' + svv('OvMeasMarginV_echo', 'V') + ' above target'],
+        ['Source', S_INA_V],
+        ['Filter', 'averaging (EMA) sized from the commissioned plant response (~10–80 ms) — rejects belt-ripple crests; logged as ovFilt_V in the CV log'],
         ['Compared to', svTargetV()],
     ],
     iexG3: () => [
@@ -16816,11 +16843,13 @@ function updateFloatVisibility(pendingVal) {
 // CV / Voltage Tuner Log — JavaScript
 //
 // Decodes /cvlog.bin and downloads as CSV.
-// Binary layout: 36-byte header + N × 51-byte CvLogEntry structs (little-endian).
+// Binary layout: 36-byte header + N × entrySize-byte CvLogEntry structs (little-endian).
+// entrySize comes from the header: 53 on current firmware, 51 on logs from older firmware
+// (which lack the trailing ovFilt field — its column is left blank, never zero-filled).
 //
 // Header (36 bytes):
 //   offset  0  uint32  count
-//   offset  4  uint32  entrySize (= 51)
+//   offset  4  uint32  entrySize (53; 51 on pre-ovFilt firmware)
 //   offset  8  float32 VoltageKp
 //   offset 12  float32 VoltageKi
 //   offset 16  uint32  VoltageLoopInterval (ms)
@@ -16829,7 +16858,7 @@ function updateFloatVisibility(pendingVal) {
 //   offset 28  float32 SlopeBleedK (A/(V/s))
 //   offset 32  float32 SlopeBleedProxV (V)
 //
-// Entry (51 bytes, packed — see static_assert(sizeof(CvLogEntry)==51) in firmware):
+// Entry (53 bytes, packed — see static_assert(sizeof(CvLogEntry)==53) in firmware):
 //   offset  0  uint32   ts
 //   offset  4  int16    battV       / 100  → V
 //   offset  6  int16    targV       / 100  → V
@@ -16844,23 +16873,24 @@ function updateFloatVisibility(pendingVal) {
 //   offset 24  int16    iMeas       / 10   → A
 //   offset 26  int16    duty        / 10   → %
 //   offset 28  uint8    flags       (b0=fastOvActive b1=voltLoopFired b2=cvActive
-//                                    b3=iExcessBulk b4=hard b5=iExcess b6=loadDumpActive)
+//                                    b3=iExcessBulk b4=hard b5=iExcess b6=loadDumpActive
+//                                    b7=recovActive — post-protection recovery window)
 //   offset 29  uint8    awState     (0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless)
 //   offset 30  int16    rpm
-//   offset 32  int16    battV_filt_x100 / 100 → V  (IBV, raw battery voltage)
-//   offset 34  int16    iMeas_filt_x10  / 10  → A  (MeasuredAmps_filtered, EMA)
-//   offset 36  int16    ch1IntervalMs        → ms  (last CH1 inter-sample gap)
-//   offset 38  int16    cvDSlope_x10000 / 10000 → V/s (g_fastOvDvdt — fastOV EMA signal)
-//   offset 40  int16    battI_x10       / 10  → A  (getBatteryCurrent — INA228 or Victron)
-//   offset 42  int16    dBcur_dt_Aps    raw A/s   (g_dBcur_dt clamped to int16)
-//   offset 44  int16    voltLoopIntervalMs  ms    actual voltage loop interval when fired (0 if not)
-//   offset 46  int16    inaIntervalMs       ms    ina_last_ms at log time — INA228 read freshness
-//   offset 48  int16    slopeBleedAmps_x1000 / 1000 → A  cv_I drain this VL tick (0 on non-VL ticks)
-//   offset 50  uint8    capReason   0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump (binding cap this tick)
+//   offset 32  int16    battV_filt_x100 / 100 → V  (IBV_filtered — display EMA, VoltageFilterTC)
+//   offset 34  int16    ch1IntervalMs        → ms  (last CH1 inter-sample gap)
+//   offset 36  int16    cvDSlope_x10000 / 10000 → V/s (cvDSlope — backward diff of filtered V)
+//   offset 38  int16    battI_x10       / 10  → A  (getBatteryCurrent — INA228 or Victron)
+//   offset 40  int16    dBcur_dt_Aps    raw A/s   (g_dBcur_dt clamped to int16)
+//   offset 42  int16    voltLoopIntervalMs  ms    actual voltage loop interval when fired (0 if not)
+//   offset 44  int16    inaIntervalMs       ms    ina_last_ms at log time — INA228 read freshness
+//   offset 46  int16    slopeBleedAmps_x1000 / 1000 → A  cv_I drain this VL tick (0 on non-VL ticks)
+//   offset 48  uint8    capReason   0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump (binding cap this tick)
+//   offset 49  int16    ovFilt_x100 / 100 → V  (g_ovIbvFilt — Group 2's comparator input, plant-tau EMA of IBV)
 // ===========================================================================
 
 const CV_LOG_HEADER_SIZE = 36;
-const CV_LOG_ENTRY_SIZE = 51;
+const CV_LOG_ENTRY_SIZE = 51;   // current entry size (with ovFilt); actual stride comes from the header
 
 // ---------------------------------------------------------------------------
 // parseCvBin(buf)
@@ -16887,11 +16917,16 @@ function parseCvBin(buf) {
 
     if (count === 0) return null;
 
-    const need = CV_LOG_HEADER_SIZE + count * CV_LOG_ENTRY_SIZE;
+    if (entrySize < CV_LOG_ENTRY_SIZE) {
+        console.error('cvlog.bin entrySize too small:', entrySize);
+        return null;
+    }
+    const need = CV_LOG_HEADER_SIZE + count * entrySize;
     if (buf.byteLength < need) {
         console.error('cvlog.bin truncated: have', buf.byteLength, 'need', need);
         return null;
     }
+    const hasOvFilt = entrySize >= 51;
 
     // --- Arrays ---
     const ts = new Array(count);
@@ -16914,7 +16949,6 @@ function parseCvBin(buf) {
     const hardClamp = new Array(count);
     const rpm = new Array(count);
     const battV_filt = new Array(count);
-    const iMeas_filt = new Array(count);
     const ch1Interval = new Array(count);
     const cvDSlope = new Array(count);
     const iExcess = new Array(count);
@@ -16927,11 +16961,13 @@ function parseCvBin(buf) {
     const slopeBleedAmps = new Array(count);
     const capReason = new Array(count);
     const iExcessBulk = new Array(count);
+    const ovFilt = new Array(count);
+    const recovActive = new Array(count);
 
     const tsBase = view.getUint32(CV_LOG_HEADER_SIZE, true);
 
     for (let i = 0; i < count; i++) {
-        const b = CV_LOG_HEADER_SIZE + i * CV_LOG_ENTRY_SIZE;
+        const b = CV_LOG_HEADER_SIZE + i * entrySize;
 
         ts[i] = (view.getUint32(b, true) - tsBase) / 1000.0;  // seconds from first entry
         battV[i] = view.getInt16(b + 4, true) / 100.0;
@@ -16956,17 +16992,18 @@ function parseCvBin(buf) {
         awState[i] = view.getUint8(b + 29);
         rpm[i] = view.getInt16(b + 30, true);
         battV_filt[i] = view.getInt16(b + 32, true) / 100.0;
-        iMeas_filt[i] = view.getInt16(b + 34, true) / 10.0;
-       ch1Interval[i] = view.getInt16(b + 36, true);
-        cvDSlope[i] = view.getInt16(b + 38, true) / 10000.0;
-        battI[i] = view.getInt16(b + 40, true) / 10.0;
-        dBcur_dt[i] = view.getInt16(b + 42, true);
-        voltLoopInterval[i] = view.getInt16(b + 44, true);
-        inaInterval[i] = view.getInt16(b + 46, true);
-        slopeBleedAmps[i] = view.getInt16(b + 48, true) / 1000.0;
-        capReason[i] = view.getUint8(b + 50);
+        ch1Interval[i] = view.getInt16(b + 34, true);
+        cvDSlope[i] = view.getInt16(b + 36, true) / 10000.0;
+        battI[i] = view.getInt16(b + 38, true) / 10.0;
+        dBcur_dt[i] = view.getInt16(b + 40, true);
+        voltLoopInterval[i] = view.getInt16(b + 42, true);
+        inaInterval[i] = view.getInt16(b + 44, true);
+        slopeBleedAmps[i] = view.getInt16(b + 46, true) / 1000.0;
+        capReason[i] = view.getUint8(b + 48);
+        ovFilt[i] = hasOvFilt ? view.getInt16(b + 49, true) / 100.0 : null;  // blank on old logs — never fabricate
         iExcess[i] = (f >> 5) & 1;
         loadDumpActive[i] = (f >> 6) & 1;
+        recovActive[i] = hasOvFilt ? (f >> 7) & 1 : null;  // b7 only written by ovFilt-era firmware — blank on old logs
     }
 
     return {
@@ -16976,9 +17013,9 @@ function parseCvBin(buf) {
         fastOvCap, cv_I, Icv, uTarget, spLimited,
         iMeas, duty, flags,
         fastOvActive, voltLoopFired, cvActive, hardClamp,
-        rpm, battV_filt, iMeas_filt, ch1Interval, cvDSlope, iExcess, battI,
+        rpm, battV_filt, ch1Interval, cvDSlope, iExcess, battI,
         dBcur_dt, loadDumpActive, awState, voltLoopInterval, inaInterval,
-        slopeBleedAmps, capReason, iExcessBulk,
+        slopeBleedAmps, capReason, iExcessBulk, ovFilt, recovActive,
     };
 }
 
@@ -16999,9 +17036,13 @@ function cvBinToCsv(d, csv3) {
     lines.push(
         `# VoltageKp=${d.voltKp.toFixed(2)} VoltageKi=${d.voltKi.toFixed(3)} VoltageLoopInterval=${d.voltInterval}ms VoltageFilterTC=${fmtRaw(c.VoltageFilterTC, 0)}ms`
     );
+    // ovFiltTC mirrors the firmware derivation (systemIDPlantTauMs/3, clamped 10–80 ms) so the
+    // exported log records what Group 2's level filter was actually running.
+    const ovFiltTC = (c.systemIDPlantTauMs !== undefined && !isNaN(c.systemIDPlantTauMs))
+        ? Math.min(80, Math.max(10, Number(c.systemIDPlantTauMs) / 3)).toFixed(1) : 'N/A';
     lines.push(
         `# FastOV: OvMeasMarginV=${fmtRaw(c.OvMeasMarginV, 3)}V OvPredMarginV=${fmtRaw(c.OvPredMarginV, 3)}V` +
-        ` TdPred=${fmtRaw(c.TdPred, 3)}s DvdtTC=${fmtDiv(c.DvdtTC, 10, 1)}ms` +
+        ` TdPred=${fmtRaw(c.TdPred, 3)}s DvdtTC=${fmtDiv(c.DvdtTC, 10, 1)}ms ovFiltTC=${ovFiltTC}ms` +
         ` KHard=${fmtDiv(c.KHard, 10, 1)}A/V` +
         ` AwBleedRate=${fmtDiv(c.AwBleedRate, 10, 1)}A/s` +  // AwRecoverRate removed from header — hardcoded to 0.1 in firmware
         ` IExcessArmMarginV=${fmtRaw(c.IExcessArmMarginV, 3)}V` +
@@ -17009,6 +17050,9 @@ function cvBinToCsv(d, csv3) {
     );
     lines.push(
         `# SlopeBleed: SlopeBleedThresh=${d.sbThresh.toFixed(3)}V/s SlopeBleedK=${d.sbK.toFixed(1)}A/(V/s) SlopeBleedProxV=${d.sbProxV.toFixed(3)}V`
+    );
+    lines.push(
+        `# Recovery: cvRecovEnable=${fmtRaw(c.cvRecovEnable, 0)} cvRecovSec=${fmtDiv(c.cvRecovSec, 10, 1)}s cvRecovEmaxV=${fmtDiv(c.cvRecovEmaxV, 1000, 2)}V ReseedFrac=${fmtDiv(c.ReseedFrac, 100, 2)}`
     );
     lines.push(
         `# capReason codes: 0=none(unclamped) 1=KHard_G1(predictive) 2=KHard_G2(measured) 3=iExcess 4=loadDump 5=iExcessBulk(current-control phase)`
@@ -17022,11 +17066,11 @@ function cvBinToCsv(d, csv3) {
         'iMeas_A', 'duty_pct',
         'fastOvActive', 'voltLoopFired', 'cvActive', 'hardClamp',
         'rpm',
-        'battV_filt_V', 'iMeas_filt_A', 'ch1_last_ms', 'iExcess', 'iExcessBulk',
+        'battV_filt_V', 'ch1_last_ms', 'iExcess', 'iExcessBulk',
         'battI_A', 'dBcur_dt_Aps', 'loadDumpActive',
         'cvDSlope_Vps', 'awState',
         'voltLoopInterval_ms', 'inaInterval_ms',
-        'slopeBleedAmps_A', 'capReason',
+        'slopeBleedAmps_A', 'capReason', 'ovFilt_V', 'recovActive',
     ].join(','));
 
     for (let i = 0; i < d.count; i++) {
@@ -17042,12 +17086,14 @@ function cvBinToCsv(d, csv3) {
             d.fastOvActive[i], d.voltLoopFired[i], d.cvActive[i],
             d.hardClamp[i],
             d.rpm[i],
-            d.battV_filt[i].toFixed(2), d.iMeas_filt[i].toFixed(1),
+            d.battV_filt[i].toFixed(2),
             d.ch1Interval[i], d.iExcess[i], d.iExcessBulk[i],
             d.battI[i].toFixed(1), d.dBcur_dt[i], d.loadDumpActive[i],
             d.cvDSlope[i].toFixed(4), d.awState[i],
             d.voltLoopInterval[i], d.inaInterval[i],
             d.slopeBleedAmps[i].toFixed(4), d.capReason[i],
+            d.ovFilt[i] === null ? '' : d.ovFilt[i].toFixed(2),
+            d.recovActive[i] === null ? '' : d.recovActive[i],
         ].join(','));
     }
 
@@ -17907,8 +17953,7 @@ function sysidUpdatePreflight() {
         }
         estSec = Math.round(ms / 1000);
     } else {
-        const tcMs   = parseFloat(getField("InputFilterTC_echo") ?? 1000);
-        const holdMs = Math.max(15 * tcMs, 5000);
+        const holdMs = 5000;  // fixed SYSID_STEP_HOLD_MS per phase
         estSec = Math.round(20 + 7 * holdMs / 1000);
     }
     const estStr = estSec >= 90 ? (estSec / 60).toFixed(1) + ' min' : estSec + ' sec';
@@ -17956,8 +18001,7 @@ function abortSystemIDTest() {
 }
 
 function sysidStartProgressPoll() {
-    const tcMs   = parseFloat(getField("InputFilterTC_echo") ?? 1000);
-    const holdMs = Math.max(15 * tcMs, 5000);
+    const holdMs = 5000;  // fixed SYSID_STEP_HOLD_MS per phase
     // Step model; overridden below for sine, whose sweep can run minutes (low start
     // frequency × many cycles per point) and would otherwise trip this step-sized timeout.
     let maxWaitMs = (SYSID_STABILIZE_TIMEOUT_HINT + 7 * holdMs + 10000);
@@ -18377,8 +18421,13 @@ function sysidFitFOPDT(pts, g0) {
     out.lambdaMs = lambdaSec * 1000;
     const Kp = tauSec / (g0 * (lambdaSec + thetaSec));
     if (isFinite(Kp) && Kp > 0) {
-        out.Kp = Kp;
-        out.Ki = Kp / tauSec;
+        // g0 is A per %duty measured at the CURRENT bus voltage, so Kp/Ki land in that bus's duty-space.
+        // Stored PidKp/PidKi are 12V-equivalent (recomputeCcGains re-applies ×12/Vbatt at use), so convert
+        // the seed here by ×(Vbatt/12): 12V → ×1 no-op; 24/48V cancels the recompute back to the measured
+        // gain instead of leaving the loop under-gained. Unknown class defaults to 12 → can only under-, never over-gain.
+        const vClass = (parseInt(window._nominalStored, 10) || 12) / 12;
+        out.Kp = Kp * vClass;
+        out.Ki = (Kp / tauSec) * vClass;
         out.ok = true;
     }
     return out;
@@ -18941,25 +18990,83 @@ function cxRenderRpmAlign(b) {
         '<div style="margin-top:16px;">' + cxNextBtn(true) + '</div>';
     cxRpmAlignRefresh();
 }
+// iOS WebKit never focuses a range input during a touch drag, so the activeElement guard in
+// cxRpmAlignRefresh can't see the drag — hold the echo repaint for a beat after any edit instead.
+let _cxRpmaHoldUntil = 0;
 // Slider drag → keep the free numeric box in step (slider is int, already inside 200–3000).
 function cxRpmAlignSlider(v) {
+    _cxRpmaHoldUntil = Date.now() + 3000;
     const num = document.getElementById('cx-rpma-sf-num');
     if (num) num.value = v;
 }
 // Typing in the free box → move the slider to the clamped position, but leave the box value untouched
 // (it may legitimately hold a value outside 200–3000).
 function cxRpmAlignNum(v) {
+    _cxRpmaHoldUntil = Date.now() + 3000;
     const n = parseInt(v, 10);
     const sl = document.getElementById('cx-rpma-sf-slider');
     if (sl && isFinite(n)) sl.value = Math.min(3000, Math.max(200, n));
 }
+// Naming what dies is the point; a tooltip is not consent. Shared with the Setup ▸ Engine field.
+const RPM_SCALE_WIPE_MSG =
+    'Rescaling the engine-RPM axis discards everything measured against the old one:\n\n'
+    + '• Min% floor table and knee learning\n'
+    + '• Overheat history\n'
+    + '• Resonance and ripple maps, and the reference waveforms\n'
+    + '• Alternator health record book and its engine-hour trend\n'
+    + '• Motoring speed curve (your sailing data is kept)\n'
+    + '• Step-test log\n'
+    + '• Every commissioning step after RPM Alignment\n\n'
+    + 'The same data is deleted from the cloud, including your all-time alternator records. This cannot be undone.\n\n'
+    + 'Your fuel curve, current-limit tables, and alternator wear hours are kept. The alternator must be off.';
+
 // Write the scaling factor (any positive integer) to the same NVS param the Engine field uses.
-function cxRpmAlignWriteSf() {
+// Fires on release/blur, never mid-drag, so one committed change = one wipe.
+async function cxRpmAlignWriteSf() {
     const num = document.getElementById('cx-rpma-sf-num');
     if (!num) return;
     const n = parseInt(num.value, 10);
+    const cur = getEchoNumber('RPMScalingFactor_echo');
     if (!isFinite(n) || n < 1) return;
-    cxGet('RPMScalingFactor=' + n).catch(() => { });
+    if (n === cur) return;  // unchanged → no wipe, no prompt
+    const restore = () => { if (Number.isFinite(cur)) { num.value = cur; cxRpmAlignNum(cur); } };
+    if (!await xConfirm(RPM_SCALE_WIPE_MSG,
+        { title: 'Rescale RPM axis and erase learning?', okText: 'Erase and rescale', cancelText: 'Cancel' })) {
+        restore();
+        return;
+    }
+    let r = null;
+    try { r = await cxGet('RPMScalingFactor=' + n); } catch (e) { r = null; }
+    if (!r || !r.ok) {
+        restore();  // device rejected it — don't leave the control showing a value it never took
+        await xAlert(r && r.status === 409
+            ? 'Turn the alternator off before changing the RPM scaling factor.'
+            : 'Could not change the RPM scaling factor.', 'Not changed');
+    }
+}
+// Setup ▸ Engine "Set". Same commit path as the wizard control: confirm, then READ the reply, so the
+// device's 409 (alternator running) surfaces instead of vanishing into the hidden form target. Its
+// inline onsubmit must return false SYNCHRONOUSLY — an async handler's Promise is truthy and the
+// native submit would fire anyway.
+async function rpmScaleFormSubmit(form) {
+    const inp = form.querySelector('input[name="RPMScalingFactor"]');
+    if (!inp) return;
+    const n = parseInt(inp.value, 10);
+    const cur = getEchoNumber('RPMScalingFactor_echo');
+    if (!isFinite(n) || n < 1) { await xAlert('Enter a positive whole number.', 'Not changed'); return; }
+    if (n === cur) { await xAlert('That is already the current value.', 'No change'); return; }
+    if (!await xConfirm(RPM_SCALE_WIPE_MSG,
+        { title: 'Rescale RPM axis and erase learning?', okText: 'Erase and rescale', cancelText: 'Cancel' })) return;
+    let r = null;
+    try {
+        r = await fetchWithTimeout(buildURL('/get?RPMScalingFactor=' + n
+            + '&password=' + encodeURIComponent(currentAdminPassword || '')), {}, 8000);
+    } catch (e) { r = null; }
+    if (!r || !r.ok) {
+        await xAlert(r && r.status === 409
+            ? 'Turn the alternator off before changing the RPM scaling factor.'
+            : 'Could not change the RPM scaling factor.', 'Not changed');
+    }
 }
 function cxRpmAlignWritePr() {
     const el = document.getElementById('cx-rpma-pr');
@@ -18977,7 +19084,11 @@ function cxRpmAlignRefresh() {
     if (rEl) rEl.innerHTML = isNaN(L.rpm) ? '<span style="color:#f0a500;font-size:14px;">no RPM (start the engine)</span>' : Math.round(L.rpm) + ' RPM';
     const sf = getEchoNumber('RPMScalingFactor_echo');
     const num = document.getElementById('cx-rpma-sf-num'), sl = document.getElementById('cx-rpma-sf-slider');
-    if (isFinite(sf) && num && sl && document.activeElement !== num && document.activeElement !== sl) {
+    // Also hold while the wipe-confirm dialog is up: the pending (unsaved) value should stay visible
+    // behind it, not snap back to the echo mid-decision.
+    const dlg = document.getElementById('xdlg-overlay');
+    const editing = Date.now() < _cxRpmaHoldUntil || (dlg && dlg.style.display !== 'none');
+    if (isFinite(sf) && num && sl && !editing && document.activeElement !== num && document.activeElement !== sl) {
         num.value = Math.round(sf);
         sl.value = Math.min(3000, Math.max(200, Math.round(sf)));
     }
@@ -19252,7 +19363,6 @@ function cxPlantApply(run = false) {
     const tcFast = Math.max(1, Math.round(f.tauMs / 3)), tcSlow = Math.max(1, Math.round(f.tauMs));
     cxGet('PidKp=' + f.Kp.toFixed(4))
         .then(() => cxGet('PidKi=' + f.Ki.toFixed(4)))
-        .then(() => cxGet('InputFilterTC=' + tcFast))
         .then(() => cxGet('OutputPIDFilterTC=' + tcFast))
         .then(() => cxGet('VoltageFilterTC=' + tcSlow))
         .then(() => { cx.plantApplied = true; if (run) cxAdvanceRun(); else commissionRender(); })
@@ -19348,7 +19458,7 @@ function cvFitOnCsv1(data) {
 // CV_CROSSOVER_TARGET / CV_PI_ZERO in 6_functions.ino recomputeCvGains() (the authoritative compute).
 // These mirror the device settings cvCrossover / cvPiZero (Tuning ▸ Voltage). They're `let` and refreshed
 // from the CSV3 echo in updateCvGainModeUI() so the fit preview matches whatever the device will apply.
-let CV_CROSSOVER_TARGET = 0.20;  // ω_c, rad/s — TRUE CV closed-loop crossover (≈20 s response default; live value from device)
+let CV_CROSSOVER_TARGET = 0.40;  // ω_c, rad/s — TRUE CV closed-loop crossover (≈10 s response default; live value from device)
 let CV_PI_ZERO     = 0.70;   // ρ, rad/s — PI integral zero; Ki = ρ·Kp (default; live value from device)
 // Exact PI magnitude condition at ω_c (CV_AUTOTUNE_PLAN.md §F.3) — the SAME math as firmware
 // recomputeCvGains(). Knorm = K20·(12/sysV) in V per 12V-equiv per A. Returns clamped 12V-equiv {Kp,Ki}.
@@ -20297,7 +20407,7 @@ function cxRtAbort() {
 // writes a one-line verdict. NEVER writes anything to the device — the operator owns the floor/ceiling/%.
 let cxRipFit = null;   // {alt:{a0,a1,rpm,n,i:[],pk:[]}} from /ripfit; null until first fetch
 function loadRipFit(cb) {
-    fetch(buildURL('/ripfit')).then(r => r.json()).then(j => { cxRipFit = j; if (cb) cb(); }).catch(() => { if (cb) cb(); });
+    fetch(buildURL('/ripfit')).then(r => r.json()).then(j => { cxRipFit = j; protUpdateMarginEcho(); if (cb) cb(); }).catch(() => { if (cb) cb(); });
 }
 // Typed value wins (live preview while editing); else the current echo value. Protections inputs are blank
 // "set new value" boxes, so the live setting normally comes from the echo span.
@@ -20419,7 +20529,16 @@ function rippleXmax(id) {
 }
 // The two permanent Protections plots. Threshold lines recompute client-side on every keystroke (pField
 // reads the typed value before saving); the ripple line is fixed measured data (cxRipFit).
+// Safety Margin has no firmware parameter — it's a client-side helper that writes IExcessBaseA.
+// Echo it back by inverting that: margin = saved CV base − ripple-at-idle. Blank without a Step-7 fit.
+function protUpdateMarginEcho() {
+    const el = document.getElementById('IExcessSafetyMargin_echo');
+    if (!el) return;
+    const rf = cxRipFit && cxRipFit.alt, base = getEchoNumber('IExcessBaseA_echo');
+    el.textContent = (rf && rf.n > 0 && isFinite(base)) ? (base - rf.a0).toFixed(1) : '—';
+}
 function renderRipplePlots() {
+    protUpdateMarginEcho();
     const cv = document.getElementById('rippleThreshPlotAlt');
     if (!cv || cv.offsetParent === null) return;   // not mounted / tab hidden → skip (redraws on show)
     const rf = cxRipFit || {};
@@ -20755,10 +20874,9 @@ function applySysidBodeFilters() {
     const tcFast = encodeURIComponent(Math.max(1, Math.round(sysidFitTauMs / 3)));
     const tcSlow = encodeURIComponent(Math.max(1, Math.round(sysidFitTauMs)));
     const pw = encodeURIComponent(currentAdminPassword);
-    fetch(buildURL("/get?InputFilterTC=" + tcFast + "&password=" + pw))
-        .then(() => fetch(buildURL("/get?OutputPIDFilterTC=" + tcFast + "&password=" + pw)))
+    fetch(buildURL("/get?OutputPIDFilterTC=" + tcFast + "&password=" + pw))
         .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tcSlow + "&password=" + pw)))
-        .then(() => { console.log("Filters set from τ: PID/display=" + tcFast + "ms, voltage=" + tcSlow + "ms"); closeSystemIDModal(); })
+        .then(() => { console.log("Filters set from τ: PID=" + tcFast + "ms, voltage=" + tcSlow + "ms"); closeSystemIDModal(); })
         .catch(err => console.error("Filter set from τ failed:", err));
 }
 
@@ -20778,21 +20896,18 @@ function applySysidPidSeed() {
 
 function applySystemIDResults() {
     if (!currentAdminPassword) { xAlert("Please unlock settings first."); return; }
-    // PID feedback and the filtered-amps display get plant/3 to preserve phase margin
-    // inside the control loop. (iExcess no longer uses InputFilterTC — it has its own EMA on
-    // IExcessTau, sized by belt resonance, not plant delay — so this only sets the display
-    // filter now.) Voltage smoothing gets the full plant delay because its consumer
+    // PID feedback gets plant/3 to preserve phase margin inside the control loop.
+    // Voltage smoothing gets the full plant delay because its consumer
     // (slope bleed dV/dt) runs on the same timescale as the voltage loop tick.
     const tcFast = Math.max(1, Math.round(sysidSuggestedTC / 3));
     const tcSlow = Math.max(1, Math.round(sysidSuggestedTC));
     const tcFastEnc = encodeURIComponent(tcFast);
     const tcSlowEnc = encodeURIComponent(tcSlow);
     const pw = encodeURIComponent(currentAdminPassword);
-    fetch(buildURL("/get?InputFilterTC=" + tcFastEnc + "&password=" + pw))
-        .then(() => fetch(buildURL("/get?OutputPIDFilterTC=" + tcFastEnc + "&password=" + pw)))
+    fetch(buildURL("/get?OutputPIDFilterTC=" + tcFastEnc + "&password=" + pw))
         .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tcSlowEnc + "&password=" + pw)))
         .then(() => {
-            console.log("Filter TCs updated: iExcess=" + tcFast + "ms, PID=" + tcFast + "ms, Voltage=" + tcSlow + "ms");
+            console.log("Filter TCs updated: PID=" + tcFast + "ms, Voltage=" + tcSlow + "ms");
             closeSystemIDModal();
         })
         .catch(err => console.error("Filter TC update failed:", err));
@@ -20812,7 +20927,7 @@ window.addEventListener('load', function () {
 // but filtering whole <details class="checkpoint-section"> blocks (data-checkpoints is
 // space-separated; an empty list means All-view only, e.g. Wear Rate / Accuracy Scores).
 (function initDiagCheckpoints() {
-    // Pills live only in Setup → Diag (the knobs). Live Data → Diag is results-only, never filtered.
+    // Pills live only in Setup → Alternator → Diag (the knobs). Live Data → Diag is results-only, never filtered.
     const panel = document.getElementById('settings-diag');
     if (!panel) return;
     const pills = panel.querySelectorAll('.checkpoint-filters button[data-filter]');

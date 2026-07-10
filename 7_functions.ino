@@ -1431,6 +1431,15 @@ void altHealth_tick(uint32_t nowMs) {
 //   declarations so altDebugCsvSend can iterate it.) Avoids fragile CSV3 plumbing.
 // ============================================================
 void altSettingsLoad() {
+  // Runs BEFORE InitSystemSettings loads BATTERY_VOLTAGE, so read the class key straight from NVS.
+  // Three registry knobs are class-dependent 12V-value defaults: first creation scales them into the
+  // boot class (volt-domain ×V/12, duty-domain ×12/V); a live class change rescales them in
+  // applyNominalVoltageChange. Existing keys load verbatim through the generic loop below.
+  int bootV = settingExists(NK_BatteryVoltage) ? settingRead(NK_BatteryVoltage).toInt() : 12;
+  if (bootV != 12 && bootV != 24 && bootV != 48) bootV = 12;
+  if (!settingExists("altVbusTol"))    altVbusTol    *= (float)bootV / 12.0f;
+  if (!settingExists("altDutyTolPct")) altDutyTolPct *= 12.0f / (float)bootV;
+  if (!settingExists("altMinDuty"))    altMinDuty    *= 12.0f / (float)bootV;
   for (size_t i = 0; i < ALT_SETTING_COUNT; i++) {
     char key[16];
     snprintf(key, sizeof(key), "%s", ALT_SETTINGS[i].name);  // NVS key = registry name (15-char cap)
@@ -2106,6 +2115,21 @@ void resetBoatPerformance() {
   queueConsoleMessage("BoatPerf: full reset (Clear All)");
 }
 
+// Motor-only counterpart of resetBoatPerformance(). The motoring front's axis 0 is engine RPM, so a
+// tach rescale invalidates it; the sail front (AWS/AWA/sea-state) has no RPM axis and must survive.
+void resetMotorFrontOnly() {
+  if (!sailFrontBuf) return;  // shared PSRAM arena backs both fronts
+  motorFront.count = 0; motorFront.source = 0;
+  motorPendingCount = 0; motorCapWarned = false;
+  motorEpisode.clearRun(); motorEpisode.ringHead = 0; motorEpisode.ringCount = 0;
+  perfMotorSeconds = 0.0;
+  motorLiveValid = false; motorLive_pct = 0;
+  fsTakeLock();
+  LittleFS.remove("/motorfront.bin");
+  fsReleaseLock();
+  queueConsoleMessage("BoatPerf: motoring front cleared (engine-RPM axis rescaled); sail front kept");
+}
+
 // ---- tick (call from loop()): fold at ~10 Hz, send live telemetry + settings echo at ~1 Hz ----
 void boatPerf_tick(uint32_t nowMs) {
   static uint32_t lastFold = 0, lastSse = 0;
@@ -2318,7 +2342,6 @@ void cvLog_tick(uint32_t nowMs) {
   e.awState = g_awState;
   e.rpm = (int16_t)constrain((int)RPM, -32768, 32767);
   e.battV_filt_x100 = (int16_t)clamp_f(IBV_filtered * 100.0f, -32767.0f, 32767.0f);
-  e.iMeas_filt_x10 = (int16_t)clamp_f(MeasuredAmps_filtered * 10.0f, -32767.0f, 32767.0f);
   e.cvDSlope_x10000 = (int16_t)clamp_f(cvDSlope * 10000.0f, -32767.0f, 32767.0f);
   e.ch1IntervalMs = (int16_t)g_ch1LastIntervalMs;
   e.battI_x10 = (int16_t)clamp_f(getBatteryCurrent() * 10.0f, -32767.0f, 32767.0f);
@@ -2331,8 +2354,10 @@ void cvLog_tick(uint32_t nowMs) {
   if (g_iExcessBulkActive) e.flags |= (1 << 3);  // iExcess BULK sub-mode (current-control phase)
   if (g_iExcessActive)   e.flags |= (1 << 5);
   if (g_loadDumpActive)  e.flags |= (1 << 6);
+  if (g_cvRecovActive)   e.flags |= (1 << 7);    // post-protection recovery window
 
   e.capReason = g_fastOvCapReason;  // which layer set the binding fastOvCap this tick
+  e.ovFilt_x100 = (int16_t)clamp_f(g_ovIbvFilt * 100.0f, -32767.0f, 32767.0f);
 
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;
@@ -2855,7 +2880,7 @@ bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const Str
 //
 // Architecture:
 //  • 8-phase state machine: BASELINE + 3× (UP / DOWN).
-//  • Each phase holds for 15 × InputFilterTC ms (floor 5000 ms).
+//  • Each phase holds for a fixed SYSID_STEP_HOLD_MS (5000 ms), sized to plant settling.
 //  • Called every CH1 fresh hit from AdjustFieldLearnMode.
 //  • Returns true while active; caller must:
 //      – force govMode = GOV_BYPASS_SLEW
@@ -2995,8 +3020,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     stabRingCount = 0;
     systemIDResultsReady = false;
     baseDuty = lastAppliedDuty;
-    holdMs = (uint32_t)(15.0f * InputFilterTC);
-    if (holdMs < 5000) holdMs = 5000;  // minimum 5 seconds per phase regardless of TC
+    holdMs = SYSID_STEP_HOLD_MS;
 
     // Capture test type for the whole run; build the log-spaced sweep frequency list.
     curTestType = systemIDTestType;
@@ -3014,8 +3038,8 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     }
 
     queueConsoleMessageF(
-      "SystemID: stabilizing to %.0fA | step=+%.1f%% holdMs=%u TC=%.0fms",
-      SystemIDStabilizeAmps, SystemIDStepAmplitude, holdMs, InputFilterTC);
+      "SystemID: stabilizing to %.0fA | step=+%.1f%% holdMs=%u",
+      SystemIDStabilizeAmps, SystemIDStepAmplitude, holdMs);
 
     phaseStartMs[0] = nowMs;  // STABILIZE start
     phase = SYSID_STABILIZE;
