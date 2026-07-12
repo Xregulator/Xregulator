@@ -782,8 +782,6 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "T0_C", NK_T0_C, 1 },
   { "WindingTempOffset", NK_WindingTempOffset, 1 },
   { "displayTempUnit", NK_displayTempUnit, 1 },
-  { "AmbientTempCorrectionFactor", NK_AmbientTempCorrectionFactor, 1 },
-  { "EnableAmbientCorrection", NK_EnableAmbientCorrection, 1 },
   { "LearningUpStep", NK_LearningUpStep, 1 },
   { "LearningDownStep", NK_LearningDownStep, 1 },
   { "LearningSettlingPeriod", NK_LearningSettlingPeriod, 1 },

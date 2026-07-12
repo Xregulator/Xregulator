@@ -96,15 +96,8 @@ enum Csv2Index {
   CSV2_UVTomorrow,
   CSV2_UVDay2,
   CSV2_weatherDataValid,
-  CSV2_reserved_SolarWatts,        // moved to CSV3
-  CSV2_reserved_performanceRatio,  // moved to CSV3
-  CSV2_reserved_VeData,            // moved to CSV3
-  CSV2_reserved_NMEA0183Data,      // moved to CSV3
-  CSV2_reserved_NMEA2KData,        // moved to CSV3
   CSV2_AlarmLatchState,
   CSV2_ResetAlarmLatch,
-  CSV2_reserved_ResetLearningTable,    // dead slot — command is action-only, no echo
-  CSV2_reserved_ClearOverheatHistory,  // dead slot — command is action-only, no echo
   CSV2_DynamicShuntGainFactor,
   CSV2_DynamicAltCurrentZero,
   CSV2_InsulationLifePercent,
@@ -147,14 +140,12 @@ enum Csv2Index {
   CSV2_MaxTemperatureThermistor_AllTime,
   CSV2_MeasuredAmpsMax_AllTime,
   CSV2_RPMMax_AllTime,
-  CSV2_reserved_Ignition,  // moved to CSV1 (banner needs ~10 Hz, not 5 s)
   CSV2_BulkStage,
   CSV2_WifiWakeSecondsRemaining,
   CSV2_BufferedRecordCount,
   CSV2_BufferedRecordPercent,
   CSV2_BufferedRecordCap,
   CSV2_VMGTargetBearing,
-  CSV2_reserved_VMGUseTrueWind,  // 98 reserved — moved to CSV3
   CSV2_cpuLoadCore0,
   CSV2_cpuLoadCore0Max,
   CSV2_cpuLoadCore1,
@@ -163,7 +154,6 @@ enum Csv2Index {
   CSV2_forcedFwVersionInt,
   CSV2_forcedUpdateDeadline,
   CSV2_stateRevision,
-  CSV2_reserved_hardwarePresent,  // 107 reserved — moved to CSV3
   CSV2_imu_accel_x_raw,
   CSV2_imu_accel_y_raw,
   CSV2_imu_accel_z_raw,
@@ -250,7 +240,6 @@ enum Csv2Index {
   CSV2_ft_rai_bmp_state_ses,
   CSV2_ft_rai_imu_win,
   CSV2_ft_rai_imu_ses,
-  CSV2_reserved_cv_D,  // dead slot — CV loop has no D term
   CSV2_tempReadFailCount,
   CSV2_tempCrcFailCount,
   CSV2_tempCrcRecoveredCount,
@@ -277,7 +266,6 @@ enum Csv2Index {
   CSV2_imu_heading_swing_120s,
   CSV2_dBcur_dt,
   CSV2_loadDumpActive,
-  CSV2_reserved_thermalTestPhase,  // dead slot, sends 0
   CSV2_ft_updateAccelMetrics_win,
   CSV2_ft_updateAccelMetrics_ses,
   // Diagnostics block
@@ -288,7 +276,6 @@ enum Csv2Index {
   CSV2_MaximumLoopTime,
   CSV2_EngineCycles,
   CSV2_CurrentSessionDuration,
-  CSV2_reserved_timeAxisModeChanging,  // moved to CSV3
   CSV2_currentPartitionType,
   CSV2_fastOvCurrentCap,
   CSV2_fastOvClampCount,
@@ -365,11 +352,9 @@ enum Csv2Index {
   CSV2_pidSetpoint,
   CSV2_TempToUse,
   CSV2_learningTargetFromRPM,
-  CSV2_ambientTempCorrection,
   CSV2_finalLearningTarget,
   CSV2_overheatingPenaltyTimer,
   CSV2_overheatingPenaltyAmps,
-  CSV2_reserved_averageTableValue,  // dead slot, sends 0
   CSV2_timeSinceLastOverheat,
   CSV2_socInfoAvailable,
   CSV2_overheatCount0,
@@ -494,8 +479,6 @@ enum Csv2Index {
   CSV2_altObsCount,         // banked best-ever record count
 
   // IMU zero/level calibration echo (Phase 2 IMU zero button)
-  CSV2_reserved_imuHeelOffset,   // moved to CSV3 (settings echo) so the Level Zero label updates fast
-  CSV2_reserved_imuPitchOffset,  // moved to CSV3
 
   // Victron VE.Direct solar/MPPT live block (7 fields — PPV/VPV/derived-current moved to CSV4/NavStream)
   CSV2_VictronChargeState,       // CS code (×1)
@@ -703,11 +686,9 @@ enum Csv3Index {
   CSV3_bmsLogicLevelOff,
   CSV3_RPMScalingFactor,
   CSV3_MaximumAllowedBatteryAmps,
-  CSV3_reserved_BatteryVoltageSource,  // dead slot, sends 0
   CSV3_AlternatorNominalAmps,
   CSV3_LearningUpStep,
   CSV3_LearningDownStep,
-  CSV3_AmbientTempCorrectionFactor,
   CSV3_xTime,
   CSV3_MinLearningInterval,
   CSV3_SafeOperationThreshold,
@@ -721,18 +702,7 @@ enum Csv3Index {
   CSV3_NeighborLearningFactor,
   CSV3_yyMax,
   CSV3_LearningMemoryDuration,
-  CSV3_EnableAmbientCorrection,
   CSV3_TuningMode,
-  CSV3_reserved_rpmCurrentTable_0,  // dead slots (0-9), send 0
-  CSV3_reserved_rpmCurrentTable_1,
-  CSV3_reserved_rpmCurrentTable_2,
-  CSV3_reserved_rpmCurrentTable_3,
-  CSV3_reserved_rpmCurrentTable_4,
-  CSV3_reserved_rpmCurrentTable_5,
-  CSV3_reserved_rpmCurrentTable_6,
-  CSV3_reserved_rpmCurrentTable_7,
-  CSV3_reserved_rpmCurrentTable_8,
-  CSV3_reserved_rpmCurrentTable_9,
   CSV3_ShuntResistanceMicroOhm,
   CSV3_InvertAltAmps,
   CSV3_InvertBattAmps,
@@ -786,7 +756,6 @@ enum Csv3Index {
   CSV3_fuelTableGPH_8,
   CSV3_fuelTableGPH_9,
   CSV3_stateRevision,
-  CSV3_reserved_SetpointRampRate,  // dead slot, sends 0
   CSV3_DutyRampRate,
   CSV3_SettleTimeBeforeCut,
   CSV3_TempWarnExcess,
@@ -833,7 +802,6 @@ enum Csv3Index {
   CSV3_MinFloatTime,
   CSV3_SOC_BlockRebulk_percent,
   CSV3_SOC_AllowRebulk_percent,
-  CSV3_reserved_accelEnabled,  // dead slot — accelerometer is always-on, no UI toggle
   CSV3_DutySlowRampRate,
   CSV3_ShutdownPhase2HoldMs,
   CSV3_TempPIDKp,
@@ -852,7 +820,6 @@ enum Csv3Index {
   CSV3_rpmCapPowerTable_7,
   CSV3_rpmCapPowerTable_8,
   CSV3_rpmCapPowerTable_9,
-  CSV3_reserved_VoltageTrimLimit,  // dead slot, sends 0
   CSV3_SystemIDStepAmplitude,
   CSV3_HardOCTripAmps,
   CSV3_HardOCDebounceMs,
@@ -862,11 +829,9 @@ enum Csv3Index {
   CSV3_IgnoreRPM,
   CSV3_MinRPMForField,
   CSV3_AwBleedRate,
-  CSV3_reserved_AwRecoverRate,  // dead slot — rate is hardcoded to 0.1 in firmware; free for future use
   CSV3_KHard,
   CSV3_ReseedFrac,
   CSV3_AwSeedProtectMs,
-  CSV3_reserved_VoltageKd,  // dead slot — voltage loop has no D term
   CSV3_displayTempUnit,
   CSV3_WarmupRampRate,
   CSV3_OvGroup1Enable,
@@ -880,7 +845,6 @@ enum Csv3Index {
   CSV3_OutputPIDMA_N,
   CSV3_OutputPIDFilterTC,
   CSV3_VoltageFilterTC,
-  CSV3_reserved_ProtectionProxGateV,  // dead slot
   CSV3_SlopeBleedThresh,
   CSV3_SlopeBleedK,
   CSV3_DvdtTC,
@@ -909,7 +873,6 @@ enum Csv3Index {
   CSV3_ManualLifePercentage,
   CSV3_UVThresholdHigh,
   CSV3_weatherModeEnabled,
-  CSV3_reserved_SENSOR_UPLOAD_INTERVAL,  // dead slot — SENSOR_UPLOAD_INTERVAL is a firmware-only constant (edit + reflash)
   CSV3_imuEnabled,
   CSV3_AbsorptionVoltage,
   CSV3_AbsorptionTimeoutMs,
@@ -922,7 +885,6 @@ enum Csv3Index {
   CSV3_IExcessFracBulk,  // BULK threshold fraction (×1000)
   CSV3_IExcessRelFrac,   // release hysteresis fraction (×1000)
   CSV3_systemIDPlantTauMs,   // fitted plant time constant (ms), persisted
-  CSV3_altSpare3,   // reserved
   CSV3_TempAlarmLow,
   CSV3_LoadDumpDtThresh,
   CSV3_LoadDumpDtThresh1,
@@ -932,14 +894,6 @@ enum Csv3Index {
   CSV3_cvKOvershoot,
   CSV3_cvConsecutiveReads,
   // 8 dead slots — kept to preserve CSV3 indices, all send 0
-  CSV3_reserved_thermal0,
-  CSV3_reserved_thermal1,
-  CSV3_reserved_thermal2,
-  CSV3_reserved_thermal3,
-  CSV3_reserved_thermal4,
-  CSV3_reserved_thermal5,
-  CSV3_reserved_thermal6,
-  CSV3_reserved_thermal7,
   CSV3_webgaugesinterval,
   CSV3_plotTimeWindow,
   CSV3_Ymin1,
@@ -951,7 +905,6 @@ enum Csv3Index {
   CSV3_Ymin4,
   CSV3_Ymax4,
   CSV3_LoadDumpDtThresh3,
-  CSV3_reserved_VMGUseTrueWind,   // dead slot, sends 0
   CSV3_hardwarePresent,
   CSV3_testProtectionsEnabled,  // runtime flag — not persisted, resets true (enabled) on boot
   CSV3_IExcessArmMarginV,       // %.3f — iExcess voltage gate, independent of OvMeasMarginV
@@ -996,7 +949,6 @@ enum Csv3Index {
   CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
   CSV3_coldChargeLockoutEnable, // cold-charge lockout master on/off (1=on)
   CSV3_cvGainMode,              // CV gain mode: 0=Manual, 1=Auto (lambda-based)
-  CSV3_EXTRA1,                  // reserved placeholder — sends 0
   CSV3_cvPlantK,                // measured plant gain K (V/A); ×10000
   CSV3_cvComputedKp,            // Auto-computed Kp (12V-equiv); ×100
   CSV3_cvComputedKi,            // Auto-computed Ki (12V-equiv); ×100
@@ -2020,7 +1972,6 @@ void setupServer() {
                 "innerKd,"
                 "voltageKp,"
                 "voltageKi,"
-                "voltageKd,"
                 "battV_filt_V,"
                 "flags,"
                 "ovFlags,"
@@ -2060,7 +2011,7 @@ void setupServer() {
                 "%u,%u,"
                 "%.0f,%.2f,"
                 "%.4f,%.4f,%.4f,"   // innerKp, innerKi, innerKd
-                "%.4f,%.4f,%.4f,"   // voltageKp, voltageKi, voltageKd
+                "%.4f,%.4f,"   // voltageKp, voltageKi
                 "%.3f,"  // battV_filt
                 "%u,%u,"          // flags, ovFlags
                 "%.2f,%.3f,"      // dBcur_dt, battI
@@ -2095,7 +2046,6 @@ void setupServer() {
                 e.innerKd,
                 e.voltageKp,
                 e.voltageKi,
-                e.voltageKd,
                 e.battV_filt,
                 (unsigned)e.flags,
                 (unsigned)e.ovFlags,
@@ -2668,7 +2618,6 @@ void setupServer() {
     uint32_t entrySize = (uint32_t)sizeof(CvLogEntry);
     float kp = (float)VoltageKp_active;  // gains ACTUALLY in effect (Manual or Auto-λ, 12V-block normalized) — not the raw manual VoltageKp, which the loop ignores in Auto mode / on 24-48V
     float ki = (float)VoltageKi_active;
-    float kd = 0.0f;  // voltage loop has no D term; 0 preserves binary header layout
     uint32_t interval = (uint32_t)VoltageLoopInterval;
 
     float sbThresh = SlopeBleedThresh;
@@ -2680,10 +2629,9 @@ void setupServer() {
     memcpy(state.header + 8,  &kp,       4);
     memcpy(state.header + 12, &ki,       4);
     memcpy(state.header + 16, &interval, 4);
-    memcpy(state.header + 20, &kd,       4);
-    memcpy(state.header + 24, &sbThresh, 4);  // SlopeBleedThresh (V/s)
-    memcpy(state.header + 28, &sbK,      4);  // SlopeBleedK (A/(V/s))
-    memcpy(state.header + 32, &sbProxV,  4);  // SlopeBleedProxV (V)
+    memcpy(state.header + 20, &sbThresh, 4);  // SlopeBleedThresh (V/s)
+    memcpy(state.header + 24, &sbK,      4);  // SlopeBleedK (A/(V/s))
+    memcpy(state.header + 28, &sbProxV,  4);  // SlopeBleedProxV (V)
 
     state.count = cvLogCount;
     state.oldest = (cvLogHead - cvLogCount + CV_LOG_SIZE) % CV_LOG_SIZE;
@@ -4745,12 +4693,6 @@ void setupServer() {
       settingWrite(NK_CloudFeatures, inputMessage.c_str());
       CloudFeatures = inputMessage.toInt();
     }
-    if (request->hasParam("EnableAmbientCorrection")) {
-      foundParameter = true;
-      inputMessage = request->getParam("EnableAmbientCorrection")->value();
-      settingWrite(NK_EnableAmbientCorrection, inputMessage.c_str());
-      EnableAmbientCorrection = inputMessage.toInt();
-    }
     if (request->hasParam("testProtectionsEnabled")) {
       foundParameter = true;
       inputMessage = request->getParam("testProtectionsEnabled")->value();
@@ -5025,12 +4967,6 @@ void setupServer() {
       inputMessage = request->getParam("LearningDownStep")->value();
       settingWrite(NK_LearningDownStep, inputMessage.c_str());
       LearningDownStep = inputMessage.toFloat();
-    }
-    if (request->hasParam("AmbientTempCorrectionFactor")) {
-      foundParameter = true;
-      inputMessage = request->getParam("AmbientTempCorrectionFactor")->value();
-      settingWrite(NK_AmbientTempCorrectionFactor, inputMessage.c_str());
-      AmbientTempCorrectionFactor = inputMessage.toFloat();
     }
     if (request->hasParam("xTime")) {
       foundParameter = true;
@@ -6705,8 +6641,9 @@ void setupServer() {
                       i > 0 ? "," : "",
                       tuningBode[i].freqHz, tuningBode[i].gain, tuningBode[i].phaseDeg);
     }
-    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"done\":%d}",
-                    tuningSweepActive ? 1 : 0, tuningSweepDone ? 1 : 0);
+    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"done\":%d,\"coh\":%.3f,\"railed\":%d}",
+                    tuningSweepActive ? 1 : 0, tuningSweepDone ? 1 : 0,
+                    tuningSweepWorstCoh, tuningSweepDutyRailed ? 1 : 0);
     request->send(200, "application/json", buf);
   });
 
@@ -7032,7 +6969,7 @@ void setupServer() {
         "%s{\"n\":%d,\"s\":%.2f,\"st\":%.1f,\"wo\":%.3f,\"io\":%.4f,\"t\":%.1f,"
         "\"ls\":%.2f,\"lst\":%.1f,\"lwo\":%.3f,\"lio\":%.4f,\"lus\":%.3f,"
         "\"fov\":%d,\"iex\":%d,\"ld\":%d,\"hoc\":%d,"
-        "\"vkp\":%.3f,\"vki\":%.3f,\"vkd\":%.2f,"
+        "\"vkp\":%.3f,\"vki\":%.3f,"
         "\"srr\":%.1f,\"sfr\":%.1f,"
         "\"abl\":%.2f,\"arl\":%.3f,\"asp\":%d,\"irf\":%.2f,"
         "\"ks\":%.1f,\"kh\":%.1f,"
@@ -7045,7 +6982,7 @@ void setupServer() {
         r.avgIntegratedOvershootVs, r.activeTimeSec,
         r.lowScore, r.avgLowSettlingTimeSec, r.worstLowOvV, r.avgLowIntOvVs, r.worstLowUndershootV,
         (int)r.fastOvFires, (int)r.iExcessFires, (int)r.loadDumpFires, (int)r.hardOcFires,
-        r.voltageKp, r.voltageKi, r.voltageKd,
+        r.voltageKp, r.voltageKi,
         r.setpointRiseRate, r.setpointFallRate,
         r.awBleedRate, r.awRecoverRate, (int)r.awSeedProtectMs, r.reseedFrac,
         r.slopeBleedK, r.kHard,
@@ -7675,111 +7612,54 @@ void SendWifiData() {
     voltLoop_compute_stats();
     // Format string:
     uint32_t _csv2b0 = micros();   // CSV2 build-cost timer (snprintf)
-    payload2Len = snprintf(payload2, PAYLOAD2_SIZE,
+        payload2Len = snprintf(payload2, PAYLOAD2_SIZE,
                                "%d,"  // CSV2_FIELD_COUNT
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // -1 %d: VictronCurrent moved to CSV4 (it sat before the %u,%u device-id pair)
-                               "%d,%d,%u,%u,%d,%d,%d,%d,%d,"
-                               // -9 %d: COG/SOG/AWS/AWA/TWS/TWA/Leeway/VMGNMEA + HeadingNMEA moved to CSV4
-                               "%d,"
-                               // -10 %d: one 10-specifier row dropped here (Control Accuracy Scores v2 net change)
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,"
-                               // net -12 specifiers parked here (count-only; field identity is by CSV2_FIELDS order)
-                               // 28 ignition-cycle watermark fields (14 lo + 14 hi)
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // restartRemainingSec + GPS/time source labels + loggingActive
-                               "%d,%d,%d,%d,"
-                               // sustainedTWS + currentGaleMinutes + 2 VMG watermark pairs (lo/hi) (VMGUpwind moved to CSV4)
-                               // ...4 alt-health + 2 imu-zero offsets
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // Victron VE.Direct solar/MPPT live block (7 fields — PPV/VPV/derived-current moved to CSV4)
-                               "%d,%d,%d,%d,%d,%d,%d,"
-                               // (live engine fuel flow + economy — currentFuelGPH/currentNMPG — moved to CSV4)
-                               // session fuel-economy curve (18 RPM bins + top-RPM scale)
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // +4 specifiers to balance the count after inserting ft_altFold + ft_boatPerf
-                               // win/ses mid-list (args emit positionally; field identity is via CSV2_FIELDS order)
-                               "%d,%d,%d,%d,"
-                               // +4: 80MHz low-power loop instrumentation (worst_win, worst_ses, over-limit count, total iters)
-                               "%d,%d,%d,%d,"
-                               // +2: field-ON loop instrumentation (worst_win, worst_ses)
-                               "%d,%d,"
-                               // (Speed Through Water STW/SOW moved to CSV4)
-                               // +4: thermal tuning live-stream fields (tempFiltered, impliedPenalty, flags, antiWindup latch)
-                               "%d,%d,%d,%d,"
-                               // +10: inner-current-PID firing interval (field-on), CH1-style stats
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // +4: I2C bus-health (inaBusReadWorstUs, inaBusSlowCount, ina228ErrorCount, imuFifoFetchWorstUs)
-                               "%d,%d,%d,%d,"
-                               // +8 net: CV voltage-loop ladder is 10 vl_* fields, but reuses the 2 specifiers freed by the
-                               // removed 2-row voltLoop watermarks (still sitting in the generic blocks above), so only +8 here.
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // +1: imuFifoWorstSamples (sample count at the worst IMU fetch — bus-stall vs transfer-size diag)
-                               "%d,"
-                               // +2: long-term-ring flash-flush timer (worst window / session, µs)
-                               "%d,%d,"
-                               // +18: fast alt-current channel (drain timer ×2, flush timer ×2, detector timer ×2, window-finalize timer ×2, state, cells, detectK, session worsts ×3, anomaly count, Highest Tone in Map ×3 [freq, amp, rpm])
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // +7: operating-point context for the two headline worsts (Highest Tone amps/temp/epoch, Session Pk-Pk rpm/amps/temp/epoch)
-                               "%d,%d,%d,%d,%d,%d,%d,"
-                               // +12: gate-tuning 10s live readouts (RPM edge margin, amps-drift spread, amps-drift gate excess, tone peak, current slew, voltage slope, ripple-capture cmd/alt/batt gate excess + rpm margin + 2 admit counters)
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // +5: lifetime nav/sailing records (longest trip, max 24h dist, deepest anchorage, best upwind VMG, longest gale)
-                               "%d,%d,%d,%d,%d,"
-                               // +6 (was +12): v4 removed the 6 RMS/peak fields — count-only bookkeeping; field identity is via CSV2_FIELDS order
-                               "%d,%d,%d,%d,%d,%d,"
-                               // +1: live CPU clock (80 or 240 MHz)
-                               "%d,"
-                               // +4: ADS slow-channel gap meters (ch0/ch2 last+worst, ms)
-                               "%d,%d,%d,%d,"
-                               // +4: CSV2 send-cost (build last/worst, send last/worst, µs)
-                               "%d,%d,%d,%d,"
-                               // +2: Core-0 HTTPS task cloud op time (last/worst, ms)
-                               "%d,%d,"
-                               // +1: live battery-temp CV gain derate multiplier (×1000)
-                               "%d,"
-                               // +20: Control Accuracy v4 routine-data loop health (8 current + 8 voltage + 4 thermal)
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d",   // CSV2_imuInstallCode
-
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d\n",
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
@@ -7812,15 +7692,8 @@ void SendWifiData() {
                                SafeInt(UVTomorrow, 100),
                                SafeInt(UVDay2, 100),
                                SafeInt(weatherDataValid),
-                               0,                                                // reserved — moved to CSV3 (SolarWatts)
-                               0,                                                // reserved — moved to CSV3 (performanceRatio)
-                               0,                                                // reserved — moved to CSV3 (VeData)
-                               0,                                                // reserved — moved to CSV3 (NMEA0183Data)
-                               0,                                                // reserved — moved to CSV3 (NMEA2KData)
                                SafeInt(alarmLatch ? 1 : 0),
                                SafeInt(ResetAlarmLatch),
-                               0,  // CSV2_reserved_ResetLearningTable — action-only, no echo
-                               0,  // CSV2_reserved_ClearOverheatHistory — action-only, no echo
                                SafeInt(DynamicShuntGainFactor, 1000),
                                SafeInt(DynamicAltCurrentZero, 1000),
                                SafeInt(InsulationLifePercent, 100),
@@ -7832,10 +7705,10 @@ void SendWifiData() {
                                SafeInt(pKwHrTomorrow, 100),
                                SafeInt(pKwHr2days, 100),
                                SafeInt(ambientTemp),
-                               SafeInt(baroPressure, 10),  // mbar ×10 — whole-mbar rounding froze the display (~1 mbar/hr drift); JS divides by 10
+                               SafeInt(baroPressure, 10),
                                SafeInt(firmwareVersionInt),
-                               deviceIdUpper,                                    // 54 (%u)
-                               deviceIdLower,                                    // 55 (%u)
+                               deviceIdUpper,
+                               deviceIdLower,
                                SafeInt(ChargedEnergy_AllTime),
                                SafeInt(AlternatorFuelUsed_AllTime, 100),
                                SafeInt(PeakVoltage_AllTime, 100),
@@ -7863,20 +7736,12 @@ void SendWifiData() {
                                SafeInt(MaxTemperatureThermistor_AllTime),
                                SafeInt(MeasuredAmpsMax_AllTime, 100),
                                SafeInt(RPMMax_AllTime),
-                               0,  // reserved — Ignition moved to CSV1
                                SafeInt(inBulkStage ? 1 : 0),
-                               // 85: seconds of WiFi remaining — WiFi wake OR shutdown drain window (shown as countdown banner)
-                               SafeInt(
-                                 (wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION)
-                                   ? (WIFI_WAKE_DURATION - (millis() - wifiWakeStart)) / 1000
-                                   : (pendingShutdownFlush && shutdownCloudDeadlineMs > millis())
-                                       ? (shutdownCloudDeadlineMs - millis()) / 1000
-                                       : 0),
+                               SafeInt( (wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION) ? (WIFI_WAKE_DURATION - (millis() - wifiWakeStart)) / 1000 : (pendingShutdownFlush && shutdownCloudDeadlineMs > millis()) ? (shutdownCloudDeadlineMs - millis()) / 1000 : 0),
                                SafeInt(bufferedRecordCount),
                                SafeInt((bufferedRecordCount * 100) / SENSOR_RING_SIZE),
                                SafeInt(SENSOR_RING_SIZE),
                                SafeInt(VMGTargetBearing),
-                               0,                                                // 98 reserved — moved to CSV3
                                SafeInt(cpuLoadCore0),
                                SafeInt(cpuLoadCore0Max),
                                SafeInt(cpuLoadCore1),
@@ -7885,14 +7750,12 @@ void SendWifiData() {
                                SafeInt(forcedFwVersionInt),
                                (forcedUpdateDeadline),
                                SafeInt(stateRevision),
-                               0,                                                // 107 reserved — moved to CSV3
                                SafeInt(imu_accel_x_raw, 1000),
                                SafeInt(imu_accel_y_raw, 1000),
                                SafeInt(imu_accel_z_raw, 1000),
                                SafeInt(imu_gyro_x_raw, 100),
                                SafeInt(imu_gyro_y_raw, 100),
                                SafeInt(imu_gyro_z_raw, 100),
-                               // Time-weighted averages below cast valid_us to int64 before dividing — else the unsigned valid_us promotes the signed area and corrupts negative values.
                                SafeInt(imuWindow->accel_x_min),
                                SafeInt(imuWindow->accel_x_max),
                                SafeInt(imuWindow->accel_x_valid_us > 0 ? (int)((int64_t)imuWindow->accel_x_area_v_us / (int64_t)imuWindow->accel_x_valid_us) : 0),
@@ -7962,7 +7825,7 @@ void SendWifiData() {
                                SafeInt((ChargingVoltageTarget - getBatteryVoltage()) * 100),
                                SafeInt(cv_I * 100),
                                SafeInt(inIdleStage),
-                               altHaveFront(),                          // CSV2_altBaselineFrozen → have a usable best-ever front
+                               altHaveFront(),
                                SafeInt(ft_rai_total.worstWindow),
                                SafeInt(ft_rai_total.worstSession),
                                SafeInt(ft_rai_ina228.worstWindow),
@@ -7973,7 +7836,6 @@ void SendWifiData() {
                                SafeInt(ft_rai_bmp_state.worstSession),
                                SafeInt(ft_rai_imu.worstWindow),
                                SafeInt(ft_rai_imu.worstSession),
-                               0,                                                 // CSV2_reserved_cv_D — dead slot (no D term)
                                SafeInt(tempReadFailCount),
                                SafeInt(tempCrcFailCount),
                                SafeInt(tempCrcRecoveredCount),
@@ -7995,15 +7857,13 @@ void SendWifiData() {
                                SafeInt(imu_min_stat_moderate),
                                SafeInt(imu_min_stat_rough),
                                SafeInt(imu_min_stat_extreme),
-                               SafeInt(imu_heel_deviation_120s, 100),            // ×100, 2dp degrees
-                               SafeInt(imu_pitch_deviation_120s, 100),           // ×100, 2dp degrees
-                               SafeInt(imu_heading_swing_120s, 10),              // ×10, 1dp degrees; -10 = no compass data
-                               SafeInt(g_dBcur_dt, 10),                          // ×10, 1dp A/s battery current rate of change
-                               (int)g_loadDumpActive,                            // 1 if load dump feedforward is active
-                               0,                                                // CSV2_reserved_thermalTestPhase (dead slot)
+                               SafeInt(imu_heel_deviation_120s, 100),
+                               SafeInt(imu_pitch_deviation_120s, 100),
+                               SafeInt(imu_heading_swing_120s, 10),
+                               SafeInt(g_dBcur_dt, 10),
+                               (int)g_loadDumpActive,
                                SafeInt(ft_updateAccelMetrics.worstWindow),
                                SafeInt(ft_updateAccelMetrics.worstSession),
-                               // from CSV1
                                SafeInt(WifiStrength),
                                SafeInt(SendWifiTime),
                                SafeInt(AnalogReadTime),
@@ -8011,7 +7871,6 @@ void SendWifiData() {
                                SafeInt(MaximumLoopTime),
                                SafeInt(EngineCycles),
                                SafeInt(CurrentSessionDuration),
-                               0,                                                // reserved — moved to CSV3 (timeAxisModeChanging)
                                SafeInt(currentPartitionType),
                                SafeInt(g_fastOvCurrentCap, 100),
                                SafeInt(g_fastOvClampCount),
@@ -8081,17 +7940,14 @@ void SendWifiData() {
                                SafeInt(ft_bhFlushCapNVS.worstSession),
                                SafeInt(ft_kneeLearnService.worstWindow),
                                SafeInt(ft_kneeLearnService.worstSession),
-                               // from CSV3 (firmware-computed)
                                SafeInt(currentRPMTableIndex),
                                SafeInt(pidInitialized ? 1 : 0),
                                SafeInt(pidSetpoint, 100),
                                SafeInt(TempToUse),
                                SafeInt(learningTargetFromRPM, 100),
-                               SafeInt(ambientTempCorrection, 100),
                                SafeInt(finalLearningTarget, 100),
                                SafeInt(overheatingPenaltyTimer / 1000),
                                SafeInt(overheatingPenaltyAmps, 100),
-                               0,  // CSV2_reserved_averageTableValue — dead slot, sends 0
                                SafeInt(timeSinceLastOverheat / 1000),
                                SafeInt(socInfoAvailable),
                                SafeInt(overheatCount[0]),
@@ -8182,163 +8038,176 @@ void SendWifiData() {
                                SafeInt(nvsFullSaveLastMs),
                                SafeInt(nvsFullSaveWorstMs),
                                SafeInt(nvsFullSaveCount),
-                               // 28 ignition-cycle watermarks (lo, hi for 14 params). Scale must match enum comments.
-                               SafeInt(wmIgnSafe(wmIgn_amps.lo), 1),     SafeInt(wmIgnSafe(wmIgn_amps.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_altTempF.lo), 1), SafeInt(wmIgnSafe(wmIgn_altTempF.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_IBV.lo), 10),     SafeInt(wmIgnSafe(wmIgn_IBV.hi), 10),
-                               SafeInt(wmIgnSafe(wmIgn_Bcur.lo), 1),     SafeInt(wmIgnSafe(wmIgn_Bcur.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_SOC.lo), 1),      SafeInt(wmIgnSafe(wmIgn_SOC.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_RPM.lo), 1),      SafeInt(wmIgnSafe(wmIgn_RPM.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_SOG.lo), 1),      SafeInt(wmIgnSafe(wmIgn_SOG.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_AWS.lo), 1),      SafeInt(wmIgnSafe(wmIgn_AWS.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_TWS.lo), 1),      SafeInt(wmIgnSafe(wmIgn_TWS.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_heel.lo), 1),     SafeInt(wmIgnSafe(wmIgn_heel.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_pitch.lo), 1),    SafeInt(wmIgnSafe(wmIgn_pitch.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_vacc.lo), 10),    SafeInt(wmIgnSafe(wmIgn_vacc.hi), 10),
-                               SafeInt(wmIgnSafe(wmIgn_baro.lo), 1),     SafeInt(wmIgnSafe(wmIgn_baro.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_ambient.lo), 1),  SafeInt(wmIgnSafe(wmIgn_ambient.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_amps.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_amps.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_altTempF.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_altTempF.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_IBV.lo), 10),
+                               SafeInt(wmIgnSafe(wmIgn_IBV.hi), 10),
+                               SafeInt(wmIgnSafe(wmIgn_Bcur.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_Bcur.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_SOC.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_SOC.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_RPM.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_RPM.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_SOG.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_SOG.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_AWS.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_AWS.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_TWS.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_TWS.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_heel.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_heel.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_pitch.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_pitch.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_vacc.lo), 10),
+                               SafeInt(wmIgnSafe(wmIgn_vacc.hi), 10),
+                               SafeInt(wmIgnSafe(wmIgn_baro.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_baro.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_ambient.lo), 1),
+                               SafeInt(wmIgnSafe(wmIgn_ambient.hi), 1),
                                (int)restartRemainingSec,
-                               (int)currentGpsSource,                    // 0=none 1=NMEA 2=Phone 3=Manual
-                               (int)currentTimeSource,                   // 0=none 1=GPS 2=Phone 3=NTP 4=drifting
-                               (int)loggingActive,                       // 1=logging, 0=stopped
-                               SafeInt(sustainedTWS, 10),                // 2-min sustained TWS, knots ×10
-                               SafeInt(currentGaleMinutes, 1),           // live gale minutes (int)
-                               SafeInt(wmIgnSafe(wmIgn_VMGman.lo), 10),  SafeInt(wmIgnSafe(wmIgn_VMGman.hi), 10),
-                               SafeInt(wmIgnSafe(wmIgn_VMGup.lo), 10),   SafeInt(wmIgnSafe(wmIgn_VMGup.hi), 10),
-                               SafeInt(altWorstPct(), 10),              // CSV2_altHealthPct → worst-region perf% (v2)
-                               altStatus(),                              // CSV2_altHealthStatus → 0 insufficient,1 healthy,2 drifting (v2)
-                               SafeInt(altCoveragePct(), 10),            // CSV2_altCoveragePct → record-book fill% (v2)
-                               altFrontCount(),                          // CSV2_altObsCount → front support-point count
-                               0,  // reserved — imuHeelOffset moved to CSV3
-                               0,  // reserved — imuPitchOffset moved to CSV3
-                               // Victron VE.Direct solar/MPPT live block (7 fields — PPV/VPV/derived-current moved to CSV4)
-                               SafeInt(VictronChargeState),              // CSV2_VictronChargeState
-                               SafeInt(VictronMPPTMode),                 // CSV2_VictronMPPTMode
-                               SafeInt(VictronError),                    // CSV2_VictronError
-                               SafeInt(VictronYieldToday_kWh, 100),      // CSV2_VictronYieldToday
-                               SafeInt(VictronMaxPowerToday_W),          // CSV2_VictronMaxPowerToday
-                               SafeInt(VictronYieldYesterday_kWh, 100),  // CSV2_VictronYieldYesterday
-                               SafeInt(VictronMaxPowerYesterday_W),      // CSV2_VictronMaxPowerYesterday
-                               // (currentFuelGPH/currentNMPG moved to CSV4/NavStream)
-                               // session fuel-economy curve (18 RPM bins, naut mi/gal ×100)
-                               SafeInt(fuelCurveNMPG[0], 100),  SafeInt(fuelCurveNMPG[1], 100),  SafeInt(fuelCurveNMPG[2], 100),
-                               SafeInt(fuelCurveNMPG[3], 100),  SafeInt(fuelCurveNMPG[4], 100),  SafeInt(fuelCurveNMPG[5], 100),
-                               SafeInt(fuelCurveNMPG[6], 100),  SafeInt(fuelCurveNMPG[7], 100),  SafeInt(fuelCurveNMPG[8], 100),
-                               SafeInt(fuelCurveNMPG[9], 100),  SafeInt(fuelCurveNMPG[10], 100), SafeInt(fuelCurveNMPG[11], 100),
-                               SafeInt(fuelCurveNMPG[12], 100), SafeInt(fuelCurveNMPG[13], 100), SafeInt(fuelCurveNMPG[14], 100),
-                               SafeInt(fuelCurveNMPG[15], 100), SafeInt(fuelCurveNMPG[16], 100), SafeInt(fuelCurveNMPG[17], 100),
-                               SafeInt(currentFuelTopRPM),               // CSV2_fuelCurveTopRPM (top fuel-table RPM)
-                               // 80MHz low-power loop instrumentation (4 fields) — µs→ms for the two worsts
-                               SafeInt(loopWorst80Win / 1000),           // CSV2_loopWorst80Win_ms
-                               SafeInt(loopWorst80Ses / 1000),           // CSV2_loopWorst80Ses_ms
-                               SafeInt(loopOver80ImuLimitCount),         // CSV2_loopOver80ImuLimitCount
-                               SafeInt(loop80IterCount),                 // CSV2_loop80IterCount
-                               // field-ON loop instrumentation (2 fields) — µs→ms
-                               SafeInt(loopFieldOnWin / 1000),           // CSV2_loopFieldOnWin_ms
-                               SafeInt(loopFieldOnSes / 1000),           // CSV2_loopFieldOnSes_ms
-                               // thermal tuning live-stream fields (see CSV2 enum) — flags byte mirrors the thermal log writer
-                               SafeInt(tempFiltered, 100),               // CSV2_tempFiltered
-                               SafeInt(outerImpliedPenalty, 100),        // CSV2_outerImpliedPenalty
-                               SafeInt((tempPIDActive ? (1 << 0) : 0) | (sysMode == SYS_MODE_AUTO ? (1 << 4) : 0) | (shutdownPhase != SHUTDOWN_PHASE_NONE ? (1 << 5) : 0)),  // CSV2_thermalFlags
-                               SafeInt(thermalAntiWindupLatch ? 1 : 0),  // CSV2_thermalAntiWindupLatch
-                               // +10: inner-current-PID firing interval (field-on)
-                               SafeInt(pf_last_ms),                      // CSV2_pf_last_ms
-                               SafeInt(pf_avg_10s, 100),                 // CSV2_pf_avg_10s
-                               SafeInt(pf_worst_10s),                    // CSV2_pf_worst_10s
-                               SafeInt(pf_over2x_10s),                   // CSV2_pf_over2x_10s
-                               SafeInt(pf_avg_2m, 100),                  // CSV2_pf_avg_2m
-                               SafeInt(pf_worst_2m),                     // CSV2_pf_worst_2m
-                               SafeInt(pf_over2x_2m),                    // CSV2_pf_over2x_2m
-                               SafeInt(pf_avg_at, 100),                  // CSV2_pf_avg_at
-                               SafeInt(pf_worst_at),                     // CSV2_pf_worst_at
-                               SafeInt(pf_over2x_at),                    // CSV2_pf_over2x_at
-                               SafeInt(inaBusReadWorstUs),               // CSV2_inaBusReadWorstUs
-                               SafeInt(inaBusSlowCount),                 // CSV2_inaBusSlowCount
-                               SafeInt(ina228ErrorCount),                // CSV2_ina228ErrorCount
-                               SafeInt(imuFifoFetchWorstUs),             // CSV2_imuFifoFetchWorstUs
-                               SafeInt(imuFifoWorstSamples),             // CSV2_imuFifoWorstSamples
-                               SafeInt(ft_dumpLongTermRing.worstWindow),   // CSV2_dumpLongTermRing_win
-                               SafeInt(ft_dumpLongTermRing.worstSession),  // CSV2_dumpLongTermRing_ses
-                               SafeInt(ft_fastAltDrain.worstWindow),       // CSV2_fastAltDrain_win
-                               SafeInt(ft_fastAltDrain.worstSession),      // CSV2_fastAltDrain_ses
-                               SafeInt(ft_faMatrixFlush.worstWindow),      // CSV2_faMatrixFlush_win
-                               SafeInt(ft_faMatrixFlush.worstSession),     // CSV2_faMatrixFlush_ses
-                               SafeInt(faDetLastComputeUs),                // CSV2_faDetector_win  -> detector compute, LAST run (us)
-                               SafeInt(faDetWorstComputeUs),               // CSV2_faDetector_ses  -> detector compute, WORST since reset (us)
-                               SafeInt(ft_faWindowFinalize.worstWindow),   // CSV2_faWindowFinalize_win
-                               SafeInt(ft_faWindowFinalize.worstSession),  // CSV2_faWindowFinalize_ses
-                               SafeInt(faChanState),                       // CSV2_faChanState
-                               SafeInt(faCellsUsed),                       // CSV2_faCellsUsed
-                               SafeInt(faDetectLastK),                     // CSV2_faDetectK (fault class of last FAULT verdict)
-                               SafeInt(faSesPkpkWorstA, 100),              // CSV2_faSesPkpkWorst
-                               SafeInt(faSesPeakWorstA, 100),              // CSV2_faSesPeakWorst
-                               SafeInt(faSesPeakWorstHz, 10),              // CSV2_faSesPeakWorstHz
-                               SafeInt(faAnomalyCount),                    // CSV2_faAnomalyCount
-                               SafeInt(faDomFreqHzX10),                    // CSV2_faDomFreqHz (already Hz×10; JS divides by 10)
-                               SafeInt(faDomAmpAX100),                     // CSV2_faDomAmp (already A×100; JS divides by 100)
-                               SafeInt(faDomRpm),                          // CSV2_faDomRpm (raw RPM)
-                               SafeInt(faDomAmpsA, 10),                    // CSV2_faDomAmps (A ×10)
-                               SafeInt(faDomTempF, 10),                    // CSV2_faDomTempF (°F ×10; NAN -> -1)
-                               SafeInt((double)faDomEpoch),                // CSV2_faDomEpoch (epoch seconds; 0 = clock not synced)
-                               SafeInt(faSesPkpkRpm),                      // CSV2_faSesPkpkRpm (raw RPM)
-                               SafeInt(faSesPkpkAmpsA, 10),                // CSV2_faSesPkpkAmps (A ×10)
-                               SafeInt(faSesPkpkTempF, 10),                // CSV2_faSesPkpkTempF (°F ×10; NAN -> -1)
-                               SafeInt((double)faSesPkpkEpoch),            // CSV2_faSesPkpkEpoch (epoch seconds; 0 = clock not synced)
-                               // +5: gate-tuning 10s live readouts (ROLL_EMPTY when no sample in window)
-                               rollCsv(ROLL_RPMEDGE, 10),                  // CSV2_faRpmEdge10sMin  (RPM ×10, trough)
-                               rollCsv(ROLL_AMPSDRIFT, 100),               // CSV2_faAmpsDrift10sMax (A ×100, peak)
-                               rollCsv(ROLL_AMPSDRIFTEXC, 100),            // CSV2_faAmpsDriftExc10sMax (A ×100, peak; <=0 = passing)
-                               rollCsv(ROLL_TONEPK, 100),                  // CSV2_faTonePk10sMax    (A ×100, peak)
-                               rollCsv(ROLL_LDSLEW, 10),                   // CSV2_ldSlew10sMax      (A/s ×10, peak)
-                               rollCsv(ROLL_CVSLOPE, 10000),               // CSV2_cvSlope10sMax     (V/s ×10000, peak)
-                               rollCsv(ROLL_RIPCMDEXC, 100),               // CSV2_ripCmdExc10sMax   (A ×100, peak; <=0 = passing)
-                               rollCsv(ROLL_RIPALTEXC, 100),               // CSV2_ripAltExc10sMax   (A ×100, peak; <=0 = passing)
-                               rollCsv(ROLL_RIPBATTEXC, 100),              // CSV2_ripBattExc10sMax  (A ×100, peak; <=0 = passing)
-                               rollCsv(ROLL_RIPRPMSHIFT, 10),              // CSV2_ripRpmShift10sMax (RPM ×10, peak; <=0 = passing)
-                               (int)(g_ripAltAdmitCount & 0x7FFFFFFF),     // CSV2_ripAltAdmitCount  (lifetime admit counter)
-                               (int)(g_ripBattAdmitCount & 0x7FFFFFFF),    // CSV2_ripBattAdmitCount (lifetime admit counter)
-                               // Lifetime nav/sailing records (NVS-persisted; shown read-only in Lifetime Statistics)
-                               SafeInt(LongestSingleTrip_Nm_AllTime, 10),  // CSV2_LongestTripAT     (nm ×10)
-                               SafeInt(Max24hrDistance_AllTime, 10),       // CSV2_Max24hrDistAT     (nm ×10)
-                               SafeInt(DeepestAnchorage_Ft_AllTime, 10),   // CSV2_DeepestAnchorAT   (ft ×10)
-                               SafeInt(best_upwind_vmg_alltime, 100),      // CSV2_BestUpwindVmgAT   (kts ×100)
-                               SafeInt(longest_gale_duration_hours_alltime, 100), // CSV2_LongestGaleAT (hr ×100)
-                               SafeInt(getCpuFrequencyMhz()),             // CSV2_cpuFreqMhz   (MHz ×1)
-                               SafeInt(ch0GapLastMs),                     // CSV2_ch0GapLast   (ms)
-                               SafeInt(ch0GapWorstMs),                    // CSV2_ch0GapWorst  (ms)
-                               SafeInt(ch2GapLastMs),                     // CSV2_ch2GapLast   (ms)
-                               SafeInt(ch2GapWorstMs),                    // CSV2_ch2GapWorst  (ms)
-                               SafeInt(csv2BuildLastUs),                  // CSV2_csv2BuildLast  (µs)
-                               SafeInt(csv2BuildWorstUs),                 // CSV2_csv2BuildWorst (µs)
-                               SafeInt(csv2SendLastUs),                   // CSV2_csv2SendLast   (µs)
-                               SafeInt(csv2SendWorstUs),                  // CSV2_csv2SendWorst  (µs)
-                               SafeInt(httpsUploadLastMs),                // CSV2_httpsUpload_win -> Core-0 cloud op LAST (ms)
-                               SafeInt(httpsUploadWorstMs),               // CSV2_httpsUpload_ses -> Core-0 cloud op WORST since reset (ms)
-                               SafeInt(cvTempDerateScale, 1000),          // CSV2_cvTempDerateScale -> battery-temp gain derate multiplier (×1000)
-                               // Control Accuracy v4 (spec: CONTROL_ACCURACY_V4_ROUTINE_SPEC.md). Raw accumulators;
-                               // the UI derives Tracking % / mean recovery / Constrained % client-side.
-                               (int)accCur4.validSec,                     // CSV2_accCurValidS
-                               (int)accCur4.activeSec,                    // CSV2_accCurActiveS
-                               (int)accCur4.inbandActiveSec,              // CSV2_accCurInbandS
-                               (int)accCur4.constrainedSec,               // CSV2_accCurConstS
-                               (int)accCur4.excursions,                   // CSV2_accCurExc
-                               (int)(accCur4.recovSecSum * 10.0),         // CSV2_accCurRecovS10 (s ×10)
-                               SafeInt((float)accCur4.overExpSum, 100),   // CSV2_accCurOverExp (A·s ×100)
-                               SafeInt(accCur4.worstOver, 100),           // CSV2_accCurWorst (A ×100)
-                               (int)accVolt4.validSec,                    // CSV2_accVoltValidS
-                               (int)accVolt4.activeSec,                   // CSV2_accVoltActiveS
-                               (int)accVolt4.inbandActiveSec,             // CSV2_accVoltInbandS
-                               (int)accVolt4.constrainedSec,              // CSV2_accVoltConstS
-                               (int)accVolt4.excursions,                  // CSV2_accVoltExc
-                               (int)(accVolt4.recovSecSum * 10.0),        // CSV2_accVoltRecovS10 (s ×10)
-                               SafeInt((float)accVolt4.overExpSum, 100),  // CSV2_accVoltOverExp (V·s 12V-equiv ×100)
-                               SafeInt(accVolt4.worstOver, 1000),         // CSV2_accVoltWorst (V→mV 12V-equiv)
-                               (int)accThermBindingSec,                   // CSV2_accThermBindS
-                               (int)accThermInbandSec,                    // CSV2_accThermInbandS
-                               (int)accThermSessions,                     // CSV2_accThermSess
-                               SafeInt(accThermWorstOverF, 100),          // CSV2_accThermWorst (°F ×100)
-                               (int)imuInstallCode()                      // CSV2_imuInstallCode
-    );
+                               (int)currentGpsSource,
+                               (int)currentTimeSource,
+                               (int)loggingActive,
+                               SafeInt(sustainedTWS, 10),
+                               SafeInt(currentGaleMinutes, 1),
+                               SafeInt(wmIgnSafe(wmIgn_VMGman.lo), 10),
+                               SafeInt(wmIgnSafe(wmIgn_VMGman.hi), 10),
+                               SafeInt(wmIgnSafe(wmIgn_VMGup.lo), 10),
+                               SafeInt(wmIgnSafe(wmIgn_VMGup.hi), 10),
+                               SafeInt(altWorstPct(), 10),
+                               altStatus(),
+                               SafeInt(altCoveragePct(), 10),
+                               altFrontCount(),
+                               SafeInt(VictronChargeState),
+                               SafeInt(VictronMPPTMode),
+                               SafeInt(VictronError),
+                               SafeInt(VictronYieldToday_kWh, 100),
+                               SafeInt(VictronMaxPowerToday_W),
+                               SafeInt(VictronYieldYesterday_kWh, 100),
+                               SafeInt(VictronMaxPowerYesterday_W),
+                               SafeInt(fuelCurveNMPG[0], 100),
+                               SafeInt(fuelCurveNMPG[1], 100),
+                               SafeInt(fuelCurveNMPG[2], 100),
+                               SafeInt(fuelCurveNMPG[3], 100),
+                               SafeInt(fuelCurveNMPG[4], 100),
+                               SafeInt(fuelCurveNMPG[5], 100),
+                               SafeInt(fuelCurveNMPG[6], 100),
+                               SafeInt(fuelCurveNMPG[7], 100),
+                               SafeInt(fuelCurveNMPG[8], 100),
+                               SafeInt(fuelCurveNMPG[9], 100),
+                               SafeInt(fuelCurveNMPG[10], 100),
+                               SafeInt(fuelCurveNMPG[11], 100),
+                               SafeInt(fuelCurveNMPG[12], 100),
+                               SafeInt(fuelCurveNMPG[13], 100),
+                               SafeInt(fuelCurveNMPG[14], 100),
+                               SafeInt(fuelCurveNMPG[15], 100),
+                               SafeInt(fuelCurveNMPG[16], 100),
+                               SafeInt(fuelCurveNMPG[17], 100),
+                               SafeInt(currentFuelTopRPM),
+                               SafeInt(loopWorst80Win / 1000),
+                               SafeInt(loopWorst80Ses / 1000),
+                               SafeInt(loopOver80ImuLimitCount),
+                               SafeInt(loop80IterCount),
+                               SafeInt(loopFieldOnWin / 1000),
+                               SafeInt(loopFieldOnSes / 1000),
+                               SafeInt(tempFiltered, 100),
+                               SafeInt(outerImpliedPenalty, 100),
+                               SafeInt((tempPIDActive ? (1 << 0) : 0) | (sysMode == SYS_MODE_AUTO ? (1 << 4) : 0) | (shutdownPhase != SHUTDOWN_PHASE_NONE ? (1 << 5) : 0)),
+                               SafeInt(thermalAntiWindupLatch ? 1 : 0),
+                               SafeInt(pf_last_ms),
+                               SafeInt(pf_avg_10s, 100),
+                               SafeInt(pf_worst_10s),
+                               SafeInt(pf_over2x_10s),
+                               SafeInt(pf_avg_2m, 100),
+                               SafeInt(pf_worst_2m),
+                               SafeInt(pf_over2x_2m),
+                               SafeInt(pf_avg_at, 100),
+                               SafeInt(pf_worst_at),
+                               SafeInt(pf_over2x_at),
+                               SafeInt(inaBusReadWorstUs),
+                               SafeInt(inaBusSlowCount),
+                               SafeInt(ina228ErrorCount),
+                               SafeInt(imuFifoFetchWorstUs),
+                               SafeInt(imuFifoWorstSamples),
+                               SafeInt(ft_dumpLongTermRing.worstWindow),
+                               SafeInt(ft_dumpLongTermRing.worstSession),
+                               SafeInt(ft_fastAltDrain.worstWindow),
+                               SafeInt(ft_fastAltDrain.worstSession),
+                               SafeInt(ft_faMatrixFlush.worstWindow),
+                               SafeInt(ft_faMatrixFlush.worstSession),
+                               SafeInt(faDetLastComputeUs),
+                               SafeInt(faDetWorstComputeUs),
+                               SafeInt(ft_faWindowFinalize.worstWindow),
+                               SafeInt(ft_faWindowFinalize.worstSession),
+                               SafeInt(faChanState),
+                               SafeInt(faCellsUsed),
+                               SafeInt(faDetectLastK),
+                               SafeInt(faSesPkpkWorstA, 100),
+                               SafeInt(faSesPeakWorstA, 100),
+                               SafeInt(faSesPeakWorstHz, 10),
+                               SafeInt(faAnomalyCount),
+                               SafeInt(faDomFreqHzX10),
+                               SafeInt(faDomAmpAX100),
+                               SafeInt(faDomRpm),
+                               SafeInt(faDomAmpsA, 10),
+                               SafeInt(faDomTempF, 10),
+                               SafeInt((double)faDomEpoch),
+                               SafeInt(faSesPkpkRpm),
+                               SafeInt(faSesPkpkAmpsA, 10),
+                               SafeInt(faSesPkpkTempF, 10),
+                               SafeInt((double)faSesPkpkEpoch),
+                               rollCsv(ROLL_RPMEDGE, 10),
+                               rollCsv(ROLL_AMPSDRIFT, 100),
+                               rollCsv(ROLL_AMPSDRIFTEXC, 100),
+                               rollCsv(ROLL_TONEPK, 100),
+                               rollCsv(ROLL_LDSLEW, 10),
+                               rollCsv(ROLL_CVSLOPE, 10000),
+                               rollCsv(ROLL_RIPCMDEXC, 100),
+                               rollCsv(ROLL_RIPALTEXC, 100),
+                               rollCsv(ROLL_RIPBATTEXC, 100),
+                               rollCsv(ROLL_RIPRPMSHIFT, 10),
+                               (int)(g_ripAltAdmitCount & 0x7FFFFFFF),
+                               (int)(g_ripBattAdmitCount & 0x7FFFFFFF),
+                               SafeInt(LongestSingleTrip_Nm_AllTime, 10),
+                               SafeInt(Max24hrDistance_AllTime, 10),
+                               SafeInt(DeepestAnchorage_Ft_AllTime, 10),
+                               SafeInt(best_upwind_vmg_alltime, 100),
+                               SafeInt(longest_gale_duration_hours_alltime, 100),
+                               SafeInt(getCpuFrequencyMhz()),
+                               SafeInt(ch0GapLastMs),
+                               SafeInt(ch0GapWorstMs),
+                               SafeInt(ch2GapLastMs),
+                               SafeInt(ch2GapWorstMs),
+                               SafeInt(csv2BuildLastUs),
+                               SafeInt(csv2BuildWorstUs),
+                               SafeInt(csv2SendLastUs),
+                               SafeInt(csv2SendWorstUs),
+                               SafeInt(httpsUploadLastMs),
+                               SafeInt(httpsUploadWorstMs),
+                               SafeInt(cvTempDerateScale, 1000),
+                               (int)accCur4.validSec,
+                               (int)accCur4.activeSec,
+                               (int)accCur4.inbandActiveSec,
+                               (int)accCur4.constrainedSec,
+                               (int)accCur4.excursions,
+                               (int)(accCur4.recovSecSum * 10.0),
+                               SafeInt((float)accCur4.overExpSum, 100),
+                               SafeInt(accCur4.worstOver, 100),
+                               (int)accVolt4.validSec,
+                               (int)accVolt4.activeSec,
+                               (int)accVolt4.inbandActiveSec,
+                               (int)accVolt4.constrainedSec,
+                               (int)accVolt4.excursions,
+                               (int)(accVolt4.recovSecSum * 10.0),
+                               SafeInt((float)accVolt4.overExpSum, 100),
+                               SafeInt(accVolt4.worstOver, 1000),
+                               (int)accThermBindingSec,
+                               (int)accThermInbandSec,
+                               (int)accThermSessions,
+                               SafeInt(accThermWorstOverF, 100),
+                               (int)imuInstallCode());
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
@@ -8377,80 +8246,34 @@ void SendWifiData() {
     /// ALL THIS SAFEINT STUFF MAY BE UNNECESSAREY BAD ADVICE, COULD HAVE JUST SENT ROUNDED FLOATS FOR 1 Byte (or bit?) xtra
     //WifiSendTime was 834uS before increasing csv3 payload size from 1100 to 1400     No change after.  Again, this separation into groups and worry about wifi packet size seems like AI nonsense.
 
-    int payload3Len = snprintf(payload3, PAYLOAD3_SIZE,
+    int     payload3Len = snprintf(payload3, PAYLOAD3_SIZE,
                                "%d,"  // CSV3_FIELD_COUNT
-                               "%d,%d,"  // 2 added: SetpointBigStepThresh, SetpointBigStepRiseRate
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // 9 fast-alt diagnostic knobs
-                               "%d,%d,%d,"  // wifiNapEnabled + 2 imu zero offsets (moved from CSV2)
-                               "%d,%d,%d,%d,"  // 4 systemID sine-sweep params
-                               "%d,%d,%d,%d,%d,"  // 5 tuning sine params
-                               "%d,"  // SystemIDStabilizeAmps
-                               "%d,"  // tuningWaveFloor (Current Target Generator floor)
-                               "%d,"  // commissionState
-                               "%d,"  // commissionPhase
-                               "%d,"  // commissionDoneMask
-                               "%d,"  // cvHelpersEnabled
-                               "%d,"  // MinChargeTempF
-                               "%d,"  // coldChargeLockoutEnable
-                               "%d,"  // cvGainMode
-                               "%d,"  // CSV3_EXTRA1 (reserved placeholder)
-                               "%d,"  // cvPlantK
-                               "%d,"  // cvComputedKp
-                               "%d,"  // cvComputedKi
-                               "%d,"  // cvCrossover
-                               "%d,"  // cvPiZero
-                               "%d,"  // vTgtRampUp
-                               "%d,"  // vTgtRampDn
-                               "%d,"  // vTgtRampEnable
-                               "%d,"  // setpointSlewEnable
-                               "%d,"  // cvRiseGovEnable
-                               "%d,"  // dutySlewEnable
-                               "%d,"  // CommissionTempF
-                               "%d,"  // battTempDerateEnable
-                               "%d,"  // battTempCoeff
-                               "%d,"  // TempPIDKiDownFrac
-                               "%d,"  // ThermalSlopeWindowSec
-                               "%d,"  // BattCurrentLimitA
-                               "%d,"  // ripWinMs
-                               "%d,"  // ripDriftFloorA
-                               "%d,"  // ripDriftPct
-                               "%d,"  // SocAlarmLow
-                               "%d,"  // battMaxMode
-                               "%d,"  // IExcessBaseA
-                               "%d,"  // IExcessCcOffsetA
-                               "%d,"  // CSV3_BatteryShuntPresent
-                               "%d,"  // cvRecovEnable
-                               "%d,"  // cvRecovSec
-                               "%d",  // cvRecovEmaxV
-
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8466,18 +8289,16 @@ void SendWifiData() {
                                SafeInt(PeukertExponent_scaled),
                                SafeInt(ChargeEfficiency_scaled),
                                SafeInt(ChargedVoltage_Scaled),
-                               SafeInt(TailCurrent, 10),                         // 14  (× 10 so JS can show 1 decimal)
+                               SafeInt(TailCurrent, 10),
                                SafeInt(ChargedDetectionTime),
                                SafeInt(IgnoreTemperature),
                                SafeInt(bmsLogic),
                                SafeInt(bmsLogicLevelOff),
                                SafeInt(RPMScalingFactor),
                                SafeInt(MaximumAllowedBatteryAmps),
-                               0,  // CSV3_reserved_BatteryVoltageSource — dead slot
                                SafeInt(AlternatorNominalAmps),
                                SafeInt(LearningUpStep, 100),
                                SafeInt(LearningDownStep, 100),
-                               SafeInt(AmbientTempCorrectionFactor, 100),
                                SafeInt(xTime),
                                SafeInt(MinLearningInterval),
                                SafeInt(SafeOperationThreshold),
@@ -8491,23 +8312,12 @@ void SendWifiData() {
                                SafeInt(NeighborLearningFactor, 1000),
                                SafeInt(yyMax),
                                SafeInt(LearningMemoryDuration / 86400000),
-                               SafeInt(EnableAmbientCorrection),
                                SafeInt(TuningMode),
-                               0,  // CSV3_reserved_rpmCurrentTable_0..9 — dead slots, send 0
-                               0,  // CSV3_reserved_rpmCurrentTable_1
-                               0,  // CSV3_reserved_rpmCurrentTable_2
-                               0,  // CSV3_reserved_rpmCurrentTable_3
-                               0,  // CSV3_reserved_rpmCurrentTable_4
-                               0,  // CSV3_reserved_rpmCurrentTable_5
-                               0,  // CSV3_reserved_rpmCurrentTable_6
-                               0,  // CSV3_reserved_rpmCurrentTable_7
-                               0,  // CSV3_reserved_rpmCurrentTable_8
-                               0,  // CSV3_reserved_rpmCurrentTable_9
                                SafeInt(ShuntResistanceMicroOhm),
                                SafeInt(InvertAltAmps),
                                SafeInt(InvertBattAmps),
                                SafeInt(MaxDuty),
-                               SafeInt(MinDuty, 100),  // float floor ×100 (client divides back)
+                               SafeInt(MinDuty, 100),
                                SafeInt(FieldResistance, 100),
                                SafeInt(maxPoints),
                                SafeInt(AlternatorCOffset, 100),
@@ -8556,7 +8366,6 @@ void SendWifiData() {
                                SafeInt(fuelTableGPH[8], 100),
                                SafeInt(fuelTableGPH[9], 100),
                                SafeInt(stateRevision),
-                               0,  // CSV3_reserved_SetpointRampRate — dead slot
                                SafeInt(DutyRampRate, 100),
                                SafeInt(SettleTimeBeforeCut),
                                SafeInt(TempWarnExcess, 100),
@@ -8603,7 +8412,6 @@ void SendWifiData() {
                                SafeInt(MinFloatTime),
                                SafeInt(SOC_BlockRebulk_percent),
                                SafeInt(SOC_AllowRebulk_percent),
-                               0,                                                 // CSV3_reserved_accelEnabled — dead slot (accelerometer always-on)
                                SafeInt(DutySlowRampRate, 100),
                                SafeInt(ShutdownPhase2HoldMs),
                                SafeInt(TempPIDKp, 1000),
@@ -8622,41 +8430,36 @@ void SendWifiData() {
                                (int)rpmCapPowerTable[7],
                                (int)rpmCapPowerTable[8],
                                (int)rpmCapPowerTable[9],
-                               0,  // CSV3_reserved_VoltageTrimLimit — dead slot
-                               SafeInt(SystemIDStepAmplitude, 10),               // ×10, 1 decimal
-                               SafeInt(HardOCTripAmps, 10),                      // ×10, 1 decimal
-                               SafeInt(HardOCDebounceMs),                        // raw ms
-                               SafeInt(IExcessFrac, 1000),                       // CSV3_IExcessFrac — ×1000, 3 decimals
-                               SafeInt(IExcessFloorA, 10),                       // CSV3_IExcessFloorA — ×10, 1 decimal
-                               SafeInt(IExcessKBleed, 100),                      // ×100, 2 decimals
+                               SafeInt(SystemIDStepAmplitude, 10),
+                               SafeInt(HardOCTripAmps, 10),
+                               SafeInt(HardOCDebounceMs),
+                               SafeInt(IExcessFrac, 1000),
+                               SafeInt(IExcessFloorA, 10),
+                               SafeInt(IExcessKBleed, 100),
                                SafeInt(IgnoreRPM),
                                SafeInt(MinRPMForField),
-                               SafeInt(AwBleedRate, 10),                         // ×10, 1 decimal
-                               0,                                                 // CSV3_reserved_AwRecoverRate — rate hardcoded to 0.1 in firmware
-                               SafeInt(KHard, 10),                               // ×10, 1 decimal
-                               SafeInt(ReseedFrac, 100),                         // ×100, 2 decimal (shared recovery seed fraction)
+                               SafeInt(AwBleedRate, 10),
+                               SafeInt(KHard, 10),
+                               SafeInt(ReseedFrac, 100),
                                (int)AwSeedProtectMs,
-                               0,                                                 // CSV3_reserved_VoltageKd — dead slot (no D term)
                                SafeInt(displayTempUnit),
-                               SafeInt(WarmupRampRate, 10),                      // ×10, 1 decimal
+                               SafeInt(WarmupRampRate, 10),
                                (int)OvGroup1Enable,
                                (int)OvGroup2Enable,
-                               SafeInt(IExcessCeilA, 10),                        // CSV3_IExcessCeilA — ×10, 1 decimal
-                               SafeInt(IExcessTau),                              // CSV3_IExcessTau — raw int ms
+                               SafeInt(IExcessCeilA, 10),
+                               SafeInt(IExcessTau),
                                OutputPIDSigSrc,
-                               TdPred,                                           // 196 (%.3f)
-                               OvMeasMarginV,                                    // 197 (%.3f)
-                               OvPredMarginV,                                    // 198 (%.3f)
+                               TdPred,
+                               OvMeasMarginV,
+                               OvPredMarginV,
                                OutputPIDMA_N,
                                (int)OutputPIDFilterTC,
                                (int)VoltageFilterTC,
-                               0,                                                // CSV3_reserved_ProtectionProxGateV — dead slot
                                SafeInt(SlopeBleedThresh, 100),
                                (int)SlopeBleedK,
-                               SafeInt(DvdtTC, 10),                              // ×10, 1 decimal (ms)
-                               SafeInt(SlopeBleedProxV, 100),                    // ×100, 2 decimals
-                               SafeInt(StartupRiseRate, 100),                    // ×100, 2 decimals
-                               // from CSV2 (settings)
+                               SafeInt(DvdtTC, 10),
+                               SafeInt(SlopeBleedProxV, 100),
+                               SafeInt(StartupRiseRate, 100),
                                SafeInt(absorptionCompleteTime),
                                SafeInt(OnOff),
                                SafeInt(ManualFieldToggle),
@@ -8664,8 +8467,8 @@ void SendWifiData() {
                                SafeInt(LimpHome),
                                SafeInt(AlarmActivate),
                                SafeInt(TempAlarm),
-                               SafeInt(VoltageAlarmHigh, 100),  // V ×100, 2 decimals
-                               SafeInt(VoltageAlarmLow, 100),   // V ×100, 2 decimals
+                               SafeInt(VoltageAlarmHigh, 100),
+                               SafeInt(VoltageAlarmLow, 100),
                                SafeInt(CurrentAlarmHigh),
                                SafeInt(AlarmTest),
                                SafeInt(AlarmLatchEnabled),
@@ -8680,7 +8483,6 @@ void SendWifiData() {
                                SafeInt(ManualLifePercentage),
                                SafeInt(UVThresholdHigh, 100),
                                SafeInt(weatherModeEnabled),
-                               0,                                                 // CSV3_reserved_SENSOR_UPLOAD_INTERVAL — firmware-only constant
                                SafeInt(imuEnabled ? 1 : 0),
                                SafeInt(AbsorptionVoltage * 100),
                                SafeInt(AbsorptionTimeoutMs),
@@ -8690,21 +8492,17 @@ void SendWifiData() {
                                SafeInt(TargetVoltageSetpoint, 100),
                                SafeInt(RebulkCurrent_A, 100),
                                SafeInt(UseFloat),
-                               SafeInt(IExcessFracBulk, 1000),  // CSV3_IExcessFracBulk (×1000, 3 decimals)
-                               SafeInt(IExcessRelFrac, 1000),   // CSV3_IExcessRelFrac (×1000, 3 decimals)
-                               SafeInt(systemIDPlantTauMs),   // CSV3_systemIDPlantTauMs — fitted plant tau (ms), persisted
-                               SafeInt(0),   // CSV3_altSpare3 (reserved)
+                               SafeInt(IExcessFracBulk, 1000),
+                               SafeInt(IExcessRelFrac, 1000),
+                               SafeInt(systemIDPlantTauMs),
                                SafeInt(TempAlarmLow),
-                               SafeInt(LoadDumpDtThresh),                        // A/s tier-2 threshold (2 consecutive)
-                               SafeInt(LoadDumpDtThresh1),                       // A/s tier-1 threshold (1 sample)
+                               SafeInt(LoadDumpDtThresh),
+                               SafeInt(LoadDumpDtThresh1),
                                (int)CVTuningMode,
-                               SafeInt(cvWaveAmplitudeV, 100),                   // ×100, 2dp V
+                               SafeInt(cvWaveAmplitudeV, 100),
                                (int)cvWavePeriodSec,
-                               SafeInt(cvKOvershoot, 10),                        // ×10, 1dp
+                               SafeInt(cvKOvershoot, 10),
                                (int)cvConsecutiveReads,
-                               // 8 dead slots (CSV3_reserved_thermal0..7), all send 0
-                               0, 0, 0, 0, 0, 0, 0, 0,
-                               // from CSV1 (settings)
                                SafeInt(webgaugesinterval),
                                SafeInt(plotTimeWindow),
                                SafeInt(Ymin1),
@@ -8715,82 +8513,78 @@ void SendWifiData() {
                                SafeInt(Ymax3),
                                SafeInt(Ymin4),
                                SafeInt(Ymax4),
-                               SafeInt(LoadDumpDtThresh3),                       // A/s tier-3 threshold (3 consecutive)
-                               SafeInt(0),                                      // CSV3_reserved_VMGUseTrueWind — dead slot
-                               SafeInt(hardwarePresent),                         // moved from CSV2
-                               (int)testProtectionsEnabled,                     // 0/1 — runtime flag, not persisted
-                               IExcessArmMarginV,                               // %.3f — iExcess voltage gate margin
-                               SafeInt(FastSetpointRiseRate, 100),              // ×100, 1 decimal — post-protection rise-slew multiplier
-                               (int)FastSetpointRiseWindowMs,                   // raw ms
-                               SafeInt(FastSetpointRiseHeadroomV, 100),         // ×100, 2 decimal — V headroom gate
-                               SafeInt(SolarWatts),                             // moved from CSV2
-                               SafeInt(performanceRatio, 100),                  // moved from CSV2 (×100, 2 decimal)
-                               SafeInt(VeData),                                 // moved from CSV2
-                               SafeInt(NMEA0183Data),                           // moved from CSV2
-                               SafeInt(NMEA2KData),                             // moved from CSV2
-                               SafeInt(timeAxisModeChanging),                   // moved from CSV2
-                               (int)gpsTimeSourceMode,                          // 0=auto,1=NMEA,2=Phone,3=NTP
-                               // Fast alt-current diagnostic knobs (Pattern B echo)
-                               (int)faEnabled,                                  // 0/1
-                               (int)faAlarmEnable,                              // 0/1
-                               (int)faAnomPause,                                // 0/1
-                               SafeInt(faRpmEdgeMargin, 10),                    // RPM ×10
-                               SafeInt(faAmpsDriftFloorA, 100),                 // A ×100
-                               SafeInt(faAmpsDriftPct, 10),                     // percent ×10
-                               SafeInt(faAttenUpAmps, 10),                      // A ×10
-                               SafeInt(faAttenDownAmps, 10),                    // A ×10
-                               SafeInt(faPeakMinA, 100),                        // A ×100
-                               (int)wifiNapEnabled,                             // 0/1
-                               SafeInt(imuHeelOffsetDeg, 100),                  // moved from CSV2
+                               SafeInt(LoadDumpDtThresh3),
+                               SafeInt(hardwarePresent),
+                               (int)testProtectionsEnabled,
+                               IExcessArmMarginV,
+                               SafeInt(FastSetpointRiseRate, 100),
+                               (int)FastSetpointRiseWindowMs,
+                               SafeInt(FastSetpointRiseHeadroomV, 100),
+                               SafeInt(SolarWatts),
+                               SafeInt(performanceRatio, 100),
+                               SafeInt(VeData),
+                               SafeInt(NMEA0183Data),
+                               SafeInt(NMEA2KData),
+                               SafeInt(timeAxisModeChanging),
+                               (int)gpsTimeSourceMode,
+                               (int)faEnabled,
+                               (int)faAlarmEnable,
+                               (int)faAnomPause,
+                               SafeInt(faRpmEdgeMargin, 10),
+                               SafeInt(faAmpsDriftFloorA, 100),
+                               SafeInt(faAmpsDriftPct, 10),
+                               SafeInt(faAttenUpAmps, 10),
+                               SafeInt(faAttenDownAmps, 10),
+                               SafeInt(faPeakMinA, 100),
+                               (int)wifiNapEnabled,
+                               SafeInt(imuHeelOffsetDeg, 100),
                                SafeInt(imuPitchOffsetDeg, 100),
-                               SafeInt(systemIDTestType),                       // 0=step, 1=sine
-                               SafeInt(systemIDSineFreqStart, 10),              // Hz ×10
-                               SafeInt(systemIDSineFreqEnd, 10),                // Hz ×10
+                               SafeInt(systemIDTestType),
+                               SafeInt(systemIDSineFreqStart, 10),
+                               SafeInt(systemIDSineFreqEnd, 10),
                                SafeInt(systemIDSineCycles),
-                               SafeInt(tuningWaveform),                         // 0=square,1=sine,2=sweep
-                               SafeInt(tuningSineFreq, 10),                     // Hz ×10
-                               SafeInt(tuningSweepStart, 10),                   // Hz ×10
-                               SafeInt(tuningSweepEnd, 10),                     // Hz ×10
+                               SafeInt(tuningWaveform),
+                               SafeInt(tuningSineFreq, 10),
+                               SafeInt(tuningSweepStart, 10),
+                               SafeInt(tuningSweepEnd, 10),
                                SafeInt(tuningSweepCycles),
-                               SafeInt(SystemIDStabilizeAmps, 10),              // A ×10
-                               SafeInt(tuningWaveFloor),                        // A (raw)
-                               (int)commissionState,                            // CSV3_commissionState (0/1/2)
-                               (int)commissionPhase,                            // CSV3_commissionPhase (0..8)
-                               (int)commissionDoneMask,                         // CSV3_commissionDoneMask (bit i = stage i done)
-                               (int)cvHelpersEnabled,                           // CSV3_cvHelpersEnabled (asymmetric unwind + slope bleed master switch)
-                               SafeInt(MinChargeTempF),                         // CSV3_MinChargeTempF (cold-charge lockout board-temp floor, °F)
-                               (int)coldChargeLockoutEnable,                    // CSV3_coldChargeLockoutEnable (cold-charge lockout master on/off)
-                               (int)cvGainMode,                                 // CSV3_cvGainMode (0=Manual, 1=Auto λ-based)
-                               0,                                              // CSV3_EXTRA1 (reserved placeholder)
-                               SafeInt(cvPlantK, 10000),                        // CSV3_cvPlantK (measured plant gain V/A, ×10000)
-                               SafeInt(cvComputedKp, 100),                      // CSV3_cvComputedKp (Auto-computed Kp 12V-equiv, ×100)
-                               SafeInt(cvComputedKi, 100),                      // CSV3_cvComputedKi (Auto-computed Ki 12V-equiv, ×100)
-                               SafeInt(cvCrossover, 100),                       // CSV3_cvCrossover (crossover ω_c rad/s, ×100)
-                               SafeInt(cvPiZero, 100),                          // CSV3_cvPiZero (PI integral zero ρ rad/s, ×100)
-                               SafeInt(vTgtRampUp, 1000),                       // CSV3_vTgtRampUp (target ramp up rate V/s, ×1000)
-                               SafeInt(vTgtRampDn, 1000),                       // CSV3_vTgtRampDn (target ramp down rate V/s, ×1000)
-                               (int)vTgtRampEnable,                             // CSV3_vTgtRampEnable (slew master switch 0/1)
-                               (int)setpointSlewEnable,                         // CSV3_setpointSlewEnable (current setpoint slew master switch 0/1)
-                               (int)cvRiseGovEnable,                            // CSV3_cvRiseGovEnable (CV rise governor master switch 0/1)
-                               (int)dutySlewEnable,                             // CSV3_dutySlewEnable (field duty slew master switch 0/1)
-                               isnan(CommissionTempF) ? -32768 : (int)lroundf(CommissionTempF * 10.0f),  // CSV3_CommissionTempF (°F ×10; -32768 = unset)
-                               (int)battTempDerateEnable,                       // CSV3_battTempDerateEnable (0/1)
-                               SafeInt(battTempCoeff, 10000),                   // CSV3_battTempCoeff (fractional R change per °C, ×10000)
-                               SafeInt(TempPIDKiDownFrac, 1000),                // CSV3_TempPIDKiDownFrac (below-setpoint bleed ratio ×Ki, ×1000)
-                               SafeInt(ThermalSlopeWindowSec),                  // CSV3_ThermalSlopeWindowSec (slope difference window, s)
-                               SafeInt(BattCurrentLimitA, 10),                  // CSV3_BattCurrentLimitA — ×10, 1 decimal; 0 = disabled
-                               SafeInt(ripWinMs),                               // CSV3_ripWinMs (ms, integer)
-                               SafeInt(ripDriftFloorA, 100),                    // CSV3_ripDriftFloorA (A ×100)
-                               SafeInt(ripDriftPct, 10),                        // CSV3_ripDriftPct (% ×10)
-                               SafeInt(SocAlarmLow),                            // CSV3_SocAlarmLow (%, integer; 0 = disabled)
-                               SafeInt(battMaxMode),                            // CSV3_battMaxMode (0 = Average, 1 = Max)
-                               SafeInt(IExcessBaseA, 10),                       // CSV3_IExcessBaseA — ×10, 1 decimal
-                               SafeInt(IExcessCcOffsetA, 10),                   // CSV3_IExcessCcOffsetA — ×10, 1 decimal
-                               SafeInt(BatteryShuntPresent),                    // CSV3_BatteryShuntPresent — bool 0/1
-                               (int)cvRecovEnable,                              // CSV3_cvRecovEnable (0/1)
-                               SafeInt(cvRecovSec, 10),                         // CSV3_cvRecovSec — ×10, 1 decimal
-                               SafeInt(cvRecovEmaxV, 1000)                      // CSV3_cvRecovEmaxV — ×1000, 3 decimals
-    );
+                               SafeInt(SystemIDStabilizeAmps, 10),
+                               SafeInt(tuningWaveFloor),
+                               (int)commissionState,
+                               (int)commissionPhase,
+                               (int)commissionDoneMask,
+                               (int)cvHelpersEnabled,
+                               SafeInt(MinChargeTempF),
+                               (int)coldChargeLockoutEnable,
+                               (int)cvGainMode,
+                               SafeInt(cvPlantK, 10000),
+                               SafeInt(cvComputedKp, 100),
+                               SafeInt(cvComputedKi, 100),
+                               SafeInt(cvCrossover, 100),
+                               SafeInt(cvPiZero, 100),
+                               SafeInt(vTgtRampUp, 1000),
+                               SafeInt(vTgtRampDn, 1000),
+                               (int)vTgtRampEnable,
+                               (int)setpointSlewEnable,
+                               (int)cvRiseGovEnable,
+                               (int)dutySlewEnable,
+                               isnan(CommissionTempF) ? -32768 : (int)lroundf(CommissionTempF * 10.0f),
+                               (int)battTempDerateEnable,
+                               SafeInt(battTempCoeff, 10000),
+                               SafeInt(TempPIDKiDownFrac, 1000),
+                               SafeInt(ThermalSlopeWindowSec),
+                               SafeInt(BattCurrentLimitA, 10),
+                               SafeInt(ripWinMs),
+                               SafeInt(ripDriftFloorA, 100),
+                               SafeInt(ripDriftPct, 10),
+                               SafeInt(SocAlarmLow),
+                               SafeInt(battMaxMode),
+                               SafeInt(IExcessBaseA, 10),
+                               SafeInt(IExcessCcOffsetA, 10),
+                               SafeInt(BatteryShuntPresent),
+                               (int)cvRecovEnable,
+                               SafeInt(cvRecovSec, 10),
+                               SafeInt(cvRecovEmaxV, 1000));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

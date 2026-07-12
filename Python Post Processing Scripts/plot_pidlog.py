@@ -213,7 +213,7 @@ EXPECTED_HEADER = [
     "pidUnsatOutput", "pidOutput", "innerTermP", "innerTermI", "innerTermD",
     "dutyRequest", "dutyApplied", "enteringCV", "enteringTargetVoltageMode",
     "rpm", "measAmps", "innerKp", "innerKi", "innerKd", "voltageKp",
-    "voltageKi", "voltageKd", "battV_filt_V", "flags",
+    "voltageKi", "battV_filt_V", "flags",
     "ovFlags", "dBcur_dt", "battI", "ch1IntervalMs", "voltLoopIntervalMs",
     "inaIntervalMs", "mExcessEma", "iExcessThreshold",
 ]
@@ -275,7 +275,7 @@ numeric_cols = [
     "rpm", "measAmps",
     "gainKp", "gainKi", "gainKd",   # old log format — inner current-loop gains
     "innerKp", "innerKi", "innerKd",  # new log format — inner current-loop gains
-    "voltageKp", "voltageKi", "voltageKd",  # new log format — outer voltage loop gains; voltageKd tombstoned (always 0, D term removed)
+    "voltageKp", "voltageKi",  # new log format — outer voltage loop gains (no D term)
     "flags",
     "battV_filt",
     "ovFlags", "dBcur_dt", "battI",

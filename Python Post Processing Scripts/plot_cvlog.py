@@ -325,7 +325,7 @@ if _have_capreason:
 else:
     print("Binding cap reason: column 'capReason' not in this log (older firmware) — skipping.")
 
-# Extract voltage loop Kp/Ki (D term removed — VoltageKd was always 0, tombstoned in log).
+# Extract voltage loop Kp/Ki (D term removed — VoltageKd no longer in the log format).
 # New log format: per-row voltageKp/Ki columns hold the actual outer voltage loop gains.
 # Old log format: only gainKp/Ki/Kd existed — those are INNER current-loop gains (PidKp/Ki/Kd),
 #   NOT the voltage loop gains. Do not use them as voltage loop gains.
@@ -938,7 +938,7 @@ add_subtitle(fig4,
 fig4.subplots_adjust(top=0.90, right=0.80)
 
 # Compute P term from header gains + logged signals.
-# D term removed — VoltageKd was always 0 and is tombstoned in the log format.
+# D term removed — VoltageKd is no longer present in the log format.
 # P term uses (targV - battV): the firmware PI error runs on RAW IBV (no filter lag).
 # voltageTargetSlewed (the slewed target) is not logged; targV is used as the target
 # approximation — differs only briefly on CV entry or setpoint change.

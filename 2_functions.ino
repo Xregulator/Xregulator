@@ -151,7 +151,6 @@ bool fsRemove(const char *path) {
 #define NK_AlternatorCOffset "AlternatrCOffst"
 #define NK_AlternatorHardShutdownV "AltrntrHrdShtdw"
 #define NK_AlternatorNominalAmps "AltrntrNmnlAmps"
-#define NK_AmbientTempCorrectionFactor "AmbntTmpCrrctnF"
 #define NK_AmpSensorRange "AmpSensorRange"
 #define NK_AutoAltCurrentZero "AutoAltCurrntZr"
 #define NK_AutoShuntGainCorrection "AutShntGnCrrctn"
@@ -175,7 +174,6 @@ bool fsRemove(const char *path) {
 #define NK_DutySlowRampRate "DutySlowRampRat"
 #define NK_DvdtAlpha "DvdtAlpha"
 #define NK_DvdtTC "DvdtTC"
-#define NK_EnableAmbientCorrection "EnblAmbntCrrctn"
 #define NK_FIELD_COLLAPSE_DELAY "FIELDCOLLAPSEDE"
 #define NK_FLOAT_DURATION "FLOAT_DURATION"
 #define NK_FastSetpointRiseHeadroomV "FstStpntRsHdrmV"
@@ -696,7 +694,6 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/AlternatorCOffset.txt", NK_AlternatorCOffset },
   { "/AlternatorHardShutdownV.txt", NK_AlternatorHardShutdownV },
   { "/AlternatorNominalAmps.txt", NK_AlternatorNominalAmps },
-  { "/AmbientTempCorrectionFactor.txt", NK_AmbientTempCorrectionFactor },
   { "/AmpSensorRange.txt", NK_AmpSensorRange },
   { "/AutoAltCurrentZero.txt", NK_AutoAltCurrentZero },
   { "/AutoShuntGainCorrection.txt", NK_AutoShuntGainCorrection },
@@ -719,7 +716,6 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/DutySlowRampRate.txt", NK_DutySlowRampRate },
   { "/DvdtAlpha.txt", NK_DvdtAlpha },
   { "/DvdtTC.txt", NK_DvdtTC },
-  { "/EnableAmbientCorrection.txt", NK_EnableAmbientCorrection },
   { "/FIELD_COLLAPSE_DELAY.txt", NK_FIELD_COLLAPSE_DELAY },
   { "/FLOAT_DURATION.txt", NK_FLOAT_DURATION },
   { "/FastSetpointRiseHeadroomV.txt", NK_FastSetpointRiseHeadroomV },

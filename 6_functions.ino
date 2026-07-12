@@ -982,7 +982,6 @@ void commitCVTuningRecord() {
   rec.hardOcFires = cvTuningScore.hardOcFires;
   rec.voltageKp = VoltageKp_active;  // gain actually in effect (Manual or Auto-λ, normalized)
   rec.voltageKi = VoltageKi_active;
-  rec.voltageKd = 0.0f;  // no D term; field kept for struct layout compatibility
   rec.setpointRiseRate = SetpointRiseRate;
   rec.setpointFallRate = SetpointFallRate;
   rec.awBleedRate = AwBleedRate;
@@ -6084,7 +6083,6 @@ void pidLog_tick(uint32_t nowMs) {
   e.innerKd = (float)PidKd;
   e.voltageKp = (float)VoltageKp_active;  // outer voltage loop — gain actually in effect (Manual or Auto-λ)
   e.voltageKi = (float)VoltageKi_active;
-  e.voltageKd = 0.0f;  // no D term; field kept for struct layout compatibility
 
   e.battV_filt = IBV_filtered;
   e.dBcur_dt = g_dBcur_dt;

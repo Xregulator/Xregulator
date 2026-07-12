@@ -1431,21 +1431,28 @@ void altHealth_tick(uint32_t nowMs) {
 //   declarations so altDebugCsvSend can iterate it.) Avoids fragile CSV3 plumbing.
 // ============================================================
 void altSettingsLoad() {
-  // Runs BEFORE InitSystemSettings loads BATTERY_VOLTAGE, so read the class key straight from NVS.
-  // Three registry knobs are class-dependent 12V-value defaults: first creation scales them into the
-  // boot class (volt-domain ×V/12, duty-domain ×12/V); a live class change rescales them in
-  // applyNominalVoltageChange. Existing keys load verbatim through the generic loop below.
-  int bootV = settingExists(NK_BatteryVoltage) ? settingRead(NK_BatteryVoltage).toInt() : 12;
-  if (bootV != 12 && bootV != 24 && bootV != 48) bootV = 12;
-  if (!settingExists("altVbusTol"))    altVbusTol    *= (float)bootV / 12.0f;
-  if (!settingExists("altDutyTolPct")) altDutyTolPct *= 12.0f / (float)bootV;
-  if (!settingExists("altMinDuty"))    altMinDuty    *= 12.0f / (float)bootV;
+  // Three knobs are class-dependent 12V-value defaults, and this loader runs BEFORE InitSystemSettings
+  // resolves BATTERY_VOLTAGE (NVS else vessel-JSON mirror). Their first creation is DEFERRED to
+  // altSeedClassKnobs() right after it; existing keys still load verbatim here. The knobs have no
+  // consumer until the runtime fold (altEpisodeSyncCfg), so the gap is safe.
   for (size_t i = 0; i < ALT_SETTING_COUNT; i++) {
     char key[16];
     snprintf(key, sizeof(key), "%s", ALT_SETTINGS[i].name);  // NVS key = registry name (15-char cap)
-    if (!settingExists(key)) settingWrite(key, String(*ALT_SETTINGS[i].ptr, 4).c_str());
+    if (!settingExists(key)) {
+      if (strcmp(key, "altVbusTol") == 0 || strcmp(key, "altDutyTolPct") == 0 || strcmp(key, "altMinDuty") == 0) continue;
+      settingWrite(key, String(*ALT_SETTINGS[i].ptr, 4).c_str());
+    }
     else *ALT_SETTINGS[i].ptr = settingRead(key).toFloat();
   }
+}
+
+// Deferred first-creation seeding for the class-dependent registry knobs — call AFTER InitSystemSettings
+// so BATTERY_VOLTAGE is authoritative. Volt-domain ×(V/12), duty-domain ×(12/V), identity at 12V; a live
+// class change rescales them in applyNominalVoltageChange like every other class-scaled setting.
+void altSeedClassKnobs() {
+  if (!settingExists("altVbusTol"))    { altVbusTol    *= (float)BATTERY_VOLTAGE / 12.0f; settingWrite("altVbusTol",    String(altVbusTol, 4).c_str()); }
+  if (!settingExists("altDutyTolPct")) { altDutyTolPct *= 12.0f / (float)BATTERY_VOLTAGE; settingWrite("altDutyTolPct", String(altDutyTolPct, 4).c_str()); }
+  if (!settingExists("altMinDuty"))    { altMinDuty    *= 12.0f / (float)BATTERY_VOLTAGE; settingWrite("altMinDuty",    String(altMinDuty, 4).c_str()); }
 }
 bool altSettingsHandle(AsyncWebServerRequest *request) {
   bool handled = false;
@@ -3889,6 +3896,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
   static bool     segStarted = false;
   static double   sAmpsSin, sAmpsCos, sAmps, sSin, sCos, sAmpsSq;
   static uint32_t nAcc;
+  static float    gMaxSeen;   // peak |gain| seen so far this sweep — gates which points feed worst-coherence
   static float    freqList[TUNING_SWEEP_NPOINTS];
   static bool     tuningEaseActive = false;   // post-sweep setpoint ease-down
   static uint32_t tuningEaseStartMs = 0;
@@ -3911,7 +3919,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
       tuningSweepRpmMin = (float)RPM; tuningSweepRpmMax = (float)RPM;
       tuningSweepBattV = BatteryV;
       tuningSweepDutyRailed = false;
-      tuningSweepWorstCoh = 1.0f;
+      tuningSweepWorstCoh = 1.0f; gMaxSeen = 0.0f;
       queueConsoleMessageF("Tuning sine sweep: %d pts %.1f-%.1f Hz, %d cycles/pt, amp=%.1f A",
                            TUNING_SWEEP_NPOINTS, freqList[0], freqList[TUNING_SWEEP_NPOINTS - 1],
                            tuningSweepCycles, ampA);
@@ -3991,7 +3999,13 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
           if (coh > 1.0f) coh = 1.0f;
           if (coh < 0.0f) coh = 0.0f;
         }
-        if (coh < tuningSweepWorstCoh) tuningSweepWorstCoh = coh;
+        if (gain > gMaxSeen) gMaxSeen = gain;
+        // Only in-band points (within 6 dB of the strongest response) feed worst-coherence.
+        // Past roll-off the current barely moves while the drive keeps swinging, so a low
+        // coherence there is dead signal, not a bad run — and that is exactly where slow
+        // alternators sit, so folding those points in would false-fail otherwise-clean sweeps.
+        if (gMaxSeen > 0.01f && gain >= 0.5f * gMaxSeen && coh < tuningSweepWorstCoh)
+          tuningSweepWorstCoh = coh;
       }
       tuningBode[segIdx].freqHz   = f;
       tuningBode[segIdx].gain     = gain;

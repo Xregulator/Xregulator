@@ -2721,7 +2721,6 @@ bool learningTableUpdated = false;
 int AlternatorNominalAmps = 100;               // Alternator rating for penalty calculation
 float LearningUpStep = 1;                      // Table increase amount (A)
 float LearningDownStep = 2;                    // Table decrease amount (A)
-float AmbientTempCorrectionFactor = -0.5;      // A per °C correction
 unsigned long MinLearningInterval = 30000;     // Min time between updates (ms)
 unsigned long SafeOperationThreshold = 30000;  // Time for upward learning (ms)
 
@@ -2936,7 +2935,7 @@ float tuningSweepRpmMin     = 0.0f;
 float tuningSweepRpmMax     = 0.0f;
 float tuningSweepBattV      = 0.0f;    // bus voltage snapshot during the sweep
 bool  tuningSweepDutyRailed = false;   // field duty hit 0%/100% on any sine peak
-float tuningSweepWorstCoh   = 1.0f;    // min per-point fit coherence seen (0..1, 1 = clean)
+float tuningSweepWorstCoh   = 1.0f;    // min IN-BAND fit coherence (0..1, 1=clean); rolled-off points excluded so slow alternators don't false-fail
 
 // Current closed-loop sine-sweep history (50-record ring, /tuningsweeplog.bin).
 struct TuningSweepRecord {
@@ -2957,7 +2956,7 @@ struct TuningSweepRecord {
   float    baseA;           // operating-point center (A) — the field current the sine swung around
   float    battV;           // bus voltage during the sweep
   float    rpmMin, rpmMax;  // RPM range across the sweep (wide spread = smeared Bode, distrust)
-  float    worstCoherence;  // min per-point fit coherence (0..1; low = noisy/unreliable point)
+  float    worstCoherence;  // min in-band fit coherence (0..1; low = real in-band noise, e.g. RPM wander)
   uint8_t  dutyRailed;      // 1 if field duty hit 0%/100% during the sweep (clipped sine)
   uint8_t  chargeStage;     // getChargeStageDisplayCode() at commit
   uint32_t epoch;           // wall-clock Unix seconds at commit (0 = clock not synced)
@@ -3105,8 +3104,8 @@ struct CVTuningRecord {
   float avgIntegratedOvershootVs;
   float activeTimeSec;
   uint16_t fastOvFires, iExcessFires, loadDumpFires, hardOcFires;
-  // CV PI (voltageKd reserved — always 0.0)
-  float voltageKp, voltageKi, voltageKd;
+  // CV PI (no D term)
+  float voltageKp, voltageKi;
   // Setpoint shaping
   float setpointRiseRate, setpointFallRate;
   // Integrator management
@@ -3386,7 +3385,6 @@ unsigned long LearningMemoryDuration = 2592000000;  // How long to remember even
 
 // Safety Overrides
 int IgnoreLearningDuringPenalty = 1;  // Block learning during penalty
-int EnableAmbientCorrection = 0;      // Apply temperature correction
 
 // Diagnostics & Debugging
 int LogAllLearningEvents = 0;       // Log every learning decision
@@ -3762,7 +3760,6 @@ volatile bool thermalAntiWindupLatch = false;
 
 // ===== CALCULATED VALUES FOR DISPLAY =====
 float learningTargetFromRPM = -1.0;  // Table lookup result before corrections
-float ambientTempCorrection = 0.0;   // Calculated temp correction (A)
 float finalLearningTarget = 0.0;     // After all corrections applied
 float ambientTemp = NAN;             // Current ambient temperature (°F)
 float baroPressure = NAN;            // bmp380
@@ -3911,7 +3908,7 @@ uint32_t thermalLogBurstUntilMs = 0;
 
 #define PID_LOG_SIZE 2400
 #define CV_LOG_SIZE 6000
-#define CV_LOG_HEADER_SIZE 36
+#define CV_LOG_HEADER_SIZE 32
 #define CV_LOG_ENTRY_SIZE 50
 
 volatile bool pidLogPaused = false;
@@ -3963,7 +3960,6 @@ struct PidLogEntry {
   float innerKd;    // PidKd  — inner output-current PID gain (NOT voltage loop Kd)
   float voltageKp;  // VoltageKp — outer voltage loop proportional gain (A/V)
   float voltageKi;  // VoltageKi — outer voltage loop integral gain (A/(V·s))
-  float voltageKd;  // reserved — always 0.0 (no CV D term)
   // ── Filtered signals ─────────────────────────────────────────────
   float battV_filt;  // IBV
   // ── Protection flags & signals ───────────────────────────────────────────
@@ -4110,17 +4106,16 @@ struct CvBinDLState {
 };
 
 // ---------------------------------------------------------------------------
-// BINARY HEADER  (36 bytes)
+// BINARY HEADER  (32 bytes)
 // offset  field           type      notes
 //   0     count           uint32    number of valid entries
 //   4     entrySize       uint32    = 51
 //   8     voltageKp       float     VoltageKp at download time
 //  12     voltageKi       float     VoltageKi at download time
 //  16     voltageInterval uint32    VoltageLoopInterval ms
-//  20     reserved        float     always 0.0
-//  24     sbThresh        float     SlopeBleedThresh (V/s)
-//  28     sbK             float     SlopeBleedK (A/(V/s))
-//  32     sbProxV         float     SlopeBleedProxV (V)
+//  20     sbThresh        float     SlopeBleedThresh (V/s)
+//  24     sbK             float     SlopeBleedK (A/(V/s))
+//  28     sbProxV         float     SlopeBleedProxV (V)
 // ---------------------------------------------------------------------------
 
 static CvLogEntry *cvLog = nullptr;
@@ -5025,6 +5020,7 @@ void setup() {
 
   InitSystemSettings();       // load all settings from NVS (one-time LittleFS import sweep first).  If no keys exist, create them.
   altApplyClassScales();      // alt-health Vbus cell size needs BATTERY_VOLTAGE — initAlternatorHealth ran before settings
+  altSeedClassKnobs();        // deferred first-creation seeding of the class-dependent registry knobs (same reason)
   bhInitSettings();           // Battery Health: DCIR test config + persisted DCIR/capacity blobs
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
   loadTuningLog();            // restore last session's tuning records from LittleFS

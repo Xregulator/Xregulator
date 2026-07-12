@@ -1492,11 +1492,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     CloudFeatures = settingRead(NK_CloudFeatures).toInt();
   }
-  if (!settingExists(NK_EnableAmbientCorrection)) {
-    settingWrite(NK_EnableAmbientCorrection, String(EnableAmbientCorrection).c_str());
-  } else {
-    EnableAmbientCorrection = settingRead(NK_EnableAmbientCorrection).toInt();
-  }
   // A live test must NEVER auto-resume after a reboot — force OFF on boot, ignoring any stored value (write back only if it was stuck on).
   TuningMode = 0;
   if (settingExists(NK_TuningMode) && settingRead(NK_TuningMode).toInt() != 0) settingWrite(NK_TuningMode, "0");
@@ -1519,11 +1514,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_LearningDownStep, String(LearningDownStep, 2).c_str());
   } else {
     LearningDownStep = settingRead(NK_LearningDownStep).toFloat();
-  }
-  if (!settingExists(NK_AmbientTempCorrectionFactor)) {
-    settingWrite(NK_AmbientTempCorrectionFactor, String(AmbientTempCorrectionFactor, 2).c_str());
-  } else {
-    AmbientTempCorrectionFactor = settingRead(NK_AmbientTempCorrectionFactor).toFloat();
   }
   if (!settingExists(NK_xTime)) {
     settingWrite(NK_xTime, String(xTime, 2).c_str());

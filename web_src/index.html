@@ -586,17 +586,19 @@
                       </span>
                     </div>
                     <div class="form-input">
-                      <div class="seg seg-choice">
+                      <div class="seg seg-pill">
                         <label>
                           <input type="radio" name="regulatorMountLoc" value="0" required>
                           <span>Near Battery</span>
-                          <small>Preferred — battery temperature can be approximated with regulator temperature</small>
                         </label>
                         <label>
                           <input type="radio" name="regulatorMountLoc" value="1" required>
                           <span>Somewhere Else</span>
-                          <small>Battery temperature is not approximately the same as regulator temperature</small>
                         </label>
+                      </div>
+                      <div class="seg-pill-caption">
+                        <span class="cap cap-0">Preferred — battery temperature can be approximated with regulator temperature</span>
+                        <span class="cap cap-1">Battery temperature is not approximately the same as regulator temperature</span>
                       </div>
                     </div>
                   </div>
@@ -5690,10 +5692,18 @@
                  field-duty-ceiling toggle: Max Field % below IS the real per-bus cap — set it to 99
                  for full duty. -->
 
-            <!-- Bulk Phase -->
-            <details open style="margin-top: 20px;">
+            <!-- Phase Definitions — one parent dropdown over the four charge-stage sections; each phase is a nested secondary dropdown -->
+            <details style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Phase Definitions
+              </summary>
+              <div style="padding-left: 12px; border-left: 2px solid var(--border); margin-top: 10px;">
+
+            <!-- Bulk Phase -->
+            <details style="margin-top: 16px;">
+              <summary
+                style="cursor: pointer; font-weight: 600; font-size: 14px; padding: 6px 0; border-bottom: 1px solid var(--border); margin-bottom: 8px;">
                 Bulk Phase
               </summary>
 
@@ -5738,9 +5748,9 @@
             </details>
 
             <!-- Absorption Phase -->
-            <details open style="margin-top: 20px;">
+            <details style="margin-top: 16px;">
               <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                style="cursor: pointer; font-weight: 600; font-size: 14px; padding: 6px 0; border-bottom: 1px solid var(--border); margin-bottom: 8px;">
                 Absorption Phase
               </summary>
 
@@ -5830,9 +5840,9 @@
             </details>
 
             <!-- Float Phase -->
-            <details class="req-batt-current" open style="margin-top: 20px;">
+            <details class="req-batt-current" style="margin-top: 16px;">
               <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                style="cursor: pointer; font-weight: 600; font-size: 14px; padding: 6px 0; border-bottom: 1px solid var(--border); margin-bottom: 8px;">
                 Float Phase
               </summary>
 
@@ -5948,9 +5958,9 @@
 
 
             <!-- Charge Start / Rebulk Criteria -->
-            <details open style="margin-top: 20px;">
+            <details style="margin-top: 16px;">
               <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                style="cursor: pointer; font-weight: 600; font-size: 14px; padding: 6px 0; border-bottom: 1px solid var(--border); margin-bottom: 8px;">
                 Charge Start / Rebulk Criteria
               </summary>
 
@@ -6017,6 +6027,10 @@
               </div>
 
             </details>
+
+              </div>
+            </details>
+            <!-- /Phase Definitions -->
 
             <!-- Safety -->
             <details open style="margin-top: 20px;">
@@ -6274,7 +6288,33 @@
                   <span>Shunt Resistance uOhms (micro)(<span id="ShuntResistanceMicroOhm_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
                     ℹ️
-                    <span class="tooltip-box">Resistance of your current shunt in micro-ohms (µΩ). The current sensor uses this value to convert measured voltage drop to amps. Victron SmartShunt / BMV shunts = 100µΩ. Check your shunt's datasheet if unsure — an incorrect value will scale all current and SoC readings proportionally.</span></span>
+                    <span class="tooltip-box" style="max-width:min(360px, calc(100vw - 32px)); max-height:60vh; overflow:auto;">Resistance of your current shunt in micro-ohms (µΩ). The current sensor converts the shunt's measured voltage drop to amps using this value — a wrong value scales all current and SoC readings proportionally. Shunts are rated by a full-scale millivolt drop at a rated current, and the resistance follows: µΩ = mV ÷ amps × 1000. Victron SmartShunt / BMV are the 50&nbsp;mV family (500&nbsp;A = 100&nbsp;µΩ, 1000&nbsp;A = 50&nbsp;µΩ, 2000&nbsp;A = 25&nbsp;µΩ). Check your shunt's datasheet for the exact rating.
+                      <table style="width:100%; margin-top:6px; border-collapse:collapse; font-size:11px; text-align:right;">
+                        <tr style="color:#bcd;"><th style="text-align:left;">Rated</th><th>µΩ</th><th>mΩ</th></tr>
+                        <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">50 mV — Victron / marine</td></tr>
+                        <tr><td style="text-align:left;">100 A</td><td>500</td><td>0.5</td></tr>
+                        <tr><td style="text-align:left;">200 A</td><td>250</td><td>0.25</td></tr>
+                        <tr><td style="text-align:left;">300 A</td><td>167</td><td>0.167</td></tr>
+                        <tr><td style="text-align:left;">400 A</td><td>125</td><td>0.125</td></tr>
+                        <tr style="font-weight:700; color:#fff;"><td style="text-align:left;">500 A — BMV-712</td><td>100</td><td>0.1</td></tr>
+                        <tr><td style="text-align:left;">1000 A</td><td>50</td><td>0.05</td></tr>
+                        <tr><td style="text-align:left;">2000 A</td><td>25</td><td>0.025</td></tr>
+                        <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">75 mV — industrial / analog meter</td></tr>
+                        <tr><td style="text-align:left;">50 A</td><td>1500</td><td>1.5</td></tr>
+                        <tr><td style="text-align:left;">100 A</td><td>750</td><td>0.75</td></tr>
+                        <tr><td style="text-align:left;">150 A</td><td>500</td><td>0.5</td></tr>
+                        <tr><td style="text-align:left;">200 A</td><td>375</td><td>0.375</td></tr>
+                        <tr><td style="text-align:left;">300 A</td><td>250</td><td>0.25</td></tr>
+                        <tr><td style="text-align:left;">400 A</td><td>188</td><td>0.188</td></tr>
+                        <tr><td style="text-align:left;">500 A</td><td>150</td><td>0.15</td></tr>
+                        <tr><td style="text-align:left;">600 A</td><td>125</td><td>0.125</td></tr>
+                        <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">100 mV</td></tr>
+                        <tr><td style="text-align:left;">100 A</td><td>1000</td><td>1.0</td></tr>
+                        <tr><td style="text-align:left;">200 A</td><td>500</td><td>0.5</td></tr>
+                        <tr><td style="text-align:left;">300 A</td><td>333</td><td>0.333</td></tr>
+                        <tr><td style="text-align:left;">500 A</td><td>200</td><td>0.2</td></tr>
+                        <tr><td style="text-align:left;">1000 A</td><td>100</td><td>0.1</td></tr>
+                      </table></span></span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -12140,6 +12180,15 @@
               recording — the dot on the button shows the state (pulsing green = recording, amber = paused).
               Start Fresh Log clears the buffers and begins a new log.</span>
           </span>
+        </div>
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Filename Tag <small style="color: #888; font-size: 11px;">(optional)</small>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Optional text added to the end of every downloaded log filename, after the date/time — e.g. "dock-test" gives pidlog_20260710_1432_dock-test.csv. Leave blank for none. Spaces and unusual characters become dashes.</span></span>
+          </div>
+          <div class="form-input">
+            <input type="text" id="logNameSuffix" maxlength="40" placeholder="e.g. dock-test" style="width: 100%;" />
+          </div>
         </div>
       </div>
       <!-- X-axis time window — buttons set plotTimeWindow (seconds) for all four live plots.
