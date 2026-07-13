@@ -943,7 +943,7 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…7=Thresholds, 8=CV plant fit, 9=finished
+  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=Thresholds, 7=CV plant fit, 8=finished
   CSV3_commissionDoneMask,      // per-stage completion bitmask (bit i = stage i done)
   CSV3_cvHelpersEnabled,        // master switch: asymmetric KiDown unwind + slope-aware integrator bleed (1=on)
   CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
@@ -978,6 +978,8 @@ enum Csv3Index {
   CSV3_cvRecovEnable,           // post-protection CV recovery window master switch (0/1)
   CSV3_cvRecovSec,              // recovery time target (s); ×10
   CSV3_cvRecovEmaxV,            // recovery error cap (V per 12V block); ×1000
+  CSV3_testSlewMode,           // manual CC square-wave test slew mode (0=off, 1=default rates, 2=custom)
+  CSV3_cvTestSlewMode,         // manual CV square-wave test slew mode (0=off, 1=default rates, 2=custom)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -2074,7 +2076,7 @@ void setupServer() {
         return written;
       });
 
-    response->addHeader("Content-Disposition", "attachment; filename=\"pidlog.csv\"");
+    response->addHeader("Content-Disposition", "attachment");
     response->addHeader("Cache-Control", "no-cache");
     request->send(response);
   });
@@ -3296,7 +3298,7 @@ void setupServer() {
       commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
       commissionSetPhase(0);        // reset furthest-phase (the wizard bumps it forward per phase)
       commissionMarkStage(0);       // Prep complete: snapshot taken, preconditions checked
-      // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (step 4) starts the sweeps clean if it is run.
+      // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (step 3) starts the sweeps clean if it is run.
       // (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable floors,
       // which are left intact so a partial re-run that skips Min% keeps its learned floors.)
       kneeAnchorN = 0;
@@ -3304,7 +3306,7 @@ void setupServer() {
       settingsDirty = true;         // push the CSV3 state echo promptly
       queueConsoleMessage("Commissioning: started — settings snapshotted");
     }
-    // Mark one wizard stage complete (i = 0=Prep…8=CV plant fit). Sets its done bit and clears
+    // Mark one wizard stage complete (i = 0=Prep…7=CV plant fit). Sets its done bit and clears
     // any downstream stage it feeds (coupling: see commissionDependentsMask). Drives the ✓ marks.
     if (request->hasParam("commissionStageDone")) {
       foundParameter = true;
@@ -4908,11 +4910,11 @@ void setupServer() {
 
       // An RPM breakpoint moved → every learned Min% floor is now keyed to the wrong RPM
       // (the per-RPM onset-knee fit spans all bins). Wipe the knee tracker entirely and flag the
-      // Min% floor commissioning step (index 3) for re-run, so the floors are re-measured at the
+      // Min% floor commissioning step (index 2) for re-run, so the floors are re-measured at the
       // new breakpoints instead of silently re-applied at shifted RPMs.
       if (rpmPointChanged) {
         kneeLearnResetDefaults();   // zero floors/knees, unfreeze, drop rpmMinDutyTable to 0
-        commissionClearStage(3);    // Min% floor stage now stale (demotes a commissioned device to in-progress)
+        commissionClearStage(2);    // Min% floor stage now stale (demotes a commissioned device to in-progress)
         queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor step");
       }
 
@@ -5169,6 +5171,22 @@ void setupServer() {
       dutySlewEnable = (uint8_t)(request->getParam("dutySlewEnable")->value().toInt() ? 1 : 0);
       settingWrite(NK_dutySlewEnable, String((int)dutySlewEnable).c_str());
       queueConsoleMessageF("Field duty slew limiter: %s", dutySlewEnable ? "ON" : "OFF (instant)");
+    }
+    if (request->hasParam("testSlewMode")) {  // manual CC test slew: 0=off/instant, 1=default rates, 2=custom
+      foundParameter = true;
+      int m = request->getParam("testSlewMode")->value().toInt();
+      testSlewMode = (uint8_t)(m < 0 ? 0 : (m > 2 ? 2 : m));
+      settingWrite(NK_testSlewMode, String((int)testSlewMode).c_str());
+      queueConsoleMessageF("Manual test slew mode: %s",
+                           testSlewMode == 0 ? "Off (instant)" : testSlewMode == 1 ? "Default rates" : "Custom rates");
+    }
+    if (request->hasParam("cvTestSlewMode")) {  // manual CV test slew: 0=off/instant target, 1=default rate, 2=custom
+      foundParameter = true;
+      int m = request->getParam("cvTestSlewMode")->value().toInt();
+      cvTestSlewMode = (uint8_t)(m < 0 ? 0 : (m > 2 ? 2 : m));
+      settingWrite(NK_cvTestSlewMode, String((int)cvTestSlewMode).c_str());
+      queueConsoleMessageF("Manual CV test slew mode: %s",
+                           cvTestSlewMode == 0 ? "Off (instant)" : cvTestSlewMode == 1 ? "Default rate" : "Custom rate");
     }
     if (request->hasParam("vTgtRampUp")) {  // CV voltage-target ramp UP rate (V/s); 0 = instant
       foundParameter = true;
@@ -6685,7 +6703,7 @@ void setupServer() {
     }
     // "aborted" is the protection-abort latch (fieldCurveAbortRequested). It is reported INDEPENDENTLY
     // of "active" because a protection cut latches the abort but leaves fieldCurveActive set until
-    // fieldCurve_tick next runs — and that tick is gated out during the fault/30s lockout, so "active"
+    // fieldCurve_tick next runs — and that tick is gated out during the fault lockout, so "active"
     // can stay 1 indefinitely. The poller checks "aborted" so it never hangs waiting for !active.
     pos += snprintf(buf + pos, 2048 - pos,
                     "],\"active\":%d,\"ready\":%d,\"ok\":%d,\"kneeDuty\":%.1f,\"kneeAmps\":%.2f,"
@@ -8273,7 +8291,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8584,7 +8602,9 @@ void SendWifiData() {
                                SafeInt(BatteryShuntPresent),
                                (int)cvRecovEnable,
                                SafeInt(cvRecovSec, 10),
-                               SafeInt(cvRecovEmaxV, 1000));
+                               SafeInt(cvRecovEmaxV, 1000),
+                               (int)testSlewMode,
+                               (int)cvTestSlewMode);
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

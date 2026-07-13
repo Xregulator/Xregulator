@@ -735,6 +735,8 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "cvRecovSec", NK_cvRecovSec, 1 },
   { "cvRecovEmaxV", NK_cvRecovEmaxV, 1 },
   { "dutySlewEnable", NK_dutySlewEnable, 1 },
+  { "testSlewMode", NK_testSlewMode, 1 },
+  { "cvTestSlewMode", NK_cvTestSlewMode, 1 },
   { "coldChargeLockoutEnable", NK_coldChargeLockoutEnable, 1 },
   { "MinChargeTempF", NK_MinChargeTempF, 1 },
   { "battTempDerateEnable", NK_battTempDerateEn, 1 },
@@ -1147,7 +1149,7 @@ static int applyImportTables(const char *body) {
   if (havePts) {
     bool moved = false;
     for (int i = 0; i < RPM_TABLE_SIZE; i++) if (pts[i] != rpmTableRPMPoints[i]) moved = true;
-    if (moved) { kneeLearnResetDefaults(); commissionClearStage(3); }
+    if (moved) { kneeLearnResetDefaults(); commissionClearStage(2); }
   }
   int applied = 0;
   nvs_handle_t h;
@@ -1596,6 +1598,13 @@ void cvpfProcess() {
   // advisory gates (never block — the wizard shows them and the user still chooses Apply)
   if (fabsf(dIalt) / fmaxf(1e-3f, cvpfStepA) < 0.6f) cvpfWarn |= 0x01;   // delivery came up short
   if (cvpfSNR < 12.0f) cvpfWarn |= 0x02;                                 // weak signal vs ripple
+  // Settle guard: the CVPF_ENTRY_RATE_A ramp must finish before the fit window opens. If the current is still
+  // climbing into the window (throttled entry, or the alternator can't reach the step at this RPM), the √t fit
+  // sees ramp not step and K reads low. Flag if the opening 1.5 s of the window sits >3% of the step below the
+  // settled read. Warn only.
+  float iEarly, iESl, iER;
+  cvpfWinStats(tS + CVPF_FIT_T0_MS, tS + CVPF_FIT_T0_MS + 1500, 1, iEarly, iESl, iER);
+  if (isfinite(iEarly) && (iaRead - iEarly) > 0.03f * fabsf(dIalt)) cvpfWarn |= 0x40;
   if (!noShunt) {   // gap-drift: alt-minus-battery current MOVING across the step ⇒ a load switched mid-test
     float iaM, iaSl, iaR, ibM, ibSl, ibR;
     cvpfWinStats(tS + CVPF_SKIP_MS, tS + CVPF_FIT_T1_MS, 1, iaM, iaSl, iaR);

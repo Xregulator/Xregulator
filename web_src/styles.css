@@ -2394,6 +2394,7 @@ input:focus {
 }
 .form-input:has(.seg-pill input[value="0"]:checked) .cap-0 { display: block; }
 .form-input:has(.seg-pill input[value="1"]:checked) .cap-1 { display: block; }
+.form-input:has(.seg-pill input[value="2"]:checked) .cap-2 { display: block; }
 
 .seg-field { display: inline-flex; flex-direction: column; gap: 5px; }
 .seg-label {

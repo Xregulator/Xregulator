@@ -221,7 +221,7 @@ void applyCcOutputLimits() {
 // volt-domain protection/helper margins and V/s rates (OV margins, disagreement threshold, iExcess
 // arm margin, fast-rise headroom, slope-bleed thresh/prox, target ramps, rest-settle gate, CV wave
 // amplitude, alt-health Vbus band), re-derives
-// the hard-shutdown trip (newBulk + 0.3×class) and refreshes the INA228 hardware OV limit. Writing the
+// the hard-shutdown trip (newBulk + 0.5×class) and refreshes the INA228 hardware OV limit. Writing the
 // class and the rescaled profile to NVS in the SAME call (synchronously) keeps them atomic: if
 // vessel_info.json (LittleFS, formatOnFail) is ever lost, NVS still holds a consistent
 // class+profile pair, so the overvoltage trips can't strand at the wrong voltage. It always re-derives
@@ -245,8 +245,9 @@ void applyNominalVoltageChange(int oldV, int newV) {
     VoltageAlarmHigh      *= ratio;
     VoltageAlarmLow       *= ratio;
     // Headroom scales with class so the OV ladder keeps its order (G2 clamp at target+OvMeasMarginV
-    // < G1 predictive at target+OvPredMarginV < hard shutdown) — all per-cell-equivalent.
-    AlternatorHardShutdownV = BulkVoltage + 0.3f * ((float)newV / 12.0f);
+    // < G1 predictive at target+OvPredMarginV < INA228 averaged backstop at bulk+0.3 < software
+    // hard shutdown at bulk+0.5) — all per-cell-equivalent.
+    AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)newV / 12.0f);
     OvMeasMarginV             *= ratio;
     OvPredMarginV             *= ratio;
     VoltageDisagreeThreshold  *= ratio;
@@ -462,6 +463,20 @@ void enter_sys_off() {
   currentPID.ResetIntegratorTo((double)lastAppliedDuty);
 }
 
+// Adaptive fast-OV lockout ladder. An isolated transient (RPM blip crest) re-arms fast so the
+// G2 clamp + recovery window own the retry; a persistent cause escalates so cut/restart churn
+// stays bounded. 3 fires per tier: 0.5s, 1s, 2s, 4s, 8s, then 10s cap. 60s with no fast-OV fire
+// resets to the first tier. RAM-only by design — a reboot restarts the ladder.
+uint32_t nextFastOvLockoutMs(uint32_t nowMs) {
+  static uint32_t lastFireMs = 0;
+  static uint8_t fireCount = 0;
+  if (lastFireMs != 0 && (uint32_t)(nowMs - lastFireMs) > 60000u) fireCount = 0;
+  lastFireMs = nowMs;
+  uint32_t ms = 500u << (fireCount / 3u);
+  if (fireCount < 15u) fireCount++;  // saturate so the shift can't run away
+  return (ms > 10000u) ? 10000u : ms;
+}
+
 /**
  * applyImmediateCut - Shared state reset for all immediate GPIO4 cut paths.
  * Every cut path leaves identical state: GPIO4 LOW, PWM 0, PID manual,
@@ -472,9 +487,14 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
   g_fieldEventReason = (uint8_t)reason;  // authoritative cut cause for the banner OFF-reason telemetry
   digitalWrite(4, LOW);
   gpio4IsLow = true;
-  // Fast OV: arm the cooldown lockout so the field can't re-engage for FIELD_COLLAPSE_DELAY (30s).
-  // applyImmediateCut returns before runShutdownPath's line-482 lockout-arm ever runs, so set it here.
-  if (reason == REASON_FAST_OVERVOLTAGE && fieldCollapseTime == 0) { fieldCollapseTime = tick.nowMs; activeCollapseDelay = FIELD_COLLAPSE_DELAY; }
+  // Fast OV: arm the adaptive cooldown lockout (nextFastOvLockoutMs ladder, not FIELD_COLLAPSE_DELAY).
+  // applyImmediateCut returns before runShutdownPath's lockout-arm ever runs, so set it here.
+  if (reason == REASON_FAST_OVERVOLTAGE && fieldCollapseTime == 0) {
+    fieldCollapseTime = tick.nowMs;
+    activeCollapseDelay = nextFastOvLockoutMs(tick.nowMs);
+    queueConsoleMessageF("Fast-OV lockout %.1fs (adaptive: 0.5s-10s ladder, resets after 60s clean)",
+                         activeCollapseDelay / 1000.0f);
+  }
   if (alreadyCut) return;  // hardware already cut — skip logging, don't spam
   apply_pwm_float(0.0f);
   lastAppliedDuty = 0.0f;
@@ -737,7 +757,9 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
 
   if ((mode == MODE_CRITICAL_RAMP || mode == MODE_WARNING_RAMP_AND_LOCKOUT) && fieldCollapseTime == 0) {
     fieldCollapseTime = tick.nowMs;
-    activeCollapseDelay = (reason == REASON_RPM_TOO_LOW) ? RPM_RECOVERY_DELAY : FIELD_COLLAPSE_DELAY;
+    activeCollapseDelay = (reason == REASON_RPM_TOO_LOW)      ? RPM_RECOVERY_DELAY
+                        : (reason == REASON_FAST_OVERVOLTAGE) ? nextFastOvLockoutMs(tick.nowMs)
+                                                              : FIELD_COLLAPSE_DELAY;
     // Spam guard: with the engine off the temp feed ages past the 20s staleness threshold, so this
     // cut/restart cycle repeats every cooldown (~2s). Announce a new reason immediately, then throttle
     // to one heartbeat per minute so a genuinely new fault never gets buried under the idle loop.
@@ -1548,8 +1570,10 @@ void AdjustFieldLearnMode() {
   // end of the bumpless block, after every supervisor has voted, so this read reflects the
   // unified flag.
   static float preEventCvI = 0.0f;
+  static float preEventIcv = 0.0f;  // commanded current at the same snapshot — recovery goal is max(cv_I, Icv)
   if (!g_fastOvClampActive) {
     preEventCvI = cv_I;  // refresh while no protection is clamping
+    preEventIcv = Icv;
   }
   // Post-protection recovery window (timed cv_I re-injection + PI error cap). Normalizes
   // recovery time across target voltages: at a low target the post-cut error is tiny so the
@@ -1562,14 +1586,19 @@ void AdjustFieldLearnMode() {
   // Icv is additionally ceilinged at recovCvGoal for the life of the window: the pre-trip current
   // is the current that held the target, so commanding more than it on the way back can only
   // overshoot — that ceiling is what stops a recovery from re-arming the protection that fired.
+  // Goal is max(cv_I, Icv) at the snapshot: in a near-target CV trip Icv sits just BELOW cv_I
+  // (P-term negative with V above target) so max() = cv_I, unchanged; railed-in-bulk (aw ceiling,
+  // integrator stale) Icv IS the legitimate command, and a cv_I goal starves charging at the stale
+  // integrator for up to 4×cvRecovSec (observed 8.6s stuck at 25A vs a 35A ceiling, 2026-07-12).
   // Premise: the plant did not change. recovStarveTicks detects when it did (goal handed back in
   // full, bus still low and not rising) and releases the window instead of starving the field.
   static bool recovActive = false;
-  static float recovCvGoal = 0.0f;  // preEventCvI snapshot at release — the re-injection target AND the Icv ceiling
+  static float recovCvGoal = 0.0f;  // max(preEventCvI, preEventIcv) snapshot at release — the re-injection target AND the Icv ceiling
   static float recovCvSeed = 0.0f;  // cv_I as seeded at release (ReseedFrac fraction)
   static uint32_t recovStartMs = 0;
   static bool recovRampHold = false;    // latched by the first slope-bleed tick: the brake outranks the ramp
   static uint8_t recovStarveTicks = 0;  // consecutive ticks the goal ceiling is pinned and the bus is low + not rising
+  static float recovSlopeEma = 0.0f;    // ~1s EMA of cvDSlope for the starve exit — raw per-tick slope is ripple-fakeable
   // Post-protection fast-rise window — opened by the falling-edge handler below.
   // 0 = window inactive. Gated again at slew site by FastSetpointRiseWindowMs cap
   // and FastSetpointRiseHeadroomV vs ChargingVoltageTarget.
@@ -1834,6 +1863,21 @@ void AdjustFieldLearnMode() {
   // (TuningMode→0) the bypass drops and duty slew re-engages, easing the field back down.
   // NB: once settled this drops the coupling-cap transient protection during sine (same as open-loop plant-ID).
   if (TuningMode != 0 && tuningWaveform != 0 && g_tuningEntrySettled) {
+    govMode = GOV_BYPASS_SLEW;
+  }
+
+  // CV plant fit: the measured current STEP rides a fixed CVPF_ENTRY_RATE_A setpoint ramp, so the duty must
+  // track it unthrottled — a slow (or user-lowered) DutyRampRate would otherwise stretch the step past the
+  // fit window and bias K low. The setpoint slew (rise AND fall) keeps the duty trajectory smooth, so there
+  // is no coupling-cap slam. Reverts next tick when cvPlantFitActive clears (finish/abort/deadman/cancel).
+  if (cvPlantFitActive) {
+    govMode = GOV_BYPASS_SLEW;
+  }
+
+  // Manual CC square-wave test in Off mode: bypass duty slew (once the entry ramp has settled) so the edges
+  // are truly instant, matching the abrupt setpoint. Default/Custom keep the normal DutyRampRate protection.
+  if (TuningMode != 0 && tuningWaveform == 0 && !g_autoTestActive && !tuningSquareAbrupt &&
+      testSlewMode == 0 && g_tuningEntrySettled) {
     govMode = GOV_BYPASS_SLEW;
   }
 
@@ -2215,7 +2259,7 @@ void AdjustFieldLearnMode() {
         setpointCommand = cvpfCmdA;
         float cvpfFall = cvpfReleasing ? SetpointFallRate : TEST_ENTRY_RATE_A;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                       TEST_ENTRY_RATE_A, cvpfFall, actualDtSec);
+                                       CVPF_ENTRY_RATE_A, cvpfFall, actualDtSec);
         voltageControlActive = false;
         ctrlLimiter = 0;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
@@ -2299,16 +2343,14 @@ void AdjustFieldLearnMode() {
           uTargetAmps = tuningWaveHigh ? (tuningWaveFloor + waveAmplitude) : tuningWaveFloor;
           setpointCommand = (float)uTargetAmps;
 
-          // CV plant fit sets tuningSquareAbrupt so the edge is a true step (slew smears the step instant
-          // the edge-gain fit keys off). Otherwise
-          // the manual current-tuning square test keeps its slew + scoring window.
-          // Abrupt-edge cases — the slew limiter is turned off (Current tab Test Limiters) OR CV-plant-fit
-          // needs true steps. Either way the FROM-REST entry STILL eases in at the FIXED conservative rate
-          // (TEST_ENTRY_RATE_A, not the user's SetpointRiseRate) so start-up never slams the field (OV risk);
-          // only after we've arrived (tuningEntryRamped) do the edges go abrupt. This keeps the limiter-off
-          // path symmetric with the sine branch — no toggle can produce a from-rest slam. g_autoTestActive
-          // keeps commissioning Verify/CV-fit from taking this path via the limiter-off term.
-          if ((!setpointSlewEnable && !g_autoTestActive) || tuningSquareAbrupt) {
+          // tuningSquareAbrupt (commissioning CV-fit) forces a true step. For the MANUAL square test the
+          // Current-tab Test Limiters slew mode decides: 0 Off = abrupt edges, 1 Default = factory setpoint
+          // rate, 2 Custom = the user's SetpointRiseRate/FallRate. Either abrupt path STILL eases in from rest
+          // at the fixed conservative TEST_ENTRY_RATE_A so start-up never slams the field (OV risk); only after
+          // arrival (tuningEntryRamped) do the edges go abrupt — symmetric with the sine branch, and
+          // g_autoTestActive keeps commissioning off this path.
+          bool abruptEdge = tuningSquareAbrupt || (!g_autoTestActive && testSlewMode == 0);
+          if (abruptEdge) {
             if (!tuningEntryRamped) {
               setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                              TEST_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
@@ -2317,9 +2359,10 @@ void AdjustFieldLearnMode() {
               setpointLimited = setpointCommand;
             }
           } else {
-            // Limiter on, not a fit → manual study keeps its user-set edge slew (the sandbox).
-            setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                           SetpointRiseRate, SetpointFallRate, actualDtSec);
+            // Slew on. Manual Default uses the factory rate; Custom (and any auto fallback) uses the user rate.
+            float rr = (!g_autoTestActive && testSlewMode == 1) ? SETPOINT_RISE_DEFAULT : SetpointRiseRate;
+            float fr = (!g_autoTestActive && testSlewMode == 1) ? SETPOINT_FALL_DEFAULT : SetpointFallRate;
+            setpointLimited = slew_limit_f(setpointLimited, setpointCommand, rr, fr, actualDtSec);
           }
 
           // Open scoring window once slew has settled (rate < 1 A/s) — fair regardless of SetpointRiseRate.
@@ -3016,14 +3059,25 @@ void AdjustFieldLearnMode() {
         //   in CVTuningMode when enabled, so the square-wave test can be studied with the limiter on/off.
         //   Always snap (no ramp) when not doing voltage control, or on the first CV tick (bumpless seed —
         //   start the target at the right value rather than ramping it up from a stale one). 0 = instant.
-        // A waveform-exit wind-down overrides the vTgtRampEnable=0 instant path so the elevated
-        // target always glides back to base — but idle / CV-entry still snap (and abort the glide).
+        // A waveform-exit wind-down overrides the target-slew-off instant path so the elevated target always
+        // glides back to base — but idle / CV-entry still snap (and abort the glide). CV manual test
+        // (CVTuningMode, not auto): the Voltage-tab Test-Limiters slew mode overrides vTgtRampEnable —
+        // 0 Off = instant target, 1 Default = factory ramp, 2 Custom = user vTgtRampUp/Dn. vTgtRampEnable
+        // still governs normal op. Off keeps the base duty slew engaged — conservative default, not a
+        // requirement: the field-slew safety is the ramp-to-zero at test EXIT (cvWaveExitWindDown), not the
+        // base rate, so bypassing duty here (like the CC Off path) is a valid future change if a need arises.
+        bool cvManualTest = (CVTuningMode != 0 && !g_autoTestActive);
+        bool tgtSlewOff   = cvManualTest ? (cvTestSlewMode == 0)
+                                         : (vTgtRampEnable == 0 && !g_autoTestActive);
+        float vtDflt   = VTGT_RAMP_DEFAULT * ((float)BATTERY_VOLTAGE / 12.0f);
+        float cvRampUp = (cvManualTest && cvTestSlewMode == 1) ? vtDflt : vTgtRampUp;
+        float cvRampDn = (cvManualTest && cvTestSlewMode == 1) ? vtDflt : vTgtRampDn;
         bool forceSnap = (!voltageControlActive || enteringCV) ||
-                         (vTgtRampEnable == 0 && !g_autoTestActive && !cvWaveExitWindDown);
+                         (tgtSlewOff && !cvWaveExitWindDown);
         if (forceSnap) {
           ChargingVoltageTarget = ChargingVoltageTargetReq;            // snap (disabled / idle / CV entry)
         } else if (ChargingVoltageTargetReq > ChargingVoltageTarget) {
-          float step = (vTgtRampUp > 0.0f) ? (vTgtRampUp * actualDtSec) : 1.0e9f;
+          float step = (cvRampUp > 0.0f) ? (cvRampUp * actualDtSec) : 1.0e9f;
           ChargingVoltageTarget = fminf(ChargingVoltageTargetReq, ChargingVoltageTarget + step);
         } else if (ChargingVoltageTargetReq < ChargingVoltageTarget) {
           // Snap-to-proximity: collapse the inert dead band in one tick, but never below the
@@ -3035,7 +3089,7 @@ void AdjustFieldLearnMode() {
           if (ChargingVoltageTarget > fastFloor) {
             ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, fastFloor);
           }
-          float step = (vTgtRampDn > 0.0f) ? (vTgtRampDn * actualDtSec) : 1.0e9f;
+          float step = (cvRampDn > 0.0f) ? (cvRampDn * actualDtSec) : 1.0e9f;
           ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, ChargingVoltageTarget - step);
         }
         if (cvWaveExitWindDown &&
@@ -3103,13 +3157,24 @@ void AdjustFieldLearnMode() {
             cv_I_track = cv_I;
             awSeedProtectStartMs = currentMillis;     // engage seed-protection window
             postProtectRiseStartMs = currentMillis;   // open fast-rise window (closed by either time cap or voltage gate at slew site)
+            // Field-side floor reseed: the clamp ran with the tach floor dropped (governor site),
+            // so flux decayed toward MinDuty. Onset duty makes ~0 A by definition, so restoring it
+            // in one step cannot re-lift the bus — and re-delivery isn't gated on a MinDuty->floor
+            // duty slew.
+            float floorSeed = fmaxf(tick.rpmMinDuty, MinDuty);
+            if (lastAppliedDuty < floorSeed) {
+              currentPID.ResetIntegratorTo((double)floorSeed);
+              pidOutput = (double)floorSeed;
+              lastAppliedDuty = floorSeed;
+            }
             if (cvRecovEnable) {
               recovActive = true;
-              recovCvGoal = clamp_f(preEventCvI, 0.0f, icvHi_seed);  // snapshot NOW — preEventCvI refreshes to the seed next tick
+              recovCvGoal = clamp_f(fmaxf(preEventCvI, preEventIcv), 0.0f, icvHi_seed);  // snapshot NOW — preEvent* refresh to post-seed values next tick
               recovCvSeed = cv_I;
               recovStartMs = currentMillis;
               recovRampHold = false;
               recovStarveTicks = 0;
+              recovSlopeEma = 0.0f;
             }
           }
           // Unified-flag rising-edge counter — counts every distinct activation of
@@ -3122,6 +3187,7 @@ void AdjustFieldLearnMode() {
           g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
           g_fastOvCapReason = capReasonTick;      // export reason atomically with the cap — CV log reads a coherent pair
           g_fastOvClampActive = fastOvClampActive;  // commit unified flag for next tick
+          if (fastOvClampActive) g_lastProtClampMs = currentMillis;  // stamps the RPM-dropout grace window (buildTickSnapshot)
           g_cvRecovActive = recovActive;            // export recovery-window state for cvLog flags b7
           // Latch which protection bound the cap this tick into the Plots-tab marker
           // bitmask (consumed + cleared by the CSV1 sender). capReasonTick is a faithful
@@ -3212,8 +3278,16 @@ void AdjustFieldLearnMode() {
               // Premise-void exit: cv_I has been handed the whole pre-trip current, yet the bus is
               // still below target and not rising — so that current no longer holds the target (load
               // or plant changed) and the ceiling would starve the field for the 4× backstop.
-              // cvDSlope is last tick's value here; one tick of lag is immaterial over 5 ticks.
-              bool starved = (cv_I >= recovCvGoal - 0.05f) && (eRaw > 0.0f) && (cvDSlope <= 0.0f);
+              // Slope term is a ~1s EMA of cvDSlope (≥ one full period of the slowest 1-2Hz idle
+              // resonance): raw per-tick slope produced 5 consecutive ripple-faked ≤0 readings and
+              // released the window 2.6s early on a rising bus (midrangeblip t=7.52, 2026-07-12).
+              // Seeded 0 at window open — a genuinely flat/falling bus (true premise-void) still
+              // exits in ~0.5s once cv_I pins; a recovering bus drives the EMA positive first.
+              {
+                float aSt = (float)g_voltLoopActualIntervalMs / (1000.0f + (float)g_voltLoopActualIntervalMs);
+                recovSlopeEma += aSt * (cvDSlope - recovSlopeEma);
+              }
+              bool starved = (cv_I >= recovCvGoal - 0.05f) && (eRaw > 0.0f) && (recovSlopeEma <= 0.0f);
               recovStarveTicks = starved ? (uint8_t)(recovStarveTicks + 1) : 0;
               if ((recovElapsed >= recovTMs && eRaw <= 0.0f) || recovElapsed >= 4u * recovTMs
                   || recovStarveTicks >= 5) {
@@ -3519,8 +3593,13 @@ void AdjustFieldLearnMode() {
   pidLog_dutyRequest = dutyRequest;
 
   // ========== APPLY THROUGH GOVERNOR ==========
+  // An active protection clamp drops the tach floor: with duty pinned at the floor, rotor flux
+  // decays to the floor asymptote instead of ~0, and an RPM surge on that residual flux carried
+  // the bus +350 mV AFTER the command cut (13.4 V event, 2026-07-12). Duty falls to MinDuty
+  // (PID outMin) for the life of the clamp; the release reseed in the bumpless block restores
+  // the measured floor in one step.
   float dutyNewFloat = governor_apply(lastAppliedDuty, dutyRequest, govMode,
-                                      sysIDRunning ? 0.0f : tick.rpmMinDuty,
+                                      (sysIDRunning || fastOvClampActive) ? 0.0f : tick.rpmMinDuty,
                                       true, actualDtSec);
   pidLog_dutyApplied = dutyNewFloat;
 
@@ -3820,6 +3899,25 @@ void updateChargingStage() {
   const float v = getFiltV();
   const int soc = SOC_percent / 100;  // SOC_percent is %×100; the rebulk gates compare in plain percent
 
+  // While a commissioning run is live (IN_PROGRESS and the wizard dialog heartbeat is still fresh) the
+  // field is owned by the wizard — resting between steps (COMMISSION_IDLE) or driven by the running
+  // test — so the pack is never actually being topped off. The IDLE stage would clear chargingEnabled
+  // (buildTickSnapshot), dropping sysMode out of AUTO and gating off every field-driving step, which
+  // freezes the wizard (and Restart can't recover it, since Restart doesn't touch the charge stage).
+  // Staying out of IDLE also keeps voltageControlActive true so G1–G4 stay armed. A stale/closed dialog
+  // clears within COMMISSION_HEARTBEAT_TIMEOUT_MS and normal IDLE resumes. Mirrors getChargeStageDisplayCode().
+  const bool commissioningOwnsBattery = (commissionState == 1) && (lastCommissionHeartbeatMs != 0) &&
+      ((uint32_t)(now - lastCommissionHeartbeatMs) < COMMISSION_HEARTBEAT_TIMEOUT_MS);
+  // Pack already resting in IDLE when the wizard went live: lift it back to a live charging stage now so
+  // the first step has AUTO available immediately, instead of waiting on a slow voltage-sag rebulk.
+  if (commissioningOwnsBattery && inIdleStage) {
+    inIdleStage = false;
+    inBulkStage = true;
+    inAbsorptionStage = false;
+    bulkVoltageHoldTimer = 0;
+    rebulkTimer = 0;
+  }
+
   // Two-sided hysteresis: timer arms when V reaches BulkVoltage − ENTER, resets only when V falls below BulkVoltage − EXIT. Prevents 30–50 mV idle noise from constantly resetting the hold timer.
   const float BULK_V_BAND_ENTER = 0.05f;
   const float BULK_V_BAND_EXIT  = 0.10f;
@@ -3877,7 +3975,7 @@ void updateChargingStage() {
       } else if ((uint32_t)(now - absorptionTailTimer) >= absorptionCompleteTime) {
         inBulkStage = false;
         inAbsorptionStage = false;
-        inIdleStage = (UseFloat == 0);
+        inIdleStage = (UseFloat == 0) && !commissioningOwnsBattery;
         floatStartTime = now;
         absorptionTailTimer = 0;
         rebulkTimer = 0;
@@ -3951,8 +4049,9 @@ void updateChargingStage() {
     // UseFloat may have been disabled at runtime while already in float, or all
     // stage flags may be false for another reason (e.g. override mode exit).
     // Either way: if float is not wanted, move to IDLE now rather than charging
-    // an already-full battery at an unregulated float voltage.
-    if (UseFloat == 0) {
+    // an already-full battery at an unregulated float voltage — except mid-commissioning, where IDLE
+    // would drop the wizard out of AUTO (commissioningOwnsBattery); hold in float instead (field rests).
+    if (UseFloat == 0 && !commissioningOwnsBattery) {
       inIdleStage = true;
       floatStartTime = now;
       rebulkTimer = 0;
@@ -4226,7 +4325,8 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
 
   // PRIORITY 1.5: FAST OVER-VOLTAGE — absolute ceiling, fires in ALL modes incl. MANUAL.
   // Live per-tick voltage vs AlternatorHardShutdownV. Reason REASON_FAST_OVERVOLTAGE is in
-  // shouldImmediatelyCutGPIO4 → instant field cut + 30s lockout. Deliberately ABOVE the manual
+  // shouldImmediatelyCutGPIO4 → instant field cut + adaptive lockout (nextFastOvLockoutMs
+  // ladder, 0.5s escalating to 10s). Deliberately ABOVE the manual
   // branch (manual otherwise bypasses all safeties) and NOT gated by testProtectionsEnabled,
   // because over-voltage is always disastrous. Must mirror selectFieldEventReason.
   if (tick.currentBatteryVoltage > tick.alternatorHardShutdownV) {
@@ -4310,7 +4410,7 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   if (!tick.chargingEnabled) return REASON_CHARGING_DISABLED;
 
   // Priority 1.5: Fast over-voltage — absolute ceiling, above the manual bypass and ungated.
-  // Mirrors selectFieldControlMode PRIORITY 1.5. Live voltage → immediate cut + 30s lockout.
+  // Mirrors selectFieldControlMode PRIORITY 1.5. Live voltage → immediate cut + adaptive lockout.
   if (tick.currentBatteryVoltage > tick.alternatorHardShutdownV) return REASON_FAST_OVERVOLTAGE;
 
   // Priority 2: Manual mode
@@ -4568,7 +4668,15 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   tick.manualMode = (ManualFieldToggle == 1);
   tick.ignoreTemperature = (IgnoreTemperature != 0);
   tick.ignoreRPM = (IgnoreRPM != 0);
-  tick.rpmBelowMinimum = (!tick.ignoreRPM && RPM < (float)MinRPMForField);
+  // Protection-event grace: a clamp runs the field near MinDuty (tach floor dropped), which can
+  // starve the LM2907 pickup — an EXACTLY-zero reading inside the window is signal dropout, not a
+  // stopped engine. Only literal 0 is masked (a real post-blip idle droop reads nonzero and gates
+  // normally); a genuine stall cuts the moment the window expires because rpmZeroSinceMs keeps
+  // counting below.
+  bool rpmDropoutGrace = (g_lastProtClampMs != 0)
+                         && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS)
+                         && (RPM <= 0.0f);
+  tick.rpmBelowMinimum = (!tick.ignoreRPM && !rpmDropoutGrace && RPM < (float)MinRPMForField);
 
   // Engine confirmed stopped: RPM held at exactly 0 for >= RPM_ZERO_CUT_MS. RPM is already
   // floored to 0 below 100 in ReadAnalogInputs, so RPM <= 0 means a true zero. Skipped when
@@ -4578,7 +4686,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   } else {
     rpmZeroSinceMs = 0;
   }
-  tick.engineFullyStopped = (rpmZeroSinceMs != 0 && (currentMillis - rpmZeroSinceMs) >= RPM_ZERO_CUT_MS);
+  tick.engineFullyStopped = (!rpmDropoutGrace && rpmZeroSinceMs != 0 && (currentMillis - rpmZeroSinceMs) >= RPM_ZERO_CUT_MS);
 
   // Charging enabled (with BMS and weather mode overrides)
   bool chargingEnabledLocal = (Ignition == 1 && OnOff == 1);
@@ -5525,7 +5633,7 @@ void commissionClearMinPctBackup() {
 void rpmAxisWipeExecute() {
   kneeLearnResetDefaults();       // Min% floor table + knee-learner state
   commissionClearMinPctBackup();  // its NVS backup snapshot
-  commissionClearRpmDependents(); // commissioning stages after RPM Alignment
+  commissionClearRpmDependents(); // every RPM-binned commissioning stage (all but Prep)
   systemIDLogClearAll();          // step-test ring (records are RPM-stamped)
   resetMotorFrontOnly();          // motoring front only; sail front kept
   pendingResetAlternatorHealth = true;  // best-ever front + engine-hour trend + baseline

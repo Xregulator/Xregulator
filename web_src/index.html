@@ -1495,6 +1495,29 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Setpoint slew limiter (<span id="setpointSlewEnable_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Master switch for the current-setpoint slew in <strong>normal operation</strong>. <strong>On</strong> (default): the commanded current target ramps at the Setpoint Rise / Fall rates above instead of stepping, and the turn-on startup ramp and large-step gentling are active. <strong>Off:</strong> the target steps instantly (also drops the startup ramp and big-step gentling). Leave On for normal use. The manual square-wave test ignores this — its slew is set by the Test Limiters pill; commissioning / automated tests ignore it too.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="setpointSlewEnable_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('setpointSlewEnable_checkbox', 'setpointSlewEnable', 'setpointSlewEnable')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="setpointSlewEnable" name="setpointSlewEnable" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Big-Step Threshold (A) (<span id="SetpointBigStepThresh_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">When a
                         rising current target jumps more than this many amps above the present slew-limited setpoint, the
@@ -2312,7 +2335,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Safety Margin — amps above ripple (<span id="IExcessSafetyMargin_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps the over-current trip line sits above the measured alternator ripple. Larger means fewer nuisance trips but less sensitivity to a genuine over-current. Applying it sets the trip line parallel to the ripple this alternator produces (Slope and CV base below are set for you). Requires a ripple measurement from Commissioning ▸ Step 7.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps the over-current trip line sits above the measured alternator ripple. Larger means fewer nuisance trips but less sensitivity to a genuine over-current. Applying it sets the trip line parallel to the ripple this alternator produces (Slope and CV base below are set for you). Requires a ripple measurement from Commissioning ▸ Step 6.</span></span>
                     </div>
                     <div class="protections-edit-row">
                       <input name="IExcessSafetyMargin" id="protMarginInput" type="number" step="1" min="0" max="25" />
@@ -2419,7 +2442,7 @@
                     </div>
                     <canvas id="rippleThreshPlotAlt" style="display:block; width:100%; height:220px; background:#161616; border-radius:6px;"></canvas>
                     <div id="rippleVerdictAlt" style="font-size:12px; color:#bbb; margin-top:6px; line-height:1.5;"></div>
-                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 7 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
+                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 6 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
                   </article>
 
                   <article class="protections-param req-batt-current" data-groups="g4">
@@ -3409,52 +3432,37 @@
               <details class="tuning-section">
                 <summary class="tuning-section-title">Test Limiters</summary>
                 <div style="font-size:0.88em; color:var(--text-muted); margin:8px 0;">
-                  Turn the rate limiters in the current-control (CC) path on or off. These switches affect <strong>normal operation and the square-wave test only</strong>. Every sine run ignores them — the manual sine, the sine sweep, and the commissioning System ID and Verify sweeps all bypass both limiters automatically after their gentle entry ramp, because a rate-limited sine would corrupt the frequency-response measurement. Commissioning and other automated tests ignore these switches too (each applies its own built-in ramping). Both default <strong>On</strong> — leave them On for normal operation.
+                  How the manual current-control (CC) square-wave test slews. Affects the <strong>manual square-wave test only</strong> — every sine run (manual sine, sine sweep, commissioning System ID / Verify) bypasses the limiters automatically, and commissioning / automated tests apply their own built-in ramping regardless of this setting. Normal operation is unaffected.
                 </div>
 
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Setpoint smoothing limiter (current setpoint slew) (<span id="setpointSlewEnable_echo">?</span>):</span>
+                    <span>Slew during the manual CC test (<span id="testSlewMode_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for the rate limit on the <strong>commanded current target</strong> (setpoint slew, SetpointRiseRate / SetpointFallRate). <strong>On</strong> (default): each square-wave edge ramps at those rates instead of stepping, so the loop sees a paced target. <strong>Off:</strong> the target steps instantly — the true square the controller-tuning fit wants. This also applies in normal operation, where Off additionally bypasses the turn-on startup ramp and the large-step gentling, so leave it On except during a test. Only the square-wave test honors this switch: sine runs (manual sine, sine sweep, commissioning System ID / Verify) always execute clean regardless of it, and commissioning/automated tests ignore it entirely. The over-voltage protections and absolute backstops are independent of this and always instant.</span>
+                      <span class="tooltip-box"><strong>Off:</strong> setpoint and field step instantly — the sharpest edges for A/B study; over-voltage protections stay live. <strong>Default:</strong> factory-safe setpoint slew (30 A/s rise / 50 A/s fall), field left at its normal duty-ramp coupling-cap protection — a clean, repeatable test without touching your saved rates. <strong>Custom:</strong> your saved Setpoint Rise / Fall rates (Controller Parameters). Only the manual square test honors this; sine runs and commissioning / automated tests are unaffected.</span>
                     </span>
                   </div>
                   <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="setpointSlewEnable_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('setpointSlewEnable_checkbox', 'setpointSlewEnable', 'setpointSlewEnable')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
+                    <div class="seg seg-pill">
+                      <label>
+                        <input type="radio" name="testSlewMode" value="0" onchange="setTestSlewMode(0)">
+                        <span>Off</span>
                       </label>
-                      <span class="toggle-label">On</span>
-                      <input id="setpointSlewEnable" name="setpointSlewEnable" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Field smoothing limiter (duty slew) (<span id="dutySlewEnable_cc_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for the rate limit on the <strong>field PWM output</strong> (duty slew, DutyRampRate) — this is the actuator-side limiter, not the setpoint. <strong>On</strong> (default): field demand can only change at DutyRampRate, which protects the coupling capacitor from harsh transitions. <strong>Off:</strong> duty steps instantly. This is a <strong>shared setting</strong>, linked with the same switch on the Voltage tab — changing it in either place changes both. It applies in normal operation and in the two square-wave tests (this tab's current square, the Voltage tab's CV square). Sine runs bypass duty slew automatically once their entry ramp settles — this switch has no effect there — and commissioning/automated tests ignore it entirely. Leave it On except during a deliberate test.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="dutySlewEnable_cc_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('dutySlewEnable_cc_checkbox', 'dutySlewEnable_cc', 'dutySlewEnable')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
+                      <label>
+                        <input type="radio" name="testSlewMode" value="1" onchange="setTestSlewMode(1)">
+                        <span>Default</span>
                       </label>
-                      <span class="toggle-label">On</span>
-                      <input id="dutySlewEnable_cc" name="dutySlewEnable" type="number" value="" style="display:none;" />
-                    </form>
+                      <label>
+                        <input type="radio" name="testSlewMode" value="2" onchange="setTestSlewMode(2)">
+                        <span>Custom</span>
+                      </label>
+                    </div>
+                    <div class="seg-pill-caption">
+                      <span class="cap cap-0">Setpoint and field step <strong>instantly</strong> — sharpest edges. Over-voltage protections stay live.</span>
+                      <span class="cap cap-1">Factory-safe <strong>30 A/s</strong> setpoint slew; field keeps its normal ramp protection. Saved rates untouched.</span>
+                      <span class="cap cap-2">Your saved <strong>Setpoint Rise / Fall</strong> rates. Field keeps its normal ramp protection.</span>
+                    </div>
                   </div>
                 </div>
               </details>
@@ -3962,29 +3970,37 @@
               <details class="tuning-section">
                 <summary class="tuning-section-title">Test Limiters</summary>
                 <div style="font-size:0.88em; color:var(--text-muted); margin:8px 0;">
-                  Turn the rate limiters in the voltage-control (CV) path on or off to study the square-wave test with and without them — all three apply in this tab's CV square-wave test and in normal operation. Commissioning and other automated tests ignore these switches (each applies its own built-in behavior). All default <strong>On</strong> — leave them On for normal operation. The ramp rate values live under Controller Parameters.
+                  Slew behaviour for the manual CV square-wave test: the target-voltage slew mode (below), plus the rise-governor and field-duty switches for A/B study. These affect the <strong>manual CV square test only</strong> — commissioning / automated tests apply their own built-in ramping, and every setting's normal-operation master lives under Controller Parameters. The ramp rate values live under Controller Parameters too.
                 </div>
 
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Target voltage ramp limiter (<span id="vTgtRampEnable_echo">?</span>):</span>
+                    <span>Target-voltage slew during the manual CV test (<span id="cvTestSlewMode_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for the voltage-target slew. <strong>On</strong> (default): the active charge target voltage can only move at the up/down rates (set under Controller Parameters), so a commanded change (stage transition or a new setpoint) glides instead of stepping. <strong>Off:</strong> the target changes instantly — byte-for-byte the old behaviour, for A/B comparison. This limiter also applies during the CV-tuning square-wave test so you can study the loop with it on or off (commissioning and other automated tests force the ramp on regardless of this switch). <strong>It changes nothing about the protections:</strong> over-voltage detection fires at the same speed relative to the current target, and the absolute backstops (hardware over-voltage comparator + software hard-shutdown, both fixed voltages) are completely independent of this and always instant.</span>
+                      <span class="tooltip-box"><strong>Off:</strong> the charge target steps instantly — the sharpest voltage step to study the CV loop. Over-voltage protections stay live, and the field duty keeps its normal ramp (unlike the CC test, this does not strip the field-duty slew). <strong>Default:</strong> factory-safe target ramp (0.05 V/s, class-scaled) — a clean, repeatable test without touching your saved rates. <strong>Custom:</strong> your saved Target-voltage ramp up / down rates (Controller Parameters). Only the manual CV square test honors this; commissioning / automated tests are unaffected.</span>
                     </span>
                   </div>
                   <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="vTgtRampEnable_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('vTgtRampEnable_checkbox', 'vTgtRampEnable', 'vTgtRampEnable')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
+                    <div class="seg seg-pill">
+                      <label>
+                        <input type="radio" name="cvTestSlewMode" value="0" onchange="setCvTestSlewMode(0)">
+                        <span>Off</span>
                       </label>
-                      <span class="toggle-label">On</span>
-                      <input id="vTgtRampEnable" name="vTgtRampEnable" type="number" value="" style="display:none;" />
-                    </form>
+                      <label>
+                        <input type="radio" name="cvTestSlewMode" value="1" onchange="setCvTestSlewMode(1)">
+                        <span>Default</span>
+                      </label>
+                      <label>
+                        <input type="radio" name="cvTestSlewMode" value="2" onchange="setCvTestSlewMode(2)">
+                        <span>Custom</span>
+                      </label>
+                    </div>
+                    <div class="seg-pill-caption">
+                      <span class="cap cap-0">Charge target steps <strong>instantly</strong> — sharpest voltage step. Over-voltage protections stay live; field keeps its duty ramp.</span>
+                      <span class="cap cap-1">Factory-safe <strong>0.05 V/s</strong> target ramp (class-scaled). Saved rates untouched.</span>
+                      <span class="cap cap-2">Your saved <strong>Target-voltage ramp up / down</strong> rates. Field keeps its normal duty ramp.</span>
+                    </div>
                   </div>
                 </div>
 
@@ -4203,7 +4219,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>CV Gain Source (<span id="cvGainMode_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto</strong> computes them from the commissioned plant fit (the measured finite-horizon gain <strong>K20</strong> from the CV plant-fit step) via the exact PI magnitude condition at the target crossover ω_c: <strong>Kp = 1 ÷ (K20 × √(1 + (ρ/ω_c)²))</strong>, <strong>Ki = ρ × Kp</strong> — you set only the desired recovery speed in the "CV Response Time (s)" field below (ω_c is derived from it) and the integral-zero ratio ρ. <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto</strong> computes them from the commissioned fit (the measured finite-horizon gain <strong>K20</strong> from the Voltage Control Autotuning step) via the exact PI magnitude condition at the target crossover ω_c: <strong>Kp = 1 ÷ (K20 × √(1 + (ρ/ω_c)²))</strong>, <strong>Ki = ρ × Kp</strong> — you set only the desired recovery speed in the "CV Response Time (s)" field below (ω_c is derived from it) and the integral-zero ratio ρ. <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4225,7 +4241,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between; font-size:0.92em; opacity:0.95; line-height:1.5;">
                     <span id="cvActiveGains">Active gains: &mdash;</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The Kp/Ki the voltage loop is running <strong>right now</strong>, in 12V-equivalent units. It is the commissioning gain <strong>after the battery-temperature correction</strong> (Temperature compensation, below), so it drifts with board temperature even though you never re-tune. In <strong>Auto</strong> the base comes from the plant fit; in <strong>Manual</strong> it is your typed Kp/Ki — either way, temperature-corrected. This is the number that actually shapes the response.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The Kp/Ki the voltage loop is running <strong>right now</strong>, in 12V-equivalent units. It is the commissioning gain <strong>after the battery-temperature correction</strong> (Temperature compensation, below), so it drifts with board temperature even though you never re-tune. In <strong>Auto</strong> the base comes from Voltage Control Autotuning; in <strong>Manual</strong> it is your typed Kp/Ki — either way, temperature-corrected. This is the number that actually shapes the response.</span></span>
                   </div>
                 </div>
 
@@ -4234,8 +4250,8 @@
                   <hr />
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between; font-size:0.9em; opacity:0.85; line-height:1.5;">
-                      <span id="cvFitStatus">No plant fit yet — run the CV plant-fit step in commissioning. Auto uses safe defaults until then.</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">What the CV plant-fit wizard computed at commissioning: it measured the battery gain <strong>K20</strong> and derived Kp = 1 ÷ (K20 × √(1 + (ρ/ω_c)²)), Ki = ρ·Kp. These are the <strong>base design gains at the commissioning temperature</strong> — before any temperature correction. Auto runs these (temperature-corrected) as the <strong>Active gains</strong> above. Re-run the CV plant-fit step to update K20.</span></span>
+                      <span id="cvFitStatus">No fit yet — run the Voltage Control Autotuning step in commissioning. Auto uses safe defaults until then.</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">What the Voltage Control Autotuning step computed at commissioning: it measured the battery gain <strong>K20</strong> and derived Kp = 1 ÷ (K20 × √(1 + (ρ/ω_c)²)), Ki = ρ·Kp. These are the <strong>base design gains at the commissioning temperature</strong> — before any temperature correction. Auto runs these (temperature-corrected) as the <strong>Active gains</strong> above. Re-run the Voltage Control Autotuning step to update K20.</span></span>
                     </div>
                   </div>
 
@@ -4243,7 +4259,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                       <span>CV Response Time (s) (<span id="cvRespS_echo">?</span>):<span id="cvRespPreview" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">&nbsp;</span></span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">With CV Gain Source = Auto, sets how fast the auto gain mode pulls battery voltage back to target after a disturbance or target change. Valid range 5–80 s. <strong>Longer is safer, shorter is faster.</strong> Margin here is a cheap backstop for errors in things like the modeled response of battery ESR to temperature and many others. The other floor is the field ramp-rate limit (currently <strong><span id="cvRespRampNote">—</span> %/s</strong> of duty), so stay well clear of that or recovery goes linear instead of exponential. Only affects Auto mode. Calculated using the existing stored plant fit, no need to re-commission after adjustment.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">With CV Gain Source = Auto, sets how fast the auto gain mode pulls battery voltage back to target after a disturbance or target change. Valid range 5–80 s. <strong>Longer is safer, shorter is faster.</strong> Margin here is a cheap backstop for errors in things like the modeled response of battery ESR to temperature and many others. The other floor is the field ramp-rate limit (currently <strong><span id="cvRespRampNote">—</span> %/s</strong> of duty), so stay well clear of that or recovery goes linear instead of exponential. Only affects Auto mode. Calculated using the existing stored fit, no need to re-commission after adjustment.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4258,7 +4274,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                       <span>CV auto-tune Ki/Kp ratio ρ (<span id="cvPiZero_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">With CV Gain Source = Auto, the integral gain is tied to the proportional gain by this ratio: <strong>Ki = ρ × Kp</strong>. Sets where the integrator's corner sits — the point at which it takes over from proportional action to pull out steady-state error — relative to the loop's response speed, which the <strong>Response Time</strong> knob above sets separately. Lower ρ = lazier integral: gentler and more damped. Higher ρ = more aggressive integral, at the cost of more overshoot. Calculated using the existing stored plant fit, no need to re-commission after adjustment.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">With CV Gain Source = Auto, the integral gain is tied to the proportional gain by this ratio: <strong>Ki = ρ × Kp</strong>. Sets where the integrator's corner sits — the point at which it takes over from proportional action to pull out steady-state error — relative to the loop's response speed, which the <strong>Response Time</strong> knob above sets separately. Lower ρ = lazier integral: gentler and more damped. Higher ρ = more aggressive integral, at the cost of more overshoot. Calculated using the existing stored fit, no need to re-commission after adjustment.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4318,7 +4334,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Battery-Temp Gain Derate (<span id="battTempDerateEnable_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The CV plant fit measures the battery's internal resistance (the plant gain K_dc) at <strong>one</strong> temperature — whatever the board was when you commissioned. A battery's resistance <strong>rises as it gets colder</strong>, which would make those gains run too aggressively in the cold (more overshoot, exactly when over-voltage matters most) and too sluggishly when warmer. With this <strong>On</strong>, the loop scales Kp <em>and</em> Ki by the estimated resistance ratio between the commissioning temperature and the present board temperature — keeping the loop's speed and damping roughly constant across temperature. This is a gain scale, <strong>not</strong> a change to the response-time target or Ki/Kp ratio. Board temperature is a <strong>proxy</strong> for battery temperature, but the derate uses only the <strong>change</strong> in board temp since commissioning — so a constant board-warmer-than-battery offset cancels out; it only needs that offset to stay roughly stable, which it does. The absolute over-voltage protections are independent and always live. Set the strength with the coefficient below. Off = use the commissioned gains unchanged at all temperatures.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage Control Autotuning measures the battery's internal resistance (the plant gain K_dc) at <strong>one</strong> temperature — whatever the board was when you commissioned. A battery's resistance <strong>rises as it gets colder</strong>, which would make those gains run too aggressively in the cold (more overshoot, exactly when over-voltage matters most) and too sluggishly when warmer. With this <strong>On</strong>, the loop scales Kp <em>and</em> Ki by the estimated resistance ratio between the commissioning temperature and the present board temperature — keeping the loop's speed and damping roughly constant across temperature. This is a gain scale, <strong>not</strong> a change to the response-time target or Ki/Kp ratio. Board temperature is a <strong>proxy</strong> for battery temperature, but the derate uses only the <strong>change</strong> in board temp since commissioning — so a constant board-warmer-than-battery offset cancels out; it only needs that offset to stay roughly stable, which it does. The absolute over-voltage protections are independent and always live. Set the strength with the coefficient below. Off = use the commissioned gains unchanged at all temperatures.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4339,7 +4355,7 @@
                 <div id="cvDerateDetailBlock">
                 <div class="form-row">
                   <div class="form-label" style="font-size:0.9em; opacity:0.85; line-height:1.5;">
-                    <span id="battTempDerate_status">Not yet commissioned — run the CV plant-fit step.</span>
+                    <span id="battTempDerate_status">Not yet commissioned — run the Voltage Control Autotuning step.</span>
                   </div>
                 </div>
 
@@ -4388,6 +4404,29 @@
                       <input type="hidden" name="password" class="password_field">
                       <input name="vTgtRampDn" type="number" step="0.001" min="0" max="5" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Target voltage slew limiter (<span id="vTgtRampEnable_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Master switch for the voltage-target slew in <strong>normal operation</strong>. <strong>On</strong> (default): the active charge target moves at the up / down rates above instead of stepping, so a stage transition or new setpoint glides. <strong>Off:</strong> the target changes instantly (old behaviour). The important one is the down rate — an instant target drop trips over-voltage and hard-cuts the field. Leave On for normal use. The manual CV test ignores this — its slew is set by the Test Limiters pill; commissioning / automated tests ignore it too. Protections and absolute backstops are independent of this and always instant.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="vTgtRampEnable_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('vTgtRampEnable_checkbox', 'vTgtRampEnable', 'vTgtRampEnable')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="vTgtRampEnable" name="vTgtRampEnable" type="number" value="" style="display:none;" />
                     </form>
                   </div>
                 </div>
@@ -4814,7 +4853,7 @@
                   toward safety. The Slope Bleed Gain drains the integrator when voltage is climbing quickly, which prevents
                   overshoot during the approach to target. Anti-windup freezes upward integration whenever the current
                   ceiling — not voltage — is the binding constraint, so the integrator does not load up while unable to act.
-                  The loop gains are set by the commissioning wizard's plant fit rather than tuned by hand (see below), and
+                  The loop gains are set by the commissioning wizard's autotuning rather than tuned by hand (see below), and
                   can be automatically re-scaled with board temperature to hold the loop's speed and damping constant as the
                   battery's internal resistance changes with temperature.
                 </p>
@@ -4903,18 +4942,19 @@
                   finding the saturation knee.<br>
                   &bull; <strong>Min% floor</strong> — finds the field level where each RPM range first starts making
                   current, and fills the RPM table's Min(%) column.<br>
-                  &bull; <strong>Plant fit</strong> — a sine sweep on field duty measures the inner current loop's
+                  &bull; <strong>Current Control Autotuning</strong> — a sine sweep on field duty measures the inner current loop's
                   plant (time constant and gain) and proposes its PID gains and filter constants (also on the Plant
                   Delay tab).<br>
-                  &bull; <strong>Verify</strong> — a closed-loop sweep with the new inner-loop gains, confirming the
+                  &bull; <strong>Verify Current Control</strong> — a closed-loop sweep with the new inner-loop gains, confirming the
                   loop is stable before anything downstream trusts it.<br>
                   &bull; <strong>Disturbances</strong> — you creep idle&rarr;cruise while it records the worst ripple
                   per RPM range (belt resonance) on both the alternator and battery signals, building the Resonance
                   &amp; Ripple Map.<br>
-                  &bull; <strong>Thresholds</strong> — a read-only review: it draws the over-current detector's trip
-                  threshold (from the floor, ceiling, and percent you set in Protections) against the ripple just
-                  measured, so you can confirm your settings clear it. Nothing is written here.<br>
-                  &bull; <strong>CV plant fit</strong> — commands one bounded current pulse through the tuned inner
+                  &bull; <strong>Fault Threshold Autotuning</strong> — sets the over-current detector's trip line from
+                  the ripple just measured: the line runs a Safety Margin above the ripple and is drawn against the
+                  measured points so you can confirm it clears them. It writes straight to the Protections settings —
+                  adjust the margin or the individual values by hand if you like.<br>
+                  &bull; <strong>Voltage Control Autotuning</strong> — commands one bounded current pulse through the tuned inner
                   loop and measures how battery voltage responds to the current step (the finite-horizon gain K20),
                   then computes the voltage-loop gains from your chosen response time.
                 </p>
@@ -4926,11 +4966,11 @@
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Manual tuning (optional).</strong> The output current loop and the voltage loop each also
                   have their own live tuning mode you can drive by hand — Tuning Mode for the inner current loop
-                  (Current tab), and the plant-fit / Auto-or-Manual gain selector on the Voltage tab for the voltage
+                  (Current tab), and the Auto-or-Manual gain selector on the Voltage tab for the voltage
                   loop. Tune them in that order — inner loop first, then voltage — because each layer depends on the
                   one beneath it being stable. The rest of this section covers hand-tuning the inner current loop; the
                   voltage loop has its own dedicated tab with a built-in step test, an Auto mode that reuses the
-                  commissioned plant fit, and live scoring. The temperature loop is tuned offline from logged data (no
+                  commissioned fit, and live scoring. The temperature loop is tuned offline from logged data (no
                   live step test) — its tab shows the live control plot and the controller parameters.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
@@ -5017,7 +5057,7 @@
         <p data-intro="c1"><strong>C1 — Anomaly Detection</strong> watches the fast current sensor for rectifier/stator fault signatures. It shares the fast channel and its steady-state admission gates (current drift floor/slope, input-range switching) with C2 — those live in the shared Fast Current Channel section. Its own pieces: the fault alarm, the fault-class and lifetime-anomaly readouts, and the anomaly snapshots in the Waveforms flipbook. Arming ignores engine speed entirely, so it keeps working with a dead tach.</p>
         <p data-intro="c2"><strong>C2 — Resonance &amp; Ripple Map</strong> learns the strongest current-ripple tones at every engine speed and load, from the same fast channel as C1. It uses the shared current-drift gates plus two gates of its own: the steady-state RPM margin (a window is discarded when the engine sits on a speed-bin edge) and the minimum tone amplitude. Its results: the map itself, the worst ripple &amp; tone table, and the biggest actionable disturbance.</p>
         <p data-intro="c3"><strong>C3 — Charging System Health</strong> grades output amps against the best this machine has ever done at the same operating point. A point is admitted only after every signal — RPM, field duty, voltage, temperature, amps — holds steady. Those admission gates and the curve-fit tuning are the knobs under Gates &amp; Tuning in this section; the resulting health gauge, session plot, and engine-hours trend appear on Live Data → Diag → Alternator.</p>
-        <p data-intro="c4"><strong>C4 — Ripple Measurements</strong> is one measurement engine with two collectors: the RPM ripple table is filled <em>only</em> by the commissioning game, and the ripple-vs-current line on the Protections plots is filled <em>only</em> by Commissioning Step 7. These gates define what counts as a valid measurement for both. They are deliberately separate from C1/C2’s gates, so tuning them can never loosen fault-detector arming.</p>
+        <p data-intro="c4"><strong>C4 — Ripple Measurements</strong> is one measurement engine with two collectors: the RPM ripple table is filled <em>only</em> by the commissioning game, and the ripple-vs-current line on the Protections plots is filled <em>only</em> by Commissioning Step 6. These gates define what counts as a valid measurement for both. They are deliberately separate from C1/C2’s gates, so tuning them can never loosen fault-detector arming.</p>
       </div>
 
           <!-- Flat, pill-filtered knob cards (Protections pattern): each block tags the checkpoint(s)
@@ -5604,7 +5644,7 @@
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Ripple Measurements</span>
         </div>
-        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">One measurement engine, two collectors: the <strong>RPM ripple table</strong> is filled only by the commissioning game, and the <strong>ripple-vs-current line</strong> on the Protections plots only by Commissioning Step 7. These gates define what counts as a valid measurement for both. A measurement counts only if conditions were <strong>stationary</strong>: the window's two halves must have (nearly) the same average — a throttle or load transient walks the average in one direction and is rejected, while a rough-but-repeating condition (a hunting idle, cycling loads) swings hard yet averages the same in both halves and is admitted. This is deliberate: a "dirty speed" is exactly what the over-current protections experience, so it must make it into the table. Each gate shows its worst value over the last 10 s (green = passing). Never relaxed during commissioning: a stationary number cannot be measured while ramping — the wizard's instructed pauses are when measurements admit.</div>
+        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">One measurement engine, two collectors: the <strong>RPM ripple table</strong> is filled only by the commissioning game, and the <strong>ripple-vs-current line</strong> on the Protections plots only by Commissioning Step 6. These gates define what counts as a valid measurement for both. A measurement counts only if conditions were <strong>stationary</strong>: the window's two halves must have (nearly) the same average — a throttle or load transient walks the average in one direction and is rejected, while a rough-but-repeating condition (a hunting idle, cycling loads) swings hard yet averages the same in both halves and is admitted. This is deliberate: a "dirty speed" is exactly what the over-current protections experience, so it must make it into the table. Each gate shows its worst value over the last 10 s (green = passing). Never relaxed during commissioning: a stationary number cannot be measured while ramping — the wizard's instructed pauses are when measurements admit.</div>
 
         <div class="form-row">
           <div class="form-label">Capture Window (ms) (<span id="ripWinMs_echo">?</span>):
@@ -6049,7 +6089,7 @@
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Alternator Hard Shutdown Voltage (V) (<span id="AlternatorHardShutdownV_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Absolute battery voltage at which the alternator is force-shutdown: field is ramped to 0, GPIO4 is cut, and a cooldown lockout begins before charging can resume. This is the only software-layer hard overvoltage shutdown — below it sit the Group 1/2/3 throttling protections (Voltage tab) which keep charging while trimming current; alongside it sits a separate hardware overvoltage backup at the same default threshold of BulkVoltage + 0.3 V, using a slow-averaged voltage (see the console log on boot for the exact programmed threshold). Should be set just below your battery BMS shutdown voltage so the alternator stops before the BMS opens the contactor. <strong>First-boot default auto-scales to BulkVoltage + 0.3 V</strong> (so 14.8 V on a 12V system, 29.1 V on a 24V system, 57.9 V on a 48V system). Once you save your own value it stays absolute — re-set it manually if you later change BulkVoltage to a different system class.</span>
+                    <span class="tooltip-box">Absolute battery voltage at which the alternator is force-shutdown: field is ramped to 0, GPIO4 is cut, and a cooldown lockout begins before charging can resume. The lockout is adaptive — 0.5 s for an isolated event, escalating toward 10 s if the cut keeps re-firing, and resetting after a minute without one. This is the only software-layer hard overvoltage shutdown — below it sit the Group 1/2/3 throttling protections (Voltage tab) which keep charging while trimming current, and a separate hardware overvoltage backup at BulkVoltage + 0.3 V that uses a slow-averaged voltage to catch sustained overvoltage (see the console log on boot for the exact programmed threshold). Should be set just below your battery BMS shutdown voltage so the alternator stops before the BMS opens the contactor. <strong>First-boot default auto-scales to BulkVoltage + 0.5 V</strong> (so 15.0 V on a 12V system, 30.0 V on a 24V system, 60.0 V on a 48V system) — the 0.2 V above the hardware backup is transient headroom so a fast spike is absorbed by the throttling protections instead of a full shutdown. Once you save your own value it stays absolute — re-set it manually if you later change BulkVoltage to a different system class.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -6101,9 +6141,11 @@
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
                       class="tooltip-box">Lockout/cooldown duration after a fault that triggered the slow ramp-down
                       path. Once a qualifying fault fires, charging will not restart until this time elapses, even if
-                      the fault clears. <strong>Triggered by:</strong> alternator hard-shutdown (Alternator Hard Shutdown Voltage
-                      exceeded), voltage sensor disagreement (warning or critical), both voltage sensors implausible,
-                      temperature warning/sustained, temperature data stale, alternator current data stale.
+                      the fault clears. <strong>Triggered by:</strong> voltage sensor disagreement (warning or critical), both voltage sensors implausible,
+                      temperature warning/sustained, temperature data stale, alternator current data stale. The
+                      alternator hard-shutdown (Alternator Hard Shutdown Voltage exceeded) uses its own adaptive
+                      cooldown instead — 0.5 s for an isolated event, escalating toward 10 s on repeats, resetting
+                      after a minute without one.
                       <strong>NOT triggered by</strong> immediate-cut faults (hardware overvoltage, hard
                       overcurrent, temperature critical, RPM below minimum) — those just cut the field and re-enable
                       as soon as the condition clears, no cooldown.</span></span>
@@ -7240,7 +7282,7 @@
                       channels stay on the mean either way.
                       <br><br>
                       <b>Diagnostic.</b> Max makes those readouts show the window peak rather than the present value,
-                      and it corrupts the CV plant fit — use Average for normal operation and commissioning.</span>
+                      and it corrupts Voltage Control Autotuning — use Average for normal operation and commissioning.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -13170,6 +13212,22 @@
       </div>
     </div>
   </div><!-- END commprep-modal-overlay -->
+
+  <!-- Engine-speed (tach) alignment — first-install only, between the Prerequisites screen and the
+       commissioning wizard (commPrepFinish → openRpmAlign → openCommissionModal). Needs the engine
+       running; body rendered by rpmAlignRender(); tach settings are written live as edited. -->
+  <div id="rpmalign-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9200; align-items:center; justify-content:center;">
+    <div style="position:relative; background:#1e1e1e; color:#ddd; width:480px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 80px); display:flex; flex-direction:column;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Engine Speed Alignment</span>
+        <button onclick="rpmAlignCancel()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
+      </div>
+      <div id="rpmalign-body" style="padding:14px 16px; overflow-y:auto; flex:1; min-height:0;"></div>
+      <div style="padding:12px 16px; border-top:1px solid #333; display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
+        <button onclick="rpmAlignFinish()" class="btn-primary" style="border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Continue to Commissioning →</button>
+      </div>
+    </div>
+  </div><!-- END rpmalign-modal-overlay -->
 
   <!-- First-boot SoC seed popup — auto-opens once after the boot-time voltage seed (ack persisted
        in NVS via SocSeedAck), reopens any time from the header SOC readout. Body rendered by socSeedRender(). -->

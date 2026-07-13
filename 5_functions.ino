@@ -2355,8 +2355,10 @@ void updateINA228OvervoltageThreshold() {
     return;
   }
 
-  // Headroom per-cell-scaled by class, matching the AlternatorHardShutdownV derivation so the
-  // hardware ALERT stays the same rung of the OV ladder at 24/48V.
+  // Headroom per-cell-scaled by class. Deliberately one rung BELOW the software fast cut
+  // (AlternatorHardShutdownV, bulk + 0.5): this compare uses the chip's averaged value and a
+  // 250ms BUSOL poll, so it owns SUSTAINED overvoltage at bulk + 0.3 while the raw per-tick
+  // software cut owns fast transients at bulk + 0.5 (2026-07-12 split).
   VoltageHardwareLimit = BulkVoltage + 0.3f * ((float)BATTERY_VOLTAGE / 12.0f);
 
   const double LSB = 0.003125;                                           // 3.125 mV/LSB

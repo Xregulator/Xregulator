@@ -291,6 +291,8 @@ bool fsRemove(const char *path) {
 #define NK_cvRecovSec "cvRecovSec"
 #define NK_cvRecovEmaxV "cvRecovEmaxV"
 #define NK_dutySlewEnable "dutySlewEn"
+#define NK_testSlewMode "testSlewMode"
+#define NK_cvTestSlewMode "cvTestSlewMode"
 #define NK_cvPlantKa "cvPlantKa"
 #define NK_cvPlantKb "cvPlantKb"
 // Measured ripple projection (§3.3) — one CSV-encoded string: "a0,a1,rpm,i0,i1,i2,pk0,pk1,pk2,n"
@@ -326,7 +328,7 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…8=CV plant fit, 9=finished)
+#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished)
 #define NK_commissionDoneMask "commissnDoneMsk" // per-stage completion bitmask (bit i = stage i done); 15-char max
 #define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
 #define NK_T0_C "T0_C"
@@ -603,7 +605,7 @@ void commissionSetState(uint8_t st) {
   settingWrite(NK_commissionState, String((int)st).c_str());
 }
 
-// Persist the furthest wizard phase reached (0=Prep…8=CV plant fit, 9=finished). Drives
+// Persist the furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished). Drives
 // the Commissioning tab checklist so step progress survives a page reload / new client.
 void commissionSetPhase(uint8_t p) {
   commissionPhase = p;
@@ -611,30 +613,31 @@ void commissionSetPhase(uint8_t p) {
 }
 
 // ── Per-stage completion tracking ─────────────────────────────────────────────
-// commissionDoneMask carries one bit per stage (0=Prep, 1=RPM Alignment … 7=Thresholds, 8=CV plant fit). It is the
+// commissionDoneMask carries one bit per stage (0=Prep, 1=Field curve … 6=Thresholds, 7=CV plant fit). It is the
 // source of truth for the per-step ✓ marks and for the default checkbox selection of a
 // partial re-run. commissionState (0/1/2) is the lifecycle badge and is DERIVED from the
 // mask wherever it is recomputed below.
-#define COMMISSION_STAGE_COUNT 9
-#define COMMISSION_ALL_DONE    0x1FF   // bits 0..8 set = every stage complete
+#define COMMISSION_STAGE_COUNT 8
+#define COMMISSION_ALL_DONE    0xFF    // bits 0..7 set = every stage complete
 
 // Downstream stages invalidated when an upstream stage is (re)completed — see the coupling
-// analysis: Field curve(2) feeds Plant fit(4) + Verify(5); Plant fit(4) feeds Verify(5);
-// Disturbances(6) feeds Thresholds(7). CV plant fit(8) measures the current→voltage plant, which
-// sits downstream of the whole inner current loop — so any current-loop retune (Field curve 2,
-// Plant fit 4, or Verify 5) makes the CV fit stale and clears bit 8. RPM Alignment(1) (tach-scaling
-// settings step) and Min% floor(3) are independent (nothing feeds them, they feed nothing here);
-// RPM Alignment runs first so every later RPM-binned table bins correctly, Min% floor runs 2nd after
-// Field curve so the measured knee floors every later current-control step. Prep requires the engine
-// already warm because Min% floor sweeps to max RPM this early. Re-doing an upstream stage clears its
-// dependents' done bits; the wizard forces them into the same run to be re-measured.
+// analysis: Field curve(1) feeds Plant fit(3) + Verify(4); Plant fit(3) feeds Verify(4);
+// Disturbances(5) feeds Thresholds(6). CV plant fit(7) measures the current→voltage plant, which
+// sits downstream of the whole inner current loop — so any current-loop retune (Field curve 1,
+// Plant fit 3, or Verify 4) makes the CV fit stale and clears bit 7. Min% floor(2) is independent
+// (nothing feeds it, it feeds nothing here); it runs 2nd after Field curve so the measured knee
+// floors every later current-control step. Tach alignment (RPMScalingFactor/PulleyRatio) is set on a
+// pre-wizard screen, not a stage — a later rescale invalidates the binned stages via
+// commissionClearRpmDependents. Prep requires the engine already warm because Min% floor sweeps to
+// max RPM this early. Re-doing an upstream stage clears its dependents' done bits; the wizard forces
+// them into the same run to be re-measured.
 static uint16_t commissionDependentsMask(int stage) {
   switch (stage) {
-    case 2: return (1 << 4) | (1 << 5) | (1 << 8);  // Field curve → Plant fit, Verify, CV plant fit
-    case 4: return (1 << 5) | (1 << 8);             // Plant fit   → Verify, CV plant fit
-    case 5: return (1 << 8);                        // Verify      → CV plant fit
-    case 6: return (1 << 7);                        // Disturbances → Thresholds
-    default: return 0;                              // RPM Alignment(1), Min% floor(3) independent — no dependents
+    case 1: return (1 << 3) | (1 << 4) | (1 << 7);  // Field curve → Plant fit, Verify, CV plant fit
+    case 3: return (1 << 4) | (1 << 7);             // Plant fit   → Verify, CV plant fit
+    case 4: return (1 << 7);                        // Verify      → CV plant fit
+    case 5: return (1 << 6);                        // Disturbances → Thresholds
+    default: return 0;                              // Min% floor(2) independent — no dependents
   }
 }
 
@@ -672,12 +675,11 @@ void commissionClearStage(int stage) {
   if (commissionState == 2) commissionSetState(1);
 }
 
-// A tach rescale moves the engine-RPM axis every stage after RPM Alignment was measured against,
-// so all of them must be re-run. Hangs off the SETTING change, not off commissionDependentsMask(1),
-// because that would also fire when the user merely clicks Next through an unchanged alignment step.
-// RPM Alignment itself stays marked done — the wizard reopens it pre-populated.
+// A tach rescale (RPMScalingFactor/PulleyRatio change) moves the engine-RPM axis every binned stage
+// was measured against, so all of them must be re-run. Hangs off the SETTING change, wherever it comes
+// from (pre-wizard alignment screen or normal Settings). Clears every wizard stage except Prep(0).
 void commissionClearRpmDependents() {
-  commissionDoneMask &= ~((1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8));
+  commissionDoneMask &= ~((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7));
   commissionWriteDoneMask();
   if (commissionState == 2) commissionSetState(1);
 }

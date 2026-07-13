@@ -1683,6 +1683,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     dutySlewEnable = (uint8_t)settingRead(NK_dutySlewEnable).toInt();
   }
+  if (!settingExists(NK_testSlewMode)) {
+    settingWrite(NK_testSlewMode, String((int)testSlewMode).c_str());
+  } else {
+    testSlewMode = (uint8_t)settingRead(NK_testSlewMode).toInt();
+  }
+  if (!settingExists(NK_cvTestSlewMode)) {
+    settingWrite(NK_cvTestSlewMode, String((int)cvTestSlewMode).c_str());
+  } else {
+    cvTestSlewMode = (uint8_t)settingRead(NK_cvTestSlewMode).toInt();
+  }
   if (!settingExists(NK_cvPlantKa)) {
     settingWrite(NK_cvPlantKa, String(cvPlantKa, 5).c_str());
     settingWrite(NK_cvPlantKb, String(cvPlantKb, 5).c_str());
@@ -1880,7 +1890,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TempSustainedTimeout = settingRead(NK_TempSustainedTimeout).toInt();
   }
   // AlternatorHardShutdownV — absolute hard-shutdown voltage threshold.
-  // First-boot default auto-scales as BulkVoltage + 0.3 V (headroom per-cell-scaled by class).
+  // First-boot default auto-scales as BulkVoltage + 0.5 V (headroom per-cell-scaled by class).
+  // +0.5 (raised from +0.3, 2026-07-12) buys transient runway above G2's filtered clamp: a blip
+  // at the bulk target peaks ~+0.31V inside the G2 filter lag, so the old line cut on events the
+  // soft layer would have absorbed. Sustained OV is still caught at BulkVoltage + 0.3 by the
+  // INA228 averaged comparator (updateINA228OvervoltageThreshold).
   // Once written, the value is treated as user-set; a later system-class change re-derives it
   // in applyNominalVoltageChange.
   // Migration: an old VoltageSpikeMargin key (a margin) converts to an absolute value.
@@ -1889,7 +1903,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
       float oldMargin = settingRead(NK_VoltageSpikeMargin).toFloat();
       AlternatorHardShutdownV = BulkVoltage + oldMargin;
     } else {
-      AlternatorHardShutdownV = BulkVoltage + 0.3f * ((float)BATTERY_VOLTAGE / 12.0f);
+      AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)BATTERY_VOLTAGE / 12.0f);
     }
     settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
   } else {

@@ -1115,10 +1115,10 @@ int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) 
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
-uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…8=CV plant fit, 9=finished); drives the Commissioning tab checklist
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished); drives the Commissioning tab checklist
 // Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
-// 0=Prep 1=RPM Alignment 2=Field curve 3=Min% floor 4=Plant fit 5=Verify 6=Disturbances 7=Thresholds 8=CV plant fit. Drives the
-// per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0x1FF.
+// 0=Prep 1=Field curve 2=Min% floor 3=Plant fit 4=Verify 5=Disturbances 6=Thresholds 7=CV plant fit. Drives the
+// per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0xFF.
 uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
 volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
 
@@ -2312,6 +2312,13 @@ int MinRPMForField = 125;             // Field is cut when RPM is below this thr
 // spikes. Confirmation window kept short (<=0.2s) so a single bad ADC read can't snap it off.
 #define RPM_ZERO_CUT_MS 200          // ms RPM must hold at exactly 0 before the immediate cut
 uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not currently zero)
+// Protection-event RPM grace: for this long after any protection clamp tick, an EXACTLY-zero RPM
+// reading is treated as tach-signal dropout (the clamp runs the field near MinDuty, which can
+// starve the LM2907 pickup), not as a stopped engine — neither the below-minimum immediate cut
+// nor the zero-cut fires on it. Nonzero-but-low readings gate normally, and rpmZeroSinceMs keeps
+// counting through the grace so a genuine stall still cuts the moment the window expires.
+#define PROT_RPM_GRACE_MS 5000
+uint32_t g_lastProtClampMs = 0;      // millis() of the most recent tick any protection clamp was active
 int bmsLogic = 0;                     // if BMS is asked to turn the alternator on and off
 int bmsLogicLevelOff = 0;             // set to 0 if the BMS gives a low signal (<3V?) when no charging is desired
 bool chargingEnabled;                 // defined from other variables
@@ -2341,11 +2348,12 @@ int ResetThermTemp = 0;  // Max thermistor temp reset
 
 unsigned long fieldCollapseTime = 0;
 unsigned long FIELD_COLLAPSE_DELAY = 30000;  // ms
-// Lockout period after temperature or voltage spike faults.
+// Lockout period after temperature or voltage-disagreement faults.
 // RPM-too-low is NOT a fault — it's a normal idle/engine-stop state — so it gets its own short
 // lockout instead of borrowing the 30s fault cooldown. Lets charging resume ~immediately on engine
-// restart. Only the RPM-gate path uses this; every real fault (OV, OT, voltage disagreement) keeps
-// FIELD_COLLAPSE_DELAY. Not user-adjustable by design.
+// restart. Fast over-voltage (software hard cut) uses the adaptive nextFastOvLockoutMs ladder
+// (0.5s escalating to 10s) so a transient blip doesn't cost a 30s outage; the remaining faults
+// (OT, voltage disagreement) keep FIELD_COLLAPSE_DELAY. Not user-adjustable by design.
 unsigned long RPM_RECOVERY_DELAY = 500;  // ms — short by design: while the engine sits stopped this cooldown re-arms every window (see 6_functions runShutdownPath), so on restart you wait out whatever remains of the current window before the field re-engages. Keep it small so that residual wait is short.
 // Delay applied to the CURRENTLY-armed lockout, set at arm time (RPM_RECOVERY_DELAY for the RPM gate,
 // else FIELD_COLLAPSE_DELAY). The remaining/clear/inLockout checks read this, not the constant.
@@ -3514,12 +3522,29 @@ uint8_t dutySlewEnable = 1;  // master switch for the field duty slew (GOV_NORMA
 float SetpointRiseRate = 30.0f;  // A/sec
 float SetpointFallRate = 50.0f;  // A/sec
 uint8_t setpointSlewEnable = 1;  // master switch for the inner-loop current setpoint slew. 0 = setpoint steps instantly (drops startup ramp / big-step gentling too); applies in the CC test and normal operation
+// Manual CC square-wave test slew mode (Current-tab Test Limiters). 0=Off (setpoint abrupt + duty bypassed),
+// 1=Default (factory setpoint rate below; field keeps its DutyRampRate protection), 2=Custom (user
+// SetpointRiseRate/FallRate). Default 2 = prior behavior. Governs ONLY the manual square test — never
+// commissioning/auto tests (g_autoTestActive) or sines. setpointSlewEnable above still governs normal op.
+uint8_t testSlewMode = 2;
+const float SETPOINT_RISE_DEFAULT = 30.0f;  // A/s — factory setpoint slew for testSlewMode=Default (matches SetpointRiseRate's own default)
+const float SETPOINT_FALL_DEFAULT = 50.0f;  // A/s
+// Manual CV square-wave test slew mode (Voltage-tab Test Limiters). 0=Off (target steps instantly),
+// 1=Default (factory target ramp below), 2=Custom (user vTgtRampUp/Dn). Default 2 = prior behavior. Governs
+// ONLY the manual CV square test — never commissioning/auto tests. vTgtRampEnable still governs normal op.
+// Unlike the CC test, Off keeps the base field duty slew engaged — a conservative default, NOT a requirement:
+// the field-slew safety that matters is the controlled ramp-to-zero at test EXIT (the cvWaveExitWindDown
+// glide), not the base rate during the test. Bypassing duty here (like the CC Off path) is a valid future
+// change if a need arises.
+uint8_t cvTestSlewMode = 2;
+const float VTGT_RAMP_DEFAULT = 0.050f;  // V/s @12V — factory target ramp for cvTestSlewMode=Default; scaled ×BATTERY_VOLTAGE/12 at use
 uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise governor (anti-windup clamp). 0 = rises are not clamped — integrator can wind up into an OV trip on an up-step; applies in the CV test and normal operation
 uint8_t cvRecovEnable = 1;   // master switch for the post-protection CV recovery window (timed cv_I re-injection + error cap). 0 = legacy behavior: recovery pace scales with the post-cut voltage error, so it crawls at low targets and can re-trip predictive OV at high ones
 float cvRecovSec = 2.5f;     // recovery time target (s): cv_I ramps from its ReseedFrac seed back to the pre-event value over this span, at any target voltage / chemistry / bank size
 float cvRecovEmaxV = 0.25f;  // recovery error cap (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use): max positive error the CV PI sees during recovery, so P+I drive can't scale with the post-cut collapse
 bool    g_autoTestActive  = false;  // set per control-loop tick: an automated/guided test owns the limiters now (commissioning / battery-health DCIR / resonance / system-ID). While true the four user limiter toggles above are inert so a stray user setting can't corrupt a measurement; each test's own built-in slew behavior governs.
 const float TEST_ENTRY_RATE_A = 8.0f;  // A/s — FIXED, conservative ramp rate for an automated test's transition up from the rest floor and back down (NOT the user's SetpointRiseRate/FallRate, which a user could set aggressively). Used by DCIR, the resonance check, and the TuningMode entry ramp so a test never slams the field coming on/off. Current-domain, so no bus-voltage scaling.
+const float CVPF_ENTRY_RATE_A = 50.0f; // A/s — CV-plant-fit STEP entry rate only; fast enough that a full CVPF_DI_MAX (40 A) step arrives (~0.8 s) well inside the 2 s fit window. At 8 A/s a big step was still ramping when the √t window opened → K biased low. Duty slew is bypassed in the cvPlantFit branch so DutyRampRate can't re-throttle it.
 bool    g_tuningEntrySettled = false;  // set per tick from tuningEntryRamped: false while a TuningMode test is still ramping up from rest, true once settled. Gates the sine duty-slew bypass so the entry eases in (duty slew engaged) before the actuator is unclamped for the clean sine.
 // Large up-step gentling: up-moves whose remaining gap exceeds SetpointBigStepThresh climb at the
 // slower SetpointBigStepRiseRate (instead of SetpointRiseRate) until the gap closes inside the
@@ -3539,12 +3564,15 @@ uint32_t TempSustainedTimeout = 120000;  // ms - WARNING temp sustained this lon
 
 // --- Voltage Thresholds ---
 // AlternatorHardShutdownV: absolute battery voltage above which the alternator field is cut
-// and a cooldown lockout starts. Should be set just below the battery BMS shutdown voltage.
-// This is the only software-layer hard OV shutdown; below it sit the Group 1/2/3 throttling
-// protections, alongside it sits the INA228 hardware ALERT pin (same default threshold of
-// BulkVoltage + 0.3 V but using the chip's slow-averaged value, so it acts as a hardware
-// backup that fires after the software on slow ramps and slightly after on fast transients).
-float AlternatorHardShutdownV = 14.8f;    // V — absolute hard-shutdown threshold; this 14.8 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with BulkVoltage + 0.3 V so 24V/48V systems get sensible defaults (29.1 V / 57.9 V).
+// and the adaptive fast-OV lockout starts. Should be set just below the battery BMS shutdown
+// voltage. This is the only software-layer hard OV shutdown; below it sit the Group 1/2/3
+// throttling protections AND the INA228 hardware ALERT (BulkVoltage + 0.3 V on the chip's
+// averaged value, BUSOL polled every 250ms) — the software cut sits a rung ABOVE the hardware
+// one on purpose: hardware owns sustained OV at +0.3, software owns fast transients the
+// averaging + 250ms poll can miss, at +0.5, leaving G2's filtered clamp room to win a blip
+// without any GPIO4 cut (2026-07-12: +0.31V blip peaks at a 14.4 bulk target hit the old
+// +0.3 line inside the G2 filter lag).
+float AlternatorHardShutdownV = 15.0f;    // V — absolute hard-shutdown threshold; this 15.0 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with BulkVoltage + 0.5 V so 24V/48V systems get sensible defaults (30.0 V / 60.0 V).
 float VoltageDisagreeThreshold = 0.15f;   // V difference between BatteryV and IBV for disagreement detection
 uint32_t VoltageDisagreeTimeout = 10000;  // ms - sustained disagreement this long triggers warning
 uint32_t VoltageDisagreeCriticalTimeoutMs = 3000;
