@@ -1476,6 +1476,9 @@ void AdjustFieldLearnMode() {
   updateRPMBucketHistory(currentMillis);
 
   TickSnapshot tick = buildTickSnapshot(currentMillis, actualDtMs);
+  // Above every early-return below (fresh-CH1 gate, limp home, immediate cuts) so lifetime OV
+  // dwell accumulates in all modes. RAW voltage on purpose — filtered smears ~100ms spikes.
+  updateOvHistogram(tick.currentBatteryVoltage, tick.nowMs);
   uint32_t aflM1 = micros();  // end of section 1: RPM tables + tick snapshot
 
   // Runs every tick in every mode (not just AUTO): an over-temp event drops to SYS_MODE_FAULT,
@@ -1553,6 +1556,16 @@ void AdjustFieldLearnMode() {
   // (phantom RPM spikes). Placed pre-CH1-gate so it fires at full loop rate regardless of
   // current-sensor freshness. Forced reason RPM_TOO_LOW so the log/telemetry name the cause.
   if (tick.engineFullyStopped && !gpio4IsLow) {
+    applyImmediateCut(tick, REASON_RPM_TOO_LOW);
+    return;
+  }
+
+  // Shutdown spin-down: charging already disabled AND RPM below the field minimum — the graceful
+  // CHARGING_DISABLED ramp has nothing left to soften (no alternator output below MinRPMForField)
+  // and an energized field only fakes tach readings, so finish the cut now. Fires on the first
+  // floored-zero sample too, beating the RPM_ZERO_CUT_MS debounce during shutdowns. Engine running
+  // above minimum keeps the full graceful ramp.
+  if (!tick.chargingEnabled && tick.rpmBelowMinimum && !gpio4IsLow) {
     applyImmediateCut(tick, REASON_RPM_TOO_LOW);
     return;
   }
@@ -1668,7 +1681,14 @@ void AdjustFieldLearnMode() {
         }
       }
 
-      if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && ibvFilt > ChargingVoltageTarget + OvMeasMarginV) {
+      // Lifetime soft-exceed counter tracks the EXACT Group-2 trigger below (not g_fastOvClampCount,
+      // which counts all protections), so the count means "the soft current-cap actually engaged."
+      bool g2SoftNow = (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && ibvFilt > ChargingVoltageTarget + OvMeasMarginV);
+      static bool g2SoftPrev = false;
+      if (g2SoftNow && !g2SoftPrev) g_ovTel.softExceedCount++;
+      g2SoftPrev = g2SoftNow;
+
+      if (g2SoftNow) {
         float ovExcess = ibvFilt - (ChargingVoltageTarget + OvMeasMarginV);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
         if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; capReasonTick = CAP_REASON_KHARD_G2; }
@@ -4456,9 +4476,15 @@ void updateProtectionCounters(FieldEventReason reason) {
   static FieldEventReason prevReason = REASON_NONE;
   if (reason != prevReason) {
     switch (reason) {
-      case REASON_INA_OVERVOLTAGE: g_inaOVCount++; break;
+      case REASON_INA_OVERVOLTAGE:
+        g_inaOVCount++;
+        g_ovTel.inaCutCount++;  // lifetime twin (RTC) of the session counter
+        break;
       case REASON_HARD_OVERCURRENT: g_hardOCCount++; break;
-      case REASON_FAST_OVERVOLTAGE: g_voltSpikeCount++; break;  // reuses the OV-spike counter (REASON_VOLTAGE_SPIKE retired)
+      case REASON_FAST_OVERVOLTAGE:
+        g_voltSpikeCount++;  // reuses the OV-spike counter (REASON_VOLTAGE_SPIKE retired)
+        g_ovTel.swHardCutCount++;  // lifetime twin (RTC) of the session counter
+        break;
       case REASON_VOLTAGE_SPIKE: g_voltSpikeCount++; break;
       case REASON_VOLTAGE_DISAGREE_CRITICAL: g_voltDisagreeCritCount++; break;
       case REASON_VOLTAGE_DISAGREE_WARNING: g_voltDisagreeWarnCount++; break;
@@ -4668,25 +4694,6 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   tick.manualMode = (ManualFieldToggle == 1);
   tick.ignoreTemperature = (IgnoreTemperature != 0);
   tick.ignoreRPM = (IgnoreRPM != 0);
-  // Protection-event grace: a clamp runs the field near MinDuty (tach floor dropped), which can
-  // starve the LM2907 pickup — an EXACTLY-zero reading inside the window is signal dropout, not a
-  // stopped engine. Only literal 0 is masked (a real post-blip idle droop reads nonzero and gates
-  // normally); a genuine stall cuts the moment the window expires because rpmZeroSinceMs keeps
-  // counting below.
-  bool rpmDropoutGrace = (g_lastProtClampMs != 0)
-                         && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS)
-                         && (RPM <= 0.0f);
-  tick.rpmBelowMinimum = (!tick.ignoreRPM && !rpmDropoutGrace && RPM < (float)MinRPMForField);
-
-  // Engine confirmed stopped: RPM held at exactly 0 for >= RPM_ZERO_CUT_MS. RPM is already
-  // floored to 0 below 100 in ReadAnalogInputs, so RPM <= 0 means a true zero. Skipped when
-  // IgnoreRPM is set (no trustworthy RPM signal). Drives the immediate-cut override below.
-  if (!tick.ignoreRPM && RPM <= 0.0f) {
-    if (rpmZeroSinceMs == 0) rpmZeroSinceMs = currentMillis;
-  } else {
-    rpmZeroSinceMs = 0;
-  }
-  tick.engineFullyStopped = (!rpmDropoutGrace && rpmZeroSinceMs != 0 && (currentMillis - rpmZeroSinceMs) >= RPM_ZERO_CUT_MS);
 
   // Charging enabled (with BMS and weather mode overrides)
   bool chargingEnabledLocal = (Ignition == 1 && OnOff == 1);
@@ -4711,6 +4718,29 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   if (inIdleStage) chargingEnabledLocal = false;
 
   tick.chargingEnabled = chargingEnabledLocal;
+
+  // Protection-event grace: a clamp runs the field near MinDuty (tach floor dropped), which can
+  // starve the LM2907 pickup — an EXACTLY-zero reading inside the window is signal dropout, not a
+  // stopped engine. Only literal 0 is masked (a real post-blip idle droop reads nonzero and gates
+  // normally); a genuine stall cuts the moment the window expires because rpmZeroSinceMs keeps
+  // counting below. Only while charging is enabled: a shutdown (toggle/key-off/BMS/weather) has
+  // nothing to recover, and deferring the cuts just keeps the field energized where its PWM fakes
+  // tach readings (phantom RPM in datalogs).
+  bool rpmDropoutGrace = (g_lastProtClampMs != 0)
+                         && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS)
+                         && chargingEnabledLocal
+                         && (RPM <= 0.0f);
+  tick.rpmBelowMinimum = (!tick.ignoreRPM && !rpmDropoutGrace && RPM < (float)MinRPMForField);
+
+  // Engine confirmed stopped: RPM held at exactly 0 for >= RPM_ZERO_CUT_MS. RPM is already
+  // floored to 0 below 100 in ReadAnalogInputs, so RPM <= 0 means a true zero. Skipped when
+  // IgnoreRPM is set (no trustworthy RPM signal). Drives the immediate-cut override below.
+  if (!tick.ignoreRPM && RPM <= 0.0f) {
+    if (rpmZeroSinceMs == 0) rpmZeroSinceMs = currentMillis;
+  } else {
+    rpmZeroSinceMs = 0;
+  }
+  tick.engineFullyStopped = (!rpmDropoutGrace && rpmZeroSinceMs != 0 && (currentMillis - rpmZeroSinceMs) >= RPM_ZERO_CUT_MS);
 
   // Temperature selection
   bool tempFromAlt = (TempSource == 0);

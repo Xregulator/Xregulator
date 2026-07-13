@@ -1373,7 +1373,9 @@ static const uint32_t CVPF_T_PILOT_MS  = 3000;
 static const uint32_t CVPF_REST_MAX_MS = 45000;        // slope-gated; 45s cap for slow flooded/large banks
 static const float    CVPF_REST_SLOPE_MVPS = 0.5f;     // "settled" = |dV/dt| under this over a 3s window
 static const uint32_t CVPF_SKIP_MS = 1500;             // current-loop settle before the horizon read
-static const float    CVPF_DI_MAX = 40.0f;
+static const float    CVPF_DI_MAX_DEFAULT = 40.0f;     // baseline current-step ceiling; cvpfDiMaxA overrides per-run on a weak-signal re-run
+static const float    CVPF_DI_MAX_CEIL    = 100.0f;    // absolute backstop for the operator-boosted step (cap-table clamp usually binds first)
+static const float    CVPF_CAP_MARGIN_A   = 5.0f;      // keep the commanded step this far under the live cap-table ceiling (g_I_cap)
 static const float    CVPF_V_RESERVE = 0.15f;          // keep the projected step peak this far below the hard-OV cut
 static const float    CVPF_GASSING_V_12V = 14.2f;      // ~2.37 V/cell — oxygen-evolution onset on lead-acid
 static const uint32_t CVPF_FIT_T0_MS = 2000;           // fit starts here: past CVPF_SKIP_MS, current has settled
@@ -1435,12 +1437,16 @@ static void cvpfSizeStep() {
   float Klong    = cvpfPilotK * CVPF_LONG_K_MULT;
   float Kupper   = Klong * 1.5f;                                             // pessimistic (bigger K → smaller ΔI)
   float headroom = fmaxf(0.05f, AlternatorHardShutdownV - cvpfPilotVbase - CVPF_V_RESERVE);
-  float di = CVPF_DI_MAX;
+  float di = cvpfDiMaxA;
   di = fminf(di, headroom / fmaxf(1e-3f, Kupper));
   di = fminf(di, cvpfTargetDV / fmaxf(1e-3f, Klong));
+  // Never command past what the alternator cap table allows at this RPM (the step rides on top of cvpfBaseA).
+  // Skip when g_I_cap is unset/tiny (low RPM) — the delivery-short warn catches under-delivery instead.
+  if (g_I_cap > cvpfBaseA + cvpfPilotA + CVPF_CAP_MARGIN_A)
+    di = fminf(di, g_I_cap - cvpfBaseA - CVPF_CAP_MARGIN_A);
   di = roundf(di);
   if (di < cvpfPilotA) di = cvpfPilotA;
-  if (di > CVPF_DI_MAX) di = CVPF_DI_MAX;
+  if (di > cvpfDiMaxA) di = cvpfDiMaxA;
   cvpfStepA = di;
 }
 
@@ -1621,12 +1627,14 @@ void cvpfProcess() {
   float ki = rho * kp;                        // Ki from the UN-clamped Kp, then clamp both — matches recomputeCvGains
   cvpfKp = clamp_f(kp, 2.0f, 120.0f);
   cvpfKi = clamp_f(ki, 1.0f, 80.0f);
+  cvpfRpmAtFit = RPM;
+  cvpfCapHeadroomA = fmaxf(0.0f, g_I_cap - cvpfBaseA);   // how much bigger a step the alternator table allows at this RPM
   cvpfOk = true; cvpfState = 2;
   queueConsoleMessageF("CV plant-fit: Ka=%.1f Kb=%.1f mV/A -> K=%.1f mV/A at %.1fs (n=%d) dI=%.2f A SNR=%.0f -> Kp %.1f Ki %.1f warn=%d (%luus)",
                        cvpfKa * 1000.0f, cvpfKb * 1000.0f, K * 1000.0f, cvpfHorizonS, nFit, dI, cvpfSNR, kp, cvpfKi, (int)cvpfWarn, (unsigned long)(micros() - tP));
 }
 
-bool cvpfStartTest() {
+bool cvpfStartTest(float diMaxReq) {
   if (cvpfState == 1)           { cvpfAbortMsg = "already running";        return false; }
   if (!cvpfBuf)                 { cvpfAbortMsg = "buffer unallocated";     return false; }
   if (RPM < 100)                { cvpfAbortMsg = "engine not running";     return false; }
@@ -1641,6 +1649,9 @@ bool cvpfStartTest() {
   cvpfBaseA = 10.0f; cvpfPilotA = 6.0f; cvpfStepA = 6.0f;
   cvpfTargetDV = 0.30f; cvpfFellBack = false; cvpfReleasing = false;
   cvpfCmdA = cvpfBaseA;
+  cvpfDiMaxA = (diMaxReq > CVPF_DI_MAX_DEFAULT) ? fminf(diMaxReq, CVPF_DI_MAX_CEIL) : CVPF_DI_MAX_DEFAULT;
+  if (cvpfDiMaxA > CVPF_DI_MAX_DEFAULT)
+    queueConsoleMessageF("CV plant-fit: step ceiling raised to %.0f A for a stronger signal (weak-signal re-run)", cvpfDiMaxA);
   float hReq = 1.0f / ((cvCrossover > 1e-3f) ? cvCrossover : 0.20f);
   cvpfHorizonS = clamp_f(hReq, CVPF_H_MIN_S, CVPF_H_MAX_S);
   if (hReq < CVPF_H_MIN_S)

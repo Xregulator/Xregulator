@@ -4630,11 +4630,13 @@ void syncTimeFromGPS(uint16_t daysSince1970, double secondsSinceMidnight) {
 // hasn't forced a non-phone source. Called from /set_phone_data handler.
 void syncTimeFromPhone(time_t phoneEpochSec) {
   if (phoneEpochSec <= 1577836800) return;  // sanity (pre-2020)
-  // Skew sanity: if we already have a trusted timebase, reject phone times
-  // more than 24h off — guards against phones with manually-set clocks or
-  // simulators that boot without time sync. First sync skips this (nothing
-  // to compare); NMEA/NTP will eventually overwrite a bad first sync.
-  if (timeIsSynced && timeBase > 0) {
+  // Skew sanity: reject phone times more than 24h off a timebase we ALREADY trust
+  // (guards against phones with manually-set clocks or sim boots). But a low-confidence
+  // soft-clock ESTIMATE (RTC/NVS restore) must NOT trigger this — it's exactly what a real
+  // phone time is meant to correct. A bench unit that sat unplugged for days restores a stale
+  // estimate; in AP mode the phone/browser POST is the ONLY clock source, so a >24h skew guard
+  // here would permanently lock the device to the wrong day. First sync (TIME_NONE) also skips.
+  if (timeIsSynced && timeBase > 0 && currentTimeSource != TIME_ESTIMATED) {
     time_t now = getCurrentTimestamp();
     long long diff = (long long)phoneEpochSec - (long long)now;
     if (diff < 0) diff = -diff;

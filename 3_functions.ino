@@ -2913,6 +2913,9 @@ void setupServer() {
     BatteryCapacity_Ah = constrain((int)(doc["battery_capacity_ah"] | BatteryCapacity_Ah), 1, 100000);
     PeukertRatedCurrent_A = BatteryCapacity_Ah / 20.0f;  // /get derives this on write; import must too
     BATTERY_TYPE = doc["battery_type"].as<String>();
+    // The INA228 OV rule is chemistry-dependent (lithium bulk+0.3, else = AlternatorHardShutdownV),
+    // so a chemistry-only change (class unchanged → applyNominalVoltageChange skipped) must re-derive.
+    updateINA228OvervoltageThreshold();
     // Voltage/capacity/chemistry all move the CV plant gain the commissioning fit measured, so the stored
     // tune no longer describes this bank. Only nag once a pass has actually been finished (epoch stamped).
     if (CommissionEpoch > 0 && (newBatteryVoltage != oldBatteryVoltage
@@ -3151,7 +3154,8 @@ void setupServer() {
     // ── CV plant fit (firmware voltage-loop identification, commissioning Step 9) ──
     if (request->hasParam("cvPlantFitStart")) {
       foundParameter = true;
-      if (!cvpfStartTest()) queueConsoleMessageF("CV plant-fit: cannot start — %s", cvpfAbortMsg);
+      float diMaxReq = request->hasParam("diMax") ? request->getParam("diMax")->value().toFloat() : 0.0f;
+      if (!cvpfStartTest(diMaxReq)) queueConsoleMessageF("CV plant-fit: cannot start — %s", cvpfAbortMsg);
     }
     if (request->hasParam("cvPlantFitCancel")) {
       foundParameter = true;
@@ -5478,6 +5482,7 @@ void setupServer() {
       inputMessage = request->getParam("AlternatorHardShutdownV")->value();
       settingWrite(NK_AlternatorHardShutdownV, inputMessage.c_str());
       AlternatorHardShutdownV = inputMessage.toFloat();
+      updateINA228OvervoltageThreshold();  // non-lithium INA228 limit tracks this value — never leave it stale
       queueConsoleMessageF("Alternator hard-shutdown voltage set to: %.2fV (absolute)", AlternatorHardShutdownV);
     }
     // "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
@@ -6724,10 +6729,10 @@ void setupServer() {
     snprintf(buf, 768,
              "{\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"aborted\":%d,"
              "\"K_mVpA\":%.1f,\"Ka_mVpA\":%.2f,\"Kb_mVpA\":%.2f,\"dV_mV\":%.0f,\"dI\":%.2f,\"snr\":%.0f,\"horizonS\":%.1f,"
-             "\"Kp\":%.2f,\"Ki\":%.2f,\"stepA\":%.1f,\"warn\":%d,\"abort\":\"%s\"}",
+             "\"Kp\":%.2f,\"Ki\":%.2f,\"stepA\":%.1f,\"capHeadroomA\":%.1f,\"rpmAtFit\":%.0f,\"diMaxA\":%.1f,\"warn\":%d,\"abort\":\"%s\"}",
              cvPlantFitActive ? 1 : 0, (int)cvpfPhase, cvpfReady ? 1 : 0, cvpfOk ? 1 : 0, (cvpfState == 3) ? 1 : 0,
              cvpfK * 1000.0f, cvpfKa * 1000.0f, cvpfKb * 1000.0f, cvpfDV * 1000.0f, cvpfDI, cvpfSNR, cvpfHorizonS,
-             cvpfKp, cvpfKi, cvpfStepA, (int)cvpfWarn, cvpfAbortMsg);
+             cvpfKp, cvpfKi, cvpfStepA, cvpfCapHeadroomA, cvpfRpmAtFit, cvpfDiMaxA, (int)cvpfWarn, cvpfAbortMsg);
     request->send(200, "application/json", buf);
   });
 
@@ -7149,6 +7154,45 @@ void setupServer() {
     g_voltImplausibleCount = 0;
     g_currentStaleCount = 0;
     request->send(200, "text/plain", "OK");
+  });
+
+  // Deliberately SEPARATE from the session-counter reset above: routine bench resets must not
+  // destroy the lifetime OV record. The web UI fronts this with an explicit confirm.
+  server.on("/resetOvTelemetryLifetime", HTTP_POST, [](AsyncWebServerRequest *request) {
+    memset(&g_ovTel, 0, sizeof(g_ovTel));
+    g_ovTel.magic = OVTEL_MAGIC;
+    request->send(200, "text/plain", "OK");
+  });
+
+  // Lifetime OV telemetry for the Diagnostics panel. Not in CSV2 (avoids field-count churn) —
+  // polled on demand. time_ms as decimal strings: uint64 dwell is beyond JS's 53-bit integers.
+  server.on("/getOvTelemetry", HTTP_GET, [](AsyncWebServerRequest *request) {
+    const size_t cap = 2048;  // worst-case body ~1.1 KB (28 bins × two arrays + metadata)
+    char *buf = (char *)ps_malloc(cap);
+    if (!buf) {
+      request->send(500, "text/plain", "Out of memory");
+      return;
+    }
+    int off = snprintf(buf, cap,
+                       "{\"bulk\":%.2f,\"k\":%.2f,\"bins_fine\":%d,\"bins_coarse\":%d,"
+                       "\"fine_width_12v\":0.2,\"coarse_width_12v\":1.0,"
+                       "\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"events\":[",
+                       BulkVoltage, (float)BATTERY_VOLTAGE / 12.0f, OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS,
+                       (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
+                       (unsigned long)g_ovTel.inaCutCount);
+    for (int i = 0; i < OV_HIST_BINS && off > 0 && off < (int)cap; i++)
+      off += snprintf(buf + off, cap - off, "%s%lu", i ? "," : "", (unsigned long)g_ovTel.events[i]);
+    if (off > 0 && off < (int)cap) off += snprintf(buf + off, cap - off, "],\"time_ms\":[");
+    for (int i = 0; i < OV_HIST_BINS && off > 0 && off < (int)cap; i++)
+      off += snprintf(buf + off, cap - off, "%s\"%llu\"", i ? "," : "", (unsigned long long)g_ovTel.timeMs[i]);
+    if (off > 0 && off < (int)cap) off += snprintf(buf + off, cap - off, "]}");
+    if (off <= 0 || off >= (int)cap) {
+      free(buf);
+      request->send(500, "text/plain", "Payload overflow");
+      return;
+    }
+    request->send(200, "application/json", buf);
+    free(buf);
   });
 
   server.on("/resetThermalProtectionCounters", HTTP_POST, [](AsyncWebServerRequest *request) {

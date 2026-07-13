@@ -2603,6 +2603,48 @@ input:focus {
    buttons fit one row beside the label. Shrinks responsively on mobile. */
 #plots-displays .settings-card { max-width: 680px; }
 
+/* Charge-mode ribbon between the Current and Voltage plots */
+.mode-strip-card { padding: 6px 10px; }
+.mode-strip-card canvas {
+  display: block;
+  width: 100%;
+  height: 12px;
+  cursor: pointer;
+}
+#mode-strip-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  justify-content: center;
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--text-dark);
+}
+#mode-strip-legend span { display: inline-flex; align-items: center; gap: 4px; }
+#mode-strip-legend i {
+  width: 10px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+  opacity: 0.88;
+}
+#mode-strip-tip {
+  position: fixed;
+  z-index: 3000;
+  display: none;
+  pointer-events: none;
+  background: rgba(20, 20, 20, 0.92);
+  color: #fff;
+  font-size: 11.5px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+body.dark-mode #mode-strip-tip {
+  background: rgba(240, 240, 240, 0.95);
+  color: #111;
+}
+
 .section-title {
   background-color: #f0f0f0;
   color: var(--text-dark);

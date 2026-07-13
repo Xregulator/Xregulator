@@ -3168,7 +3168,8 @@ bool buildConfigPayload() {
     "{\"device_uid\":\"%s\",\"token\":\"%s\",\"snapshot_timestamp\":\"%s\","
     // payload_v = ingest payload schema version; bump when this body's shape changes.
     // Edge fn destructures named keys so it ignores this; present for version tracing.
-    "\"payload_v\":1,"
+    // v2 adds state.ov_telemetry (lifetime OV histogram + counters → device_statistics jsonb).
+    "\"payload_v\":2,"
     "\"settings\":",
     device_id_hex, authToken.c_str(), timestampStr);
   if (offset < 0 || offset >= CONFIG_PAYLOAD_SIZE) return false;
@@ -3238,6 +3239,24 @@ bool buildConfigPayload() {
   offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
     ",\"fa_pkpk_worst_session\":%.2f,\"fa_peak_worst_a_session\":%.2f,\"fa_peak_worst_hz_session\":%.1f",
     faSesPkpkWorstA, faSesPeakWorstA, faSesPeakWorstHz);
+
+  // Lifetime OV excursion telemetry (RTC-RAM histogram + counters — OvTelemetry in Xregulator.ino).
+  // One nested object → device_statistics.ov_telemetry (jsonb); the edge fn must route it there and
+  // EXCLUDE it from the device_state_daily flatten (a nested value in that INSERT 500s the snapshot).
+  // time_ms as decimal strings (uint64 dwell is beyond JS 53-bit integers). After a true power cut
+  // the struct zeroes and the next snapshot reports lower values — edge fn overwrites as-is, accepted.
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
+    ",\"ov_telemetry\":{\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"bulk\":%.2f,\"k\":%.2f,"
+    "\"bins_fine\":%d,\"bins_coarse\":%d,\"events\":[",
+    (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
+    (unsigned long)g_ovTel.inaCutCount, BulkVoltage, (float)BATTERY_VOLTAGE / 12.0f,
+    OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS);
+  for (int i = 0; i < OV_HIST_BINS; i++)
+    offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "%s%lu", i ? "," : "", (unsigned long)g_ovTel.events[i]);
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "],\"time_ms\":[");
+  for (int i = 0; i < OV_HIST_BINS; i++)
+    offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "%s\"%llu\"", i ? "," : "", (unsigned long long)g_ovTel.timeMs[i]);
+  offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "]}");
 
   // Control Accuracy numbers since the last reset (≈one day — these auto-reset right after this
   // upload succeeds, so each daily snapshot is one independent measurement of loop performance).

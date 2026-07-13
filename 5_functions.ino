@@ -689,6 +689,13 @@ void captureResetReason() {
   g_blackBoxPrevValid = (g_blackBoxPrev.magic == BLACKBOX_MAGIC);
   g_blackBox.magic = 0;
 
+  // Lifetime OV telemetry: bad magic = true power-down or a firmware layout change — start clean
+  // (no migration; an old bin layout is not comparable). Valid magic carries the history through.
+  if (g_ovTel.magic != OVTEL_MAGIC) {
+    memset(&g_ovTel, 0, sizeof(g_ovTel));
+    g_ovTel.magic = OVTEL_MAGIC;
+  }
+
   Serial.printf("RESET: %s | esp=%d rtc0=%d rtc1=%d\n",
                 resetReasonName(), g_rawResetEsp, g_rawResetRtc0, g_rawResetRtc1);
   if (g_blackBoxPrevValid) {
@@ -2349,17 +2356,61 @@ bool clearINA228AlertLatch(uint8_t i2cAddress) {
   return Wire.endTransmission() == 0;
 }
 
+// Returns 0..OV_HIST_BINS-1, or -1 if raw bus voltage is at/below Bulk (struct + bin layout
+// documented at the OvTelemetry declaration in Xregulator.ino).
+int ovHistBin(float rawV) {
+  float k = (float)BATTERY_VOLTAGE / 12.0f;
+  float v = rawV - BulkVoltage;  // volts above Bulk (raw)
+  if (v <= 0.0f) return -1;
+  float fineW = 0.2f * k, fineTop = 3.0f * k;
+  if (v < fineTop) return (int)(v / fineW);  // 0..14
+  float c = (v - fineTop) / (1.0f * k);
+  if (c < (float)OV_HIST_COARSE_BINS) return OV_HIST_FINE_BINS + (int)c;  // 15..26
+  return OV_HIST_BINS - 1;  // 27 overflow
+}
+
+// Called once per control tick in every mode — field state does not gate it, because external
+// charge sources (solar, shore) can drive bus OV with the field off and must still be captured.
+void updateOvHistogram(float rawV, uint32_t nowMs) {
+  static uint32_t lastMs = 0;
+  static int lastBin = -1;
+  uint32_t dt = (lastMs == 0) ? 0 : (nowMs - lastMs);
+  if (dt > 1000) dt = 1000;  // clamp: never attribute a boot/stall gap to a bin
+  lastMs = nowMs;
+  int bin = ovHistBin(rawV);
+  if (bin < 0) {
+    lastBin = -1;
+    return;
+  }
+  g_ovTel.timeMs[bin] += dt;
+  if (bin != lastBin) g_ovTel.events[bin]++;
+  lastBin = bin;
+}
+
+// BATTERY_TYPE is free text from Vessel Info, so substring-match the common lithium spellings.
+// Shared by the INA228 threshold rule and the SoC voltage seed.
+bool batteryIsLithium() {
+  String bt = BATTERY_TYPE;
+  bt.toLowerCase();
+  return bt.indexOf("lifepo") >= 0 || bt.indexOf("lithium") >= 0 ||
+         bt.indexOf("li-ion") >= 0 || bt.indexOf("liion") >= 0 || bt.indexOf("lfp") >= 0;
+}
+
 void updateINA228OvervoltageThreshold() {
   if (INADisconnected != 0) {
     queueConsoleMessageF("INA228: Cannot update threshold - chip not connected");
     return;
   }
 
-  // Headroom per-cell-scaled by class. Deliberately one rung BELOW the software fast cut
-  // (AlternatorHardShutdownV, bulk + 0.5): this compare uses the chip's averaged value and a
-  // 250ms BUSOL poll, so it owns SUSTAINED overvoltage at bulk + 0.3 while the raw per-tick
-  // software cut owns fast transients at bulk + 0.5 (2026-07-12 split).
-  VoltageHardwareLimit = BulkVoltage + 0.3f * ((float)BATTERY_VOLTAGE / 12.0f);
+  // Lithium: one rung BELOW the software fast cut — this compare uses the chip's averaged value
+  // and a 250ms BUSOL poll, so it owns SUSTAINED overvoltage at bulk + 0.3 while the raw per-tick
+  // software cut owns fast transients at bulk + 0.5 (2026-07-12 split). AGM/flooded/other: same
+  // ceiling as the software cut (chemistry-specific absolute via commissioning, 16.0 V at 12 V;
+  // bulk + 0.5 fallback if never commissioned). At one voltage the pair stays complementary
+  // (raw per-tick vs ~1s average) and the INA228 becomes the software-failed-to-protect /
+  // MCU-hang backstop that should read ~0 trips normally (2026-07-13 chemistry split).
+  if (batteryIsLithium()) VoltageHardwareLimit = BulkVoltage + 0.3f * ((float)BATTERY_VOLTAGE / 12.0f);
+  else VoltageHardwareLimit = AlternatorHardShutdownV;
 
   const double LSB = 0.003125;                                           // 3.125 mV/LSB
   uint16_t thresholdLSB = (uint16_t)(VoltageHardwareLimit / LSB + 0.5);  // Round instead of truncate
@@ -2807,6 +2858,23 @@ void _ReadAnalogInputs_inner() {
                                              (int)endStatus, (int)bytesReceived, (unsigned)adsMuxCodes[adsTriggeredChannel]);
                              }
                              prevRPMdbg = RPM;
+                           }
+                           // Lone-sample glitch rejection: a real start ramps across >=2 samples (~30ms
+                           // apart via the ADS round-robin); a single <100 -> >1000 jump is field-PWM
+                           // pickup during shutdown or an ADS mux-carryover artifact, never a real engine.
+                           // Hold the last accepted value for one sample and accept on the second
+                           // consecutive high reading — keeps phantoms out of RPM, RPMMax, watermarks,
+                           // aggregates, and CSVs, and stops a lone spike resetting rpmZeroSinceMs.
+                           {
+                             static float rpmLastAccepted = 0.0f;
+                             static bool rpmJumpPending = false;
+                             if (rpmLastAccepted < 100.0f && RPM > 1000.0f && !rpmJumpPending) {
+                               rpmJumpPending = true;
+                               RPM = rpmLastAccepted;
+                             } else {
+                               rpmJumpPending = false;
+                               rpmLastAccepted = RPM;
+                             }
                            }
                            if (RPM > RPMMax)         { RPMMax         = RPM; }
                            if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; }
@@ -4262,10 +4330,7 @@ void seedSocFromVoltage() {
   bool isLithium = false;
 
   if (voltage > 5.0f) {  // same sanity floor as the INA read path
-    String bt = BATTERY_TYPE;
-    bt.toLowerCase();
-    isLithium = (bt.indexOf("lifepo") >= 0 || bt.indexOf("lithium") >= 0 ||
-                 bt.indexOf("li-ion") >= 0 || bt.indexOf("liion") >= 0 || bt.indexOf("lfp") >= 0);
+    isLithium = batteryIsLithium();
 
     // Current compensation: back out open-circuit voltage before the table lookup
     // (Vocv ≈ Vterm − I·Reff). The published SoC-vs-V curve families at different C-rates are

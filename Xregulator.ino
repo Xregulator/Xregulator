@@ -830,6 +830,30 @@ RTC_NOINIT_ATTR BlackBoxSnap g_blackBox;
 BlackBoxSnap g_blackBoxPrev;        // copy of last session's snapshot, taken at boot
 bool g_blackBoxPrevValid = false;   // true if last session's magic matched (RTC RAM survived)
 
+// Lifetime OV excursion telemetry in RTC noinit RAM (same survival semantics as the black box:
+// lost only on a true power-down — accepted). Histogram of RAW bus voltage, referenced to Bulk.
+// Fine: Bulk .. Bulk+3V in 0.2V steps (15 bins). Coarse: Bulk+3 .. Bulk+15V in 1.0V steps
+// (12 bins). +1 overflow bin. Bin widths scale ×(BATTERY_VOLTAGE/12) so the bin count is fixed
+// across 12/24/48V. Separate from the session counters (g_voltSpikeCount etc.), which reset on
+// reboot and /resetVoltageProtectionCounters; this struct is zeroed only by a magic mismatch or
+// /resetOvTelemetryLifetime.
+#define OV_HIST_FINE_BINS 15
+#define OV_HIST_COARSE_BINS 12
+#define OV_HIST_BINS (OV_HIST_FINE_BINS + OV_HIST_COARSE_BINS + 1)  // 28
+typedef struct {
+  uint64_t timeMs[OV_HIST_BINS];  // cumulative ms with raw bus V in this band (first: 8-byte align; u32 would wrap at 49.7 days/bin)
+  uint32_t events[OV_HIST_BINS];  // entries into this band (band-occupancy rising edge; low bins run large from CV ripple — expected, timeMs is the ripple-robust metric)
+  uint32_t softExceedCount;       // rising edge: filtered V crossed target + OvMeasMarginV (Group-2 soft cap actually engaged)
+  uint32_t swHardCutCount;        // rising edge: REASON_FAST_OVERVOLTAGE (SW hard cut, raw/per-tick)
+  uint32_t inaCutCount;           // rising edge: REASON_INA_OVERVOLTAGE (INA228 ~1s-avg latched cut — software-failed-to-protect backstop)
+  uint32_t magic;
+} OvTelemetry;  // ~352 B; RTC slow RAM has ample room (black box is the only other user)
+// Size + bin count folded into the magic so a layout change self-invalidates (no migration —
+// an old-layout histogram is not comparable to a new one).
+#define OVTEL_MAGIC (0x0E7E1E77UL ^ (uint32_t)sizeof(OvTelemetry) ^ ((uint32_t)OV_HIST_BINS << 8))
+RTC_NOINIT_ATTR OvTelemetry g_ovTel;
+// ovHistBin() + updateOvHistogram() live in 5_functions.ino (need BulkVoltage, declared below).
+
 // These are health variables for the TempTask (digital temperature measurement)
 unsigned long lastTempTaskHeartbeat = 0;
 bool tempTaskHealthy = true;
@@ -2317,6 +2341,8 @@ uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not c
 // starve the LM2907 pickup), not as a stopped engine — neither the below-minimum immediate cut
 // nor the zero-cut fires on it. Nonzero-but-low readings gate normally, and rpmZeroSinceMs keeps
 // counting through the grace so a genuine stall still cuts the moment the window expires.
+// Applies ONLY while charging is enabled — a shutdown has nothing to recover, so both cuts fire
+// ungated and a stopping engine can't sit with an energized field faking tach readings.
 #define PROT_RPM_GRACE_MS 5000
 uint32_t g_lastProtClampMs = 0;      // millis() of the most recent tick any protection clamp was active
 int bmsLogic = 0;                     // if BMS is asked to turn the alternator on and off
@@ -2888,6 +2914,9 @@ uint32_t cvpfPhaseStartMs = 0, cvpfStepT0Ms = 0, cvpfSampleLastMs = 0, cvpfTestS
 float    cvpfBaseA = 10.0f, cvpfPilotA = 6.0f, cvpfStepA = 6.0f, cvpfTargetDV = 0.30f;
 float    cvpfPilotK = 0.02f, cvpfPilotVbase = 12.0f, cvpfCmdA = 10.0f;
 bool     cvpfFellBack = false, cvpfReleasing = false;
+float    cvpfDiMaxA = 40.0f;       // per-run current-step ceiling (A); raised only when the operator accepts the weak-signal re-run, reset each start
+float    cvpfRpmAtFit = 0.0f;      // RPM at fit completion — feeds the re-run RPM advice
+float    cvpfCapHeadroomA = 0.0f;  // A — alternator cap-table headroom at fit time (g_I_cap − cvpfBaseA); how much bigger a step the table allows
 
 // Explicit prototypes: String-return / String& functions don't survive auto-prototype ordering.
 void   bhSample(uint32_t nowMs);
@@ -2896,7 +2925,7 @@ void   bhAbort(const char *reason);
 void   bhComputeDcir();
 void   bhServiceCompletion();
 void   cvpfSample(uint32_t nowMs);
-bool   cvpfStartTest();
+bool   cvpfStartTest(float diMaxReq);
 void   cvpfAbort(const char *reason);
 void   cvpfProcess();
 void   cvpfServiceCompletion();

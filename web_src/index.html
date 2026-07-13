@@ -11840,6 +11840,63 @@
         </details>
         </div>
       </details>
+      <!-- Overvoltage History — lifetime OV telemetry (RTC RAM), on-demand /getOvTelemetry fetch -->
+      <details class="diag-section" ontoggle="if (this.open) fetchOvTelemetry()">
+        <summary class="diag-section-title">Overvoltage History</summary>
+        <div class="settings-card">
+          <p style="font-size:0.8em;color:var(--text-muted);margin:0 0 10px 0;">
+            Lifetime record of bus-voltage excursions above the Bulk target, from any charge source
+            (alternator, solar, shore). It survives restarts and firmware updates; a full power-down
+            (battery disconnected) starts it fresh.
+          </p>
+
+          <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Soft-Cap Engagements
+              <span class="sinfo" data-sinfo="ovtSoft" onclick="sinfoToggle(this)"></span>
+            </span>
+            <span class="metric-value telemetry-value"><span id="ovtSoftCount">—</span></span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+          <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Software Hard Cuts
+              <span class="sinfo" data-sinfo="ovtSwHard" onclick="sinfoToggle(this)"></span>
+            </span>
+            <span class="metric-value telemetry-value"><span id="ovtSwHardCount">—</span></span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+          <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Hardware (INA228) Cuts
+              <span class="sinfo" data-sinfo="ovtIna" onclick="sinfoToggle(this)"></span>
+            </span>
+            <span class="metric-value telemetry-value"><span id="ovtInaCount">—</span></span>
+          </div>
+
+          <div style="overflow-x:auto;margin-top:12px;">
+            <table style="width:100%;border-collapse:collapse;font-size:0.82em;min-width:300px;">
+              <thead>
+                <tr style="color:var(--text-muted);">
+                  <th style="text-align:left;font-weight:600;padding:2px 6px 6px 0;">Voltage band</th>
+                  <th style="text-align:right;font-weight:600;padding:2px 8px 6px 8px;">Events</th>
+                  <th style="text-align:right;font-weight:600;padding:2px 0 6px 8px;">Total time</th>
+                </tr>
+              </thead>
+              <tbody id="ovtBinsBody">
+                <tr><td colspan="3" style="padding:6px 0;color:var(--text-muted);">—</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p style="font-size:0.74em;color:var(--text-muted);margin:8px 0 0 0;">
+            Bands the voltage has never entered are not listed. The lowest bands accumulate large
+            event counts from normal regulation ripple crossing band edges — total time is the
+            better severity measure there.
+          </p>
+
+          <div style="text-align:right;margin-top:8px;">
+            <button onclick="resetOvTelemetryLifetime()" class="btn-secondary btn-sm">Reset Lifetime OV History</button>
+          </div>
+        </div>
+      </details>
+
       <details class="diag-section">
         <summary class="diag-section-title">About this Alternator Diag Page</summary>
         <div class="settings-card">
@@ -12258,6 +12315,12 @@
       </div>
       <div class="settings-card">
         <div class="plot-container" id="current-temp-plot"></div>
+      </div>
+      <!-- Charge-mode ribbon: one sample per plot buffer slot, x-aligned to the plot area
+           above, scrolling in lockstep. Legend lists only the modes present in the window. -->
+      <div class="settings-card mode-strip-card">
+        <canvas id="mode-strip-canvas"></canvas>
+        <div id="mode-strip-legend"></div>
       </div>
       <div class="settings-card">
         <div class="plot-container" id="voltage-plot"></div>
