@@ -808,7 +808,8 @@ const CSV4_FIELDS = [
     "VictronCurrent",             // Victron battery current (A ×100)
     "currentFuelGPH",             // live fuel flow (gal/hr ×100)
     "currentNMPG",                // live fuel economy (naut mi/gal ×100)
-    "ctrlLimiter",                // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit
+    "ctrlLimiter",                // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty
+    "chargeStage",                // CHARGE_STAGE_* code — feeds gLastChargeStage at 2 Hz for the mode ribbon
 ];
 
 // ── Gate-tuning live readouts ───────────────────────────────────────────────
@@ -3454,7 +3455,7 @@ let protEventData = [];
 // without this the samples either side of a gap render as adjacent and the outage is invisible.
 let gapMarkData = [];
 // Charge-mode code per buffer sample for the mode ribbon between the Current and Voltage
-// plots. 1-8 = firmware CHARGE_STAGE_* (via gLastChargeStage, 5s CSV2 cadence), 9 = shutdown
+// plots. 1-8 = firmware CHARGE_STAGE_* (via gLastChargeStage, 2 Hz CSV4 cadence), 9 = shutdown
 // override (CSV1 shutdownPhase, per-frame), 0 = unknown/no-data → bare track.
 let modeStripData = [];
 
@@ -9880,7 +9881,8 @@ function applyStaleStyleByAge(elementId, ageMs, staleThreshold = STALE_THRESHOLD
     }
 }
 // Active-limit cue: teal pill on the governing figure's label (ctrlLimiter 1 alt current,
-// 2 thermal, 3 CV voltage, 4 battery limit). Alt temp digits also go red >2°F over the limit.
+// 2 thermal, 3 CV voltage, 4 battery limit, 5 field at max duty → header duty readout).
+// Alt temp digits also go red >2°F over the limit.
 function updateHeaderLimiterColors(sa) {
     const RED = "#f44336", NORM = "var(--reading)";
     const limFresh = (performance.now() - (window._ctrlLimiterAtMs || 0)) < 5000;  // 10× CSV4 cadence
@@ -9905,6 +9907,7 @@ function updateHeaderLimiterColors(sa) {
     pill('lbl-voltage', sa.ibv, STALE_THRESHOLD_DEFAULT_MS, lim === 3);
     pill('lbl-alt-current', sa.measuredAmps, STALE_THRESHOLD_DEFAULT_MS, lim === 1);
     pill('lbl-batt-current', sa.bcur, STALE_THRESHOLD_DEFAULT_MS, lim === 4);
+    pill('duty-pill-wrap', sa.dutyCycle, STALE_THRESHOLD_DEFAULT_MS, lim === 5);
 }
 
 function updateAllStalenessStyles() {
@@ -12760,7 +12763,7 @@ window.addEventListener("load", function () {
             // Update life indicators
             updateLifeIndicators(data);
 
-            gLastChargeStage = data.chargeStageDisplay; // keep gate functions up to date
+            // gLastChargeStage now rides CSV4 (2 Hz) — not set here, see the CSVData4 listener
 
             // TuningMode/CVTuningMode are CSV3 (settings-echo) fields, NOT present in this CSV2
             // frame — read them from the echo-backed hidden inputs (same idiom as elsewhere,
@@ -12864,11 +12867,17 @@ window.addEventListener("load", function () {
 
             const data = Object.fromEntries(CSV4_FIELDS.map((key, i) => [key, values[i]]));
 
-            // Banner limiter tint source (consumed by updateHeaderLimiterColors on the staleness pass)
+            // Banner limiter tint: repaint on arrival — the 2 s staleness pass alone point-samples
+            // this 500 ms feed and holds a stale code on screen; it still runs as the stale-fallback.
             if (data.ctrlLimiter !== undefined) {
                 window._ctrlLimiter = Number(data.ctrlLimiter);
                 window._ctrlLimiterAtMs = performance.now();
+                if (window.sensorAges) updateHeaderLimiterColors(window.sensorAges);
             }
+
+            // Sole gLastChargeStage source — CSV2's copy is a stale pre-built snapshot that could
+            // briefly regress a fresh stage transition, so it no longer writes this.
+            if (data.chargeStage !== undefined) gLastChargeStage = data.chargeStage;
 
             // Cache raw nav values for cross-listener consumers (baro Zambretti forecast on CSV2).
             Object.assign(window._navLast, data);
@@ -14766,6 +14775,25 @@ const SINFO = {
         ['Source', S_INA_V],
         ['Filter', 'averaging (EMA) sized from the commissioned plant response (~10–80 ms) — rejects belt-ripple crests; logged as ovFilt_V in the CV log'],
         ['Compared to', svTargetV()],
+    ],
+    // ── Live Data ▸ Diag: Overvoltage History (lifetime counters) ──
+    ovtSoft: () => [
+        ['Signal', 'filtered battery voltage vs ' + svv('OvMeasMarginV_echo', 'V') + ' above ' + svTargetV()],
+        ['Action', 'the current command is tapered down in proportion to the excess (35 A per volt) — no field cut, nothing felt at the engine'],
+        ['Counts', 'each engagement of that taper (rising edge). It engages routinely during normal regulation, so a large lifetime count is expected and healthy'],
+        ['Sources', 'any charge source can push the bus voltage here — alternator, solar, or shore'],
+    ],
+    ovtSwHard: () => [
+        ['Signal', 'raw per-tick battery voltage vs the hard-shutdown ceiling (AlternatorHardShutdownV) = ' + svv('AlternatorHardShutdownV_echo', 'V')],
+        ['Action', 'instant field cut plus an escalating re-enable delay (adaptive lockout). Compares the unfiltered per-tick sample, so it catches fast excursions the averaged hardware comparator below cannot see'],
+        ['Counts', 'each cut (rising edge), lifetime — survives restarts; the Protections tab twin is per-session'],
+        ['Sources', 'counts bus-voltage excursions from any charge source (alternator, solar, shore), not just the alternator'],
+    ],
+    ovtIna: () => [
+        ['Signal', 'battery voltage averaged over ~1 s inside the shunt monitor chip (INA228, 128-sample SLOW_ALERT) vs its own hardware limit'],
+        ['Action', 'the chip’s alert pin cuts the field electrically, with no processor involvement — the backstop if software hangs. The trip latches in the chip (BUSOL bit) and firmware polls it every 250 ms, so no trip is missed'],
+        ['Counts', 'each hardware trip (rising edge), lifetime. The software cut above should always act first — a nonzero count here means software failed to protect: a red flag worth reporting'],
+        ['Sources', 'any charge source can push the bus voltage here — alternator, solar, or shore'],
     ],
     iexG3: () => [
         ['Signal', 'smoothed excess of alternator current over the live current command'],
@@ -17428,7 +17456,7 @@ function getField(id) {
 }
 
 // ── Test mode gate helpers ──────────────────────────────────────────────────
-// Last-known chargeStageDisplay from CSVData2 (updated each frame)
+// Last-known charge stage from CSVData4 (2 Hz) — also samples into the Plots-tab mode ribbon
 let gLastChargeStage = 0;
 
 // Stage codes (must match firmware CHARGE_STAGE_* enum)
@@ -21297,12 +21325,14 @@ function cxFinish() {
     }).catch(e => xAlert('Finish failed: ' + e));
 }
 const CX_HELPFUL_HINTS_HTML =
-    '<p style="font-size:15px; line-height:1.5; margin:0 0 12px;"><strong>Commissioning saved. Helpful tips at this point:</strong></p>' +
+    '<p style="font-size:15px; line-height:1.5; margin:0 0 4px;"><strong>Commissioning saved.</strong></p>' +
+    '<p style="font-size:13px; line-height:1.5; margin:0 0 12px; opacity:0.85;">Some helpful tips:</p>' +
     '<ul style="list-style:none; padding:0; margin:0; font-size:13px; line-height:1.6;">' +
-    '<li style="margin-bottom:12px;">You can leave Alternator Enable toggled on permanently (in top right of screen). The regulator only drives the field and produces charging current when the ignition is on and engine speed is &gt; Min RPM (125 RPM by default).</li>' +
-    '<li style="margin-bottom:12px;">The regulator stays powered as long as it has battery power. With the engine off it keeps tracking battery state of charge and logging sailing, motoring, GPS, and comfort data.</li>' +
-    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Engine off, Client Mode:</strong> regulator drops WiFi into a low-power doze but stays reachable — open the app or browse to alternator.local and it wakes on its own.</li>' +
-    '<li style="margin-bottom:0;"><strong style="color:#2ec4b6;">Engine off, AP (Hotspot) Mode:</strong> regulator keeps WiFi up for about 30 minutes, then powers the radio down to save battery. Press the WiFi wake button to bring it back for five minutes. Ignition on also restarts WiFi.</li>' +
+    '<li style="margin-bottom:12px;">Most installations should leave Alternator Enable toggled on permanently (in top right of screen). The regulator only drives the field and produces charging current when the ignition is on and engine speed is &gt; Min RPM (125 RPM by default), so there&rsquo;s no reason to disable it, and the net result is the behavior you&rsquo;d expect &mdash; the alternator just works when the engine is running.</li>' +
+    '<li style="margin-bottom:12px;">This regulator brain is unique in that it stays powered as long as it has battery power. Even with engine/ignition/field off, it keeps tracking battery state of charge, logging sailing and comfort data, etc.</li>' +
+    '<li style="margin-bottom:12px;">To view this interface with Ignition Off:</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Client Mode:</strong> regulator is accessible over WiFi, will wake up from a low-power doze when you access alternator.local or open the app.</li>' +
+    '<li style="margin-bottom:0;"><strong style="color:#2ec4b6;">AP (Hotspot) Mode:</strong> regulator keeps WiFi up for about 30 minutes after shutdown, then powers WiFi down to save battery. Press the WiFi wake button to bring it back for five minutes at a time, or Ignition on.</li>' +
     '</ul>';
 // Terminal Helpful Hints page, drawn into the commissioning modal body after Finish. No per-phase
 // poll or RPM strip (the run is over); the abort row is hidden so it can't revert the saved tune.
@@ -22043,6 +22073,12 @@ window.addEventListener('load', function () {
   // so over-eager gaps blank the chart at low zoom. Break only on big gaps (≥ ~20 min).
   function ltGapThreshold(interval) { return Math.max((interval || 600) * 4, 1200); }
 
+  // Battery volts and barometric pressure can't physically read <= 0 — a 0 is a boot /
+  // commissioning transient (sensors not settled), not data. Null it so those samples don't
+  // drag the line/band to the floor on the first record after a boot. Every other field
+  // (currents, speeds, angles, SOC) has legitimate zeros — those pass through untouched.
+  function ltNz(k, v) { return ((k === 'battVolt' || k === 'baro') && v != null && v <= 0) ? null : v; }
+
   // Header (16 B LE): u16 head, u16 count, u16 capacity, u16 recordSize,
   // u32 lastEpoch, u32 intervalSec. Then capacity × recordSize raw records.
   function parseLT(buf) {
@@ -22091,15 +22127,15 @@ window.addEventListener('load', function () {
       ENV.forEach(([k, scale], fi) => {
         const f = fields[k];
         if (valid & (1 << fi)) {
-          f.min.push(dv.getInt16(off, true) / scale);
-          f.max.push(dv.getInt16(off + 2, true) / scale);
-          f.avg.push(dv.getInt16(off + 4, true) / scale);
+          f.min.push(ltNz(k, dv.getInt16(off, true) / scale));
+          f.max.push(ltNz(k, dv.getInt16(off + 2, true) / scale));
+          f.avg.push(ltNz(k, dv.getInt16(off + 4, true) / scale));
         } else { f.min.push(null); f.max.push(null); f.avg.push(null); }
         off += 6;
       });
       let ao = base + 16 + ENV.length * 6;   // avg-only block: one int16 each
       AVG.forEach(([k, scale], ai) => {
-        fields[k].avg.push((valid & (1 << (ENV.length + ai))) ? dv.getInt16(ao, true) / scale : null);
+        fields[k].avg.push((valid & (1 << (ENV.length + ai))) ? ltNz(k, dv.getInt16(ao, true) / scale) : null);
         ao += 2;
       });
       // chargeStage u8 sits right after the avg-only block (display code 0-7).
@@ -22807,14 +22843,12 @@ window.addEventListener('load', function () {
       if (prevTs != null && (ts - prevTs) > ltGapThreshold(interval)) pushGap((prevTs + ts) / 2);
       prevTs = ts;
       t.push(ts); isGap.push(false);
-      // Fields where 0 means "no reading" (a battery/baro can't be 0): null the garbage so
-      // boot-window transients don't pull lines/bands to 0. Legit zeros (speeds, angles) kept.
-      const nz = (k, v) => ((k === 'battVolt' || k === 'baro') && v != null && v <= 0) ? null : v;
+      // Null battery/baro zeros (boot-window garbage) via the same rule the local parse uses.
       ENV.forEach(([k]) => {
         const c = LT_CLOUD_COL[k], f = fields[k];
-        f.min.push(nz(k, num(r[c + '_min']))); f.max.push(nz(k, num(r[c + '_max']))); f.avg.push(nz(k, num(r[c + '_avg'])));
+        f.min.push(ltNz(k, num(r[c + '_min']))); f.max.push(ltNz(k, num(r[c + '_max']))); f.avg.push(ltNz(k, num(r[c + '_avg'])));
       });
-      AVG.forEach(([k]) => fields[k].avg.push(nz(k, num(r[LT_CLOUD_COL[k] + '_avg']))));
+      AVG.forEach(([k]) => fields[k].avg.push(ltNz(k, num(r[LT_CLOUD_COL[k] + '_avg']))));
       stage.push(r.charge_stage == null ? null : Number(r.charge_stage));
     }
     return { t, fields, isGap, stage, n: t.length };

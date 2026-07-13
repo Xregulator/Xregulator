@@ -1204,7 +1204,7 @@ float ChargingVoltageTarget = 0;                 // This becomes active target �
                                                  // ChargingVoltageTargetReq by the slew in AdjustFieldLearnMode).
 float ChargingVoltageTargetReq = 0;              // Instantaneous DESIRED target (set each tick by stage logic /
                                                  // TargetVoltageMode / MaintainMode). ChargingVoltageTarget ramps to it.
-float VoltageHardwareLimit = BulkVoltage + 0.3;  // boot placeholder; updateINA228OvervoltageThreshold() derives the real limit (Bulk + 0.3×class)
+float VoltageHardwareLimit = BulkVoltage + 0.3;  // boot placeholder; updateINA228OvervoltageThreshold() derives the real limit (lithium: Bulk + 0.3×class, else: tracks AlternatorHardShutdownV)
 bool inBulkStage = true;
 
 // System voltage class (12/24/48V) lives in BATTERY_VOLTAGE (set from Vessel Info). It is the sole
@@ -2336,6 +2336,12 @@ int MinRPMForField = 125;             // Field is cut when RPM is below this thr
 // spikes. Confirmation window kept short (<=0.2s) so a single bad ADC read can't snap it off.
 #define RPM_ZERO_CUT_MS 200          // ms RPM must hold at exactly 0 before the immediate cut
 uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not currently zero)
+// Shutdown spin-down cut dwell: charging disabled + RPM below MinRPMForField must persist this
+// long (≥ two ADS CH2 samples at ~30 ms cadence) before the immediate cut, so a single glitched
+// low read can never cut mid-ramp at real duty — an abrupt cut from meaningful field amplitude
+// slams the LM2907 coupling cap (100k bias kept for low-frequency performance → ~4.6 s re-bias
+// dropout of false-zero RPM). Real spin-downs and dropout streaks are sustained, so they pass.
+#define RPM_BELOWMIN_CUT_MS 75
 // Protection-event RPM grace: for this long after any protection clamp tick, an EXACTLY-zero RPM
 // reading is treated as tach-signal dropout (the clamp runs the field near MinDuty, which can
 // starve the LM2907 pickup), not as a stopped engine — neither the below-minimum immediate cut
@@ -2743,7 +2749,7 @@ GovernorMode govMode = GOV_NORMAL_SLEW;
 // Setpoint tracking
 float setpointLimited = 0.0f;
 float setpointCommand = 0.0f;   // pre-slew current command (Icv in CV, uTargetAmps in idle); global so the Control Accuracy score gate can see whether setpointLimited is still slewing toward it
-uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit
+uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty (machine/RPM limit)
 bool setpointInitialized = false;
 
 // ===== LEARNING MODE CONTROL PARAMETERS =====
@@ -3593,15 +3599,17 @@ uint32_t TempSustainedTimeout = 120000;  // ms - WARNING temp sustained this lon
 
 // --- Voltage Thresholds ---
 // AlternatorHardShutdownV: absolute battery voltage above which the alternator field is cut
-// and the adaptive fast-OV lockout starts. Should be set just below the battery BMS shutdown
-// voltage. This is the only software-layer hard OV shutdown; below it sit the Group 1/2/3
-// throttling protections AND the INA228 hardware ALERT (BulkVoltage + 0.3 V on the chip's
-// averaged value, BUSOL polled every 250ms) — the software cut sits a rung ABOVE the hardware
-// one on purpose: hardware owns sustained OV at +0.3, software owns fast transients the
-// averaging + 250ms poll can miss, at +0.5, leaving G2's filtered clamp room to win a blip
-// without any GPIO4 cut (2026-07-12: +0.31V blip peaks at a 14.4 bulk target hit the old
-// +0.3 line inside the G2 filter lag).
-float AlternatorHardShutdownV = 15.0f;    // V — absolute hard-shutdown threshold; this 15.0 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with BulkVoltage + 0.5 V so 24V/48V systems get sensible defaults (30.0 V / 60.0 V).
+// and the adaptive fast-OV lockout starts. This is the only software-layer hard OV shutdown;
+// below it sit the Group 1/2/3 throttling protections AND the INA228 hardware ALERT (chemistry
+// branch in updateINA228OvervoltageThreshold: lithium BulkVoltage + 0.3 V, else equal to this
+// value; chip's averaged value, BUSOL polled every 250ms). Value is chemistry-specific via the
+// commissioning proposal: lithium Bulk + 0.5 (just below the BMS disconnect; software owns fast
+// transients the chip's averaging + 250ms poll can miss, leaving G2's filtered clamp room to
+// win a blip without any GPIO4 cut — 2026-07-12: +0.31V blip peaks at a 14.4 bulk target hit
+// the old +0.3 line inside the G2 filter lag); AGM/flooded 16.0 V absolute ×(V/12) (lead-acid
+// damage is time-integrated, indifferent to brief bounded spikes — the ceiling protects the DC
+// loads' published continuous ratings instead, 2026-07-13).
+float AlternatorHardShutdownV = 15.0f;    // V — absolute hard-shutdown threshold; this 15.0 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with the conservative BulkVoltage + 0.5 V fallback (24V/48V get 30.0/60.0 V); the chemistry-specific value (AGM/flooded 16 V absolute) arrives via the commissioning proposal.
 float VoltageDisagreeThreshold = 0.15f;   // V difference between BatteryV and IBV for disagreement detection
 uint32_t VoltageDisagreeTimeout = 10000;  // ms - sustained disagreement this long triggers warning
 uint32_t VoltageDisagreeCriticalTimeoutMs = 3000;

@@ -245,8 +245,11 @@ void applyNominalVoltageChange(int oldV, int newV) {
     VoltageAlarmHigh      *= ratio;
     VoltageAlarmLow       *= ratio;
     // Headroom scales with class so the OV ladder keeps its order (G2 clamp at target+OvMeasMarginV
-    // < G1 predictive at target+OvPredMarginV < INA228 averaged backstop at bulk+0.3 < software
-    // hard shutdown at bulk+0.5) — all per-cell-equivalent.
+    // < G1 predictive at target+OvPredMarginV < the hard cuts) — all per-cell-equivalent. A class
+    // change re-derives the CONSERVATIVE Bulk+0.5 fallback, discarding any commissioned
+    // chemistry-specific value (AGM/flooded 16 V absolute): the class change flags re-commissioning
+    // anyway, and the fallback is always at or below the proposal. The INA228 limit re-derives from
+    // this in updateINA228OvervoltageThreshold below (lithium Bulk+0.3, else equal to this value).
     AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)newV / 12.0f);
     OvMeasMarginV             *= ratio;
     OvPredMarginV             *= ratio;
@@ -1562,12 +1565,22 @@ void AdjustFieldLearnMode() {
 
   // Shutdown spin-down: charging already disabled AND RPM below the field minimum — the graceful
   // CHARGING_DISABLED ramp has nothing left to soften (no alternator output below MinRPMForField)
-  // and an energized field only fakes tach readings, so finish the cut now. Fires on the first
-  // floored-zero sample too, beating the RPM_ZERO_CUT_MS debounce during shutdowns. Engine running
+  // and an energized field only fakes tach readings, so finish the cut. The RPM_BELOWMIN_CUT_MS
+  // dwell (≥ two ADS CH2 samples) keeps a lone glitched low read from cutting mid-ramp at real
+  // duty — that abrupt amplitude step is the LM2907 coupling-cap slam the ramp exists to avoid.
+  // Still ~3x faster than the zero-cut's RPM_ZERO_CUT_MS on a real spin-down. Engine running
   // above minimum keeps the full graceful ramp.
-  if (!tick.chargingEnabled && tick.rpmBelowMinimum && !gpio4IsLow) {
-    applyImmediateCut(tick, REASON_RPM_TOO_LOW);
-    return;
+  {
+    static uint32_t rpmBelowMinSinceMs = 0;
+    if (!tick.chargingEnabled && tick.rpmBelowMinimum) {
+      if (rpmBelowMinSinceMs == 0) rpmBelowMinSinceMs = tick.nowMs;
+      if ((uint32_t)(tick.nowMs - rpmBelowMinSinceMs) >= RPM_BELOWMIN_CUT_MS && !gpio4IsLow) {
+        applyImmediateCut(tick, REASON_RPM_TOO_LOW);
+        return;
+      }
+    } else {
+      rpmBelowMinSinceMs = 0;
+    }
   }
 
 
@@ -3570,20 +3583,37 @@ void AdjustFieldLearnMode() {
 
         currentPID.Compute();
 
-        // Banner limiter code (→ CSV4/NavStream): which constraint owns the current command this tick.
-        // 0 none — mid-slew in either direction (on a commanded step-DOWN MeasuredAmps lags above
-        // setpointLimited, which reads as "tracking" and would blink a spurious limiter tint),
-        // machine-saturated (output can't reach the setpoint, so the alternator itself is the
-        // limit), zero-current command, or CV square-wave tuning.
+        // Banner limiter code (→ CSV4/NavStream): always the min-select winner — transient
+        // under-tracking / mid-slew still show the constraint the loop is converging to, so the
+        // cue doesn't blink off on ripple dips or setpoint moves. 0 only when nobody limits
+        // charging (zero-current cmd, CV square-wave tuning, startup ramp). 5 = machine limit,
+        // read from the ACTUATOR (applied duty riding MaxDuty, sustained, output still short) —
+        // output error alone can't distinguish "won't get there" from "not there yet".
         {
           bool zeroCmd = (MaintainMode == 1 || zeroFloatActive);
-          bool slewing = (fabsf(setpointLimited - setpointCommand) > 0.5f);
-          bool tracking = (MeasuredAmps >= setpointLimited - fmaxf(3.0f, 0.10f * setpointLimited));
-          if (CVTuningMode || zeroCmd || slewing || !tracking)    ctrlLimiter = 0;
-          else if (voltageControlActive && Icv < icvCeil - 0.5f)  ctrlLimiter = 3;
-          else if (battCeilBinding)                               ctrlLimiter = 4;
-          else if (thermalPenaltyAmps > 0.5f)                     ctrlLimiter = 2;
-          else                                                    ctrlLimiter = 1;
+          bool underTracking = ((float)pidInput < setpointLimited - fmaxf(3.0f, 0.10f * setpointLimited));
+          bool dutyPegged = (lastAppliedDuty >= ccDutyCeiling() - 1.0f);
+          static uint32_t dutyPegStartMs = 0;
+          if (dutyPegged && underTracking) {
+            if (dutyPegStartMs == 0) dutyPegStartMs = currentMillis;
+          } else {
+            dutyPegStartMs = 0;
+          }
+          bool fieldSaturated = (dutyPegStartMs != 0) && ((uint32_t)(currentMillis - dutyPegStartMs) >= 2000UL);
+          uint8_t rawCode;
+          if (CVTuningMode || zeroCmd || inStartupRamp)           rawCode = 0;
+          else if (fieldSaturated)                                rawCode = 5;
+          else if (voltageControlActive && Icv < icvCeil - 0.5f)  rawCode = 3;
+          else if (battCeilBinding)                               rawCode = 4;
+          else if (thermalPenaltyAmps > 0.5f)                     rawCode = 2;
+          else                                                    rawCode = 1;
+          // Publish a change only after 5 consecutive identical ticks (~150 ms): edge-hover
+          // between two codes (Icv at icvCeil, thermal penalty at 0.5 A) parks the published
+          // value instead of hopping at whatever instant the 500 ms CSV4 sampler catches.
+          static uint8_t limCand = 0, limCandTicks = 0;
+          if (rawCode == ctrlLimiter)  limCandTicks = 0;
+          else if (rawCode == limCand) { if (++limCandTicks >= 5) { ctrlLimiter = rawCode; limCandTicks = 0; } }
+          else                         { limCand = rawCode; limCandTicks = 1; }
         }
       }
 

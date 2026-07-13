@@ -1890,11 +1890,14 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TempSustainedTimeout = settingRead(NK_TempSustainedTimeout).toInt();
   }
   // AlternatorHardShutdownV — absolute hard-shutdown voltage threshold.
-  // First-boot default auto-scales as BulkVoltage + 0.5 V (headroom per-cell-scaled by class).
+  // First-boot default auto-scales as BulkVoltage + 0.5 V (headroom per-cell-scaled by class) —
+  // the conservative fallback for a device with no chemistry chosen. The chemistry-specific
+  // value arrives via the commissioning proposal (lithium keeps Bulk + 0.5, just below the BMS
+  // disconnect; AGM/flooded get 16.0 V absolute ×class — protects DC loads, not the battery).
   // +0.5 (raised from +0.3, 2026-07-12) buys transient runway above G2's filtered clamp: a blip
   // at the bulk target peaks ~+0.31V inside the G2 filter lag, so the old line cut on events the
-  // soft layer would have absorbed. Sustained OV is still caught at BulkVoltage + 0.3 by the
-  // INA228 averaged comparator (updateINA228OvervoltageThreshold).
+  // soft layer would have absorbed. Sustained OV is still caught by the INA228 averaged
+  // comparator (updateINA228OvervoltageThreshold: lithium Bulk + 0.3, else equal to this value).
   // Once written, the value is treated as user-set; a later system-class change re-derives it
   // in applyNominalVoltageChange.
   // Migration: an old VoltageSpikeMargin key (a margin) converts to an absolute value.

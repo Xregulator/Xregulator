@@ -114,7 +114,7 @@
       <div class="reading-value header-field-cluster field-status-inactive">
         <div class="field-status-row">
           <span id="field-status">?</span>
-          <span id="dutyCycleID3" style="display:none;"></span><span id="dutyCyclePercentSign" style="display:none;">%</span>
+          <span id="duty-pill-wrap"><span id="dutyCycleID3" style="display:none;"></span><span id="dutyCyclePercentSign" style="display:none;">%</span></span>
         </div>
         <span id="charge-stage" class="charge-stage charge-stage-unknown">—</span>
         <span id="field-off-reason" class="field-off-reason" style="display:none;"></span>
@@ -6089,7 +6089,7 @@
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Alternator Hard Shutdown Voltage (V) (<span id="AlternatorHardShutdownV_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Absolute battery voltage at which the alternator is force-shutdown: field is ramped to 0, GPIO4 is cut, and a cooldown lockout begins before charging can resume. The lockout is adaptive — 0.5 s for an isolated event, escalating toward 10 s if the cut keeps re-firing, and resetting after a minute without one. This is the only software-layer hard overvoltage shutdown — below it sit the Group 1/2/3 throttling protections (Voltage tab) which keep charging while trimming current, and a separate hardware overvoltage backup at BulkVoltage + 0.3 V that uses a slow-averaged voltage to catch sustained overvoltage (see the console log on boot for the exact programmed threshold). Should be set just below your battery BMS shutdown voltage so the alternator stops before the BMS opens the contactor. <strong>First-boot default auto-scales to BulkVoltage + 0.5 V</strong> (so 15.0 V on a 12V system, 30.0 V on a 24V system, 60.0 V on a 48V system) — the 0.2 V above the hardware backup is transient headroom so a fast spike is absorbed by the throttling protections instead of a full shutdown. Once you save your own value it stays absolute — re-set it manually if you later change BulkVoltage to a different system class.</span>
+                    <span class="tooltip-box">Absolute battery voltage at which the alternator is force-shutdown: field is ramped to 0, GPIO4 is cut, and a cooldown lockout begins before charging can resume. The lockout is adaptive — 0.5 s for an isolated event, escalating toward 10 s if the cut keeps re-firing, and resetting after a minute without one. This is the only software-layer hard overvoltage shutdown — below it sit the Group 1/2/3 throttling protections (Voltage tab) which keep charging while trimming current, and a separate hardware overvoltage backup that uses a slow-averaged voltage to catch sustained overvoltage (for lithium it sits between the bulk target and this cut; for other chemistries it tracks this setting exactly — see the console log on boot for the programmed threshold). Where to set it depends on chemistry. Lithium: just below the battery protection circuit's (BMS) disconnect voltage, so the alternator stops before the BMS opens the contactor. Flooded/AGM: brief bounded excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), so the ceiling is placed to protect connected DC electronics from sustained high voltage instead — the commissioning battery-defaults proposal fills in the recommended value per chemistry. Changing the system voltage class later re-derives a conservative value; re-run the battery-defaults proposal afterward to restore the chemistry-specific one.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -11283,7 +11283,7 @@
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">INA228 OV Events
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: INA228 hardware ALERT pin fired (bus voltage crossed VoltageHardwareLimit = BulkVoltage + 0.3V). Hardware cuts GPIO4 immediately before software runs. Should be zero under normal operation.</span>
+              <span class="tooltip-box">Rising-edge count: the shunt monitor's hardware alert pin fired (INA228 ALERT — its ~1 s averaged bus voltage crossed the hardware limit: Bulk + 0.3 V for lithium, equal to the Alternator Hard Shutdown Voltage for other chemistries). Hardware cuts the field electrically before software runs. Should be zero under normal operation — the software cut acts first.</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="inaOVCountID">?</span></span>
@@ -11891,8 +11891,9 @@
             better severity measure there.
           </p>
 
-          <div style="text-align:right;margin-top:8px;">
-            <button onclick="resetOvTelemetryLifetime()" class="btn-secondary btn-sm">Reset Lifetime OV History</button>
+          <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+            <button type="button" class="btn-secondary" onclick="fetchOvTelemetry()">↺ Refresh</button>
+            <button type="button" class="btn-secondary" onclick="resetOvTelemetryLifetime()">Reset Lifetime OV History</button>
           </div>
         </div>
       </details>

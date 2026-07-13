@@ -1632,6 +1632,20 @@ input[type="submit"]:hover {
   margin: -1px -5px;
 }
 
+/* ctrlLimiter 5 (field at max duty): pill wraps the header duty % readout. !important beats
+   the inline color applyStaleStyleByAge() writes on #dutyCycleID3 and the cluster's
+   .field-status-* !important tints. */
+#duty-pill-wrap.limit-pill {
+  background: var(--accent);
+  border-radius: 6px;
+  padding: 1px 5px;
+  margin: -1px -5px;
+}
+#duty-pill-wrap.limit-pill span {
+  color: #fff !important;
+  font-weight: 700;
+}
+
 .duo-num {
   font-size: 15px;
   font-weight: 700;

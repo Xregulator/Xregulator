@@ -659,8 +659,9 @@ enum Csv4Index {
   CSV4_VictronCurrent,          // Victron battery current (A ×100)
   CSV4_currentFuelGPH,          // live fuel flow (gal/hr ×100)
   CSV4_currentNMPG,             // live fuel economy (naut mi/gal ×100)
-  CSV4_ctrlLimiter,             // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit — rides NavStream so the banner tint updates at ~500ms
-  CSV4_FIELD_COUNT  // = 18
+  CSV4_ctrlLimiter,             // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty — rides NavStream so the banner tint updates at ~500ms
+  CSV4_chargeStage,             // CHARGE_STAGE_* code — rides NavStream so the Plots-tab mode ribbon tracks stage changes at ~500ms (CSV2 still carries it for the thermal ring)
+  CSV4_FIELD_COUNT  // = 19
 };
 
 enum Csv3Index {
@@ -7602,7 +7603,7 @@ void SendWifiData() {
   // channels. These fields used to ride the 5 s CSV2 cadence and looked frozen on the dial/helm.
   if (!sentSomething && now - lastpayload4send >= 500UL && events.count() > 0) {
     static char *payload4 = nullptr;
-    static const size_t PAYLOAD4_SIZE = 256;  // (17 fields + 1) × 7 = 126, rounded up with headroom
+    static const size_t PAYLOAD4_SIZE = 256;  // (19 fields + 1) × 7 = 140, rounded up with headroom
     if (!payload4) {
       payload4 = (char *)ps_malloc(PAYLOAD4_SIZE);  // allocated to PSRAM
       if (!payload4) {
@@ -7613,7 +7614,7 @@ void SendWifiData() {
     int payload4Len = snprintf(payload4, PAYLOAD4_SIZE,
                                "%d,"  // CSV4_FIELD_COUNT
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV4_FIELD_COUNT,
                                SafeInt(HeadingNMEA),                     // CSV4_HeadingNMEA
@@ -7633,7 +7634,8 @@ void SendWifiData() {
                                SafeInt(VictronCurrent, 100),             // CSV4_VictronCurrent
                                SafeInt(currentFuelGPH, 100),             // CSV4_currentFuelGPH
                                SafeInt(currentNMPG, 100),                // CSV4_currentNMPG
-                               (int)ctrlLimiter                          // CSV4_ctrlLimiter -> banner limiter code
+                               (int)ctrlLimiter,                         // CSV4_ctrlLimiter -> banner limiter code
+                               SafeInt(chargeStageDisplay)               // CSV4_chargeStage -> Plots-tab mode ribbon
     );
     if (payload4Len < 0 || payload4Len >= PAYLOAD4_SIZE) {
       Serial.printf("payload4 truncated or format error: %d\n", payload4Len);
