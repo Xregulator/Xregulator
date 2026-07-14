@@ -2534,6 +2534,7 @@ const CSV3_FIELDS = [
     "cvTestSlewMode",                // manual CV square-wave test slew mode (0=off, 1=default, 2=custom)
     "CvBrakeTauMs",                  // approach-brake sustained-slope EMA time constant (ms)
     "fieldDecayTauMs",               // commissioned field de-energize τ (ms); 30% cold margin baked in
+    "commissionManualMask",          // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5999,8 +6000,8 @@ const BATTDEF_MODE_NAMES = ['No Float (idle)', 'Voltage Float', 'Zero-Current Fl
 // cited numbers match 12/24/48 V banks.
 const BATTDEF_CHEM_COPY = {
     lifepo4: v => 'For lithium (LiFePO4), Bulk and Absorption are set to ' + v + ' V — roughly a high-90s% state of charge, which avoids the higher-voltage cell stress of a full charge. Float is disabled. The charge current limit is set to a moderate fraction of the bank\'s capacity. You may want to manually increase it if you prioritize charging time vs. battery lifetime.',
-    agm: (v, hardV) => 'For AGM, the default charge current limit is set to a high fraction of the bank\'s capacity: a high charge rate reduces sulfation and extends AGM cycle life, and AGM cells accept high in-rush current. The charge voltages are kept toward the lower end of the acceptable range to limit cell stress. The hard overvoltage cut is set to ' + hardV + ' V: brief voltage excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), so instead of cutting the field on momentary spikes the ceiling is placed to protect connected DC loads, whose published continuous ratings top out near that level.',
-    lead_acid: (v, hardV) => 'For flooded lead-acid, the absorption voltage and charge current are set on the higher side to keep the cells fully charged and the electrolyte mixed. This errs toward reduced sulfation at the cost of higher water use — check the electrolyte level regularly and top up with distilled water, as a bank charged this way will need watering more often. The hard overvoltage cut is set to ' + hardV + ' V: brief voltage excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), so instead of cutting the field on momentary spikes the ceiling is placed to protect connected DC loads, whose published continuous ratings top out near that level.'
+    agm: (v, hardV) => 'For AGM, the default charge current limit is set to a high fraction of the bank\'s capacity: a high charge rate reduces sulfation and extends AGM cycle life, and AGM cells accept high in-rush current. The charge voltages are kept toward the lower end of the acceptable range to limit cell stress. The hard overvoltage cut is set to ' + hardV + ' V: brief voltage excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), so instead of cutting the field on momentary spikes the ceiling is placed to protect connected DC loads, whose published continuous ratings usually top out around that level or higher.',
+    lead_acid: (v, hardV) => 'For flooded lead-acid, the absorption voltage and charge current are set on the higher side to keep the cells fully charged and the electrolyte mixed. This errs toward reduced sulfation at the cost of higher water use — check the electrolyte level regularly and top up with distilled water, as a bank charged this way will need watering more often. The hard overvoltage cut is set to ' + hardV + ' V: brief voltage excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), so instead of cutting the field on momentary spikes the ceiling is placed to protect connected DC loads, whose published continuous ratings usually top out around that level or higher.'
 };
 
 // Per-chemistry Battery Health capacity-trend tuning. 12V-referenced rested open-circuit-voltage
@@ -6193,7 +6194,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         const _tc = (typeof displayTempUnit !== 'undefined' && displayTempUnit === 1);
         let tempWarnHtml = '';
         if (type === 'agm' || type === 'lead_acid') {
-            tempWarnHtml = ' <span style="color:#fca5a5;">Lead-acid and AGM batteries want a higher charge voltage when cold and a lower one when hot. This regulator does not yet move your charge voltages, current limit, or protection limits with temperature — they stay fixed at whatever you set, so it will not raise voltage in the cold, or lower voltage and current when the battery is hot (which matters most in hot installs and with aging cells).<br><br>When the regulator is mounted near the bank (Mounting Location on the Vessel Info tab), its own board temperature already tracks the battery closely enough to serve as a temperature stand-in — automatic compensation of the charge settings from it is planned but not yet built. For now, set these for your battery\'s typical temperature and adjust them yourself in unusually cold or hot conditions. To have temperature compensation prioritized, email joe@xengineering.net.</span>';
+            tempWarnHtml = ' <span style="color:#fca5a5;">Lead-acid and AGM batteries want a higher charge voltage when cold and a lower one when hot. This regulator does not yet move your charge voltages, current limit, or protection limits with temperature — they stay fixed at whatever you set. Temperature compensation of the charge settings for lead-acid and AGM is planned. To have it prioritized, email joe@xengineering.net.</span>';
         } else if (type === 'lifepo4') {
             const tFrz = _tc ? '0 °C' : '32 °F';
             const t40 = _tc ? '4 °C' : '40 °F';
@@ -13016,12 +13017,13 @@ window.addEventListener("load", function () {
             updateAllEchosOptimized(data);
             updateTogglesFromData(data);
             // Auto-commissioning: refresh the badge + step checklist + clear button from the
-            // persisted state (0/1/2) and furthest phase reached (0..6).
+            // persisted state (0/1/2), current phase (0..9), and done/manual masks.
             if (data.commissionState !== undefined) {
                 try {
                     renderCommissionStatus(parseInt(data.commissionState, 10),
                                            parseInt(data.commissionPhase, 10) || 0,
-                                           parseInt(data.commissionDoneMask, 10) || 0);
+                                           parseInt(data.commissionDoneMask, 10) || 0,
+                                           parseInt(data.commissionManualMask, 10) || 0);
                 } catch (e) { }
             }
             // capLimitMode pending toggle confirmation (capLimitMode is a CSV3 field)
@@ -18898,6 +18900,19 @@ const CX_DEPENDENTS = { 1: [3, 4, 7], 3: [4, 7], 4: [7], 5: [6] };
 let cxPlanUserSet = false;   // true once the user ticks a box, so CSV3 re-renders stop re-defaulting the plan
 let cxLastPhase = 0;         // remembered from the last CSV3 frame (for re-render after a checkbox toggle)
 let cxLastMask = 0;          // per-stage done bitmask from the last CSV3 frame
+let cxLastManual = 0;        // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with cxLastMask
+// Where each step's result lives when it is skipped, so the Finish summary can point the user at it. Index = stage.
+const CX_MANUAL_LOC = [
+    '',  // Prep — never skippable
+    'Field-duty→current map and saturation knee. No single manual field — the seeded field defaults stand; re-run this step later to measure them.',
+    'Per-RPM Min% duty floor. Set it in the Min% floor table under Tuning, or re-run this step.',
+    'Current-loop gains (Kp/Ki) and the output/voltage filter time constants. Set them under Tuning ▸ Current Control.',
+    'Verification only — nothing is stored. The current-loop gains from the previous step stand.',
+    'Alternator ripple map. Not measured when skipped — check the ripple plot under Protections; the over-current trip lines will use your existing/default ripple.',
+    'Over-current trip floor and ceiling. Set them under Protections ▸ Over-current.',
+    'Voltage-loop gains (CV Kp/Ki). Leave CV gain mode on Auto (safe defaults) or set them under Tuning ▸ Voltage Control.',
+    'Field de-energize time constant (τ). Set it under Protections ▸ Field Decay, or re-run this step.',
+];
 
 // Force-select every downstream dependent of any selected stage (transitive); Prep always on.
 function cxApplyDeps() {
@@ -18989,6 +19004,7 @@ function cxNextSelected(from) { for (let i = from + 1; i < CX_PHASES.length; i++
 // fit on a weak alternator) doesn't get a ✓ or push the device to a false COMMISSIONED badge.
 function cxAdvance(markDone = true) {
     const cur = cx.phase, nx = cxNextSelected(cur);
+    if (markDone && cx.handled) delete cx.handled[cur];   // measured now — drop any earlier skip/manual note for this session
     const done = markDone ? cxGet('commissionStageDone=' + cur) : Promise.resolve();
     done.finally(() => { if (nx === -1) cxFinish(); else cxGoto(nx); });
 }
@@ -19022,11 +19038,109 @@ function cxApplyRunBtn(applyFn, clean) {
 // cxAdvance(true) plus an immediate start of the next stage's test.
 function cxAdvanceRun() {
     const nx = cxNextSelected(cx.phase);
+    if (cx.handled) delete cx.handled[cx.phase];   // measured now — drop any earlier skip/manual note for this session
     cxGet('commissionStageDone=' + cx.phase).finally(() => {
         if (nx === -1) { cxFinish(); return; }
         cxGoto(nx);
         if (CX_AUTORUN[nx]) CX_AUTORUN[nx]();
     });
+}
+
+// ── Universal step navigation: Back / Skip for now / Mark done manually ───────
+// Available on every runnable step (not Prep). Back re-enters an earlier step to redo it; Skip leaves a
+// step outstanding but flagged for manual setup; Mark-done-manually counts it done (unmeasured) so the
+// COMMISSIONED badge can be reached and the nag stops. Reverse of CX_DEPENDENTS — the upstream steps that
+// feed a given stage, used to warn at skip time and to taint a measured step built on a skipped upstream.
+const CX_UPSTREAMS = { 3: [1], 4: [1, 3], 6: [5], 7: [1, 3, 4] };
+
+// Previous planned runnable step before `from`, or -1 if `from` is the first one (Back never returns
+// to Prep — it's the start gate, not a redoable step).
+function cxPrevSelected(from) { for (let i = from - 1; i >= 1; i--) if (cxPlan[i]) return i; return -1; }
+
+// Any wizard flow currently commanding the field / mid-measurement. Nav is disabled during a run —
+// navigating away would leave it running unmonitored (only modal close tears runs down).
+function cxRunActive() {
+    return !!(cx && (cx.fieldRunning || cx.plantRunning || cx.verifyRunning || cx.cvFitRunning ||
+                     cx.matrixOn || cx.rtFieldArmed || (cx.fc && cx.fc.running)));
+}
+
+function cxBack() {
+    if (cxRunActive()) return;
+    const prev = cxPrevSelected(cx.phase);
+    if (prev !== -1) cxGoto(prev);
+}
+
+// Skip the current step "for now": stays outstanding (badge keeps nagging), flagged for the Finish
+// summary. Warns first if the step feeds later ones that are still planned and unmeasured.
+async function cxSkip(stage) {
+    if (cxRunActive()) return;
+    const deps = (CX_DEPENDENTS[stage] || []).filter(d => cxPlan[d] && !(cxLastMask & (1 << d)));
+    if (deps.length) {
+        const names = deps.map(d => CX_PHASES[d]).join(', ');
+        const consequence = (stage === 5)
+            ? 'the over-current trip lines will be set from your existing/default ripple, not a fresh measurement — check the Protections ripple plot afterward'
+            : names + ' will run against the current tune and may fit poorly (skip them too when you reach them, if so)';
+        const ok = await xConfirm(CX_PHASES[stage] + ' feeds ' + names + '. If you skip it, ' + consequence + '.\n\nSkip it anyway?',
+            { title: 'Skip step', okText: 'Skip it', cancelText: 'Keep going' });
+        if (!ok) return;
+    }
+    cx.handled = cx.handled || {};
+    cx.handled[stage] = 'skip';
+    const nx = cxNextSelected(stage);
+    cxGet('commissionStageSkip=' + stage).finally(() => { if (nx === -1) cxFinish(); else cxGoto(nx); });
+}
+
+// Mark the current step done BY HAND (unmeasured). Confirms first — it can push the device to a green
+// COMMISSIONED badge on a step that was never measured.
+async function cxManual(stage) {
+    if (cxRunActive()) return;
+    const ok = await xConfirm(CX_PHASES[stage] + ' will be marked complete without measuring it. It counts toward "Commissioned" and the reminder stops. You are responsible for setting its value by hand — the summary at the end tells you where.\n\nMark it done?',
+        { title: 'Mark done manually', okText: 'Mark done', cancelText: 'Cancel' });
+    if (!ok) return;
+    cx.handled = cx.handled || {};
+    cx.handled[stage] = 'manual';
+    const nx = cxNextSelected(stage);
+    cxGet('commissionStageManual=' + stage).finally(() => { if (nx === -1) cxFinish(); else cxGoto(nx); });
+}
+
+// Persistent nav row appended to every runnable step's body (Prep has its own Start flow).
+function cxNavFooter() {
+    const s = cx.phase;
+    const prev = cxPrevSelected(s);
+    const back = (prev === -1) ? '' :
+        '<button onclick="cxBack()" class="btn-secondary btn-sm" title="Go back to ' + CX_PHASES[prev] + ' to redo it">&larr; Back</button>';
+    return '<div style="margin-top:14px; padding-top:12px; border-top:1px solid #2c2c2c; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">' +
+        back + '<span style="flex:1;"></span>' +
+        '<button onclick="cxSkip(' + s + ')" class="btn-secondary btn-sm" title="Move on without doing this step. It stays outstanding — set it by hand later (the end-of-wizard summary says where).">Skip for now</button>' +
+        '<button onclick="cxManual(' + s + ')" class="btn-secondary btn-sm" title="Mark this step done by hand (unmeasured). Counts toward Commissioned so the reminder stops.">Mark done manually</button>' +
+        '</div>';
+}
+
+// Rows for the Finish summary: every step set by hand this run (skipped or hand-marked), plus a taint
+// note for any measured step that was built on a skipped upstream. Reads the persisted masks (reload-proof)
+// unioned with this session's immediate actions, so it is correct even if the CSV3 echo hasn't caught up.
+// Plain-text rows (xAlert renders textContent with pre-line, so no HTML). Reads the persisted masks
+// (reload-proof) unioned with this session's immediate actions, so it is correct even if the CSV3 echo
+// hasn't caught up.
+function cxHandledSummaryRows() {
+    const h = (cx && cx.handled) || {};
+    const rows = [];
+    for (let i = 1; i < COMMISSION_STEPS.length; i++) {
+        const bit = 1 << i;
+        const skipped = h[i] === 'skip' || ((cxLastManual & bit) && !(cxLastMask & bit));
+        const hand = h[i] === 'manual' || ((cxLastManual & bit) && (cxLastMask & bit));
+        if (skipped) rows.push('• ' + (i + 1) + '. ' + COMMISSION_STEPS[i].name + ' — skipped. ' + CX_MANUAL_LOC[i]);
+        else if (hand) rows.push('• ' + (i + 1) + '. ' + COMMISSION_STEPS[i].name + ' — marked done by hand. ' + CX_MANUAL_LOC[i]);
+    }
+    // Taint: a measured step (done, not hand-set) whose upstream was skipped this run built on shaky ground.
+    for (let i = 1; i < COMMISSION_STEPS.length; i++) {
+        const bit = 1 << i;
+        const measured = (cxLastMask & bit) && !(cxLastManual & bit) && h[i] !== 'manual';
+        if (!measured) continue;
+        const badUp = (CX_UPSTREAMS[i] || []).filter(u => h[u] === 'skip' || ((cxLastManual & (1 << u)) && !(cxLastMask & (1 << u))));
+        if (badUp.length) rows.push('⚠ ' + COMMISSION_STEPS[i].name + ' was measured on top of skipped ' + badUp.map(u => COMMISSION_STEPS[u].name).join(', ') + ' — re-check it once those are set.');
+    }
+    return rows;
 }
 
 function cxStopPoll() { if (cxPollTimer) { clearInterval(cxPollTimer); cxPollTimer = null; } }
@@ -19133,7 +19247,8 @@ function cxGet(params) {
 function openCommissionModal() {
     if (!currentAdminPassword) { xAlert('Unlock settings first (enter the admin password).'); return; }
     // In-session resume: if a flow is already underway, reopen exactly where it was.
-    if (!cx) cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false };
+    if (!cx) cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false, handled: {} };
+    if (!cx.handled) cx.handled = {};   // stage → 'skip' | 'manual' for this session's Finish summary
     document.getElementById('commission-modal-overlay').style.display = 'block';
     // Make the panel draggable (idempotent) — drag by the header, clamped on-screen.
     makePanelDraggable(document.getElementById('commission-modal-panel'),
@@ -19182,9 +19297,8 @@ function closeCommissionModal() {
 function cxGoto(phase) {
     cxStopPoll();                 // drop any timer from the phase we're leaving
     cx.phase = phase;
-    // Persist the furthest phase reached so the Commissioning tab checklist survives a
-    // page reload or shows on a different client (firmware clamps + ignores lower values? no —
-    // it stores exactly; the wizard is forward-only in practice).
+    // Persist the current phase (moves backward on Back) so the checklist survives a page reload /
+    // other clients, and so the firmware re-baselines the in-flight step snapshot on each step entry.
     if (currentAdminPassword) cxGet('commissionPhase=' + phase).catch(() => { });
     // No tab switch on phase entry — only the field-action buttons move the tab (cxShowTab).
     commissionRender();
@@ -19195,10 +19309,14 @@ function commissionRender() {
     if (!cx) return;
     const steps = document.getElementById('commission-steps');
     steps.innerHTML = CX_PHASES.map((nm, i) => {
-        const skipped = !cxPlan[i];   // not in this run's plan — shown dimmed/struck, not ✓
+        const notInPlan = !cxPlan[i];   // not in this run's plan — shown dimmed/struck
+        const done = !!(cxLastMask & (1 << i));
+        const hand = !!(cxLastManual & (1 << i));
         if (i === cx.phase) return '<span style="color:#2ec4b6;font-weight:600;">' + (i + 1) + '. ' + nm + '</span>';
-        if (skipped) return '<span style="color:#666;text-decoration:line-through;">' + nm + '</span>';
-        if (i < cx.phase) return '<span style="color:#5a5;">✓ ' + nm + '</span>';
+        if (done && hand) return '<span style="color:#c9a227;">⊘ ' + nm + '</span>';   // hand-marked complete
+        if (done) return '<span style="color:#5a5;">✓ ' + nm + '</span>';
+        if (hand) return '<span style="color:#c77d1a;">⤼ ' + nm + '</span>';            // skipped, outstanding
+        if (notInPlan) return '<span style="color:#666;text-decoration:line-through;">' + nm + '</span>';
         return '<span>' + (i + 1) + '. ' + nm + '</span>';
     }).join('<span style="color:#444;"> › </span>');
     document.getElementById('commission-abort-row').style.display = (cx.phase > 0) ? 'block' : 'none';
@@ -19218,6 +19336,9 @@ function commissionRender() {
         (details ? '<div style="margin-bottom:8px;">' + details + '</div>' : '') +
         '<div>' + cxSafetyText(cx.phase) + '</div>' +
         '</div>');
+    // Universal Back / Skip / Mark-done row on every runnable step (Prep drives its own Start button).
+    // Hidden while a run is active — navigating away mid-measurement would leave it running unmonitored.
+    if (!cxRunActive() && cx.phase >= 1 && cx.phase < CX_PHASES.length) b.insertAdjacentHTML('beforeend', cxNavFooter());
 }
 
 // ── Step 1 · Prep — preconditions & snapshot ────────────────────────────────
@@ -19279,8 +19400,9 @@ function cxPrepRefresh() {
     btn.disabled = !engineOk;
 }
 function cxStart() {
-    // commissionStart snapshots the tune + marks Prep done; jump to the first selected stage
-    // (or finish immediately if the plan is Prep-only).
+    // commissionStart snapshots the tune (kept from the original Start when resuming a live run)
+    // + marks Prep done; jump to the first selected stage (or finish immediately if Prep-only).
+    if (cx) cx.handled = {};   // fresh run — clear any skip/manual notes carried over from a prior session
     cxGet('commissionStart=1').then(() => { const nx = cxNextSelected(0); if (nx === -1) cxFinish(); else cxGoto(nx); }).catch(e => xAlert('Start failed: ' + e));
 }
 
@@ -19828,7 +19950,11 @@ function cxDrawBode(pts) {
             const mkXAxis = (label) => ({ scale: 'x', grid: { show: true, stroke: '#333' }, stroke: '#8a8a8a', font: '11px sans-serif',
                 label: label, labelSize: label ? 24 : undefined, labelFont: '600 11px sans-serif',
                 splits: (u, ax, mn, mx) => [0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5, 10, 20, 50].filter(v => v >= mn && v <= mx),
-                // log axis (distr:3): uPlot nulls out minor-tick entries so only decades get labeled — pass those through, don't .toFixed() a null (that throws inside draw → blank canvas)
+                // log axis (distr:3): grid lines are drawn for every split, but the default filter labels only the
+                // decades (1, 10) — too sparse to read a bandwidth off. Label a curated half-decade subset instead;
+                // it stays legible down to 320px mobile width because only 0.3/1/3/10 ever fall in the swept range.
+                filter: (u, s) => s.map(v => ([0.1, 0.3, 1, 3, 10, 30, 100].indexOf(v) >= 0 ? v : null)),
+                // don't .toFixed() a null (a filtered-out tick) — that throws inside draw → blank canvas
                 values: (u, s) => s.map(v => v == null ? null : (v >= 1 ? String(Math.round(v)) : String(+v.toFixed(1)))) });
             const common = { cursor: { drag: { x: false, y: false } }, legend: { show: false } };
 
@@ -19841,14 +19967,20 @@ function cxDrawBode(pts) {
                                     values: (u, t) => t.map(v => v.toFixed(2)) }],
                 hooks: { draw: [u => {
                     const ctx = u.ctx; ctx.save();
-                    const hline = (yv, col, dash) => {
+                    // Each reference line carries the whole meaning of the plot, so label it in-canvas at the right
+                    // edge. below=true drops the text under the near-top damping ceiling (a label above it would
+                    // clip); the mid-plot bandwidth line takes its label above.
+                    const hline = (yv, col, dash, txt, below) => {
                         const y = u.valToPos(yv, 'y', true);
                         if (y < u.bbox.top || y > u.bbox.top + u.bbox.height) return;
                         ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash(dash);
                         ctx.beginPath(); ctx.moveTo(u.bbox.left, y); ctx.lineTo(u.bbox.left + u.bbox.width, y); ctx.stroke();
+                        ctx.setLineDash([]); ctx.fillStyle = col; ctx.font = '10px sans-serif';
+                        ctx.textAlign = 'right'; ctx.textBaseline = below ? 'top' : 'bottom';
+                        ctx.fillText(txt, u.bbox.left + u.bbox.width - 3, y + (below ? 3 : -3));
                     };
-                    hline(1.15, '#ef5350', [5, 4]);         // damping ceiling — peak gain must stay under this
-                    hline(0.707 * g0, '#3a7bd5', [2, 4]);   // -3 dB of DC gain → where bandwidth is read off
+                    hline(1.15, '#ef5350', [5, 4], 'peak-gain limit 1.15', true);
+                    hline(0.707 * g0, '#3a7bd5', [2, 4], 'bandwidth (−3 dB)', false);
                     ctx.restore();
                 }] }
             }), [f, g], magEl);
@@ -20219,7 +20351,7 @@ function cxFieldCutPoll() {
     if (!cx.fc || !cx.fc.running) return;
     const giveUp = () => (performance.now() - (cx.fc._pollStart || 0) > 60000);
     fetch(buildURL('/fieldcut.json')).then(r => r.json()).then(j => {
-        const phaseTxt = ['Settling at the operating point…', 'Cutting the field — measuring the decay…', 'Easing the field back up…'];
+        const phaseTxt = ['Holding a steady output (a few seconds)…', 'Cutting the field — measuring the decay…', 'Easing the field back up…'];
         cx.fc.phase = phaseTxt[j.phase] || 'Running…';
         const el = document.getElementById('fcPhase'); if (el) el.textContent = cx.fc.phase; else commissionRender();
         if (j.aborted) { cx.fc.running = false; cx.fc.err = (j.abort || 'aborted'); commissionRender(); return; }
@@ -20339,7 +20471,7 @@ function cxRenderFieldCut(b) {
     }
 
     if (!haveIdle) {
-        body += '<p style="font-size:15px;line-height:1.5;"><strong>Set the engine to idle</strong> and make sure the alternator is charging (some current flowing), then press Run. The test briefly cuts the field and times how fast the current falls.</p>' +
+        body += '<p style="font-size:15px;line-height:1.5;"><strong>Set the engine to idle</strong> with the alternator spinning, then press Run. The test raises the field to a steady output, briefly cuts it, and times how fast the current falls.</p>' +
             '<p style="font-size:13px;color:#f0a500;line-height:1.45;">⚠️ Hold RPM steady and don’t switch other loads on or off during the ~2 s test.</p>' +
             '<button onclick="cxFieldCutStart(\'idle\')" class="btn-primary btn-sm">Run (idle)</button>';
     } else if (!haveCruise) {
@@ -21378,7 +21510,14 @@ function protApplyMargin() {
 // the CV trip line runs parallel to the ripple the Safety Margin above it; the CC line is the same slope,
 // IExcessCcOffsetA above CV. Writes IExcessFrac+FracBulk (kept equal → parallel), Base, CcOffset, Floor,
 // Ceil — the same settings mirrored on Protections ▸ G3. Path B: no measured fit → hand-set only, no margin.
-const CX_THR_LIMS = { slope: [2, 50], base: [0, 40], ccoff: [0, 40], floor: [1, 20], ceil: [5, 80], margin: [0, 25] };
+const CX_THR_LIMS = { slope: [2, 50], base: [0, 40], ccoff: [0, 40], floor: [1, 20], ceil: [5, 80], margin: [0, 40] };
+// Lithium (LiFePO4) keeps tight over-current protection (BMS-disconnect cliff). Every other chemistry —
+// AGM, flooded, unknown — tolerates brief current excursions, so the wizard recommends a much larger
+// trip-line margin AND a raised ceiling (else the ceiling clips the margin back down).
+function cxIsNonLithium() {
+    const t = (window.vesselInfo && window.vesselInfo.battery_type) || '';
+    return !!t && t !== 'lifepo4';
+}
 function cxThrClamp(k, v) { const L = CX_THR_LIMS[k]; return Math.min(L[1], Math.max(L[0], v)); }
 function cxThrLegItem(color, label, dot, dash) {
     const sw = dot ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';vertical-align:middle;margin-right:5px;"></span>'
@@ -21391,13 +21530,18 @@ function cxThrAdvField(key, label, step) {
            'style="width:100%;background:#161616;border:1px solid #383838;border-radius:6px;color:#ddd;padding:6px 8px;font-size:14px;"></div>';
 }
 function cxRenderThresh(b) {
+    const nonLith = cxIsNonLithium();
+    const recMargin = nonLith ? 30 : 5;
+    const introCopy = nonLith
+        ? 'Set the margin so the over-current trip line sits above the ripple measured in the Disturbances step. For lead-acid and AGM the recommended margin is large — 30 A — because a brief current spike does no harm to these batteries: their wear accumulates over minutes to years, not milliseconds, and there is no lithium-style BMS cutoff. Setting the trip high lets a momentary over-current from an engine-speed blip ride through so the current loop settles on its own, instead of cutting the field and dropping the charge for a fraction of a second. The battery-voltage protections remain the fast defense against an actual over-voltage. The ceiling is raised to match so the larger margin is not clipped back down.'
+        : 'Set the margin so the over-current trip line clears the ripple measured in the Disturbances step. A 5 A margin works well for most installations.';
     let body = '<h2 style="font-size:15px;font-weight:600;margin:0 0 4px;">Fault Threshold Autotuning</h2>' +
-        '<p style="font-size:13px;color:#b7b7b7;margin:0 0 12px;line-height:1.5;">Adjust the margin such that the thresholds clear the measured ripple. A 5 amp margin works well for most installations.</p>' +
+        '<p style="font-size:13px;color:#b7b7b7;margin:0 0 12px;line-height:1.5;">' + introCopy + '</p>' +
         '<div id="cxThrNoFit"></div>' +
         '<div id="cxThrMarginRow" style="display:flex;align-items:center;gap:12px;margin:8px 0 14px;">' +
           '<label style="font-size:14px;font-weight:600;min-width:96px;">Safety Margin</label>' +
-          '<input type="range" id="cxThrMargin" min="0" max="25" step="1" value="5" oninput="cxThrMarginInput(this.value)" onchange="cxThrWrite([\'slope\',\'base\'])" style="flex:1;accent-color:#14b8af;">' +
-          '<span id="cxThrMarginVal" style="min-width:52px;text-align:right;font-weight:600;color:#2ec4b6;">5 A</span>' +
+          '<input type="range" id="cxThrMargin" min="0" max="40" step="1" value="' + recMargin + '" oninput="cxThrMarginInput(this.value)" onchange="cxThrWrite([\'slope\',\'base\'])" style="flex:1;accent-color:#14b8af;">' +
+          '<span id="cxThrMarginVal" style="min-width:52px;text-align:right;font-weight:600;color:#2ec4b6;">' + recMargin + ' A</span>' +
         '</div>' +
         '<canvas id="cxThreshPlotAlt" style="width:100%;height:230px;background:#161616;border-radius:6px;display:block;"></canvas>' +
         '<div style="display:flex;flex-wrap:wrap;gap:6px 14px;font-size:11px;margin-top:7px;color:#9a9a9a;">' +
@@ -21414,8 +21558,9 @@ function cxRenderThresh(b) {
     b.innerHTML = body;
     loadRipFit(() => { cxThrInit(); cxThrDraw(); });
 }
-// Seed wizard-local state from the fit + current device settings; on first entry apply the margin-5
-// recommendation (slope = ripple slope, base = ripple-at-idle + 5) and persist it so Next alone suffices.
+// Seed wizard-local state from the fit + current device settings; on first entry apply the per-chemistry
+// margin recommendation (5 A lithium, 30 A non-lithium) plus the matching over-current ceiling (25/40 A),
+// and persist them so Next alone suffices. The raised ceiling is absolute, so it applies even with no fit.
 function cxThrInit() {
     const rf = (cxRipFit && cxRipFit.alt && cxRipFit.alt.n > 0) ? cxRipFit.alt : null;
     if (!cx.thr) cx.thr = {};
@@ -21425,18 +21570,21 @@ function cxThrInit() {
     if (st.ceil == null) st.ceil = dNum('IExcessCeilA_echo', 25);
     if (st.ccoff == null) st.ccoff = dNum('IExcessCcOffsetA_echo', 0);
     if (!st.init) {
+        const nonLith = cxIsNonLithium();
+        if (nonLith) st.ceil = cxThrClamp('ceil', 40);   // raise so a 30 A margin isn't clipped; lithium's ceiling is left untouched
         if (rf) {
-            st.margin = 5;
+            st.margin = nonLith ? 30 : 5;
             st.slope = cxThrClamp('slope', rf.a1 * 100);   // firmware stores slope as % of command
             st.base = cxThrClamp('base', rf.a0 + st.margin);
             if (!(st.ccoff > 0)) st.ccoff = 4;   // give CC a visible gap above CV (device default 0 = coincident with CV)
             st.init = true;
-            cxThrWrite(['slope', 'base', 'ccoff']);
+            cxThrWrite(nonLith ? ['slope', 'base', 'ccoff', 'ceil'] : ['slope', 'base', 'ccoff']);
         } else {
             st.margin = null;
             st.slope = dNum('IExcessFrac_echo', 10);
             st.base = dNum('IExcessBaseA_echo', 0);
             st.init = true;
+            if (nonLith) cxThrWrite(['ceil']);   // non-lithium ceiling is absolute — apply even with no ripple fit
         }
     }
     const noFit = !rf;
@@ -21499,8 +21647,8 @@ function cxAppliedSummary() {
     const rows = [];
     if (r) rows.push('Field: stabilize ' + r.propStabA.toFixed(0) + ' A, step ' + r.propStepPct.toFixed(1) + '%');
     if (f && f.ok) rows.push('Gains: Kp ' + f.Kp.toFixed(3) + ', Ki ' + f.Ki.toFixed(3) + '; filters ' + Math.round(f.tauMs / 3) + '/' + Math.round(f.tauMs) + ' ms');
-    // Over-current floor/ceiling are operator-owned (Protections), so they're echoed here, not "applied" by
-    // commissioning. The current-check only produced the measured ripple projection (the plot above).
+    // Over-current floor is operator-owned (Protections), echoed here not "applied" by commissioning. The
+    // ceiling and trip-line margin ARE set by the Fault Threshold step, per chemistry (30 A / 40 A non-lithium).
     const flr = getEchoNumber('IExcessFloorA_echo');
     if (flr > 0) rows.push('Over-current floor (set in Protections): ' + flr.toFixed(1) + ' A');
     return rows.length ? rows.join('<br>') : 'No settings applied yet — earlier phases were skipped.';
@@ -21509,10 +21657,15 @@ function cxFinish() {
     // commissionDone persists the new tune the moment Finish fires (so a ✕ on the Helpful Hints
     // page below can't lose it); the close/reset/navigate tail moves behind the Done button.
     // cmEpoch: the browser's wall clock stamps the pass — the device's own clock may never have been set.
-    cxGet('commissionDone=1&cmEpoch=' + Math.floor(Date.now() / 1000)).then(() => {
+    cxGet('commissionDone=1&cmEpoch=' + Math.floor(Date.now() / 1000)).then(async () => {
         const _ALL = (1 << COMMISSION_STEPS.length) - 1;
         const allDone = (cxLastMask & _ALL) === _ALL;
-        if (!allDone) xAlert('Selected steps saved. Some steps are still pending — the badge shows what remains.');
+        const rows = cxHandledSummaryRows();
+        if (rows.length) {
+            await xAlert('Set these by hand — the wizard did not measure them:\n\n' + rows.join('\n\n'), 'Before you go');
+        } else if (!allDone) {
+            await xAlert('Selected steps saved. Some steps are still pending — the badge shows what remains.');
+        }
         cxShowHelpfulHints();
     }).catch(e => xAlert('Finish failed: ' + e));
 }
@@ -21566,10 +21719,12 @@ let cxLastState = 0;   // remembered from the last CSV3 frame, for the clear/res
 // Render the whole Commissioning tab status block: badge + overall line + step checklist (with
 // per-step run checkboxes) + clear/restart button. Driven by persisted state (0/1/2), furthest
 // phase reached (0..9, 9 = finished), and the per-stage done bitmask (bit i = stage i complete).
-function renderCommissionStatus(state, phase, mask) {
+function renderCommissionStatus(state, phase, mask, manual) {
     cxLastState = state;
     cxLastPhase = phase;
     cxLastMask = mask || 0;
+    if (manual !== undefined) cxLastManual = manual || 0;   // 3-arg internal re-renders keep the last value
+    manual = cxLastManual;
     // Until the user touches a checkbox, keep the run plan defaulted to the pending stages (so a
     // fresh device pre-selects all and a single stale step pre-selects just that one).
     if (!cxPlanUserSet) cxDefaultPlanFromMask(cxLastMask);
@@ -21586,12 +21741,14 @@ function renderCommissionStatus(state, phase, mask) {
     const ov = document.getElementById('commission-overall');
     if (ov) {
         let doneCount = 0; for (let i = 0; i < COMMISSION_STEPS.length; i++) if (cxLastMask & (1 << i)) doneCount++;
-        if (state === 2) { ov.textContent = 'Commissioned'; ov.style.color = '#2e7d32'; }
+        let manualCount = 0; for (let i = 0; i < COMMISSION_STEPS.length; i++) if (manual & (1 << i)) manualCount++;
+        const byHand = manualCount ? ' · ' + manualCount + ' set by hand' : '';
+        if (state === 2) { ov.textContent = 'Commissioned' + byHand; ov.style.color = '#2e7d32'; }
         else if (state === 1) {
             // Every step done but state still 1 = the run completed but Finish never committed it
             // (closed early / dropped network). Say so instead of "in progress" — the button offers Finish.
-            if (doneCount === COMMISSION_STEPS.length) { ov.textContent = 'All steps done — press “Finish commissioning” to save'; ov.style.color = '#b8860b'; }
-            else { ov.textContent = 'In progress — ' + doneCount + ' of ' + COMMISSION_STEPS.length + ' steps done'; ov.style.color = '#b8860b'; }
+            if (doneCount === COMMISSION_STEPS.length) { ov.textContent = 'All steps done — press “Finish commissioning” to save' + byHand; ov.style.color = '#b8860b'; }
+            else { ov.textContent = 'In progress — ' + doneCount + ' of ' + COMMISSION_STEPS.length + ' steps done' + byHand; ov.style.color = '#b8860b'; }
         }
         else { ov.textContent = 'Not commissioned'; ov.style.color = '#c62828'; }
     }
@@ -21600,6 +21757,7 @@ function renderCommissionStatus(state, phase, mask) {
     if (cl) {
         cl.innerHTML = COMMISSION_STEPS.map((s, i) => {
             const done = !!(cxLastMask & (1 << i));   // ✓ now comes from the per-stage done mask
+            const hand = !!(manual & (1 << i));        // set by hand (skip / mark-done-manually)
             // "Current" = the step the wizard is on. Done always wins, so a finished current step shows ✓.
             const current = (state === 1) && (i === phase) && (phase < COMMISSION_STEPS.length) && !done;
             const prep = (i === 0);
@@ -21609,13 +21767,21 @@ function renderCommissionStatus(state, phase, mask) {
             // completed step is unmistakable next to the run checkboxes. Big bold ✓ DONE when complete;
             // ▶ RUNNING while the wizard is open on this step, ▶ RESUME when paused (modal closed); ○ otherwise.
             let badge;
-            if (done) {
+            if (done && hand) {
+                // Hand-marked complete (unmeasured): counts toward COMMISSIONED but flagged so it's honest.
+                badge = '<span style="font-size:20px;font-weight:800;color:#b8860b;line-height:1;">⊘</span>' +
+                        '<span style="font-size:9px;font-weight:700;letter-spacing:.06em;color:#b8860b;">MANUAL</span>';
+            } else if (done) {
                 badge = '<span style="font-size:22px;font-weight:800;color:#2e7d32;line-height:1;">✓</span>' +
                         '<span style="font-size:9px;font-weight:700;letter-spacing:.06em;color:#2e7d32;">DONE</span>';
             } else if (current) {
                 const lbl = _panelOpen ? 'RUNNING' : 'RESUME';
                 badge = '<span style="font-size:16px;color:#1565c0;line-height:1;">▶</span>' +
                         '<span style="font-size:9px;font-weight:700;letter-spacing:.06em;color:#1565c0;">' + lbl + '</span>';
+            } else if (hand) {
+                // Skipped for now: outstanding (still nags) but explicitly set aside, not merely un-reached.
+                badge = '<span style="font-size:16px;color:#c77d1a;line-height:1;">⤼</span>' +
+                        '<span style="font-size:9px;font-weight:700;letter-spacing:.06em;color:#c77d1a;">SKIPPED</span>';
             } else {
                 badge = '<span style="font-size:16px;color:var(--text-muted);line-height:1;">○</span>';
             }
@@ -21664,8 +21830,8 @@ async function commissionClearAndRestart() {
         // Clear the local mirror and repaint so the checklist ✓ marks flip to ○ the instant the
         // user clicks — otherwise they linger until the next CSV3 frame round-trips the now-zeroed
         // done-mask back (CSV3 is event-driven, so that lag is user-visible).
-        cxLastState = 0; cxLastPhase = 0; cxLastMask = 0;
-        renderCommissionStatus(0, 0, 0);
+        cxLastState = 0; cxLastPhase = 0; cxLastMask = 0; cxLastManual = 0;
+        renderCommissionStatus(0, 0, 0, 0);
         openCommissionModal();     // reopen fresh at Prep (user re-confirms Start there)
     }).catch(e => xAlert('Clear failed: ' + e));
 }
@@ -22477,8 +22643,10 @@ window.addEventListener('load', function () {
 
   // Hand the relocated dashboard-brush its data bounds + a sink into ltRenderAll, wire
   // it once, and show it. Brush works in ms; ltRenderAll in seconds.
+  // Returns true if a saved window pref was applied (and thus already rendered), so the
+  // caller skips its own default render instead of clobbering the restored window.
   function ltInitBrush(minSec, maxSec, latestSec) {
-    if (typeof _brushState === 'undefined' || !_brushState) return;
+    if (typeof _brushState === 'undefined' || !_brushState) return false;
     _brushState.nativeSink = (fromMs, toMs) => ltRenderAll(fromMs / 1000, toMs / 1000);
     _brushState.ltSaveWindowPref = ltSaveWindowPref;   // bridge: snap handler is top-level, can't see the IIFE-private fn
     _brushState.dataMin = minSec * 1000;
@@ -22524,6 +22692,25 @@ window.addEventListener('load', function () {
     }
     const clr = document.getElementById('dashboard-crosshair-clear');
     if (clr && !clr._ltWired) { clr._ltWired = true; clr.addEventListener('click', () => { ltPinnedTime = null; ltRedrawMarkers(); ltUpdateCrosshairIndicator(); }); }
+    return !!ltWindowPref;
+  }
+
+  // First-open default view (no saved window pref): frame the most recent data rather than the
+  // whole ring. When only a recent slice is populated (AP mode, older records null), a full-span
+  // render bins every real point into the last column → a collapsed vertical sliver at the right
+  // edge. Frame = span of non-null samples, capped to the latest 24h for multi-session rings.
+  function ltRecentDataView(loSec, hiSec) {
+    const N = ltData.n, t = ltData.t, fields = ltData.fields, keys = Object.keys(fields);
+    let dataLo = null, dataHi = null;
+    for (let i = 0; i < N; i++) {
+      let has = false;
+      for (let k = 0; k < keys.length; k++) { const a = fields[keys[k]].avg; if (a && a[i] != null) { has = true; break; } }
+      if (has) { if (dataLo == null) dataLo = t[i]; dataHi = t[i]; }
+    }
+    if (dataLo == null) return [loSec, hiSec];
+    if (dataHi - dataLo > 86400) dataLo = dataHi - 86400;
+    const pad = Math.min(1800, Math.max(300, (dataHi - dataLo) * 0.08));
+    return [Math.max(loSec, dataLo - pad), Math.min(hiSec, dataHi + pad)];
   }
 
   // ---- Markers: live-edge "now" line + a tap-to-pin crosshair synced across charts ----
@@ -22796,9 +22983,14 @@ window.addEventListener('load', function () {
     ltFullRange = [loSec, hiSec];
     // Order matters: brush (sets nativeSink) → cloud state (reach) → render. The render's
     // ltCloudMaybePull then fires exactly ONE pull (loSec < oldest in the sparse case).
-    ltInitBrush(loSec, hiSec, sparse ? nowSec : (ltData.lastEpoch || hiSec));
+    // A restored window pref renders itself inside ltInitBrush; only render here when none
+    // applied, else the default render clobbers the restored window back to the full span.
+    const appliedPref = ltInitBrush(loSec, hiSec, sparse ? nowSec : (ltData.lastEpoch || hiSec));
     ltCloudInit(oldestBoundary);
-    ltRenderAll(loSec, hiSec);
+    if (!appliedPref) {
+      const [vFrom, vTo] = sparse ? [loSec, hiSec] : ltRecentDataView(loSec, hiSec);
+      ltRenderAll(vFrom, vTo);
+    }
     // Force each chart to its real container width + repaint. Charts can get stuck at
     // the 320px fallback if first built before the sub-tab had laid out; the per-chart
     // ResizeObserver never corrects it because `el` itself doesn't change size. Run on

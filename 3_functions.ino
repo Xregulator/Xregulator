@@ -984,6 +984,7 @@ enum Csv3Index {
   CSV3_cvTestSlewMode,         // manual CV square-wave test slew mode (0=off, 1=default rates, 2=custom)
   CSV3_CvBrakeTauMs,           // approach-brake sustained-slope EMA time constant (ms)
   CSV3_fieldDecayTauMs,        // commissioned field de-energize τ (ms); 30% cold margin already baked in
+  CSV3_commissionManualMask,   // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -3353,14 +3354,20 @@ void setupServer() {
     // ── Auto-commissioning: state machine ───────────────────────────────────
     if (request->hasParam("commissionStart")) {
       foundParameter = true;
-      // Take ownership of the protection flag for the wizard run: save the user's manual-tuning value
-      // (only on a fresh start, not a resume — don't clobber the original) and force protections ON so the
-      // tuning-tab Protections sliders can't leak a stray "off" into commissioning. Restored on done/abort.
-      if (commissionState != 1) commissionProtBackup = testProtectionsEnabled;
+      // Resuming a live run (IN_PROGRESS with its origin snapshot still present — e.g. reopening the
+      // wizard after a page reload or a mid-wizard reboot) must NOT re-baseline: the origin snapshot and
+      // the protection-flag backup keep their values from the original Start, so a later Abort still
+      // reverts to the true pre-commissioning tune. Any other Start (fresh, restart after abort/done,
+      // re-run on a demoted state==1 device that has no snapshot) captures the current tune as origin.
+      bool resumingRun = (commissionState == 1 && settingExists(NK_commissionSnap));
+      if (!resumingRun) commissionProtBackup = testProtectionsEnabled;
+      // Force protections ON for the run so the tuning-tab Protections sliders can't leak a stray "off"
+      // into commissioning. Restored to the backup on done/abort.
       testProtectionsEnabled = true;
-      commissionSnapshot();         // capture pre-commissioning tune for the abort path
+      if (!resumingRun) commissionSnapshot();   // origin snapshot + Min% backup for the abort path
+      commissionStepSnapshot();     // seed the in-flight step baseline; each step entry re-takes it
       commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
-      commissionSetPhase(0);        // reset furthest-phase (the wizard bumps it forward per phase)
+      commissionSetPhase(0);        // back to Prep (the wizard writes the phase on every step entry)
       commissionMarkStage(0);       // Prep complete: snapshot taken, preconditions checked
       // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (step 3) starts the sweeps clean if it is run.
       // (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable floors,
@@ -3379,6 +3386,23 @@ void setupServer() {
       settingsDirty = true;
       queueConsoleMessageF("Commissioning: step %d complete", s + 1);
     }
+    // Skip a step "for now": leave it outstanding (badge keeps nagging) but flag it hand-touched so the
+    // Finish summary lists it for manual setup. Does not advance phase — the wizard moves on client-side.
+    if (request->hasParam("commissionStageSkip")) {
+      foundParameter = true;
+      int s = request->getParam("commissionStageSkip")->value().toInt();
+      commissionSkipStage(s);
+      settingsDirty = true;
+      queueConsoleMessageF("Commissioning: step %d skipped (set manually later)", s + 1);
+    }
+    // Mark a step done BY HAND (unmeasured): counts toward COMMISSIONED so the nag can stop, flagged manual.
+    if (request->hasParam("commissionStageManual")) {
+      foundParameter = true;
+      int s = request->getParam("commissionStageManual")->value().toInt();
+      commissionManualStage(s);
+      settingsDirty = true;
+      queueConsoleMessageF("Commissioning: step %d marked done manually", s + 1);
+    }
     if (request->hasParam("commissionAbort")) {
       foundParameter = true;
       faCommissionGate = false;
@@ -3391,6 +3415,9 @@ void setupServer() {
       commissionSetPhase(0);                // clear checklist progress
       commissionDoneMask = 0;               // revert also drops all per-stage completion
       commissionWriteDoneMask();
+      commissionManualMask = 0;             // …and all hand-set flags
+      commissionWriteManualMask();
+      settingRemove(NK_commissionStepSnap); // teardown: no interrupted step to revert on next boot
       settingsDirty = true;
       queueConsoleMessageF("Commissioning: aborted — %s",
                            reverted ? "settings reverted to the pre-commissioning snapshot"
@@ -3402,6 +3429,7 @@ void setupServer() {
       if (ripGameFill || ripTabPendingWipe) { ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true; }
       testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
       settingRemove(NK_commissionSnap);     // commit the new tune (no snapshot ⇒ reboot won't revert)
+      settingRemove(NK_commissionStepSnap); // run over: drop the in-flight step baseline too
       commissionClearMinPctBackup();        // discard the Min% backup too — the new floors stay
       commissionRecomputeState();           // COMMISSIONED if every stage done, else IN_PROGRESS (partial)
       commissionSetPhase(COMMISSION_STAGE_COUNT);  // wizard pass finished (= one past the last step)
@@ -3430,7 +3458,14 @@ void setupServer() {
       foundParameter = true;
       int p = request->getParam("commissionPhase")->value().toInt();
       if (p < 0) p = 0; if (p > COMMISSION_STAGE_COUNT) p = COMMISSION_STAGE_COUNT;
+      bool phaseChanged = ((uint8_t)p != commissionPhase);
       commissionSetPhase((uint8_t)p);
+      // Re-baseline the in-flight step snapshot on ENTERING a runnable step (not on a same-phase
+      // heartbeat, which would swallow this step's own applies into the baseline). A reboot then undoes
+      // only the step you're on; finish (p==STAGE_COUNT) and Prep (p==0) have no step to snapshot.
+      if (phaseChanged && commissionState == 1 && p >= 1 && p < COMMISSION_STAGE_COUNT) {
+        commissionStepSnapshot();
+      }
       settingsDirty = true;
     }
     // Commissioning idle-rest heartbeat. The open wizard pings =1 every ~2 s to keep the field "rested"
@@ -8427,7 +8462,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8742,7 +8777,8 @@ void SendWifiData() {
                                (int)testSlewMode,
                                (int)cvTestSlewMode,
                                SafeInt(CvBrakeTauMs),
-                               SafeInt(fieldDecayTauMs));
+                               SafeInt(fieldDecayTauMs),
+                               (int)commissionManualMask);
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

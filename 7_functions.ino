@@ -3557,14 +3557,19 @@ static float fieldCurveInvert(float targetA) {
 // ============================================================
 // fieldCut_tick() — commissioning stage 8: field de-energize τ
 //
-// Holds the pre-test operating duty briefly (steady baseline), cuts the field to the floor
-// and samples the alternator-current decay, then eases the field back up. The decay is
-// log-linear-fit (ln I vs t) to the electrical time constant τ = L/R — the physical time the
-// OV protection's field drain takes. Like systemID_tick it returns true while active; the
-// caller forces GOV_BYPASS_SLEW + MANUAL PID (which also drops the MinDuty/RPM floor to 0, so
-// the cut reaches true field-off) and uses dutyOut as the command. One run per trigger; the
-// wizard runs it at idle and at cruise and averages. Field-off is the SAFE direction (can't
-// over-volt or over-current), so no extra protection gating is needed beyond the gentle ease-out.
+// Sequence: (1) close the loop on CURRENT to reach FIELDCUT_OPERATE_A and hold it steady for 5 s
+// (1 Hz P-control, duty is only the actuator — same mechanism as systemID's stabilize phase);
+// (2) FREEZE the duty and hold it fixed FIELDCUT_FREEZE_MS (~2 s) so the field sits at a constant,
+// settled operating point, averaging current over the hold as the baseline; (3) cut the field to the
+// floor instantly and sample the alternator-current decay; (4) ease the field back to where AUTO left
+// it. The decay is log-linear-fit (ln I vs t) to the electrical time constant τ = L/R. Like
+// systemID_tick it returns true while active; the caller forces GOV_BYPASS_SLEW + MANUAL PID (which
+// also drops the MinDuty/RPM floor to 0, so the cut reaches true field-off) and uses dutyOut as the
+// command. One run per trigger; the wizard runs it at idle and at cruise and averages. Field-off is
+// the SAFE direction. RPM plays NO role in the logic — but the abrupt cut starves the LM2907 tach
+// pickup and false-zeros RPM for a few seconds, so the engine-stopped detector is masked over the
+// test + FIELDCUT_RPM_GRACE_MS tail (fieldCutRpmGrace in the tick builder) precisely so a phantom
+// 0-RPM read can't abort the cut with RPM_TOO_LOW.
 // ============================================================
 static void fieldCutProcess() {
   fieldCutOk = false;
@@ -3611,10 +3616,14 @@ static void fieldCutProcess() {
 }
 
 bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
-  static uint8_t  phase = 0;             // 0=idle 1=settle 2=cut/measure 3=ease-out
+  static uint8_t  phase = 0;             // 0=idle 1=stabilize 2=freeze 3=cut/measure 4=ease-out
   static uint32_t phaseStartMs = 0;
-  static float    baseDuty = 0.0f;
-  static double   baseSum = 0.0;
+  static float    entryDuty = 0.0f;      // pre-test operating duty (AUTO float, ~4%) — returned to on exit
+  static float    operateDuty = 0.0f;    // closed-loop duty that reached the current target; frozen through the hold + cut
+  static uint32_t stabLastAdjMs = 0;     // 1 Hz P-control update stamp
+  static float    stabRing[SYSID_STABILIZE_SAMPLES];  // rolling 1 Hz current samples for the band check
+  static uint8_t  stabIdx = 0, stabCount = 0;
+  static double   baseSum = 0.0;         // freeze-window current accumulator → pre-cut baseline
   static uint32_t baseN = 0;
 
   // ── Abort ────────────────────────────────────────────────────────────────
@@ -3623,7 +3632,7 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     // A protection abort latches its reason into the msg before this tick runs — don't overwrite it.
     if (fieldCutAbortMsg[0] == '\0') snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "aborted");
     fieldCutActive = 0; fieldCutPhase = 0; fieldCutLastEndMs = millis();
-    phase = 0; dutyOut = baseDuty;
+    phase = 0; dutyOut = entryDuty;
     return false;
   }
 
@@ -3640,29 +3649,65 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         return false;
       }
     }
-    baseDuty = (dutyOut > 1.0f) ? dutyOut : 1.0f;   // hold the pre-test operating duty
-    fieldCutCount = 0; baseSum = 0.0; baseN = 0;
+    entryDuty = (dutyOut > 1.0f) ? dutyOut : 1.0f;   // where AUTO left the field — restored on exit
+    operateDuty = entryDuty;
+    fieldCutCount = 0; stabIdx = 0; stabCount = 0; stabLastAdjMs = nowMs; baseSum = 0.0; baseN = 0;
     fieldCutTauMs = -1.0f; fieldCutBaseA = 0.0f; fieldCutResidPct = -1.0f;
     fieldCutResultsReady = false; fieldCutOk = false; fieldCutAbortMsg[0] = '\0';
     fieldCutActive = 1; fieldCutPhase = 0;
     phase = 1; phaseStartMs = nowMs;
-    dutyOut = baseDuty;
+    dutyOut = entryDuty;
     return true;
   }
 
-  // ── SETTLE: hold baseline; average output over the back half (skip the entry transient) ──
+  // ── STABILIZE: close the loop on CURRENT. Adjust duty at 1 Hz (P-control, duty is only the knob)
+  //   until the field output holds at FIELDCUT_OPERATE_A within band for a full 5 s rolling window —
+  //   same mechanism as systemID's stabilize phase. Runs under GOV_BYPASS_SLEW, so each 1 Hz step is
+  //   a direct duty command. On success the loop is done adjusting; the FREEZE phase then locks this
+  //   duty. ──
   if (phase == 1) {
-    dutyOut = baseDuty; fieldCutPhase = 0;
-    if (nowMs - phaseStartMs >= FIELDCUT_SETTLE_MS / 2) { baseSum += ampsRaw; baseN++; }
-    if (nowMs - phaseStartMs >= FIELDCUT_SETTLE_MS) {
-      fieldCutBaseA = (baseN > 0) ? (float)(baseSum / baseN) : ampsRaw;
+    fieldCutPhase = 0;
+    if (nowMs - stabLastAdjMs >= 1000) {
+      float err = FIELDCUT_OPERATE_A - ampsRaw;
+      operateDuty = constrain(operateDuty + err * 0.5f, 5.0f, FIELDCUT_DUTY_MAX);
+      stabRing[stabIdx] = ampsRaw;
+      stabIdx = (stabIdx + 1) % SYSID_STABILIZE_SAMPLES;
+      if (stabCount < SYSID_STABILIZE_SAMPLES) stabCount++;
+      stabLastAdjMs = nowMs;
+      if (stabCount >= SYSID_STABILIZE_SAMPLES) {
+        float sum = 0; for (uint8_t i = 0; i < SYSID_STABILIZE_SAMPLES; i++) sum += stabRing[i];
+        float avg = sum / SYSID_STABILIZE_SAMPLES;
+        if (fabsf(avg - FIELDCUT_OPERATE_A) < SYSID_STABILIZE_BAND_A) {
+          queueConsoleMessageF("Field-cut: current steady at %.1f A (duty %.1f%%) — freezing duty", avg, operateDuty);
+          phase = 2; phaseStartMs = nowMs;
+        }
+      }
+    }
+    dutyOut = operateDuty;
+    // Backstop: if the current never holds in band (e.g. hunting), don't hang — freeze the current
+    // duty and proceed. fieldCutProcess still rejects the run if the resulting baseline is unusable.
+    if (phase == 1 && (nowMs - phaseStartMs) >= SYSID_STABILIZE_TIMEOUT_MS) {
+      queueConsoleMessageF("Field-cut: current never settled — freezing duty %.1f%% and proceeding", operateDuty);
       phase = 2; phaseStartMs = nowMs;
     }
     return true;
   }
 
-  // ── CUT/MEASURE: field to floor, sample the decay every fresh CH1 (~10 ms) ──
+  // ── FREEZE: duty is now FIXED at operateDuty (loop off). Hold it steady FIELDCUT_FREEZE_MS so the
+  //   field sits at a constant operating point, and average the current over the hold as the pre-cut
+  //   baseline. The decay then starts from a known, settled value, not a mid-adjustment transient. ──
   if (phase == 2) {
+    dutyOut = operateDuty; fieldCutPhase = 0;
+    baseSum += ampsRaw; baseN++;
+    if (nowMs - phaseStartMs >= FIELDCUT_FREEZE_MS) {
+      fieldCutBaseA = (baseN > 0) ? (float)(baseSum / baseN) : ampsRaw;
+      phase = 3; phaseStartMs = nowMs;
+    }
+    return true;
+  }
+
+  // ── CUT/MEASURE: field to floor, sample the decay every fresh CH1 (~10 ms) ──
+  if (phase == 3) {
     dutyOut = 0.0f; fieldCutPhase = 1;   // sysIDRunning drops the MinDuty/RPM floor → true field-off
     if (fieldCutCount < FIELDCUT_BUF_SIZE) {
       fieldCutBuf[fieldCutCount].tMs = nowMs - phaseStartMs;
@@ -3672,21 +3717,21 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     if ((nowMs - phaseStartMs >= FIELDCUT_MEAS_MS) || fieldCutCount >= FIELDCUT_BUF_SIZE) {
       fieldCutProcess();
       fieldCutActive = 2; fieldCutPhase = 2;
-      phase = 3; phaseStartMs = nowMs;
+      phase = 4; phaseStartMs = nowMs;
     }
     return true;
   }
 
-  // ── EASE-OUT: ramp duty 0 → baseDuty so re-engagement can't trip a protection ──
-  if (phase == 3) {
+  // ── EASE-OUT: ramp duty 0 → entryDuty so re-engagement can't trip a protection ──
+  if (phase == 4) {
     float frac = (float)(nowMs - phaseStartMs) / FIELDCUT_EASE_MS;
     if (frac >= 1.0f) {
       fieldCutResultsReady = true;
       fieldCutActive = 0; fieldCutPhase = 0; fieldCutLastEndMs = millis();
-      phase = 0; dutyOut = baseDuty;
+      phase = 0; dutyOut = entryDuty;
       return false;
     }
-    dutyOut = baseDuty * frac;
+    dutyOut = entryDuty * frac;
     return true;
   }
   return false;

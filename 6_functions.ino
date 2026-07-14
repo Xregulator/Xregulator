@@ -1640,6 +1640,31 @@ void AdjustFieldLearnMode() {
   // and FastSetpointRiseHeadroomV vs ChargingVoltageTarget.
   static uint32_t postProtectRiseStartMs = 0;
 
+  // Field-decay-tau early release: once a clamp episode has held for fieldDecayTauMs, the field coil
+  // driving the excess has bled out (one L/R time constant; cold margin baked into the stored value),
+  // so the hold latches below release early instead of waiting out their lagged filtered signals
+  // (G2 immediately; iExcess once its excess EMA is back under the fire line — see the site gates).
+  // OR'd with each latch's natural release — can only shorten a cut, never lengthen it. Reason-blind
+  // by construction: it clears only the OV/iExcess hold latches, so a Load-Dump-owned clamp (no hold
+  // latch, re-asserts every tick) is unaffected.
+  bool tauReleaseNow = g_fastOvClampActive && g_ovClampRiseMs != 0 && fieldDecayTauMs > 0
+                       && (uint32_t)(currentMillis - g_ovClampRiseMs) >= (uint32_t)fieldDecayTauMs;
+  // Count/announce once per episode, and only when a latch-bearing layer owns the clamp: Load Dump
+  // re-asserts every tick (no hold latch) and G1 is predictive (no hold latch), so the timer elapsing
+  // against either clears nothing. Episode-latched rather than edge-detected — the committed reason
+  // can flicker (Load-Dump tiers vote per-sample), and an edge-detect would re-announce per flicker.
+  bool tauReleaseOwned = tauReleaseNow && g_fastOvCapReason != CAP_REASON_LOADDUMP
+                         && g_fastOvCapReason != CAP_REASON_KHARD_G1;
+  static bool tauAnnounced = false;
+  if (tauReleaseOwned && !tauAnnounced) {
+    tauAnnounced = true;
+    g_tauReleaseCount++;
+    queueConsoleMessageF("Fast-OV tau-release #%lu: clamp held %lums >= tau %ums — releasing G2/iExcess holds as they cool",
+                         (unsigned long)g_tauReleaseCount,
+                         (unsigned long)(currentMillis - g_ovClampRiseMs), (unsigned)fieldDecayTauMs);
+  }
+  if (!tauReleaseNow) tauAnnounced = false;  // episode over — re-arm for the next one
+
   {
     static float vPrev = 0.0f;
     static uint32_t vPrevMs = 0;
@@ -1677,6 +1702,7 @@ void AdjustFieldLearnMode() {
     g_ovIbvFilt = ibvFilt;
 
     if (voltageControlActive) {  // Groups 1/2 target-relative; gated only on voltageControlActive
+      if (tauReleaseNow) ovActive = false;  // field bled >= tau: drop the G2 hysteresis hold before it can re-latch below
       const float TD_PRED = TdPred;
       const float V_HARD = ChargingVoltageTarget + OvPredMarginV;
       // Arm-proximity window scales with class: at 48V dV/dt is ~4× so a fixed 0.06V window
@@ -1827,6 +1853,15 @@ void AdjustFieldLearnMode() {
   // nor logs mode transitions. sysMode is intentionally left as-is (last AUTO), so resuming a test or
   // ending the session slips back to NORMAL_AUTO with no SYS_MODE transition spam.
   if (mode == MODE_COMMISSION_IDLE) {
+    // Rest preserves the prior AUTO sysMode — but a wizard started before the system ever reached
+    // AUTO leaves sysMode at its OFF boot default with no path back (this branch returns before the
+    // transition handler), so every field step is AUTO-gated off. chargingEnabled is guaranteed true
+    // here (selectFieldControlMode PRIORITY 1), so seed AUTO once.
+    if (sysMode != SYS_MODE_AUTO) {
+      enter_sys_auto();
+      pidInitialized = true;
+      queueConsoleMessage("Charging enabled (AUTO)");
+    }
     runCommissionIdle(tick, reason, actualDtSec);
     prevMode = mode;
     return;
@@ -2631,6 +2666,11 @@ void AdjustFieldLearnMode() {
             // measured ripple slope and base to ripple-at-idle + Safety Margin, so the line rides a fixed
             // margin above the ripple (base 0 = legacy through-origin behaviour).
             float E = fmaxf(IExcessFloorA, fminf(IExcessFrac * setpointLimited + IExcessBaseA, IExcessCeilA));
+            // Field bled >= tau: release the hold, but only once the excess EMA (last tick's value) is
+            // back at/under the fire line — below E the latch is pure hysteresis-tail lag. Clearing while
+            // EMA > E would hand the latch to the edge-triggered fire above, re-running the full fire
+            // side effects (count/console/cv_I snap/inner-PID reset) every tick until the EMA decays.
+            if (tauReleaseNow && mExcessEma <= E) iExcessActive = false;
 
             float ieActual = MeasuredAmps;
 
@@ -2644,8 +2684,8 @@ void AdjustFieldLearnMode() {
             // clamp, then HOLD past release until the wind-down excess has decayed back inside the normal
             // band (self-clearing, no fixed timer), bounded by a safety cap so a genuinely sustained
             // over-current is never muted forever (the voltage backstops own that case regardless).
-            const uint32_t kPostProtMismatchMaxMs = 350;  // ≈3 field-fall TCs; backstop only — normal release is the decay test
-            bool clampOwned = fastOvClampActive || modeCapGlideSuppress;
+            const uint32_t kPostProtMismatchMaxMs = (uint32_t)fmaxf(150.0f, 3.0f * (float)fieldDecayTauMs);  // 3× the commissioned field-decay τ (already carries the 30% cold margin), floored 150ms; backstop only — normal release is the decay test
+            bool clampOwned = fastOvClampActive || iExcessActive || modeCapGlideSuppress;  // include iExcess's OWN clamp so the guard arms after an iExcess-only cut, not just a voltage-OV cut
             if (clampOwned) {
               postProtMismatch = true;
               postProtClearMs  = currentMillis;  // refreshed every clamped tick, so the cap below counts from the release edge
@@ -2721,7 +2761,10 @@ void AdjustFieldLearnMode() {
             // into a startup fire. Unified reseed fires on the falling edge of fastOvClampActive.
             iExcessActive = false;
             mExcessEma = 0.0f;
-            postProtMismatch = false;  // drop the wind-down guard too — no clamp can be in flight while the gate is closed
+            // Do NOT clear postProtMismatch here. At a low/float setpoint the field cut sags battV below the
+            // arm line mid-wind-down, briefly closing this gate; wiping the guard on that dip is exactly what
+            // let iExcess re-fire when the gate re-opened. The guard self-clears via its decay/timeout while
+            // the gate is open and counts from the release edge, so a genuine sustained CV exit still clears it.
             g_mExcessEma = 0.0f;
             g_iExcessThreshold = 0.0f;
           }
@@ -2754,6 +2797,8 @@ void AdjustFieldLearnMode() {
             // command-vs-actual error, catching only overshoots above ceiling. Always alternator-domain.
             float floorBulk = IExcessFloorA;
             float E = fmaxf(floorBulk, fminf(IExcessFracBulk * i_ceiling_pre_ov + IExcessBaseA + IExcessCcOffsetA, IExcessCeilA));
+            // Field bled >= tau: EMA-gated hold release — same rationale as the CV detector above.
+            if (tauReleaseNow && mExcessEmaBulk <= E) iExBulkActive = false;
 
             // Post-protection wind-down gate — bulk mirror of the CV detector's postProtMismatch.
             // A Hi->Lo ceiling glide ramps i_ceiling_pre_ov DOWN; when
@@ -2763,8 +2808,8 @@ void AdjustFieldLearnMode() {
             // release until the excess decays back inside the band (self-clearing, no fixed timer),
             // bounded by a safety cap so a genuinely sustained over-current still fires (the voltage
             // backstops own that interim regardless).
-            const uint32_t kPostProtMismatchMaxMs = 350;  // ≈3 field-fall TCs; backstop only — normal release is the decay test
-            bool clampOwnedBulk = fastOvClampActive || modeCapGlideSuppress;
+            const uint32_t kPostProtMismatchMaxMs = (uint32_t)fmaxf(150.0f, 3.0f * (float)fieldDecayTauMs);  // 3× the commissioned field-decay τ, floored 150ms; backstop only — normal release is the decay test
+            bool clampOwnedBulk = fastOvClampActive || iExBulkActive || modeCapGlideSuppress;  // include bulk iExcess's OWN clamp so the guard arms after a bulk-iExcess-only cut
             if (clampOwnedBulk) {
               postProtMismatchBulk = true;
               postProtClearMsBulk  = currentMillis;  // refreshed every clamped tick, so the cap counts from the release edge
@@ -2821,7 +2866,8 @@ void AdjustFieldLearnMode() {
             // Leave g_mExcessEma / g_iExcessThreshold untouched so the CV detector's export stands.
             iExBulkActive = false;
             mExcessEmaBulk = 0.0f;
-            postProtMismatchBulk = false;  // drop the wind-down guard too — no clamp can be in flight while the gate is closed
+            // Keep postProtMismatchBulk (see the CV mirror): a gate dip during the field wind-down must not
+            // wipe the guard. It self-clears via its decay/timeout while the gate is open.
           }
           g_iExcessBulkActive = iExBulkActive;  // export for PID/CV log flag + dashboard
         }
@@ -3199,6 +3245,7 @@ void AdjustFieldLearnMode() {
           // g_fastOvClampActive (read here, written at end of this block) is the
           // unified flag — every supervisor has voted by the time we reach this point.
           if (voltageControlActive && g_fastOvClampActive && !fastOvClampActive) {
+            g_ovClampRiseMs = 0;  // episode ended — disarm the tau timer until the next rising edge stamps it
             float icvHi_seed = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
             cv_I = clamp_f(preEventCvI * ReseedFrac, 0.0f, icvHi_seed);
             cv_I_track = cv_I;
@@ -3229,6 +3276,7 @@ void AdjustFieldLearnMode() {
           // g_fastOvClampActive is updated for next tick.
           if (fastOvClampActive && !g_fastOvClampActive) {
             g_fastOvClampCount++;
+            g_ovClampRiseMs = currentMillis;  // stamp the episode start for the field-decay-tau early release
             recovActive = false;  // a new fire cancels the recovery ramp; the mid-ramp cv_I becomes the next reseed base (de-escalation ratchet)
           }
           g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
@@ -4779,10 +4827,20 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // counting below. Only while charging is enabled: a shutdown (toggle/key-off/BMS/weather) has
   // nothing to recover, and deferring the cuts just keeps the field energized where its PWM fakes
   // tach readings (phantom RPM in datalogs).
-  bool rpmDropoutGrace = (g_lastProtClampMs != 0)
-                         && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS)
-                         && chargingEnabledLocal
-                         && (RPM <= 0.0f);
+  // Field-cut test (commissioning stage 8) deliberately cuts the field to 0 to time the current
+  // decay; that abrupt cut starves the LM2907 pickup and false-zeros RPM for ~4.6 s after. Same
+  // dropout as a protection clamp — mask it while the test runs and through the re-bias tail, else
+  // engineFullyStopped would fire RPM_TOO_LOW and abort the cut mid-measurement. Not gated on
+  // chargingEnabled (the test always eases the field back, so there is always something to recover).
+  bool fieldCutRpmGrace = (RPM <= 0.0f)
+                          && ((fieldCutActive != 0)
+                              || (fieldCutLastEndMs != 0
+                                  && (uint32_t)(currentMillis - fieldCutLastEndMs) < FIELDCUT_RPM_GRACE_MS));
+  bool rpmDropoutGrace = fieldCutRpmGrace
+                         || ((g_lastProtClampMs != 0)
+                             && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS)
+                             && chargingEnabledLocal
+                             && (RPM <= 0.0f));
   tick.rpmBelowMinimum = (!tick.ignoreRPM && !rpmDropoutGrace && RPM < (float)MinRPMForField);
 
   // Engine confirmed stopped: RPM held at exactly 0 for >= RPM_ZERO_CUT_MS. RPM is already

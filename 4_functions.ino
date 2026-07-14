@@ -1996,20 +1996,23 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   if (settingExists(NK_commissionDoneMask)) {
     commissionDoneMask = (uint16_t)settingRead(NK_commissionDoneMask).toInt();
   }
-  // A genuinely INTERRUPTED wizard run must NOT survive a reboot — detect it by the Phase-0
-  // snapshot still being present (it is removed on both Finish and Abort). Such a boot is
-  // treated exactly like Abort: revert every setting to the snapshot, reset to NOT_COMMISSIONED,
-  // and clear the done mask so the user starts over from the reverted baseline. (All
-  // snapshot-covered settings are loaded above, so the revert wins.)
-  // NOTE: a COMMITTED-but-partial config (e.g. a commissioned device whose Min% floor was
-  // invalidated by an RPM-breakpoint change) is also state==1 but has NO snapshot — it must
-  // persist across reboot so the badge keeps nagging that a step needs re-running.
-  if (commissionState == 1 && settingExists(NK_commissionSnap)) {
-    commissionRestore();          // revert to the Phase-0 snapshot (also removes it)
-    commissionSetState(0);
-    commissionSetPhase(0);
-    commissionDoneMask = 0;
-    commissionWriteDoneMask();
+  // Per-stage set-by-hand bitmask (skip / mark-done-manually). Default 0.
+  if (settingExists(NK_commissionManualMask)) {
+    commissionManualMask = (uint16_t)settingRead(NK_commissionManualMask).toInt();
+  }
+  // A reboot mid-wizard must KEEP already-finished steps — only the step that was running when power
+  // was lost is un-trustworthy. The in-flight step snapshot (NK_commissionStepSnap, re-taken on each
+  // step entry) holds the scalar tune as of that step's start, so restoring it undoes exactly that one
+  // step while every finished step stays intact. The done/manual masks and IN_PROGRESS state are left
+  // as-is so the badge invites "Continue commissioning" rather than starting over. The Phase-0 origin
+  // snapshot (NK_commissionSnap) is deliberately NOT touched here — it stays so a later explicit Abort
+  // can still fully revert to the pre-commissioning tune.
+  // NOTE: a COMMITTED-but-partial device (e.g. commissioned, then Min% floor invalidated by an
+  // RPM-breakpoint change) is also state==1 but has NEITHER snapshot — it persists untouched and keeps
+  // nagging, which is correct.
+  if (commissionState == 1 && settingExists(NK_commissionStepSnap)) {
+    commissionRestoreScalars(NK_commissionStepSnap);  // undo just the interrupted step's scalar applies
+    settingRemove(NK_commissionStepSnap);
   }
   if (!settingExists(NK_IExcessArmMarginV)) {
     IExcessArmMarginV *= seedVScale;

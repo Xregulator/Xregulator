@@ -330,9 +330,11 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=CV plant fit, 8=Field cut, 9=finished)
+#define NK_commissionPhase "commissnPhase"    // current wizard phase (0=Prep…8=Field cut, 9=finished); moves backward on Back
 #define NK_commissionDoneMask "commissnDoneMsk" // per-stage completion bitmask (bit i = stage i done); 15-char max
-#define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
+#define NK_commissionManualMask "commissnManMsk" // per-stage set-by-hand bitmask (skip / mark-done-manually)
+#define NK_commissionSnap "commissnSnap"      // Phase-0 origin snapshot (explicit-abort full revert): positional CSV of the settings the flow writes
+#define NK_commissionStepSnap "commissnStepSnp" // in-flight step snapshot: scalars as of the current step's entry — reboot undoes only that step
 #define NK_T0_C "T0_C"
 #define NK_TailCurrent "TailCurrent"
 #define NK_TailCurrent_A "TailCurrent_A"
@@ -539,27 +541,43 @@ bool settingRemove(const char *key) {
 // exact match, so a snapshot from a different field set is refused rather than misread slot-for-slot.
 static const int COMMISSION_SNAP_FIELDS = 14;
 
-void commissionSnapshot() {
+// Serialize the current scalar tune into `key` as one positional CSV. 12th field = HiLow (charge-rate
+// mode) so a revert never strands the user in the wrong mode; fields 13/14 = IExcessBaseA/CcOffsetA (the
+// affine trip-line the Thresholds step writes). This scalar set IS the whole positional snapshot; the
+// Min% floor table is backed up separately (see commissionSnapshot).
+void commissionSnapshotScalars(const char* key) {
   char buf[180];
-  // 12th field = HiLow (charge-rate mode). Captured so an abort/reboot restores the mode too —
-  // a commissioning run must never strand the user in the wrong mode.
-  // Fields 13/14 = IExcessBaseA/CcOffsetA — the affine trip-line the Thresholds step writes, so an
-  // abort reverts them too. Prep rewrites this snapshot at the start of every run.
   snprintf(buf, sizeof(buf),
            "%.4f,%.4f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d,%.1f,%.1f",
            PidKp, PidKi, OutputPIDFilterTC, VoltageFilterTC,
            IExcessTau, IExcessFloorA, IExcessCeilA, IExcessFrac, IExcessFracBulk,
            SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow, IExcessBaseA, IExcessCcOffsetA);
-  settingWrite(NK_commissionSnap, buf);
-  // The Min% floor table + knee tracker don't fit this positional CSV (10 floats × 3 + bools), so
-  // they are backed up separately as "bk_*" blobs. Keeps an abort able to revert the Min% step too.
+  settingWrite(key, buf);
+}
+
+// Origin snapshot for the explicit-abort full revert: scalar tune + the Min% floor table/knee (bk_* blobs).
+// Taken once at Prep (a resume Start skips re-taking it) and left untouched for the whole run so an abort
+// reverts to the pre-commissioning tune.
+void commissionSnapshot() {
+  commissionSnapshotScalars(NK_commissionSnap);
+  // The Min% floor table + knee tracker don't fit the positional CSV (10 floats × 3 + bools), so they are
+  // backed up separately as "bk_*" blobs. Keeps an abort able to revert the Min% step too.
   commissionBackupMinPct();
 }
 
-// Restore from the Phase-0 snapshot (abort path). Returns false if none exists.
-bool commissionRestore() {
-  if (!settingExists(NK_commissionSnap)) return false;
-  String s = settingRead(NK_commissionSnap);
+// In-flight step snapshot: re-taken on each step entry, so it holds the scalar tune as of the START of the
+// step currently running (every finished step is already baked in). A reboot mid-wizard restores it to undo
+// ONLY the interrupted step. Scalars only — a partially-swept Min% floor is left as valid data and the
+// un-done step is simply re-run.
+void commissionStepSnapshot() {
+  commissionSnapshotScalars(NK_commissionStepSnap);
+}
+
+// Apply a positional-CSV scalar snapshot from `key`. Returns false (and drops a corrupt key) on a short
+// read. Does NOT touch the Min% backup and does NOT remove `key` on success — the caller owns cleanup.
+bool commissionRestoreScalars(const char* key) {
+  if (!settingExists(key)) return false;
+  String s = settingRead(key);
   float v[COMMISSION_SNAP_FIELDS];
   int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
                  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
@@ -567,11 +585,11 @@ bool commissionRestore() {
   // Exact count only. A short read means a truncated/corrupt snapshot, or one written by a build with a
   // different field set — either way the slots no longer mean what this code assumes. Refuse rather than
   // half-apply values into live control parameters. Log here, not at the call sites: the boot path discards
-  // the return value, and leaving the snapshot in NVS would make every later abort repeat this silently.
+  // the return value, and leaving the snapshot in NVS would make every later revert repeat this silently.
   if (n != COMMISSION_SNAP_FIELDS) {
-    queueConsoleMessageF("Commissioning: pre-state snapshot unreadable (%d of %d fields) - settings NOT reverted",
+    queueConsoleMessageF("Commissioning: snapshot unreadable (%d of %d fields) - settings NOT reverted",
                          n, COMMISSION_SNAP_FIELDS);
-    settingRemove(NK_commissionSnap);
+    settingRemove(key);
     return false;
   }
   PidKp = v[0];                  settingWrite(NK_PidKp, String(PidKp, 4).c_str());
@@ -596,9 +614,16 @@ bool commissionRestore() {
   IExcessBaseA = v[12];     settingWrite(NK_IExcessBaseA, String(IExcessBaseA, 1).c_str());
   IExcessCcOffsetA = v[13]; settingWrite(NK_IExcessCcOffsetA, String(IExcessCcOffsetA, 1).c_str());
   recomputeCcGains();  // re-apply CC gains live (normalized to BATTERY_VOLTAGE)
-  commissionRestoreMinPct();      // revert the Min% floor table + knee tracker (also clears the backup)
-  settingRemove(NK_commissionSnap);
   return true;
+}
+
+// Restore from the Phase-0 origin snapshot (explicit-abort path): scalars + Min% floor table, then drop
+// the origin key. Returns false if none exists.
+bool commissionRestore() {
+  bool ok = commissionRestoreScalars(NK_commissionSnap);
+  if (ok) commissionRestoreMinPct();      // revert the Min% floor table + knee tracker (also clears the backup)
+  settingRemove(NK_commissionSnap);
+  return ok;
 }
 
 // Persist the commissioning state byte (0=not / 1=in-progress / 2=commissioned).
@@ -607,7 +632,7 @@ void commissionSetState(uint8_t st) {
   settingWrite(NK_commissionState, String((int)st).c_str());
 }
 
-// Persist the furthest wizard phase reached (0=Prep…7=CV plant fit, 8=Field cut, 9=finished). Drives
+// Persist the current wizard phase (0=Prep…8=Field cut, 9=finished; moves backward on Back). Drives
 // the Commissioning tab checklist so step progress survives a page reload / new client.
 void commissionSetPhase(uint8_t p) {
   commissionPhase = p;
@@ -647,6 +672,33 @@ void commissionWriteDoneMask() {
   settingWrite(NK_commissionDoneMask, String((int)commissionDoneMask).c_str());
 }
 
+void commissionWriteManualMask() {
+  settingWrite(NK_commissionManualMask, String((int)commissionManualMask).c_str());
+}
+
+// Skip a stage "for now": leave it NOT done (badge keeps nagging) but flag it as hand-touched so the
+// Finish summary and checklist can show it as skipped rather than merely un-reached. Also un-marks done
+// (a skip of a previously-done stage demotes it to outstanding).
+void commissionSkipStage(int stage) {
+  if (stage < 0 || stage >= COMMISSION_STAGE_COUNT) return;
+  commissionDoneMask &= ~(1 << stage);
+  commissionManualMask |= (1 << stage);
+  commissionWriteDoneMask();
+  commissionWriteManualMask();
+  if (commissionState == 2) commissionSetState(1);
+}
+
+// Mark a stage done BY HAND (unmeasured): sets its done bit so completion math is satisfied and the nag
+// can stop, flagged manual. Unlike a measured completion it does NOT invalidate downstream stages —
+// nothing was re-measured that could stale them.
+void commissionManualStage(int stage) {
+  if (stage < 0 || stage >= COMMISSION_STAGE_COUNT) return;
+  commissionDoneMask |= (1 << stage);
+  commissionManualMask |= (1 << stage);
+  commissionWriteDoneMask();
+  commissionWriteManualMask();
+}
+
 // Derive the lifecycle byte from the mask: none done → NOT, all done → COMMISSIONED, anything
 // in between → IN_PROGRESS. Called at FINISH only — during an active wizard, commissionState is
 // held at IN_PROGRESS explicitly (set by commissionStart) so the badge reads "in progress" even
@@ -661,9 +713,13 @@ void commissionRecomputeState() {
 // commissionState — that is owned by start/abort/done.
 void commissionMarkStage(int stage) {
   if (stage < 0 || stage >= COMMISSION_STAGE_COUNT) return;
+  uint16_t deps = commissionDependentsMask(stage);
   commissionDoneMask |= (1 << stage);
-  commissionDoneMask &= ~commissionDependentsMask(stage);
+  commissionDoneMask &= ~deps;
   commissionWriteDoneMask();
+  // This stage is now MEASURED (not hand-set); its invalidated dependents revert to pending, not manual.
+  commissionManualMask &= ~((1 << stage) | deps);
+  commissionWriteManualMask();
 }
 
 // Clear a single stage's done bit (e.g. RPM breakpoints changed → Min% floor must be redone),
@@ -671,9 +727,11 @@ void commissionMarkStage(int stage) {
 // demoted to IN_PROGRESS so the badge nags that a step needs re-running.
 void commissionClearStage(int stage) {
   if (stage < 0 || stage >= COMMISSION_STAGE_COUNT) return;
-  commissionDoneMask &= ~(1 << stage);
-  commissionDoneMask &= ~commissionDependentsMask(stage);
+  uint16_t cleared = (1 << stage) | commissionDependentsMask(stage);
+  commissionDoneMask &= ~cleared;
   commissionWriteDoneMask();
+  commissionManualMask &= ~cleared;   // a staled stage is no longer satisfied, hand-set or otherwise
+  commissionWriteManualMask();
   if (commissionState == 2) commissionSetState(1);
 }
 
@@ -682,8 +740,11 @@ void commissionClearStage(int stage) {
 // from (pre-wizard alignment screen or normal Settings). Clears every RPM-binned wizard stage; Prep(0)
 // and Field cut(8) are exempt — the field de-energize τ is RPM-independent (L/R), so a rescale can't stale it.
 void commissionClearRpmDependents() {
-  commissionDoneMask &= ~((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7));
+  uint16_t rpmBits = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7);
+  commissionDoneMask &= ~rpmBits;
   commissionWriteDoneMask();
+  commissionManualMask &= ~rpmBits;
+  commissionWriteManualMask();
   if (commissionState == 2) commissionSetState(1);
 }
 

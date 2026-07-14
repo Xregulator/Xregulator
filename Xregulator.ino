@@ -267,7 +267,7 @@ static bool    altHiFieldAlert = false;    // high-field-low-output alert (indep
 // operating-point drift, not raw loop dither / sensor jitter (which the filter strips):
 // Band widths are sized by each axis's measured output sensitivity (Alt_Health_Dev_Summary.md §3):
 // output smear from a band = band × dI/dx, and the four add in quadrature.
-float altDutyTolPct    = 0.4f;   // field-duty band (% points, filtered; raw CV dither ~3 p-p). 1.76 A/pt — dominates the smear budget
+float altDutyTolPct    = 0.3f;   // field-duty band (% points, filtered; raw CV dither ~3 p-p). 1.76 A/pt — dominates the smear budget
 float altRpmTol        = 30.0f;  // RPM band (filtered; raw idle jitter ~50 p-p). 0.004 A/RPM at cruise but 0.045 below the ~1200 knee — do NOT widen on the cruise number
 float altVbusTol       = 0.20f;  // bus-voltage band (V, filtered). |dI/dV| < 1.8 and sign-unstable across fits — output cost is near zero
 // Admission floors:
@@ -1142,10 +1142,13 @@ int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) 
 // once per install (idle + cruise averaged) and consumed by the OV field-drain release timing.
 // Shares the SystemID duty-override + bumpless-resume path (OR'd into sysIDRunning).
 #define FIELDCUT_BUF_SIZE   256      // decay samples (~10 ms CH1 cadence, PSRAM)
-#define FIELDCUT_SETTLE_MS  700UL    // hold baseline before the cut so the decay starts from a steady output
+#define FIELDCUT_FREEZE_MS  2000UL   // after the current is steady, hold the duty FIXED this long before the cut so the field is at a constant, settled operating point (decay starts from a known baseline, not a mid-adjustment transient)
 #define FIELDCUT_MEAS_MS    500UL    // cut window: field at floor, sample the decay (>10τ for any realistic field)
-#define FIELDCUT_EASE_MS    1500.0f  // ease duty back to baseline on exit — gentle re-engagement can't trip a protection
+#define FIELDCUT_EASE_MS    1500.0f  // ease duty back to the pre-test operating point on exit — gentle re-engagement can't trip a protection
 #define FIELDCUT_MIN_BASE_A 5.0f     // baseline output must clear this or there is no decay to fit
+#define FIELDCUT_OPERATE_A   35.0f   // pre-cut steady CURRENT target: closed-loop stabilize the field to this (duty is the actuator) so the decay starts from a real output, not the AUTO float duty (~4%). Mirrors SystemIDStabilizeAmps.
+#define FIELDCUT_DUTY_MAX    92.0f   // upper safety clamp on the closed-loop duty command (%) — a bound on the actuator, NOT an operating target
+#define FIELDCUT_RPM_GRACE_MS 6000UL // ms after a field-cut run to keep masking a 0-RPM read as tach dropout (not a stopped engine): the abrupt cut starves the LM2907 pickup, false-zeroing RPM for ~4.6 s while its front end re-biases (see reference_lm2907_frontend_final). Without this the engine-stopped detector aborts the cut mid-measurement with RPM_TOO_LOW.
 struct FieldCutSample { uint32_t tMs; float amps; };
 FieldCutSample *fieldCutBuf = nullptr;          // ps_malloc'd on first run, never freed
 int   fieldCutCount = 0;                          // decay samples captured this run
@@ -1170,11 +1173,16 @@ uint16_t fieldDecayTauMs = 60;
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
-uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=CV plant fit, 8=Field cut, 9=finished); drives the Commissioning tab checklist
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — current wizard phase (0=Prep…8=Field cut, 9=finished; moves backward on Back); drives the Commissioning tab checklist
 // Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
 // 0=Prep 1=Field curve 2=Min% floor 3=Plant fit 4=Verify 5=Disturbances 6=Thresholds 7=CV plant fit 8=Field cut. Drives
 // the per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0x1FF.
 uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
+// Per-stage "set by hand, not measured" bitmask (mirrors NK_commissionManualMask). Combined with the
+// done bit it distinguishes four states per stage: measured (done, !manual), hand-marked complete
+// (done, manual), skipped-outstanding (!done, manual), and pending (!done, !manual). Cleared for a
+// stage whenever it is properly measured or its done bit is cleared.
+uint16_t commissionManualMask = 0;              // mirrors NK_commissionManualMask
 volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
 
 // Commissioning "rest" hold (between guided steps). The open wizard dialog pings commissionHeartbeat
@@ -2382,6 +2390,15 @@ uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not c
 // ungated and a stopping engine can't sit with an energized field faking tach readings.
 #define PROT_RPM_GRACE_MS 5000
 uint32_t g_lastProtClampMs = 0;      // millis() of the most recent tick any protection clamp was active
+// Field-decay-tau early release. g_ovClampRiseMs stamps the FIRST tick of a clamp episode (rising
+// edge) — distinct from g_lastProtClampMs, which restamps every clamped tick. Once a clamp has held
+// for fieldDecayTauMs (one field-drain L/R time constant, cold-margin already baked into the stored
+// value), the coil current sustaining the excess has bled out, so the G2/iExcess hold latches are
+// released without waiting for the lagged filtered-voltage return (iExcess additionally waits for its
+// excess EMA to fall back under the fire line — see the site gates). OR'd with the natural release, so
+// it can only ever SHORTEN a cut; Load Dump is untouched (it re-asserts every tick, no hold latch).
+uint32_t g_ovClampRiseMs = 0;
+uint32_t g_tauReleaseCount = 0;      // episodes where the tau timer elapsed against an OV/iExcess-owned clamp
 int bmsLogic = 0;                     // if BMS is asked to turn the alternator on and off
 int bmsLogicLevelOff = 0;             // set to 0 if the BMS gives a low signal (<3V?) when no charging is desired
 bool chargingEnabled;                 // defined from other variables
@@ -3390,7 +3407,7 @@ volatile float VoltageKi = 6.0f;    // A/(V·s) — integral gain; above-target 
 float CvBrakeThreshVps = 0.70f;     // V/s — approach brake fires when the sustained (EMA'd) rise of filtered V exceeds this. Bench-raced 2026-07-13: 0.5–0.6 thins low-Hz resonance margin, 0.8+ misses ~3×-stiffer banks
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess sustained slope, drain this many A/s from cv_I
 float CvBrakeTauMs = 250.0f;        // ms — EMA TC of the brake's sustained-slope signal. Co-set with CvBrakeThreshVps (filter+threshold are one DOF, like IExcessTau)
-float CvBrakeArmV = 1.00f;          // V below live target within which the brake is armed. Wide by design — the 0.20 V proximity gate it replaced neutered the old bleed
+float CvBrakeArmV = 1.25f;          // V below live target within which the brake is armed. Sized to exceed a typical Hi->Lo / load-sag hole (~1.2 V) so the brake stays armed through the whole climb-back and catches the fast rise — not just the last fraction near target. Undershoot-safe (over-braking just re-integrates)
 bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "helpers" (asymmetric 7× KiDown unwind + slope-aware integrator bleed). ON = both active (reduce overshoot / speed OV recovery). OFF = symmetric plain PI, easier to tune/understand. Does NOT touch real OV protections.
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 // --- FastOV supervisor ---
