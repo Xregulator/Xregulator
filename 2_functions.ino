@@ -314,8 +314,9 @@ bool fsRemove(const char *path) {
 #define NK_battTempDerateEn "battTmpDerEn"
 #define NK_battTempCoeff "battTmpCoeff"
 #define NK_SlopeBleedK "SlopeBleedK"
-#define NK_SlopeBleedProxV "SlopeBleedProxV"
-#define NK_SlopeBleedThresh "SlopeBleedThrsh"
+#define NK_CvBrakeThreshVps "CvBrakeThrVps"
+#define NK_CvBrakeTauMs "CvBrakeTauMs"
+#define NK_CvBrakeArmV "CvBrakeArmV"
 #define NK_SolarWatts "SolarWatts"
 #define NK_StartupRiseRate "StartupRiseRate"
 #define NK_SwitchControlOverride "SwtchCntrlOvrrd"
@@ -325,10 +326,11 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineFreqStart "SysIDSineFStrt"
 #define NK_systemIDSineFreqEnd "SysIDSineFEnd"
 #define NK_sysidPlantTau "sysidPlantTau"
+#define NK_fieldDecayTau "fieldDecayTau"       // commissioned field de-energize τ (ms), 30% cold-margin baked in
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished)
+#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=CV plant fit, 8=Field cut, 9=finished)
 #define NK_commissionDoneMask "commissnDoneMsk" // per-stage completion bitmask (bit i = stage i done); 15-char max
 #define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
 #define NK_T0_C "T0_C"
@@ -605,7 +607,7 @@ void commissionSetState(uint8_t st) {
   settingWrite(NK_commissionState, String((int)st).c_str());
 }
 
-// Persist the furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished). Drives
+// Persist the furthest wizard phase reached (0=Prep…7=CV plant fit, 8=Field cut, 9=finished). Drives
 // the Commissioning tab checklist so step progress survives a page reload / new client.
 void commissionSetPhase(uint8_t p) {
   commissionPhase = p;
@@ -613,12 +615,12 @@ void commissionSetPhase(uint8_t p) {
 }
 
 // ── Per-stage completion tracking ─────────────────────────────────────────────
-// commissionDoneMask carries one bit per stage (0=Prep, 1=Field curve … 6=Thresholds, 7=CV plant fit). It is the
+// commissionDoneMask carries one bit per stage (0=Prep, 1=Field curve … 7=CV plant fit, 8=Field cut). It is the
 // source of truth for the per-step ✓ marks and for the default checkbox selection of a
 // partial re-run. commissionState (0/1/2) is the lifecycle badge and is DERIVED from the
 // mask wherever it is recomputed below.
-#define COMMISSION_STAGE_COUNT 8
-#define COMMISSION_ALL_DONE    0xFF    // bits 0..7 set = every stage complete
+#define COMMISSION_STAGE_COUNT 9
+#define COMMISSION_ALL_DONE    0x1FF   // bits 0..8 set = every stage complete (8 = Field cut, appended)
 
 // Downstream stages invalidated when an upstream stage is (re)completed — see the coupling
 // analysis: Field curve(1) feeds Plant fit(3) + Verify(4); Plant fit(3) feeds Verify(4);
@@ -677,7 +679,8 @@ void commissionClearStage(int stage) {
 
 // A tach rescale (RPMScalingFactor/PulleyRatio change) moves the engine-RPM axis every binned stage
 // was measured against, so all of them must be re-run. Hangs off the SETTING change, wherever it comes
-// from (pre-wizard alignment screen or normal Settings). Clears every wizard stage except Prep(0).
+// from (pre-wizard alignment screen or normal Settings). Clears every RPM-binned wizard stage; Prep(0)
+// and Field cut(8) are exempt — the field de-energize τ is RPM-independent (L/R), so a rescale can't stale it.
 void commissionClearRpmDependents() {
   commissionDoneMask &= ~((1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7));
   commissionWriteDoneMask();
@@ -806,8 +809,6 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/ShuntResistanceMicroOhm.txt", NK_ShuntResistanceMicroOhm },
   { "/ShutdownPhase2HoldMs.txt", NK_ShutdownPhase2HoldMs },
   { "/SlopeBleedK.txt", NK_SlopeBleedK },
-  { "/SlopeBleedProxV.txt", NK_SlopeBleedProxV },
-  { "/SlopeBleedThresh.txt", NK_SlopeBleedThresh },
   { "/SolarWatts.txt", NK_SolarWatts },
   { "/StartupRiseRate.txt", NK_StartupRiseRate },
   { "/SwitchControlOverride.txt", NK_SwitchControlOverride },
@@ -3246,10 +3247,11 @@ bool buildConfigPayload() {
   // time_ms as decimal strings (uint64 dwell is beyond JS 53-bit integers). After a true power cut
   // the struct zeroes and the next snapshot reports lower values — edge fn overwrites as-is, accepted.
   offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
-    ",\"ov_telemetry\":{\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"bulk\":%.2f,\"k\":%.2f,"
+    ",\"ov_telemetry\":{\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"brake\":%lu,\"bulk\":%.2f,\"k\":%.2f,"
     "\"bins_fine\":%d,\"bins_coarse\":%d,\"events\":[",
     (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
-    (unsigned long)g_ovTel.inaCutCount, BulkVoltage, (float)BATTERY_VOLTAGE / 12.0f,
+    (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.brakeEventCount,
+    BulkVoltage, (float)BATTERY_VOLTAGE / 12.0f,
     OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS);
   for (int i = 0; i < OV_HIST_BINS; i++)
     offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "%s%lu", i ? "," : "", (unsigned long)g_ovTel.events[i]);

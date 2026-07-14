@@ -635,6 +635,7 @@ enum Csv2Index {
   CSV2_accThermSess,    // containment sessions since reset
   CSV2_accThermWorst,   // worst over-temp vs limit (°F ×100) — unconditional
   CSV2_imuInstallCode,  // 0=OK 1=never zeroed 2=mount not vertical 3=zeroed pre-mount-check 4=no IMU
+  CSV2_cvBrakeCount,    // approach-brake engagement episodes this session (rising edge, ≥1s quiet re-arm)
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -846,10 +847,10 @@ enum Csv3Index {
   CSV3_OutputPIDMA_N,
   CSV3_OutputPIDFilterTC,
   CSV3_VoltageFilterTC,
-  CSV3_SlopeBleedThresh,
+  CSV3_CvBrakeThreshVps,
   CSV3_SlopeBleedK,
   CSV3_DvdtTC,
-  CSV3_SlopeBleedProxV,
+  CSV3_CvBrakeArmV,
   CSV3_StartupRiseRate,
   CSV3_absorptionCompleteTime,
   CSV3_OnOff,
@@ -981,6 +982,8 @@ enum Csv3Index {
   CSV3_cvRecovEmaxV,            // recovery error cap (V per 12V block); ×1000
   CSV3_testSlewMode,           // manual CC square-wave test slew mode (0=off, 1=default rates, 2=custom)
   CSV3_cvTestSlewMode,         // manual CV square-wave test slew mode (0=off, 1=default rates, 2=custom)
+  CSV3_CvBrakeTauMs,           // approach-brake sustained-slope EMA time constant (ms)
+  CSV3_fieldDecayTauMs,        // commissioned field de-energize τ (ms); 30% cold margin already baked in
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -2623,18 +2626,20 @@ void setupServer() {
     float ki = (float)VoltageKi_active;
     uint32_t interval = (uint32_t)VoltageLoopInterval;
 
-    float sbThresh = SlopeBleedThresh;
-    float sbK      = SlopeBleedK;
-    float sbProxV  = SlopeBleedProxV;
+    float brThresh = CvBrakeThreshVps;
+    float brK      = SlopeBleedK;
+    float brArmV   = CvBrakeArmV;
+    float brTauMs  = CvBrakeTauMs;
 
     memcpy(state.header + 0,  &cnt,      4);
     memcpy(state.header + 4,  &entrySize, 4);
     memcpy(state.header + 8,  &kp,       4);
     memcpy(state.header + 12, &ki,       4);
     memcpy(state.header + 16, &interval, 4);
-    memcpy(state.header + 20, &sbThresh, 4);  // SlopeBleedThresh (V/s)
-    memcpy(state.header + 24, &sbK,      4);  // SlopeBleedK (A/(V/s))
-    memcpy(state.header + 28, &sbProxV,  4);  // SlopeBleedProxV (V)
+    memcpy(state.header + 20, &brThresh, 4);  // CvBrakeThreshVps (V/s)
+    memcpy(state.header + 24, &brK,      4);  // SlopeBleedK (A/(V/s))
+    memcpy(state.header + 28, &brArmV,   4);  // CvBrakeArmV (V)
+    memcpy(state.header + 32, &brTauMs,  4);  // CvBrakeTauMs (ms)
 
     state.count = cvLogCount;
     state.oldest = (cvLogHead - cvLogCount + CV_LOG_SIZE) % CV_LOG_SIZE;
@@ -3108,6 +3113,17 @@ void setupServer() {
       systemIDPlantTauMs = (uint16_t)inputMessage.toInt();
       settingWrite(NK_sysidPlantTau, String(systemIDPlantTauMs).c_str());
     }
+    if (request->hasParam("fieldDecayTauMs")) {
+      // Commissioned field de-energize τ (ms) — the Field-cut step's Apply-Average writes the averaged
+      // measurement × 1.30 (cold margin); a manual override writes the typed value directly. Clamped to a
+      // sane physical band. Consumed by the OV field-drain release timing.
+      foundParameter = true;
+      inputMessage = request->getParam("fieldDecayTauMs")->value();
+      int v = inputMessage.toInt();
+      if (v < 5) v = 5; else if (v > 900) v = 900;
+      fieldDecayTauMs = (uint16_t)v;
+      settingWrite(NK_fieldDecayTau, String(fieldDecayTauMs).c_str());
+    }
     if (request->hasParam("systemIDSineCycles")) {
       foundParameter = true;
       inputMessage = request->getParam("systemIDSineCycles")->value();
@@ -3124,10 +3140,14 @@ void setupServer() {
     if (request->hasParam("startSystemID")) {
       foundParameter = true;
       bool sysidModeOK = (sysMode == SYS_MODE_AUTO);
-      // Mutex: refuse if any square-wave tuning test is already on. All four tests must run independently.
+      // Mutex: refuse if any other field-driving test or tuning mode is on — they must run one at a time.
       const char *activeTuning = TuningMode ? "Current tuning"
-                                            : (CVTuningMode ? "Voltage tuning"
-                                                            : (fieldCurveActive != 0 ? "Field curve" : nullptr));
+                                 : CVTuningMode ? "Voltage tuning"
+                                 : cvPlantFitActive ? "Voltage Control Autotuning"
+                                 : batteryHealthTestActive ? "Battery health test"
+                                 : resTestActive ? "Resonance current-check"
+                                 : (fieldCurveActive != 0) ? "Field curve"
+                                 : (fieldCutActive != 0) ? "Field cut" : nullptr;
       if (sysMode == SYS_MODE_MANUAL) {
         queueConsoleMessage("SystemID: start blocked — not allowed in manual mode (duty is fixed; test cannot drive the field)");
       } else if (!sysidModeOK) {
@@ -3169,7 +3189,11 @@ void setupServer() {
       const char *busy = (systemIDActive != 0) ? "Plant Delay test"
                          : TuningMode ? "Current tuning"
                          : CVTuningMode ? "Voltage tuning"
-                         : (fieldCurveActive != 0) ? "Field curve" : nullptr;
+                         : cvPlantFitActive ? "Voltage Control Autotuning"
+                         : batteryHealthTestActive ? "Battery health test"
+                         : resTestActive ? "Resonance current-check"
+                         : (fieldCurveActive != 0) ? "Field curve"
+                         : (fieldCutActive != 0) ? "Field cut" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Field curve: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
@@ -3191,6 +3215,37 @@ void setupServer() {
       queueConsoleMessage("Field curve: abort requested via web UI");
     }
 
+    // ── Auto-commissioning: field de-energize τ (stage 8) ───────────────────
+    if (request->hasParam("fieldCutStart")) {
+      foundParameter = true;
+      const char *busy = (systemIDActive != 0) ? "Plant Delay test"
+                         : TuningMode ? "Current tuning"
+                         : CVTuningMode ? "Voltage tuning"
+                         : cvPlantFitActive ? "Voltage Control Autotuning"
+                         : batteryHealthTestActive ? "Battery health test"
+                         : resTestActive ? "Resonance current-check"
+                         : (fieldCurveActive != 0) ? "Field curve"
+                         : (fieldCutActive != 0) ? "Field cut" : nullptr;
+      if (sysMode != SYS_MODE_AUTO) {
+        queueConsoleMessage("Field cut: start blocked — only allowed in AUTO mode");
+      } else if (busy != nullptr) {
+        queueConsoleMessageF("Field cut: start blocked — %s is active", busy);
+      } else if ((millis() - fieldCutLastEndMs) > 2000UL) {
+        fieldCutRequested = true;
+        fieldCutResultsReady = false;
+        fieldCutAbortRequested = false;
+        fieldCutAbortMsg[0] = '\0';
+        queueConsoleMessage("Field cut: requested via web UI");
+      } else {
+        queueConsoleMessage("Field cut: start ignored (cooldown)");
+      }
+    }
+    if (request->hasParam("fieldCutCancel")) {
+      foundParameter = true;
+      fieldCutAbortRequested = true;
+      queueConsoleMessage("Field cut: abort requested via web UI");
+    }
+
     // ── Min% onset-knee sweep (commissioning) ───────────────────────────────
     // Reuses the field-curve ramp in onset-stop mode (stops at first current). Each completed
     // sweep is committed as an anchor; applyKneeCurve fits the Min% column across the anchors.
@@ -3199,7 +3254,11 @@ void setupServer() {
       const char *busy = (systemIDActive != 0) ? "Plant Delay test"
                          : TuningMode ? "Current tuning"
                          : CVTuningMode ? "Voltage tuning"
-                         : (fieldCurveActive != 0) ? "Field curve" : nullptr;
+                         : cvPlantFitActive ? "Voltage Control Autotuning"
+                         : batteryHealthTestActive ? "Battery health test"
+                         : resTestActive ? "Resonance current-check"
+                         : (fieldCurveActive != 0) ? "Field curve"
+                         : (fieldCutActive != 0) ? "Field cut" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Min% knee: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
@@ -3311,7 +3370,7 @@ void setupServer() {
       settingsDirty = true;         // push the CSV3 state echo promptly
       queueConsoleMessage("Commissioning: started — settings snapshotted");
     }
-    // Mark one wizard stage complete (i = 0=Prep…7=CV plant fit). Sets its done bit and clears
+    // Mark one wizard stage complete (i = 0=Prep…8=Field Decay). Sets its done bit and clears
     // any downstream stage it feeds (coupling: see commissionDependentsMask). Drives the ✓ marks.
     if (request->hasParam("commissionStageDone")) {
       foundParameter = true;
@@ -5262,19 +5321,26 @@ void setupServer() {
       resTestLastCmdMs = millis();  // keepalive refresh (deadman)
     }
     // No VoltageKd handler — voltage loop has no D term.
-    if (request->hasParam("SlopeBleedThresh")) {
+    if (request->hasParam("CvBrakeThreshVps")) {
       foundParameter = true;
-      inputMessage = request->getParam("SlopeBleedThresh")->value();
-      SlopeBleedThresh = inputMessage.toFloat();
-      settingWrite(NK_SlopeBleedThresh, String(SlopeBleedThresh, 3).c_str());
-      queueConsoleMessageF("Slope bleed threshold: %.3f V/s", SlopeBleedThresh);
+      inputMessage = request->getParam("CvBrakeThreshVps")->value();
+      CvBrakeThreshVps = inputMessage.toFloat();
+      settingWrite(NK_CvBrakeThreshVps, String(CvBrakeThreshVps, 3).c_str());
+      queueConsoleMessageF("Approach brake threshold: %.3f V/s", CvBrakeThreshVps);
+    }
+    if (request->hasParam("CvBrakeTauMs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvBrakeTauMs")->value();
+      CvBrakeTauMs = inputMessage.toFloat();
+      settingWrite(NK_CvBrakeTauMs, String(CvBrakeTauMs, 0).c_str());
+      queueConsoleMessageF("Approach brake averaging TC: %.0f ms", CvBrakeTauMs);
     }
     if (request->hasParam("SlopeBleedK")) {
       foundParameter = true;
       inputMessage = request->getParam("SlopeBleedK")->value();
       SlopeBleedK = inputMessage.toFloat();
       settingWrite(NK_SlopeBleedK, String(SlopeBleedK, 1).c_str());
-      queueConsoleMessageF("Slope bleed gain: %.1f A/(V/s)", SlopeBleedK);
+      queueConsoleMessageF("Approach brake bleed gain: %.1f A/(V/s)", SlopeBleedK);
     }
     if (request->hasParam("cvHelpersEnabled")) {
       foundParameter = true;
@@ -5283,12 +5349,12 @@ void setupServer() {
       settingWrite(NK_cvHelpersEnabled, String((int)cvHelpersEnabled).c_str());
       queueConsoleMessageF("CV tuning helpers (asymmetric unwind + slope bleed): %s", cvHelpersEnabled ? "ENABLED" : "DISABLED");
     }
-    if (request->hasParam("SlopeBleedProxV")) {
+    if (request->hasParam("CvBrakeArmV")) {
       foundParameter = true;
-      inputMessage = request->getParam("SlopeBleedProxV")->value();
-      SlopeBleedProxV = inputMessage.toFloat();
-      settingWrite(NK_SlopeBleedProxV, String(SlopeBleedProxV, 2).c_str());
-      queueConsoleMessageF("Slope bleed proximity gate: %.2f V", SlopeBleedProxV);
+      inputMessage = request->getParam("CvBrakeArmV")->value();
+      CvBrakeArmV = inputMessage.toFloat();
+      settingWrite(NK_CvBrakeArmV, String(CvBrakeArmV, 2).c_str());
+      queueConsoleMessageF("Approach brake arm window: %.2f V", CvBrakeArmV);
     }
     if (request->hasParam("TempPIDKp")) {
       foundParameter = true;
@@ -6721,6 +6787,28 @@ void setupServer() {
     request->send(200, "application/json", buf);
   });
 
+  // Field de-energize τ test (commissioning stage 8): decay samples + fitted τ. The wizard polls this,
+  // plots the current decay, and averages the idle+cruise τ. "aborted" reported independently of "active"
+  // (same rationale as /fieldcurve.json).
+  server.on("/fieldcut.json", HTTP_GET, [](AsyncWebServerRequest *request) {
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(4096), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
+    int pos = 0;
+    pos += snprintf(buf + pos, 4096 - pos, "{\"pts\":[");
+    for (int i = 0; i < fieldCutCount && pos < 3700; i++) {
+      pos += snprintf(buf + pos, 4096 - pos, "%s{\"t\":%lu,\"a\":%.2f}",
+                      i > 0 ? "," : "", (unsigned long)fieldCutBuf[i].tMs, fieldCutBuf[i].amps);
+    }
+    pos += snprintf(buf + pos, 4096 - pos,
+                    "],\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"tauMs\":%.1f,"
+                    "\"baseA\":%.1f,\"residPct\":%.1f,\"nPts\":%d,\"aborted\":%d,\"abort\":\"%s\"}",
+                    fieldCutActive != 0 ? 1 : 0, (int)fieldCutPhase, fieldCutResultsReady ? 1 : 0,
+                    fieldCutOk ? 1 : 0, fieldCutTauMs, fieldCutBaseA, fieldCutResidPct,
+                    fieldCutCount, fieldCutAbortRequested ? 1 : 0, fieldCutAbortMsg);
+    request->send(200, "application/json", buf);
+  });
+
   // CV plant-fit status + result (commissioning Step 9 polls this). "aborted" reported independently of
   // "active" (same rationale as /fieldcurve.json — a protection cut can leave active latched).
   server.on("/cvplantfit.json", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -7147,6 +7235,7 @@ void setupServer() {
     g_fastOvClampCount = 0;
     g_fastOvHardCount = 0;
     g_iExcessCount = 0;
+    g_cvBrakeCount = 0;
     g_inaOVCount = 0;
     g_hardOCCount = 0;
     g_voltSpikeCount = 0;
@@ -7177,10 +7266,10 @@ void setupServer() {
     int off = snprintf(buf, cap,
                        "{\"bulk\":%.2f,\"k\":%.2f,\"bins_fine\":%d,\"bins_coarse\":%d,"
                        "\"fine_width_12v\":0.2,\"coarse_width_12v\":1.0,"
-                       "\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"events\":[",
+                       "\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"brake\":%lu,\"events\":[",
                        BulkVoltage, (float)BATTERY_VOLTAGE / 12.0f, OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS,
                        (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
-                       (unsigned long)g_ovTel.inaCutCount);
+                       (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.brakeEventCount);
     for (int i = 0; i < OV_HIST_BINS && off > 0 && off < (int)cap; i++)
       off += snprintf(buf + off, cap - off, "%s%lu", i ? "," : "", (unsigned long)g_ovTel.events[i]);
     if (off > 0 && off < (int)cap) off += snprintf(buf + off, cap - off, "],\"time_ms\":[");
@@ -7723,7 +7812,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
@@ -8271,7 +8360,8 @@ void SendWifiData() {
                                (int)accThermInbandSec,
                                (int)accThermSessions,
                                SafeInt(accThermWorstOverF, 100),
-                               (int)imuInstallCode());
+                               (int)imuInstallCode(),
+                               SafeInt(g_cvBrakeCount));
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
@@ -8337,7 +8427,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8519,10 +8609,10 @@ void SendWifiData() {
                                OutputPIDMA_N,
                                (int)OutputPIDFilterTC,
                                (int)VoltageFilterTC,
-                               SafeInt(SlopeBleedThresh, 100),
+                               SafeInt(CvBrakeThreshVps, 100),
                                (int)SlopeBleedK,
                                SafeInt(DvdtTC, 10),
-                               SafeInt(SlopeBleedProxV, 100),
+                               SafeInt(CvBrakeArmV, 100),
                                SafeInt(StartupRiseRate, 100),
                                SafeInt(absorptionCompleteTime),
                                SafeInt(OnOff),
@@ -8650,7 +8740,9 @@ void SendWifiData() {
                                SafeInt(cvRecovSec, 10),
                                SafeInt(cvRecovEmaxV, 1000),
                                (int)testSlewMode,
-                               (int)cvTestSlewMode);
+                               (int)cvTestSlewMode,
+                               SafeInt(CvBrakeTauMs),
+                               SafeInt(fieldDecayTauMs));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

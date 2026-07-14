@@ -256,8 +256,8 @@ void applyNominalVoltageChange(int oldV, int newV) {
     VoltageDisagreeThreshold  *= ratio;
     IExcessArmMarginV         *= ratio;
     FastSetpointRiseHeadroomV *= ratio;
-    SlopeBleedProxV           *= ratio;
-    SlopeBleedThresh          *= ratio;  // V/s
+    CvBrakeArmV               *= ratio;
+    CvBrakeThreshVps          *= ratio;  // V/s
     vTgtRampUp                *= ratio;  // V/s
     vTgtRampDn                *= ratio;  // V/s
     capSettleRateMv10         *= ratio;  // mV/10min rest-settle gate
@@ -270,6 +270,7 @@ void applyNominalVoltageChange(int oldV, int newV) {
     kneeMarginPct   *= dutyRatio;
     kneeStepPct     *= dutyRatio;
     kneeMaxFloorPct *= dutyRatio;
+    kneeDutyTolPct  *= dutyRatio;   // field-duty steadiness band — inverse-scale like altDutyTolPct
     DutyRampRate    *= dutyRatio;
     DutySlowRampRate *= dutyRatio;
     MaxDuty          = (int)lroundf(MaxDuty * dutyRatio);  // Max Field %: real per-bus cap, scales down on higher banks
@@ -281,6 +282,7 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_kneeMarginPct,   String(kneeMarginPct, 2).c_str());
     settingWrite(NK_kneeStepPct,     String(kneeStepPct, 2).c_str());
     settingWrite(NK_kneeMaxFloorPct, String(kneeMaxFloorPct, 2).c_str());
+    settingWrite(NK_kneeDutyTolPct,  String(kneeDutyTolPct, 2).c_str());
     settingWrite(NK_DutyRampRate,    String(DutyRampRate, 1).c_str());
     settingWrite(NK_DutySlowRampRate, String(DutySlowRampRate, 2).c_str());
     settingWrite(NK_MaxDuty,         String(MaxDuty).c_str());
@@ -307,8 +309,8 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_VoltageDisagreeThreshold, String(VoltageDisagreeThreshold, 2).c_str());
     settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
     settingWrite(NK_FastSetpointRiseHeadroomV, String(FastSetpointRiseHeadroomV, 2).c_str());
-    settingWrite(NK_SlopeBleedProxV, String(SlopeBleedProxV, 2).c_str());
-    settingWrite(NK_SlopeBleedThresh, String(SlopeBleedThresh, 3).c_str());
+    settingWrite(NK_CvBrakeArmV, String(CvBrakeArmV, 2).c_str());
+    settingWrite(NK_CvBrakeThreshVps, String(CvBrakeThreshVps, 3).c_str());
     settingWrite(NK_vTgtRampUp, String(vTgtRampUp, 3).c_str());
     settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
     settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str());
@@ -535,6 +537,14 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
     fieldCurveAbortReason = (uint8_t)reason;
     strncpy(fieldCurveAbortMsg, reasonToString(reason), sizeof(fieldCurveAbortMsg) - 1);
     fieldCurveAbortMsg[sizeof(fieldCurveAbortMsg) - 1] = '\0';
+  }
+  // Field de-energize τ test rides the same override path — latch the abort identically. The tick that
+  // consumes the flag is gated out during the fault lockout, so without the latch the test would resume
+  // from a stale phase (stale phaseStartMs) once the lockout clears.
+  if (fieldCutActive != 0) {
+    fieldCutAbortRequested = true;
+    strncpy(fieldCutAbortMsg, reasonToString(reason), sizeof(fieldCutAbortMsg) - 1);
+    fieldCutAbortMsg[sizeof(fieldCutAbortMsg) - 1] = '\0';
   }
 }
 
@@ -1883,7 +1893,7 @@ void AdjustFieldLearnMode() {
   // go inert so a stray user setting can't ruin a commissioning/health measurement (each test carries
   // its own built-in slew behavior). NOT bare TuningMode/CVTuningMode — those are the manual study tabs
   // where the toggles are meant to be live.
-  g_autoTestActive = (commissionState == 1) || batteryHealthTestActive || resTestActive || cvPlantFitActive || (systemIDActive != 0);
+  g_autoTestActive = (commissionState == 1) || batteryHealthTestActive || resTestActive || cvPlantFitActive || (systemIDActive != 0) || (fieldCutActive != 0);
 
   // ========== DETERMINE GOVERNOR MODE ==========
   govMode = GOV_NORMAL_SLEW;
@@ -2095,6 +2105,10 @@ void AdjustFieldLearnMode() {
   // (mutually exclusive with SystemID via the start-handler mutex). OR it in so the snapshot,
   // override, and restore logic below cover it too.
   sysIDRunning = fieldCurve_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
+  // Field de-energize τ test (commissioning stage 8) — identical duty-override + bumpless-resume path,
+  // mutually exclusive with the others via the start-handler mutex. Inherits the effectiveMinDuty=0 floor
+  // bypass below, so its cut reaches true field-off.
+  sysIDRunning = fieldCut_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
 
   bool sysIDJustStarted = !prevSysIDRunning && sysIDRunning;
   bool sysIDJustCompleted = prevSysIDRunning && !sysIDRunning;
@@ -3342,21 +3356,24 @@ void AdjustFieldLearnMode() {
             float icvLo = 0.0f;
 
             // cvDSlope: backward diff of getFiltV() over one voltage loop interval (V/s).
-            // Uses filtered IBV so slope bleed does not react to measurement noise.
-            // No D term — this signal feeds SlopeBleedK only.
+            // Uses filtered IBV so the brake does not react to measurement noise.
+            // No D term — this signal feeds the approach brake and the recovery starve exit only.
             {
               static float vPrevCV = 0.0f;
               if (enteringCV) {
                 cvDSlope = 0.0f;
+                g_cvBrakeSlopeEma = 0.0f;
                 vPrevCV = getFiltV();
               } else {
                 float vNow = getFiltV();
                 // Sanity clamp scales with class: real 48V slopes reach ~4× the 12V ceiling, and a
-                // saturated cvDSlope understates the drive into the slope bleed (or never crosses a
-                // bank-appropriate SlopeBleedThresh at all).
+                // saturated cvDSlope understates the drive into the brake (or never crosses a
+                // bank-appropriate CvBrakeThreshVps at all).
                 float slopeCeil = 4.0f * ((float)BATTERY_VOLTAGE / 12.0f);
                 if (dtSec > 0.001f) cvDSlope = constrain((vNow - vPrevCV) / dtSec, -slopeCeil, slopeCeil);
-                rollUpdate(ROLL_CVSLOPE, cvDSlope);   // slope-bleed gate-tuning readout
+                float aBr = (dtSec * 1000.0f) / (fmaxf(CvBrakeTauMs, 1.0f) + dtSec * 1000.0f);
+                g_cvBrakeSlopeEma += aBr * (cvDSlope - g_cvBrakeSlopeEma);
+                rollUpdate(ROLL_CVSLOPE, g_cvBrakeSlopeEma);   // brake threshold-tuning readout (10s peak sustained rise)
                 vPrevCV = vNow;
               }
             }
@@ -3384,28 +3401,33 @@ void AdjustFieldLearnMode() {
                 g_awState = 2;  // PID output at ceiling or floor; standard anti-windup
               }
 
-              // Slope-aware integrator bleed — drains cv_I when voltage is rising faster than
-              // SlopeBleedThresh (V/s). proxGain gates on the PROJECTED arrival voltage, not the
-              // present distance: the field needs ~one fall TC to respond and the bus can cross the
-              // last SlopeBleedProxV in less than that (measured 2.5 V/s on a 14.5 V recovery = 80 ms
-              // of runway against a ~100 ms fall). brakeTauS must cover BOTH how stale cvDSlope already
-              // is and how long the field takes to answer: 0.5×interval (backward difference is centred
-              // half a window back) + VoltageFilterTC (getFiltV's own lag) + 1×interval (PI dead time)
-              // + field fall. With cvDSlope <= 0 the projection collapses to IBV and the gate is
-              // identical to the old proximity gate, so a flat bus far below target still never bleeds.
-              // Distance uses the RAW error — the recovery cap must not move this gate.
-              // KiDown still handles steady-state correction above setpoint independently.
-              // Gated by cvHelpersEnabled — OFF disables slope bleed entirely for clean symmetric-PI tuning.
-              if (cvHelpersEnabled && cvDSlope > SlopeBleedThresh) {
-                const float kFieldFallS = 0.10f;  // alternator field fall TC — physical, ~universal
-                float brakeTauS = kFieldFallS + 0.0015f * (float)VoltageLoopInterval + 0.001f * VoltageFilterTC;
-                // Project from getFiltV(), NOT raw IBV: cvDSlope is the slope OF getFiltV, and the
-                // VoltageFilterTC term in brakeTauS exists to undo that signal's lag. Projecting a
-                // filtered slope off a raw level double-counts the lag and rides the ripple crest —
-                // the exact defect that makes fastOV's Vpred fire on belt ripple.
-                float vArrive = getFiltV() + cvDSlope * brakeTauS;
-                float proxGain = clamp_f(1.0f - (voltageTargetSlewed - vArrive) / SlopeBleedProxV, 0.0f, 1.0f);
-                float slopeBleedAmps = SlopeBleedK * (cvDSlope - SlopeBleedThresh) * dtSec * proxGain;
+              // Approach brake — drains cv_I when the SUSTAINED rise of filtered V (g_cvBrakeSlopeEma,
+              // CvBrakeTauMs EMA of cvDSlope) exceeds CvBrakeThreshVps while within CvBrakeArmV of
+              // target. Replaced the projected-arrival proximity bleed 2026-07-13: its 0.20 V gate
+              // opened ~0.2 s before the crest — cosmetic against a 3 V/s knee rise (144blipFAIL limit
+              // cycle). The EMA rejects belt ripple/resonance (oscillation nets to ~zero over the TC;
+              // per-tick cvDSlope spikes to ±0.25 V/s on ripple that sustains ~0); design + offline
+              // bake-off: CV_Approach_Brake_Brainstorm.md §7. One-sided and undershoot-safe: over-braking
+              // just re-integrates. Arm distance uses getFiltV, RAW error — the recovery cap must not
+              // move this gate. KiDown still handles steady-state correction above setpoint.
+              // Gated by cvHelpersEnabled — OFF gives clean symmetric PI for tuning. Also held off while
+              // any step/probe test owns the field: a mid-probe bleed would corrupt the plant fits.
+              bool fitProbeActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
+                                    resTestActive || batteryHealthTestActive || cvPlantFitActive;
+              if (cvHelpersEnabled && !fitProbeActive
+                  && (voltageTargetSlewed - getFiltV()) < CvBrakeArmV
+                  && g_cvBrakeSlopeEma > CvBrakeThreshVps) {
+                // Episode counter: consecutive bleed ticks are one engagement; ≥1s quiet re-arms.
+                static uint32_t lastBrakeBleedMs = 0;
+                if (currentMillis - lastBrakeBleedMs > 1000) {
+                  g_cvBrakeCount++;
+                  g_ovTel.brakeEventCount++;
+                  queueConsoleMessageF("Approach brake #%lu: %.2f V/s sustained rise, %.2f V under target",
+                                       (unsigned long)g_cvBrakeCount, g_cvBrakeSlopeEma,
+                                       voltageTargetSlewed - getFiltV());
+                }
+                lastBrakeBleedMs = currentMillis;
+                float slopeBleedAmps = SlopeBleedK * (g_cvBrakeSlopeEma - CvBrakeThreshVps) * dtSec;
                 cv_I = fmaxf(0.0f, cv_I - slopeBleedAmps);
                 g_slopeBleedAmpsThisTick = slopeBleedAmps;  // captured for cvLog; cleared by cvLog_tick after logging
                 if (recovActive && slopeBleedAmps > 0.0f) recovRampHold = true;  // brake has spoken; the ramp must not answer back
@@ -3968,9 +3990,9 @@ void updateChargingStage() {
     rebulkTimer = 0;
   }
 
-  // Two-sided hysteresis: timer arms when V reaches BulkVoltage − ENTER, resets only when V falls below BulkVoltage − EXIT. Prevents 30–50 mV idle noise from constantly resetting the hold timer.
-  const float BULK_V_BAND_ENTER = 0.05f;
-  const float BULK_V_BAND_EXIT  = 0.10f;
+  // Two-sided hysteresis: timer arms when V reaches BulkVoltage − ENTER, resets only when V falls below BulkVoltage − EXIT. Prevents 30–50 mV idle noise (12V-bank figure) from resetting the hold timer — scaled ×V/12 so the band tracks the ~proportionally larger idle noise on 24/48V banks (BulkVoltage is class-scaled).
+  const float BULK_V_BAND_ENTER = 0.05f * ((float)BATTERY_VOLTAGE / 12.0f);
+  const float BULK_V_BAND_EXIT  = 0.10f * ((float)BATTERY_VOLTAGE / 12.0f);
 
   if (inBulkStage && !inAbsorptionStage) {
     // ===== BULK (CC) =====
@@ -4235,10 +4257,11 @@ bool isVoltageDisagreementWarning(uint32_t nowMs, float batteryV, float ibv,
     return false;
   }
 
-  // Scale the warning threshold by bank class (12V-equivalent → pack-space), exactly like the
-  // critical detector below. A fixed 0.15V is normal sensor spread on a 48V bank and would otherwise
-  // false-trip MODE_WARNING_RAMP_AND_LOCKOUT (which DISABLES charging) on a healthy 24/48V system.
-  if (fabsf(batteryV - ibv) > VoltageDisagreeThreshold * (float)BATTERY_VOLTAGE / 12.0f) {
+  // VoltageDisagreeThreshold is already class-scaled at storage (seedVScale at creation +
+  // applyNominalVoltageChange on a live class change), exactly like OvMeasMarginV — so it is compared
+  // RAW. A prior build ALSO multiplied ×V/12 here, double-scaling it (×4 at 24V, ×16 at 48V) and
+  // desensitizing MODE_WARNING_RAMP_AND_LOCKOUT (which DISABLES charging) on 24/48V systems.
+  if (fabsf(batteryV - ibv) > VoltageDisagreeThreshold) {
     if (!voltageDisagreementActive) {
       voltageDisagreementStart = nowMs;
       voltageDisagreementActive = true;
@@ -4814,8 +4837,8 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     // systemIDActive would never rise — a permanent rest deadlock (the field ramp only started once the
     // dialog closed and resting cleared). Treating a pending request as "test active" lets the control
     // path fall through and consume it on the same tick.
-    bool anyTestActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
-                         fieldCurveRequested || systemIDRequested ||
+    bool anyTestActive = (fieldCurveActive != 0) || (systemIDActive != 0) || (fieldCutActive != 0) ||
+                         fieldCurveRequested || systemIDRequested || fieldCutRequested ||
                          resTestActive || batteryHealthTestActive || cvPlantFitActive ||
                          TuningMode || CVTuningMode || faCommissionGate;
     tick.commissioningResting = (commissionState == 1) && dialogAlive && !anyTestActive;
@@ -5751,7 +5774,7 @@ void kneeLearnInit() {
   KNEE_LD_DUTY(NK_kneeMaxFloorPct, kneeMaxFloorPct);
   KNEE_LD_F(NK_kneeRpmTolPct,   kneeRpmTolPct);
   KNEE_LD_F(NK_kneeTempTolF,    kneeTempTolF);
-  KNEE_LD_F(NK_kneeDutyTolPct,  kneeDutyTolPct);
+  KNEE_LD_DUTY(NK_kneeDutyTolPct,  kneeDutyTolPct);   // duty-domain steadiness band — inverse-scale ×12/V like altDutyTolPct
 #undef KNEE_LD_F
 #undef KNEE_LD_DUTY
 

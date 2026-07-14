@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Cursor
+import os
 from tkinter import Tk, filedialog
 from pathlib import Path
 
@@ -25,9 +26,18 @@ def volts_to_amps(volts: np.ndarray) -> np.ndarray:
 def pick_csv_file() -> str:
     root = Tk()
     root.withdraw()
+    root.attributes("-topmost", True)   # native dialog otherwise opens behind the terminal on macOS
     root.update()
+    try:
+        os.system(
+            "osascript -e 'tell application \"System Events\" to set frontmost of "
+            "first process whose unix id is %d to true' >/dev/null 2>&1" % os.getpid()
+        )
+    except Exception:
+        pass
     file_path = filedialog.askopenfilename(
         title="Select CSV file",
+        initialdir=os.path.expanduser("~/Downloads"),
         filetypes=[("CSV or text files", "*.csv *.txt"), ("All files", "*.*")]
     )
     root.destroy()

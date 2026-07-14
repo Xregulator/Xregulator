@@ -2365,6 +2365,7 @@ void cvLog_tick(uint32_t nowMs) {
 
   e.capReason = g_fastOvCapReason;  // which layer set the binding fastOvCap this tick
   e.ovFilt_x100 = (int16_t)clamp_f(g_ovIbvFilt * 100.0f, -32767.0f, 32767.0f);
+  e.brakeSlope_x10000 = (int16_t)clamp_f(g_cvBrakeSlopeEma * 10000.0f, -32767.0f, 32767.0f);
 
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;
@@ -3551,6 +3552,144 @@ static float fieldCurveInvert(float targetA) {
     }
   }
   return fieldCurveBuf[fieldCurveCount - 1].duty;
+}
+
+// ============================================================
+// fieldCut_tick() — commissioning stage 8: field de-energize τ
+//
+// Holds the pre-test operating duty briefly (steady baseline), cuts the field to the floor
+// and samples the alternator-current decay, then eases the field back up. The decay is
+// log-linear-fit (ln I vs t) to the electrical time constant τ = L/R — the physical time the
+// OV protection's field drain takes. Like systemID_tick it returns true while active; the
+// caller forces GOV_BYPASS_SLEW + MANUAL PID (which also drops the MinDuty/RPM floor to 0, so
+// the cut reaches true field-off) and uses dutyOut as the command. One run per trigger; the
+// wizard runs it at idle and at cruise and averages. Field-off is the SAFE direction (can't
+// over-volt or over-current), so no extra protection gating is needed beyond the gentle ease-out.
+// ============================================================
+static void fieldCutProcess() {
+  fieldCutOk = false;
+  if (fieldCutBaseA < FIELDCUT_MIN_BASE_A) {
+    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "output too low to measure — raise RPM/charge current and retry");
+    return;
+  }
+  // Fit only the clean exponential band: above the ripple/noise floor, below the pre-cut plateau.
+  const float lo = 0.20f * fieldCutBaseA, hi = 0.85f * fieldCutBaseA;
+  double sx = 0, sy = 0, sxx = 0, sxy = 0; int n = 0;
+  for (int i = 0; i < fieldCutCount; i++) {
+    float a = fieldCutBuf[i].amps;
+    if (a < lo || a > hi || a <= 0.01f) continue;
+    double x = (double)fieldCutBuf[i].tMs / 1000.0;   // seconds since the cut
+    double y = log((double)a);
+    sx += x; sy += y; sxx += x * x; sxy += x * y; n++;
+  }
+  if (n < 4) {
+    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "decay too fast/noisy to fit — hold RPM steady and retry");
+    return;
+  }
+  double d = (double)n * sxx - sx * sx;
+  if (fabs(d) < 1e-9) { snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "fit failed — retry"); return; }
+  double slope = ((double)n * sxy - sx * sy) / d;   // d(ln I)/dt (1/s); a real decay is negative
+  double icept = (sy - slope * sx) / n;
+  double tauMs = (slope < 0.0) ? (-1000.0 / slope) : -1.0;
+  if (tauMs < 3.0 || tauMs > 500.0) {
+    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "no clean decay (field may not have cut) — retry");
+    return;
+  }
+  double ss = 0;
+  for (int i = 0; i < fieldCutCount; i++) {
+    float a = fieldCutBuf[i].amps;
+    if (a < lo || a > hi || a <= 0.01f) continue;
+    double x = (double)fieldCutBuf[i].tMs / 1000.0;
+    double e = log((double)a) - (icept + slope * x);
+    ss += e * e;
+  }
+  fieldCutResidPct = (float)((exp(sqrt(ss / n)) - 1.0) * 100.0);
+  fieldCutTauMs = (float)tauMs;
+  fieldCutOk = true;
+  queueConsoleMessageF("Field-cut: tau=%.0f ms (base %.1f A, %d pts, resid %.0f%%)",
+                       fieldCutTauMs, fieldCutBaseA, n, fieldCutResidPct);
+}
+
+bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
+  static uint8_t  phase = 0;             // 0=idle 1=settle 2=cut/measure 3=ease-out
+  static uint32_t phaseStartMs = 0;
+  static float    baseDuty = 0.0f;
+  static double   baseSum = 0.0;
+  static uint32_t baseN = 0;
+
+  // ── Abort ────────────────────────────────────────────────────────────────
+  if (phase != 0 && fieldCutAbortRequested) {
+    fieldCutAbortRequested = false;
+    // A protection abort latches its reason into the msg before this tick runs — don't overwrite it.
+    if (fieldCutAbortMsg[0] == '\0') snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "aborted");
+    fieldCutActive = 0; fieldCutPhase = 0; fieldCutLastEndMs = millis();
+    phase = 0; dutyOut = baseDuty;
+    return false;
+  }
+
+  // ── IDLE: wait for trigger (do NOT touch dutyOut — SystemID may own it) ───
+  if (phase == 0) {
+    if (!fieldCutRequested) return false;
+    fieldCutRequested = false;
+    fieldCutAbortRequested = false;
+    if (fieldCutBuf == nullptr) {
+      fieldCutBuf = (FieldCutSample *)ps_malloc(FIELDCUT_BUF_SIZE * sizeof(FieldCutSample));
+      if (fieldCutBuf == nullptr) {
+        snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "PSRAM alloc failed");
+        fieldCutOk = false; fieldCutResultsReady = true;
+        return false;
+      }
+    }
+    baseDuty = (dutyOut > 1.0f) ? dutyOut : 1.0f;   // hold the pre-test operating duty
+    fieldCutCount = 0; baseSum = 0.0; baseN = 0;
+    fieldCutTauMs = -1.0f; fieldCutBaseA = 0.0f; fieldCutResidPct = -1.0f;
+    fieldCutResultsReady = false; fieldCutOk = false; fieldCutAbortMsg[0] = '\0';
+    fieldCutActive = 1; fieldCutPhase = 0;
+    phase = 1; phaseStartMs = nowMs;
+    dutyOut = baseDuty;
+    return true;
+  }
+
+  // ── SETTLE: hold baseline; average output over the back half (skip the entry transient) ──
+  if (phase == 1) {
+    dutyOut = baseDuty; fieldCutPhase = 0;
+    if (nowMs - phaseStartMs >= FIELDCUT_SETTLE_MS / 2) { baseSum += ampsRaw; baseN++; }
+    if (nowMs - phaseStartMs >= FIELDCUT_SETTLE_MS) {
+      fieldCutBaseA = (baseN > 0) ? (float)(baseSum / baseN) : ampsRaw;
+      phase = 2; phaseStartMs = nowMs;
+    }
+    return true;
+  }
+
+  // ── CUT/MEASURE: field to floor, sample the decay every fresh CH1 (~10 ms) ──
+  if (phase == 2) {
+    dutyOut = 0.0f; fieldCutPhase = 1;   // sysIDRunning drops the MinDuty/RPM floor → true field-off
+    if (fieldCutCount < FIELDCUT_BUF_SIZE) {
+      fieldCutBuf[fieldCutCount].tMs = nowMs - phaseStartMs;
+      fieldCutBuf[fieldCutCount].amps = ampsRaw;
+      fieldCutCount++;
+    }
+    if ((nowMs - phaseStartMs >= FIELDCUT_MEAS_MS) || fieldCutCount >= FIELDCUT_BUF_SIZE) {
+      fieldCutProcess();
+      fieldCutActive = 2; fieldCutPhase = 2;
+      phase = 3; phaseStartMs = nowMs;
+    }
+    return true;
+  }
+
+  // ── EASE-OUT: ramp duty 0 → baseDuty so re-engagement can't trip a protection ──
+  if (phase == 3) {
+    float frac = (float)(nowMs - phaseStartMs) / FIELDCUT_EASE_MS;
+    if (frac >= 1.0f) {
+      fieldCutResultsReady = true;
+      fieldCutActive = 0; fieldCutPhase = 0; fieldCutLastEndMs = millis();
+      phase = 0; dutyOut = baseDuty;
+      return false;
+    }
+    dutyOut = baseDuty * frac;
+    return true;
+  }
+  return false;
 }
 
 // ============================================================

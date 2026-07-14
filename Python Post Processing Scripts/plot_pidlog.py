@@ -22,6 +22,8 @@ import glob
 import os
 import tkinter as tk
 from tkinter import messagebox
+from filepicker import pick_file
+from plotlayout import tile_figures
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -48,103 +50,11 @@ plt.rcParams.update({
 # ---------------------------------------------------------------------------
 # 1. File selector
 # ---------------------------------------------------------------------------
-def pick_file():
-    files = sorted(
-        glob.glob(os.path.join(DOWNLOADS, "*.csv")),
-        key=os.path.getmtime,
-        reverse=True
-    )
-    if not files:
-        messagebox.showerror("No files", f"No *.csv found in {DOWNLOADS}")
-        return None
-
-    selected = []
-
-    root = tk.Tk()
-    try:  # force light appearance on macOS regardless of system dark-mode setting
-        root.tk.call("::tk::unsupported::MacWindowStyle", "appearance",
-                     root._w, "NSAppearanceNameAqua")
-    except Exception:
-        pass
-    root.title("Select PID Log")
-    root.resizable(False, False)
-    root.configure(bg="#f5f5f5")
-
-    tk.Label(
-        root,
-        text="Select a log file:",
-        font=("Helvetica", 16, "bold"),
-        bg="#f5f5f5",
-        fg="#1a1a1a"
-    ).pack(padx=20, pady=(16, 8))
-
-    frame = tk.Frame(root, bg="#f5f5f5")
-    frame.pack(padx=20, pady=8)
-
-    scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL)
-    listbox = tk.Listbox(
-        frame,
-        yscrollcommand=scrollbar.set,
-        width=70,
-        height=min(len(files), 16),
-        font=("Courier", 15),
-        selectmode=tk.SINGLE,
-        bg="#ffffff",
-        fg="#1a1a1a",
-        selectbackground="#1565c0",
-        selectforeground="#ffffff",
-        highlightbackground="#cccccc",
-        highlightcolor="#1565c0"
-    )
-    scrollbar.config(command=listbox.yview)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    listbox.pack(side=tk.LEFT)
-
-    for f in files:
-        listbox.insert(tk.END, os.path.basename(f))
-    listbox.selection_set(0)
-
-    def on_go():
-        idxs = listbox.curselection()
-        if not idxs:
-            messagebox.showwarning("No selection", "Please select a file.")
-            return
-        selected.append(files[idxs[0]])
-        root.destroy()
-
-    def on_cancel():
-        root.destroy()
-
-    btn_frame = tk.Frame(root, bg="#f5f5f5")
-    btn_frame.pack(pady=16)
-
-    # tk.Label used instead of tk.Button — macOS ignores bg/fg on native buttons
-    _lbl_open = tk.Label(
-        btn_frame, text="Open",
-        font=("Helvetica", 15, "bold"),
-        bg="#1565c0", fg="#ffffff",
-        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2"
-    )
-    _lbl_open.bind("<Button-1>", lambda e: on_go())
-    _lbl_open.pack(side=tk.LEFT, padx=10)
-
-    _lbl_cancel = tk.Label(
-        btn_frame, text="Cancel",
-        font=("Helvetica", 14),
-        bg="#ffffff", fg="#1a1a1a",
-        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2"
-    )
-    _lbl_cancel.bind("<Button-1>", lambda e: on_cancel())
-    _lbl_cancel.pack(side=tk.LEFT, padx=10)
-
-    root.mainloop()
-    return selected[0] if selected else None
-
 
 # ---------------------------------------------------------------------------
 # 2. Load and parse
 # ---------------------------------------------------------------------------
-path = pick_file()
+path = pick_file(prefix="pidlog_", title="Select PID Log")
 if not path:
     raise SystemExit("No file selected.")
 
@@ -953,4 +863,5 @@ fig1.text(0.03, 0.043, "Trim file:", fontsize=10, color="#1a1a1a",
 
 # ---------------------------------------------------------------------------
 print("Tip: use the checkboxes on the right of each plot to show/hide series.")
+tile_figures()
 plt.show()

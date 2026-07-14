@@ -2140,6 +2140,10 @@
                   <span class="group-label">Group 4</span>
                   <span class="nick-label">Battery Limit</span>
                 </button>
+                <button type="button" data-filter="ab">
+                  <span class="group-label">Brake</span>
+                  <span class="nick-label">CV Approach</span>
+                </button>
               </div>
 
               <!-- ============ DETECTION ============ -->
@@ -2706,6 +2710,104 @@
                       <div class="protections-edit-row">
                         <input name="FastSetpointRiseHeadroomV" type="number" step="0.05" min="0.05" max="2.0" />
                         <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span>
+                      Field Decay Time Constant (ms) (<span id="fieldDecayTauMs_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long the alternator field coil takes to electrically drain once the field is cut — its de-energize time constant, in milliseconds. Measured by the Field Decay commissioning step, which stores the average of the idle and cruise measurements plus a 30% cold-coil margin; the number here is that final value. Editing it overrides the stored value directly — no margin is re-applied.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="fieldDecayTauMs" type="number" step="1" min="5" max="900" />
+                        <span class="protections-unit">ms</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                </div>
+              </section>
+
+              <!-- ============ APPROACH BRAKE (pre-protection) ============ -->
+              <section class="protections-phase" data-phase="brake">
+                <div class="protections-section-title">Approach Brake</div>
+
+                <div class="protections-intro">
+                  <p data-intro="ab">Not a protection — a helper that makes the protections above fire less often. While battery voltage climbs toward the charge target, a sustained fast rise means the voltage loop integrator is holding more current than the target will need (integrator windup): the bus overshoots and a protection cuts hard. The brake watches the sustained rise rate of the smoothed battery voltage and drains the integrator early, in proportion to how far the rise exceeds the threshold. It only ever removes current — a false trigger just means arriving at target slightly slower, which self-corrects; a miss leaves the hard protections to fire exactly as before. Gated by the CV Tuning Helpers switch (Tuning → Voltage) and held off while commissioning probe tests own the field.</p>
+                </div>
+
+                <div class="protections-cards">
+
+                  <article class="protections-param" data-groups="ab">
+                    <div class="protections-name">
+                      <span class="protections-tag ab">BR</span>
+                      Sustained Rise Threshold (V/s) (<span id="CvBrakeThreshVps_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sustained rise rate of the smoothed battery voltage above which the brake starts draining the voltage loop integrator. The rise rate is averaged over the Averaging Time Constant below, so belt ripple and resonance wobble (which rise and fall) cancel out — only a genuine one-directional climb counts. Lower catches gentler approaches but eats into the margin against slow-resonance false alarms; higher hands more of the events back to the hard protections. The live readout below shows the worst sustained rise seen in the last 10 seconds — this installation's own floor.</span></span>
+                      <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
+                      <span id="CvBrakeThreshVps_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak sustained rise: —</span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="CvBrakeThreshVps" type="number" step="0.05" min="0.1" max="4" />
+                        <span class="protections-unit">V/s</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="ab">
+                    <div class="protections-name">
+                      <span class="protections-tag ab">BR</span>
+                      Averaging Time Constant (ms) (<span id="CvBrakeTauMs_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long the voltage rise rate is averaged before comparing it to the threshold. Longer rejects ripple and slow resonance better but reacts later to a real sustained climb; shorter fires earlier at the cost of false-alarm margin. This filter and the threshold act as one setting — if you change one, re-check the other against a real approach.</span></span>
+                      <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="CvBrakeTauMs" type="number" step="25" min="50" max="1000" />
+                        <span class="protections-unit">ms</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="ab">
+                    <div class="protections-name">
+                      <span class="protections-tag ab">BR</span>
+                      Arm Window Below Target (V) (<span id="CvBrakeArmV_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far below the active charge target the brake is allowed to act. Farther below than this, a fast rise is normal charging or recovery and the integrator needs every amp it can build — the brake stays out of the way. Inside the window (and above target), a sustained fast rise means imminent overshoot and the brake acts. Compares the smoothed voltage against the live stage target (bulk, absorption, float — whichever is active right now).</span></span>
+                      <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="CvBrakeArmV" type="number" step="0.1" min="0.2" max="3" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="ab">
+                    <div class="protections-name">
+                      <span class="protections-tag ab">BR</span>
+                      Bleed Gain (A per V/s) (<span id="SlopeBleedK_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How aggressively the voltage loop integrator is drained once the sustained rise exceeds the threshold — amps per second removed for each V/s of excess rise. Higher arrests a fast approach harder. It can only remove current, never add it, so the failure mode of too-high is simply a slower final approach to target.</span></span>
+                      <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="SlopeBleedK" type="number" step="5" min="0" max="500" />
+                        <span class="protections-unit">A/(V/s)</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -4465,7 +4567,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>CV Tuning Helpers (<span id="cvHelpersEnabled_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for two non-linear "helpers" that sit on top of the plain voltage PI: <strong>(1) asymmetric integrator unwind</strong> — when battery voltage goes above target the integrator drains 7× faster than it builds, and <strong>(2) slope-aware integrator bleed</strong> — drains the integrator early when voltage is rising fast near the target. Both exist for one purpose only: they <strong>REDUCE OVERSHOOT</strong> and <strong>HELP SPEED OVERVOLTAGE RECOVERY</strong>. They never make the loop more aggressive, so leaving them ON is always at least as safe.<br><br>Turn them <strong>OFF</strong> while tuning Voltage Loop Kp/Ki: the loop becomes a clean symmetric PI, so its overshoot and settling behaviour reflect Kp/Ki directly and are far <strong>easier to understand</strong>. Once Kp/Ki are dialled in, turn them back ON to add the overshoot/OV-recovery polish. This does NOT touch the real overvoltage protections (hardware OV, fast OV, hard clamp) — those stay live regardless.</span>
+                      <span class="tooltip-box">Master switch for two non-linear "helpers" that sit on top of the plain voltage PI: <strong>(1) asymmetric integrator unwind</strong> — when battery voltage goes above target the integrator drains 7× faster than it builds, and <strong>(2) the approach brake</strong> — drains the integrator early when the smoothed voltage is climbing toward target at a sustained fast rate (its knobs live in Setup → Alternator → Protections → Approach Brake). Both exist for one purpose only: they <strong>REDUCE OVERSHOOT</strong> and <strong>HELP SPEED OVERVOLTAGE RECOVERY</strong>. They never make the loop more aggressive, so leaving them ON is always at least as safe.<br><br>Turn them <strong>OFF</strong> while tuning Voltage Loop Kp/Ki: the loop becomes a clean symmetric PI, so its overshoot and settling behaviour reflect Kp/Ki directly and are far <strong>easier to understand</strong>. Once Kp/Ki are dialled in, turn them back ON to add the overshoot/OV-recovery polish. This does NOT touch the real overvoltage protections (hardware OV, fast OV, hard clamp) — those stay live regardless.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4483,58 +4585,7 @@
                   </div>
                 </div>
 
-                <!-- Slope-bleed knobs (helper #2) — shown only when CV Tuning Helpers are On -->
-                <div id="cvSlopeBleedBlock">
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Slope bleed threshold (V/s) (<span id="SlopeBleedThresh_echo">?</span>):<span id="SlopeBleedThresh_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak rise: —</span></span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Voltage rise rate above which the voltage loop integrator begins to drain. The rise rate is computed from the smoothed voltage signal (set by "Voltage sensor smoothing filter" in Tuning → Plant Delay), not from the voltage rate-of-change EMA used by Group 1 prediction. Below this threshold the integrator is unaffected. Setting too low causes false drains during normal charging; too high and it never fires in time.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="SlopeBleedThresh" type="number" step="0.01" min="0.01" max="2" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Slope bleed gain (A per V/s) (<span id="SlopeBleedK_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">How aggressively to drain the voltage loop integrator when slope exceeds the threshold. At 50 with 0.2 V/s excess slope, drains 1A per 100ms tick. Higher = more aggressive preemptive wind-down.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="SlopeBleedK" type="number" step="5" min="0" max="500" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Slope bleed proximity gate (V) (<span id="SlopeBleedProxV_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Are we close enough to setpoint that the integrator could cause overshoot?<br><br>When measured battery voltage is more than this many volts below the active charge target, slope-bleed is fully suppressed — the voltage loop integrator needs every amp it can build to climb toward target. As voltage approaches target, bleed strength ramps smoothly from 0 to full, draining the integrator just before overshoot becomes likely.<br><br>Compares: measured voltage vs the live stage target (bulk, absorption, float — whichever is active right now).</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="SlopeBleedProxV" type="number" step="0.05" min="0.05" max="1.0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                </div> <!-- end cvSlopeBleedBlock -->
+                <!-- Approach-brake knobs (helper #2) live in Setup → Alternator → Protections → Approach Brake -->
 
               </details> <!-- END VTM Controller Parameters -->
 
@@ -11281,6 +11332,15 @@
           <span class="metric-value telemetry-value"><span id="iExcessCountID">?</span></span>
         </div>
         <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Approach-Brake Engagements
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: the CV approach brake engaged and drained the voltage loop integrator because the smoothed battery voltage was climbing toward target at a sustained fast rate. Consecutive brake ticks count as one engagement; a new one is counted after at least a second of quiet. This is a pre-protection save, not a trip — each engagement is an approach that would otherwise have run hotter into the overvoltage protections. Knobs: Setup → Alternator → Protections → Approach Brake.</span>
+            </span>
+            <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="cvBrakeCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">INA228 OV Events
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
               <span class="tooltip-box">Rising-edge count: the shunt monitor's hardware alert pin fired (INA228 ALERT — its ~1 s averaged bus voltage crossed the hardware limit: Bulk + 0.3 V for lithium, equal to the Alternator Hard Shutdown Voltage for other chemistries). Hardware cuts the field electrically before software runs. Should be zero under normal operation — the software cut acts first.</span>
@@ -11850,6 +11910,16 @@
             (battery disconnected) starts it fresh.
           </p>
 
+          <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Approach-Brake Engagements
+              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                <span class="tooltip-box">Times the CV approach brake drained the voltage loop integrator to soften a fast climb toward target — a pre-protection save, not a trip. If the brake is doing its job, this counter grows while the protection counts below grow more slowly.</span>
+              </span>
+              <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
+            </span>
+            <span class="metric-value telemetry-value"><span id="ovtBrakeCount">—</span></span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
           <div class="metric-row telemetry-row">
             <span class="metric-label telemetry-label">Soft-Cap Engagements
               <span class="sinfo" data-sinfo="ovtSoft" onclick="sinfoToggle(this)"></span>

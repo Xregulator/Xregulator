@@ -43,6 +43,7 @@ import os
 import datetime
 import tkinter as tk
 from tkinter import messagebox, ttk
+from filepicker import pick_file
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -79,61 +80,6 @@ X_AXES = {
 # -----------------------------------------------------------------------------
 # File picker
 # -----------------------------------------------------------------------------
-def pick_file():
-    pattern = os.path.join(DOWNLOADS, f"{FILE_KEYWORD}*.csv")
-    files   = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    if not files:
-        _r = tk.Tk(); _r.withdraw()
-        messagebox.showerror(
-            "No files",
-            f"No '{FILE_KEYWORD}*.csv' found in {DOWNLOADS}\n\n"
-            "Export one with the Download CSV button in the\n"
-            "Charging-System Health panel on the regulator dashboard.")
-        _r.destroy()
-        return None
-
-    selected = []
-    root = tk.Tk()
-    try:
-        root.tk.call("::tk::unsupported::MacWindowStyle", "appearance",
-                     root._w, "NSAppearanceNameAqua")
-    except Exception:
-        pass
-    root.title("Select Alternator Health Export")
-    root.resizable(False, False)
-    root.configure(bg="#f5f5f5")
-
-    tk.Label(root, text="Select health export to view:",
-             bg="#f5f5f5", font=("Helvetica", 13, "bold")).pack(padx=16, pady=(16, 8))
-
-    frame = tk.Frame(root, bg="#f5f5f5")
-    frame.pack(padx=16, pady=4, fill="both", expand=True)
-    sb = tk.Scrollbar(frame);  sb.pack(side="right", fill="y")
-    lb = tk.Listbox(frame, yscrollcommand=sb.set, width=64,
-                    height=min(len(files), 12),
-                    font=("Helvetica", 11), selectmode="single", bg="white")
-    for f in files:
-        ts = datetime.datetime.fromtimestamp(os.path.getmtime(f)).strftime("%Y-%m-%d %H:%M")
-        kb = max(1, os.path.getsize(f) // 1024)
-        lb.insert(tk.END, f"  {ts}   {os.path.basename(f)}  ({kb} KB)")
-    lb.pack(side="left", fill="both", expand=True)
-    lb.selection_set(0)
-    sb.config(command=lb.yview)
-
-    def on_ok():
-        idx = lb.curselection()
-        if idx:
-            selected.append(files[idx[0]])
-        root.destroy()
-
-    bf = tk.Frame(root, bg="#f5f5f5");  bf.pack(pady=12)
-    tk.Button(bf, text="Open",   command=on_ok,        width=12,
-              font=("Helvetica", 12)).pack(side="left", padx=8)
-    tk.Button(bf, text="Cancel", command=root.destroy, width=10,
-              font=("Helvetica", 12)).pack(side="left", padx=4)
-    root.mainloop()
-    return selected[0] if selected else None
-
 
 # -----------------------------------------------------------------------------
 # Data loader
@@ -423,7 +369,7 @@ class FrontViewer:
 # Entry point
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    path = pick_file()
+    path = pick_file(prefix="Alternator Health Data", title="Select Alternator Health Export", reminder="Select health export to view:")
     if not path:
         raise SystemExit
 

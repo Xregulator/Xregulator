@@ -742,8 +742,9 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "battTempDerateEnable", NK_battTempDerateEn, 1 },
   { "battTempCoeff", NK_battTempCoeff, 1 },
   { "SlopeBleedK", NK_SlopeBleedK, 1 },
-  { "SlopeBleedProxV", NK_SlopeBleedProxV, 1 },
-  { "SlopeBleedThresh", NK_SlopeBleedThresh, 1 },
+  { "CvBrakeThreshVps", NK_CvBrakeThreshVps, 1 },
+  { "CvBrakeTauMs", NK_CvBrakeTauMs, 1 },
+  { "CvBrakeArmV", NK_CvBrakeArmV, 1 },
   { "TdPred", NK_TdPred, 1 },
   { "KHard", NK_KHard, 1 },
   { "OvGroup1Enable", NK_OvGroup1Enable, 1 },
@@ -920,6 +921,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "CommissionTempF", NK_CommissionTempF, 1 },
   { "CommissionEpoch", NK_CommissionEpoch, 3 },
   { "systemIDPlantTauMs", NK_sysidPlantTau, 1 },
+  { "fieldDecayTauMs", NK_fieldDecayTau, 1 },
   { "ripFitAlt", NK_ripFitAlt, 1 },
   { "imu_zero", NK_imu_zero, 1 },
 };
@@ -1260,7 +1262,7 @@ bool bhStartTest() {
   if (!bhSamples || !bhResults){ bhAbortReason = "buffers unallocated";      return false; }
   if (RPM < 100)               { bhAbortReason = "engine not running";       return false; }
   if (sysMode != SYS_MODE_AUTO){ bhAbortReason = "must be in AUTO mode";     return false; }   // generator only runs in the AUTO control path
-  if (TuningMode || CVTuningMode || systemIDActive) { bhAbortReason = "another test active"; return false; }
+  if (TuningMode || CVTuningMode || systemIDActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || resTestActive) { bhAbortReason = "another test active"; return false; }
   if (BatteryCurrentSource != 0 || !HAS_BATT_SHUNT){ bhAbortReason = "needs INA228 battery shunt"; return false; }
   if (bhNumEdges < 3) bhNumEdges = 3;
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
@@ -1436,6 +1438,9 @@ static void cvpfSizeStep() {
   // diffusion tail. Size against the LONG-horizon gain or the peak overshoots the target by ~27%.
   float Klong    = cvpfPilotK * CVPF_LONG_K_MULT;
   float Kupper   = Klong * 1.5f;                                             // pessimistic (bigger K → smaller ΔI)
+  // CVPF cushions are fixed ABSOLUTE volts, not class-scaled: the probe ΔV is sensor-resolution-limited
+  // (excellent noise floor), so a fixed step gives full SNR at any bank voltage and the step peak it bounds
+  // is ~absolute. Scaling these up would only shrink the achievable step on a stiff 24/48V bank for no gain.
   float headroom = fmaxf(0.05f, AlternatorHardShutdownV - cvpfPilotVbase - CVPF_V_RESERVE);
   float di = cvpfDiMaxA;
   di = fminf(di, headroom / fmaxf(1e-3f, Kupper));
@@ -1511,6 +1516,7 @@ void cvPlantFit_advance(uint32_t nowMs) {
       cvpfCmdA = cvpfBaseA + cvpfStepA;
       // Runtime OV guard: if the bank climbs toward the hard-OV cut, abort this step. First time → fall back
       // to a smaller (180 mV) step and re-run; still over-volts at 180 mV → give up (charge target too near OV).
+      // 0.10 V cushion is fixed absolute (the fixed-ΔV probe's overshoot is ~absolute, not per-cell).
       if (IBV > AlternatorHardShutdownV - 0.10f) {
         if (!cvpfFellBack) {
           cvpfFellBack = true; cvpfTargetDV = 0.18f; cvpfWarn |= 0x10;
@@ -1639,7 +1645,7 @@ bool cvpfStartTest(float diMaxReq) {
   if (!cvpfBuf)                 { cvpfAbortMsg = "buffer unallocated";     return false; }
   if (RPM < 100)                { cvpfAbortMsg = "engine not running";     return false; }
   if (sysMode != SYS_MODE_AUTO) { cvpfAbortMsg = "must be in AUTO mode";   return false; }
-  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive) {
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive) {
     cvpfAbortMsg = "another test active"; return false;
   }
   cvpfBufCount = 0; cvpfSampleLastMs = 0;
@@ -1647,7 +1653,7 @@ bool cvpfStartTest(float diMaxReq) {
   cvpfPhaseStartMs = millis(); cvpfTestStartMs = cvpfPhaseStartMs; cvpfRestChkMs = cvpfPhaseStartMs;
   cvpfStepT0Ms = 0;
   cvpfBaseA = 10.0f; cvpfPilotA = 6.0f; cvpfStepA = 6.0f;
-  cvpfTargetDV = 0.30f; cvpfFellBack = false; cvpfReleasing = false;
+  cvpfTargetDV = 0.30f; cvpfFellBack = false; cvpfReleasing = false;  // fixed absolute ΔV probe (sensor-resolution-limited, not per-cell)
   cvpfCmdA = cvpfBaseA;
   cvpfDiMaxA = (diMaxReq > CVPF_DI_MAX_DEFAULT) ? fminf(diMaxReq, CVPF_DI_MAX_CEIL) : CVPF_DI_MAX_DEFAULT;
   if (cvpfDiMaxA > CVPF_DI_MAX_DEFAULT)

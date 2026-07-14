@@ -4678,6 +4678,7 @@ input:checked+.slider:before {
 #alt-panel-protections .protections-tag.g2 { color: var(--accent); border-color: var(--accent); }
 #alt-panel-protections .protections-tag.g3 { color: #d68910; border-color: #d68910; }
 #alt-panel-protections .protections-tag.g4 { color: #7d3c98; border-color: #7d3c98; }
+#alt-panel-protections .protections-tag.ab { color: #148f77; border-color: #148f77; }
 
 /* Dark-mode overrides — match the rest of the site's dark variants. */
 body.dark-mode #alt-panel-protections .protections-filters,

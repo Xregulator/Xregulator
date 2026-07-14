@@ -846,6 +846,7 @@ typedef struct {
   uint32_t softExceedCount;       // rising edge: filtered V crossed target + OvMeasMarginV (Group-2 soft cap actually engaged)
   uint32_t swHardCutCount;        // rising edge: REASON_FAST_OVERVOLTAGE (SW hard cut, raw/per-tick)
   uint32_t inaCutCount;           // rising edge: REASON_INA_OVERVOLTAGE (INA228 ~1s-avg latched cut — software-failed-to-protect backstop)
+  uint32_t brakeEventCount;       // rising edge: approach-brake engagement episodes (bleed after ≥1s quiet) — pre-protection, counts saves not trips
   uint32_t magic;
 } OvTelemetry;  // ~352 B; RTC slow RAM has ample room (black box is the only other user)
 // Size + bin count folded into the magic so a layout change self-invalidates (no migration —
@@ -937,8 +938,8 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // excess (measured − command), never on a _filtered signal. Each _filtered signal
 // carries its own TC so CC PID and CV loop are tuned independently.
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
-float OutputPIDFilterTC = 37.0f;   // ms — Output Current PID EMA TC, NVS-backed (τ/3 at commissioning plant τ=112ms)
-float VoltageFilterTC = 112.0f;    // ms — IBV EMA TC for CV voltage loop, NVS-backed (full plant τ at commissioning, τ=112ms)
+float OutputPIDFilterTC = 34.0f;   // ms — Output Current PID EMA TC, NVS-backed (τ/3 at commissioning plant τ≈103ms)
+float VoltageFilterTC = 103.0f;    // ms — IBV EMA TC for CV voltage loop, NVS-backed (full plant τ at commissioning, τ≈103ms)
 float g_pidI_filtered = 0.0f;        // Output Current PID EMA signal
 float IBV_filtered = 0.0f;           // EMA of INA228 bus voltage — used by getFiltV()
 
@@ -1134,15 +1135,45 @@ float kneeFitC         = 0.0f;                  // fitted slope C (% duty · RPM
 float kneeFitResidPct  = -1.0f;                 // worst-anchor fit residual (% duty), -1 = not fitted
 int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) of the worst residual
 
+// ── Field de-energize time-constant test (commissioning stage 8) ─────────────
+// Cuts the field from a steady output and log-linear-fits the alternator-current decay to
+// get the field's electrical de-energize time constant (τ = L/R) — the time the OV protection's
+// field drain physically takes. RPM/voltage-independent in a fixed install, so it is measured
+// once per install (idle + cruise averaged) and consumed by the OV field-drain release timing.
+// Shares the SystemID duty-override + bumpless-resume path (OR'd into sysIDRunning).
+#define FIELDCUT_BUF_SIZE   256      // decay samples (~10 ms CH1 cadence, PSRAM)
+#define FIELDCUT_SETTLE_MS  700UL    // hold baseline before the cut so the decay starts from a steady output
+#define FIELDCUT_MEAS_MS    500UL    // cut window: field at floor, sample the decay (>10τ for any realistic field)
+#define FIELDCUT_EASE_MS    1500.0f  // ease duty back to baseline on exit — gentle re-engagement can't trip a protection
+#define FIELDCUT_MIN_BASE_A 5.0f     // baseline output must clear this or there is no decay to fit
+struct FieldCutSample { uint32_t tMs; float amps; };
+FieldCutSample *fieldCutBuf = nullptr;          // ps_malloc'd on first run, never freed
+int   fieldCutCount = 0;                          // decay samples captured this run
+volatile bool fieldCutRequested = false;          // set by /get?fieldCutStart
+volatile bool fieldCutAbortRequested = false;     // set by /get?fieldCutCancel
+uint8_t fieldCutActive = 0;                        // 0=idle 1=running 2=processing (sent to UI)
+uint8_t fieldCutPhase = 0;                         // 0=settle 1=measuring 2=easing (live caption)
+bool  fieldCutResultsReady = false;
+bool  fieldCutOk = false;                          // true = a usable τ was fit this run
+float fieldCutTauMs   = -1.0f;                     // fitted decay τ this run (ms), -1 = none
+float fieldCutBaseA   = 0.0f;                      // steady output measured just before the cut (A)
+float fieldCutResidPct = -1.0f;                    // log-fit RMS residual as % (quality; lower is better)
+uint32_t fieldCutLastEndMs = 0;                    // cooldown guard
+char  fieldCutAbortMsg[48] = {0};                  // human reason text on a failed/aborted run
+// Commissioned field de-energize time constant (ms), WITH the 30% cold-field margin already applied by
+// the Field-cut wizard step (measured warm → a colder field decays slower, so the wait is padded). The OV
+// field-drain release consumes this value directly. Safe placeholder default until the step is run.
+uint16_t fieldDecayTauMs = 60;
+
 // ── Auto-commissioning state machine ──────────────────────────────────────────
 // Persistent across reboots (NVS). 0=NOT_COMMISSIONED, 1=IN_PROGRESS, 2=COMMISSIONED.
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
-uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished); drives the Commissioning tab checklist
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=CV plant fit, 8=Field cut, 9=finished); drives the Commissioning tab checklist
 // Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
-// 0=Prep 1=Field curve 2=Min% floor 3=Plant fit 4=Verify 5=Disturbances 6=Thresholds 7=CV plant fit. Drives the
-// per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0xFF.
+// 0=Prep 1=Field curve 2=Min% floor 3=Plant fit 4=Verify 5=Disturbances 6=Thresholds 7=CV plant fit 8=Field cut. Drives
+// the per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0x1FF.
 uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
 volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
 
@@ -1197,8 +1228,8 @@ uint32_t modeCapSlewEndMs = 0;     // millis() the glide self-cleared; iExcess s
 #define MODE_CAP_GLIDE_SEC 2.5f      // full-scale Hi->Lo glide time (s); rate = MaxTableValue / this
 #define MODE_CAP_GLIDE_GRACE_MS 1000 // iExcess suppression hold AFTER the glide ends (ms)
 
-float FloatVoltage = 13.4;
-float BulkVoltage = 14.5;                        // this could have been called Target Bulk Voltage to be more clear
+float FloatVoltage = 13.6;
+float BulkVoltage = 13.9;                        // this could have been called Target Bulk Voltage to be more clear
 float ChargingVoltageTarget = 0;                 // This becomes active target — now the SLEWED/smoothed value the
                                                  // CV loop AND the over-voltage protections read (rate-limited from
                                                  // ChargingVoltageTargetReq by the slew in AdjustFieldLearnMode).
@@ -1231,11 +1262,11 @@ uint8_t chargeStageDisplay = 0;
 bool socInfoAvailable = false;
 
 // Tail-current based bulk completion
-float TailCurrent_A = 5.0f;
+float TailCurrent_A = 10.0f;
 uint32_t bulkVoltageHoldTimer = 0;  // millis() timestamp, 0 = inactive
 
 // Float->Bulk (rebulk) based on sag + debounce
-float RebulkVoltage = 13.2f;
+float RebulkVoltage = 13.1f;
 uint32_t rebulkDebounceTime = 10UL * 1000UL;  // ms
 uint32_t rebulkTimer = 0;                     // millis() timestamp, 0 = inactive
 
@@ -1243,13 +1274,13 @@ uint32_t rebulkTimer = 0;                     // millis() timestamp, 0 = inactiv
 uint32_t MinFloatTime = 5UL * 60UL * 1000UL;  // ms
 
 // SoC-based refinements (same scaling as SOC_percent: percent*100)
-int SOC_BlockRebulk_percent = 95.00;
-int SOC_AllowRebulk_percent = 94.00;
+int SOC_BlockRebulk_percent = 90;
+int SOC_AllowRebulk_percent = 80;
 
-uint32_t FLOAT_DURATION = 12 * 3600;  // 12 hours in seconds
+uint32_t FLOAT_DURATION = 8 * 3600;  // 8 hours in seconds
 uint32_t floatStartTime = 0;
 
-float RebulkCurrent_A = 5.0f;  // net discharge current threshold to trigger rebulk
+float RebulkCurrent_A = 10.0f;  // net discharge current threshold to trigger rebulk
 bool inIdleStage = false;      // true when UseFloat=0 and absorption complete, waiting for rebulk
 int UseFloat = 0;              // post-absorption mode: 0 = idle until rebulk criteria met, 1 = hold FloatVoltage, 2 = zero-current float (alternator carries house loads, battery held at 0 A)
 bool zeroFloatActive = false;  // live: in the float stage with UseFloat=2 — zero-current regulation (MaintainMode's control law, entered by the stage machine with rebulk criteria still armed)
@@ -1258,8 +1289,8 @@ bool zeroFloatActive = false;  // live: in the float stage with UseFloat=2 — z
 // Absorption stage
 volatile bool inAbsorptionStage = false;
 uint32_t absorptionStartTime = 0;
-float AbsorptionVoltage = 14.0f;
-uint32_t AbsorptionTimeoutMs = 1200000UL;   //
+float AbsorptionVoltage = 13.9f;
+uint32_t AbsorptionTimeoutMs = 2700000UL;   //
 uint32_t absorptionCompleteTime = 30000UL;  // tail current hold before float
 uint32_t absorptionTailTimer = 0;
 uint32_t bulkVoltageHoldMs = 250;  // time at bulk voltage before entering absorption
@@ -1275,7 +1306,7 @@ int ManualFieldToggle = 0;           // 0 = Auto (PID) — fresh-flash default. 
 int SwitchControlOverride = 1;       // set to 1 for web interface switches to override physical switch panel
 int MaintainMode = 0;                // Set to 1 to target 0 amps at battery
 int TargetVoltageMode = 0;
-float TargetVoltageSetpoint = 12.6f;
+float TargetVoltageSetpoint = 14.0f;
 int OnOff = 0;             // 0 is charger off, 1 is charger On (corresponds to Alternator Enable in Basic Settings)
 int Ignition = 0;          // Digital Input      NEED THIS TO HAVE WIFI ON , FOR NOW
 int IgnitionOverride = 2;  // Auto (any value != 1) = follow real GPIO1 ignition wire (default); 1 = force ON. Cannot force off.
@@ -2312,8 +2343,8 @@ int Alarm_Status;                                // for alarm mirror light on Cl
 float CurrentThreshold = 0.01f;       // Ignore currents below this (amps)
 int PeukertExponent_scaled = 105;     // Peukert exponent × 100 (112 = 1.12)
 int ChargeEfficiency_scaled = 990;    // Charging efficiency % × 10 (990 = 99.0%)
-int ChargedVoltage_Scaled = 1400;     // Voltage threshold for "charged" (V × 100) (a Battery Monitor setup parameter, nothing to do with alternator)
-float TailCurrent = 2.0f;             // % of battery Ah capacity (1 decimal place)
+int ChargedVoltage_Scaled = 1380;     // Voltage threshold for "charged" (V × 100) (a Battery Monitor setup parameter, nothing to do with alternator)
+float TailCurrent = 5.0f;             // % of battery Ah capacity (1 decimal place)
 int ShuntResistanceMicroOhm = 100;    // Shunt resistance in microohms
 // Single gate every battery-current consumer reads (SoC, tail-current, MaintainMode, load-dump, charge-
 // current limit, CV plant fit). True only with a declared shunt AND nonzero resistance — the nonzero
@@ -2358,11 +2389,11 @@ bool bmsSignalActive;                 // Read from GPIO34
 int AlarmActivate = 0;                // set to 1 to enable alarm conditions
 int TempAlarm = 190;                  // above this value, sound alarm
 int TempAlarmLow = 32;                // below this value, sound alarm (0 = disabled)
-float VoltageAlarmHigh = 15.0f;       // above this value, sound alarm (V, 2 decimals)
-float VoltageAlarmLow = 11.0f;        // below this value, sound alarm (V, 2 decimals)
-int SocAlarmLow = 0;                  // sound alarm when SoC falls below this % (0 = disabled; needs socInfoAvailable)
+float VoltageAlarmHigh = 14.8f;       // above this value, sound alarm (V, 2 decimals)
+float VoltageAlarmLow = 11.9f;        // below this value, sound alarm (V, 2 decimals)
+int SocAlarmLow = 10;                 // sound alarm when SoC falls below this % (0 = disabled; needs socInfoAvailable)
 int CurrentAlarmHigh = 100;           // above this value, sound alarm
-int MaximumAllowedBatteryAmps = 150;  // safety for battery, optional
+int MaximumAllowedBatteryAmps = 125;  // safety for battery, optional
 int RPMScalingFactor = 1330;          // adjust until it matches your trusted tachometer
 float AlternatorCOffset = 0;          // tare for alt current
 float BatteryCOffset = 0;             // tare or batt current
@@ -3254,8 +3285,8 @@ float pidError = 0.0f;  // PID error for display (A)
 // operating point, and a fresh/uncommissioned install on a different plant oscillates at full gain. Ki/Kp
 // ratio (integral zero, 8.9 rad/s) is preserved — this is loop gain only, not a reshape. Commissioning
 // overwrites both.
-float PidKp = 0.579f;  // 12V-equivalent proportional gain
-float PidKi = 5.150f;  // 12V-equivalent integral gain
+float PidKp = 0.4662f;  // 12V-equivalent proportional gain
+float PidKi = 4.5384f;  // 12V-equivalent integral gain
 float PidKd = 0.01f;  // 12V-equivalent derivative gain
 volatile float PidKp_active = 0.579f;  // DERIVED duty-space gain the PID uses (PidKp × 12/BATTERY_VOLTAGE). Set by recomputeCcGains().
 volatile float PidKi_active = 5.150f;  // DERIVED duty-space Ki.
@@ -3267,7 +3298,7 @@ volatile float PidKd_active = 0.01f;  // DERIVED duty-space Kd.
 // selected mode and bakes the 12V-block normalization (×12/BATTERY_VOLTAGE) into.
 uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) — DEFAULT, so a fresh/never-commissioned
                                   // device runs the seeded manual gains; 1 = AUTO (measured-K_dc, see CV_AUTOTUNE_PLAN.md §E).
-                                  // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply.
+                                  // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply (cxCVPlantApply).
 // cvLambdaMult's old CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged
 // (gains come from cvCrossover/ω_c).
 // K(t) = cvPlantKa + cvPlantKb·√t — the plant gain as a function of read horizon (V/A at the pack). Storing
@@ -3355,10 +3386,11 @@ volatile float VoltageKp_active = 8.5f;  // DERIVED pack-space Kp the loop uses 
 volatile float VoltageKi_active = 6.0f;  // DERIVED pack-space Ki the loop uses.
 volatile float VoltageKp = 8.5f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID); from commissioning CV plant fit (K20=32.2 mV/A, 12 V-equiv)
 volatile float VoltageKi = 6.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi; from commissioning CV plant fit. Deferred cv_I anti-windup still open (see CV_Loop_Dev_Summary.md Future Work)
-// No CV D term — redundant with slope-aware integrator bleed (SlopeBleedK).
-float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
-float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
-float SlopeBleedProxV = 0.20f;      // V — proximity gate: bleed scales linearly from 0 (e >= ProxV) to full (e <= 0)
+// No CV D term — redundant with the approach brake (SlopeBleedK).
+float CvBrakeThreshVps = 0.70f;     // V/s — approach brake fires when the sustained (EMA'd) rise of filtered V exceeds this. Bench-raced 2026-07-13: 0.5–0.6 thins low-Hz resonance margin, 0.8+ misses ~3×-stiffer banks
+float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess sustained slope, drain this many A/s from cv_I
+float CvBrakeTauMs = 250.0f;        // ms — EMA TC of the brake's sustained-slope signal. Co-set with CvBrakeThreshVps (filter+threshold are one DOF, like IExcessTau)
+float CvBrakeArmV = 1.00f;          // V below live target within which the brake is armed. Wide by design — the 0.20 V proximity gate it replaced neutered the old bleed
 bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "helpers" (asymmetric 7× KiDown unwind + slope-aware integrator bleed). ON = both active (reduce overshoot / speed OV recovery). OFF = symmetric plain PI, easier to tune/understand. Does NOT touch real OV protections.
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 // --- FastOV supervisor ---
@@ -3377,10 +3409,10 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 // oscillation (belt resonance, stator imbalance, rectifier ripple) to ~0 before the
 // threshold is applied.
 // See Working Markdown Docs/iExcess_Redesign_Spec.md and CV_Loop_Dev_Summary.md.
-float IExcessFrac     = 0.10f;   // shared trip-line SLOPE (A per A of command); commissioning sets it to the measured ripple slope. E = clamp(floor, frac·cmd + base, ceil).
-float IExcessFracBulk = 0.15f;   // CC-detector slope; the UI keeps it equal to IExcessFrac so the CV and CC trip lines stay parallel. Differs from CV only on an uncommissioned device.
-float IExcessBaseA    = 0.0f;    // A — trip-line intercept (CV base). 0 = through-origin. Commissioning sets it to ripple-at-idle + Safety Margin, lifting the line above the measured ripple.
-float IExcessCcOffsetA = 0.0f;   // A — the CC trip line sits this far above the CV line (parallel offset). 0 = coincident with CV.
+float IExcessFrac     = 0.031f;  // shared trip-line SLOPE (A per A of command); commissioning sets it to the measured ripple slope. E = clamp(floor, frac·cmd + base, ceil).
+float IExcessFracBulk = 0.031f;  // CC-detector slope; the UI keeps it equal to IExcessFrac so the CV and CC trip lines stay parallel. Differs from CV only on an uncommissioned device.
+float IExcessBaseA    = 5.8f;    // A — trip-line intercept (CV base). 0 = through-origin. Commissioning sets it to ripple-at-idle + Safety Margin, lifting the line above the measured ripple.
+float IExcessCcOffsetA = 4.0f;   // A — the CC trip line sits this far above the CV line (parallel offset). 0 = coincident with CV.
 float IExcessFloorA   = 5.0f;    // A — trip-line floor; it never dips below this even at tiny commands.
 float IExcessCeilA    = 25.0f;   // A — trip-line ceiling; it never rises above this on very large commands.
 float BattCurrentLimitA = 100.0f;  // A — max battery charge current (G4). Ceiling on the alternator-amp command = limit + measured house-load offset; requires the INA228 battery shunt as Battery Current Source. 0 = disabled.
@@ -3609,7 +3641,7 @@ uint32_t TempSustainedTimeout = 120000;  // ms - WARNING temp sustained this lon
 // the old +0.3 line inside the G2 filter lag); AGM/flooded 16.0 V absolute ×(V/12) (lead-acid
 // damage is time-integrated, indifferent to brief bounded spikes — the ceiling protects the DC
 // loads' published continuous ratings instead, 2026-07-13).
-float AlternatorHardShutdownV = 15.0f;    // V — absolute hard-shutdown threshold; this 15.0 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with the conservative BulkVoltage + 0.5 V fallback (24V/48V get 30.0/60.0 V); the chemistry-specific value (AGM/flooded 16 V absolute) arrives via the commissioning proposal.
+float AlternatorHardShutdownV = 14.4f;    // V — absolute hard-shutdown threshold; this 14.4 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with the conservative BulkVoltage + 0.5 V fallback (13.9 Bulk → 14.4; 24V/48V get 30.0/60.0 V); the chemistry-specific value (AGM/flooded 16 V absolute) arrives via the commissioning proposal.
 float VoltageDisagreeThreshold = 0.15f;   // V difference between BatteryV and IBV for disagreement detection
 uint32_t VoltageDisagreeTimeout = 10000;  // ms - sustained disagreement this long triggers warning
 uint32_t VoltageDisagreeCriticalTimeoutMs = 3000;
@@ -3815,7 +3847,9 @@ uint32_t thermalSlopeLastPushMs = 0;  // gates slope buffer push to TempPIDInter
 // there the trend really is stale and must be cleared. Consumed (reset) inside the re-enable path.
 bool thermalPreserveSlopeOnResume = false;
 
-float cvDSlope = 0.0f;              // V/s — mirrors g_fastOvDvdt; used by slope-aware integrator bleed (SlopeBleedK)
+float cvDSlope = 0.0f;              // V/s — mirrors g_fastOvDvdt; feeds the approach-brake slope EMA and the recovery starve exit
+float g_cvBrakeSlopeEma = 0.0f;     // V/s — CvBrakeTauMs EMA of cvDSlope; the approach brake's trigger signal, logged to cvLog
+uint32_t g_cvBrakeCount = 0;        // session count of approach-brake engagement episodes; lifetime twin lives in g_ovTel.brakeEventCount
 
 float outerImpliedPenalty = 0.0f;
 bool outerAntiWindupFired = false;
@@ -3973,7 +4007,7 @@ uint32_t thermalLogBurstUntilMs = 0;
 
 #define PID_LOG_SIZE 2400
 #define CV_LOG_SIZE 6000
-#define CV_LOG_HEADER_SIZE 32
+#define CV_LOG_HEADER_SIZE 36
 #define CV_LOG_ENTRY_SIZE 50
 
 volatile bool pidLogPaused = false;
@@ -4154,8 +4188,9 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t slopeBleedAmps_x1000;    // cv_I drain applied this voltage loop tick (A × 1000); 0 on non-VL ticks
   uint8_t capReason;               // which layer set fastOvCap this tick: 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk
   int16_t ovFilt_x100;             // g_ovIbvFilt × 100 (V) — Group 2's comparator input (plant-tau EMA of IBV)
+  int16_t brakeSlope_x10000;       // g_cvBrakeSlopeEma × 10000 (V/s) — approach-brake trigger signal
 };
-static_assert(sizeof(CvLogEntry) == 51, "CvLogEntry must be 51 bytes");
+static_assert(sizeof(CvLogEntry) == 53, "CvLogEntry must be 53 bytes");
 
 
 struct CvBinDLState {
@@ -4178,9 +4213,10 @@ struct CvBinDLState {
 //   8     voltageKp       float     VoltageKp at download time
 //  12     voltageKi       float     VoltageKi at download time
 //  16     voltageInterval uint32    VoltageLoopInterval ms
-//  20     sbThresh        float     SlopeBleedThresh (V/s)
-//  24     sbK             float     SlopeBleedK (A/(V/s))
-//  28     sbProxV         float     SlopeBleedProxV (V)
+//  20     brThresh        float     CvBrakeThreshVps (V/s)
+//  24     brK             float     SlopeBleedK (A/(V/s))
+//  28     brArmV          float     CvBrakeArmV (V)
+//  32     brTauMs         float     CvBrakeTauMs (ms)
 // ---------------------------------------------------------------------------
 
 static CvLogEntry *cvLog = nullptr;
@@ -4297,9 +4333,9 @@ float g_iExcessThreshWinMin = 0.0f; // min of E over armed ticks this frame (A)
 bool  g_iExcessArmedWin = false;    // detector armed at any tick this frame (peak/min validity)
 
 // Load dump detection via dBcur/dt — three-tier cascade
-float LoadDumpDtThresh1 = 4000.0f;  // A/s — tier 1: fires on a SINGLE sample above this (hard-switched FET disconnects)
-float LoadDumpDtThresh  = 1500.0f;  // A/s — tier 2: fires when TWO consecutive samples both exceed this; noise ceiling ~354 A/s consecutive
-float LoadDumpDtThresh3 = 1000.0f;  // A/s — tier 3: fires when THREE consecutive samples all exceed this (slow relay-contact disconnects)
+float LoadDumpDtThresh1 = 7000.0f;  // A/s — tier 1: fires on a SINGLE sample above this (hard-switched FET disconnects)
+float LoadDumpDtThresh  = 5000.0f;  // A/s — tier 2: fires when TWO consecutive samples both exceed this; noise ceiling ~354 A/s consecutive
+float LoadDumpDtThresh3 = 5000.0f;  // A/s — tier 3: fires when THREE consecutive samples all exceed this (slow relay-contact disconnects)
 volatile bool g_loadDumpActive = false;
 uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
 uint32_t g_loadDumpCount = 0;

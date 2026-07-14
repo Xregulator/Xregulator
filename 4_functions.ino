@@ -999,6 +999,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     } else {
       systemIDPlantTauMs = (uint16_t)settingRead(NK_sysidPlantTau).toInt();
     }
+    if (!settingExists(NK_fieldDecayTau)) {
+      settingWrite(NK_fieldDecayTau, String(fieldDecayTauMs).c_str());
+    } else {
+      fieldDecayTauMs = (uint16_t)settingRead(NK_fieldDecayTau).toInt();
+    }
     // Survives reboots on purpose: a device rescaled while offline must keep suppressing front
     // sync until the cloud wipe lands, or the cloud ships the old-scaled front straight back.
     rpmAxisWipePending = (settingExists(NK_RpmAxisWipePend) && settingRead(NK_RpmAxisWipePend) == "1");
@@ -1589,11 +1594,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     VoltageKi = settingRead(NK_VoltageKi).toFloat();
   }
-  if (!settingExists(NK_SlopeBleedThresh)) {
-    SlopeBleedThresh *= seedVScale;
-    settingWrite(NK_SlopeBleedThresh, String(SlopeBleedThresh, 3).c_str());
+  if (!settingExists(NK_CvBrakeThreshVps)) {
+    CvBrakeThreshVps *= seedVScale;
+    settingWrite(NK_CvBrakeThreshVps, String(CvBrakeThreshVps, 3).c_str());
   } else {
-    SlopeBleedThresh = settingRead(NK_SlopeBleedThresh).toFloat();
+    CvBrakeThreshVps = settingRead(NK_CvBrakeThreshVps).toFloat();
+  }
+  if (!settingExists(NK_CvBrakeTauMs)) {
+    settingWrite(NK_CvBrakeTauMs, String(CvBrakeTauMs, 0).c_str());
+  } else {
+    CvBrakeTauMs = settingRead(NK_CvBrakeTauMs).toFloat();
   }
   if (!settingExists(NK_SlopeBleedK)) {
     SlopeBleedK *= seedDScale;
@@ -1734,11 +1744,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     MinChargeTempF = settingRead(NK_MinChargeTempF).toFloat();
   }
-  if (!settingExists(NK_SlopeBleedProxV)) {
-    SlopeBleedProxV *= seedVScale;
-    settingWrite(NK_SlopeBleedProxV, String(SlopeBleedProxV, 2).c_str());
+  if (!settingExists(NK_CvBrakeArmV)) {
+    CvBrakeArmV *= seedVScale;
+    settingWrite(NK_CvBrakeArmV, String(CvBrakeArmV, 2).c_str());
   } else {
-    SlopeBleedProxV = settingRead(NK_SlopeBleedProxV).toFloat();
+    CvBrakeArmV = settingRead(NK_CvBrakeArmV).toFloat();
   }
   if (!settingExists(NK_PidKp)) {
     settingWrite(NK_PidKp, String(PidKp, 3).c_str());
