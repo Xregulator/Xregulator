@@ -1200,10 +1200,24 @@ void setupWiFi() {
   Serial.println("=== WiFi Setup Complete ===");
 }
 
+// mDNS starts once and never MDNS.end(): ESP32 core 3.3.8's mdns teardown null-derefs the
+// netif (LoadProhibited crash on wake/reconnect). mDNS stays bound to the persistent STA
+// netif across reconnects, so it keeps working without a restart.
+void startMdnsOnce() {
+  static bool mdnsStarted = false;
+  if (!mdnsStarted && MDNS.begin("alternator")) {
+    Serial.println("mDNS responder started");
+    MDNS.addService("http", "tcp", 80);
+    mdnsStarted = true;
+  }
+}
+
+// Boot-time (setup) connect only — a blocking wait is fine before the control loop starts.
+// Runtime reconnects go through checkWiFiConnection()'s non-blocking engine.
 bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout) {
 
   if (!ssid || strlen(ssid) == 0) {
-    Serial.println("ERROR: No SSID provided for WiFi connection");  
+    Serial.println("ERROR: No SSID provided for WiFi connection");
     return false;
   }
 
@@ -1243,15 +1257,7 @@ bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout
     Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("Signal strength: %d dBm\n", WiFi.RSSI());
 
-    // mDNS setup — start once and never MDNS.end() on reconnect: ESP32 core 3.3.8's mdns
-    // teardown null-derefs the netif (LoadProhibited crash on wake/reconnect). mDNS stays bound
-    // to the persistent STA netif across reconnects, so it keeps working without a restart.
-    static bool mdnsStarted = false;
-    if (!mdnsStarted && MDNS.begin("alternator")) {
-      Serial.println("mDNS responder started");
-      MDNS.addService("http", "tcp", 80);
-      mdnsStarted = true;
-    }
+    startMdnsOnce();
 
     return true;
 
@@ -1528,6 +1534,16 @@ int doCloudPOST(const char *endpointPath, const char *payload,
     return -1;
   }
 
+  // Pre-resolve DNS with a WDT feed so a slow lookup (~15 s worst on dead cellular) can't stack
+  // into the same unfed window as the up-to-14 s TCP+TLS connect; connect() then hits the lwIP cache.
+  IPAddress preResolved;
+  if (!WiFi.hostByName(host, preResolved)) {
+    Serial.printf("doCloudPOST(%s): DNS lookup failed\n", endpointPath);
+    queueConsoleMessageF("Cloud unreachable: DNS lookup for %s failed (check WiFi/router DNS)", host);
+    return -2;
+  }
+  esp_task_wdt_reset();
+
   WiFiClientSecure client;
   // Match executeUploadPayload (2_functions.ino) which uses setInsecure(). setCACert(server_root_ca)
   // does NOT work here: that cert is our Let's Encrypt ISRG Root X1, but Supabase fronts behind
@@ -1537,13 +1553,14 @@ int doCloudPOST(const char *endpointPath, const char *payload,
   // setTimeout omitted: Stream::setTimeout is ms (not seconds as some docs claim) and
   // our read loops use available()+read() polling with explicit millis() deadlines,
   // so the Stream-level timeout doesn't gate anything in this path.
-  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT / 1000);  // this API takes seconds
 
   uint32_t start = millis();
   esp_task_wdt_reset();
 
   if (!client.connect(host, port, CONNECT_TIMEOUT)) {
     uint32_t connElapsed = millis() - start;  // how long the failed TLS connect took (before extra probes below)
+    esp_task_wdt_reset();                     // the failed connect may have just eaten 14 s of the WDT window
     char errBuf[128] = {0};
     int lastErr = client.lastError(errBuf, sizeof(errBuf));
     // Disambiguate the three distinct failure modes for the dashboard Console — a generic
@@ -1627,6 +1644,7 @@ int doCloudPOST(const char *endpointPath, const char *payload,
     esp_task_wdt_reset();
     while (client.available()) {
       char c = (char)client.read();
+      readStart = millis();  // idle timeout — each byte restarts it
       if (statusLen < sizeof(statusBuf) - 1) statusBuf[statusLen++] = c;
       if (c == '\n') { gotStatusLine = true; break; }
     }
@@ -1658,6 +1676,7 @@ int doCloudPOST(const char *endpointPath, const char *payload,
     esp_task_wdt_reset();
     while (client.available()) {
       char c = (char)client.read();
+      readStart = millis();
       if (state == ST_HDR) {
         if (c == '\r') continue;
         if (c == '\n') {
@@ -4741,7 +4760,7 @@ void setupServer() {
       } else if (LatitudeNMEA == 0.0 && LongitudeNMEA == 0.0) {
         queueConsoleMessage("Weather update failed: no GPS position yet — wait for a fix or set a manual lat/lon");
         inputMessage = "no_gps";
-      } else if (WiFi.RSSI() < -76) {
+      } else if (WiFi.RSSI() < -80) {
         queueConsoleMessage("Weather update failed: WiFi signal too weak");
         inputMessage = "weak_wifi";
       } else {
@@ -6458,6 +6477,18 @@ void setupServer() {
     }
   });
 
+  // Tiny always-answers identity endpoint for app-side subnet discovery: when mDNS fails
+  // across a phone hotspot, the Capacitor app sweeps 172.20.10.2-14 and latches onto this
+  // reply. No password, no side effects; CORS header because the app's origin is not us.
+  server.on("/identify", HTTP_GET, [](AsyncWebServerRequest *request) {
+    char idBuf[128];
+    snprintf(idBuf, sizeof(idBuf), "{\"device\":\"xregulator\",\"uid\":\"%s\",\"fw\":\"%s\"}",
+             device_id_hex, FIRMWARE_VERSION);
+    AsyncWebServerResponse *r = request->beginResponse(200, "application/json", idBuf);
+    r->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(r);
+  });
+
   server.on("/getAuthToken", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!isRegistered) {
       request->send(200, "application/json", "{\"registered\":false}");
@@ -7440,119 +7471,92 @@ void enterLowPowerStandby() {
   }
 }
 void checkWiFiConnection() {
-  // Only attempt reconnection in client mode
+  // Non-blocking reconnect engine — never waits on the radio in loop() (Core 1). Presence scans
+  // run async+passive on the Core-0 WiFi task; joins are fire-and-poll across loop passes. No
+  // backoff, no give-up: a phone hotspot can appear at any moment, and holding the association
+  // once joined is what keeps the iPhone's ~90 s no-client hotspot auto-off at bay.
   if (currentMode != MODE_CLIENT) return;
-  // === VOLTAGE-PROXIMITY RECONNECT THROTTLE ===
-  // When battery voltage is close to charging target, alternator is working hard
-  // and a 5-second reconnect block could disrupt regulation at a critical moment.
-  // Use 5-minute minimum interval when within 0.3V of target, normal backoff otherwise.
-  if (OnOff == 1 && ChargingVoltageTarget > 0) {
-    float voltageError = ChargingVoltageTarget - getBatteryVoltage();
-    // voltageError > 0 means battery is below target (still charging hard)
-    // voltageError < 0 means battery is above target (shouldn't happen normally)
-    if (voltageError >= -0.3f && voltageError <= 0.3f) {
-      // Within 0.3V of target - near regulation point, don't risk a 5s block
-      if (millis() - wifiRecon.lastAttempt < wifiRecon.maxInterval) return;
-    }
-  }
-  // === END VOLTAGE-PROXIMITY RECONNECT THROTTLE ===
-  // === THROTTLE WIFI CHECKS (every 2 seconds) ===
-  static int cachedWiFiMode = WIFI_OFF;
-  static int cachedWiFiStatus = WL_DISCONNECTED;
-  static int cachedWiFiRSSI = -100;
+
+  static int cachedWiFiMode = WIFI_STA;
   static int cachedCpuFreq = 240;
-  static unsigned long lastWiFiPoll = 0;
-
+  static unsigned long lastDriverPoll = 0;
   unsigned long now = millis();
-
-  // Poll actual WiFi state only every 2 seconds
-  if (now - lastWiFiPoll > 2000) {
+  if (now - lastDriverPoll > 2000) {  // getMode/getCpuFrequencyMhz cross cores — poll gently
     cachedWiFiMode = WiFi.getMode();
-    cachedWiFiStatus = WiFi.status();
-    cachedWiFiRSSI = WiFi.RSSI();
     cachedCpuFreq = getCpuFrequencyMhz();
-    lastWiFiPoll = now;
+    lastDriverPoll = now;
   }
-
-  // Use cached values for early returns (no ipc0!)
   if (cachedWiFiMode == WIFI_OFF) return;
   if (cachedCpuFreq < 81 && !wifiNapActive) return;  // napping reconnects at 80MHz so a router drop can't strand it
 
-  // === END THROTTLE ===
-
-  if (cachedWiFiStatus == WL_CONNECTED) {
-    // Update signal strength while connected
-    wifiRecon.lastSignalStrength = cachedWiFiRSSI;
-
-    // Reset reconnection state on successful connection
-    if (wifiRecon.attemptCount > 0) {
-      Serial.println("WiFi reconnected successfully!");
-      queueConsoleMessageF("WiFi reconnected after %d attempts", wifiRecon.attemptCount);
+  if (WiFi.status() == WL_CONNECTED) {  // event-cached in the core — no cross-core call
+    if (wifiRecon.state != WIFI_RECON_IDLE) {
+      wifiRecon.state = WIFI_RECON_IDLE;
+      wifiRecon.channel = WiFi.channel();  // seed the single-channel presence scan
+      WiFi.scanDelete();
+      Serial.printf("WiFi: connected, IP %s, RSSI %d dBm, ch %d\n",
+                    WiFi.localIP().toString().c_str(), WiFi.RSSI(), (int)wifiRecon.channel);
+      if (wifiRecon.attemptCount > 0) {
+        queueConsoleMessageF("WiFi reconnected after %d join attempts", wifiRecon.attemptCount);
+      }
+      wifiRecon.attemptCount = 0;
+      startMdnsOnce();
+      setupServer();  // no-op when already up; covers a boot that had no WiFi (routes never registered)
     }
-    wifiRecon.attemptCount = 0;
-    wifiRecon.currentInterval = wifiRecon.minInterval;
-    wifiRecon.giveUpMode = false;
+    static unsigned long lastRssiPoll = 0;
+    if (now - lastRssiPoll > 2000) {
+      wifiRecon.lastSignalStrength = WiFi.RSSI();
+      lastRssiPoll = now;
+    }
     return;
   }
 
-  // WiFi is disconnected - check if we should give up temporarily
-  if (wifiRecon.giveUpMode) {
-    if (now - wifiRecon.lastAttempt < 300000) return;
-    Serial.println("WiFi: Exiting give-up mode, attempting fresh reconnection burst");
-    wifiRecon.giveUpMode = false;
-    wifiRecon.attemptCount = 0;
-    wifiRecon.currentInterval = wifiRecon.minInterval;
+  // Disconnected — use cached credentials only (no filesystem reads here)
+  if (!cached_wifi_creds_valid || strlen(cached_wifi_ssid) == 0) return;
+
+  if (wifiRecon.state == WIFI_RECON_JOINING) {
+    if (now - wifiRecon.joinStart > WIFI_JOIN_TIMEOUT_MS) {
+      wifiRecon.attemptCount++;
+      Serial.printf("WiFi: join timed out (attempt %d), back to seeking\n", wifiRecon.attemptCount);
+      WiFi.disconnect();  // clears the half-finished join; posts to the driver, doesn't wait
+      wifiRecon.state = WIFI_RECON_SEEKING;
+      wifiRecon.lastScanKickoff = now;
+    }
+    return;  // join success is caught by the WL_CONNECTED branch on a later pass
   }
 
-  // Signal strength awareness
-  if (wifiRecon.lastSignalStrength != -999 && wifiRecon.lastSignalStrength < wifiRecon.minSignalThreshold) {
-    if (now - wifiRecon.lastAttempt < 60000) return;
-    Serial.printf("WiFi: Poor signal (%d dBm), using extended retry interval\n", wifiRecon.lastSignalStrength);
-  } else {
-    if (now - wifiRecon.lastAttempt < wifiRecon.currentInterval) return;
+  // Seeking: reap a finished presence scan, else kick one off at cadence
+  int16_t sc = WiFi.scanComplete();
+  if (sc == WIFI_SCAN_RUNNING) return;
+
+  if (sc >= 0) {
+    int32_t seenChannel = 0;
+    for (int16_t i = 0; i < sc; i++) {
+      if (WiFi.SSID(i) == cached_wifi_ssid) {
+        seenChannel = WiFi.channel(i);
+        break;
+      }
+    }
+    WiFi.scanDelete();
+    if (seenChannel > 0) {
+      wifiRecon.channel = seenChannel;
+      Serial.printf("WiFi: '%s' sighted on ch %d - joining\n", cached_wifi_ssid, (int)seenChannel);
+      // Fire-and-poll: begin() returns immediately; association + DHCP run on the Core-0 WiFi task
+      WiFi.begin(cached_wifi_ssid, strlen(cached_wifi_pass) > 0 ? cached_wifi_pass : nullptr, seenChannel);
+      wifiRecon.joinStart = now;
+      wifiRecon.state = WIFI_RECON_JOINING;
+      return;
+    }
   }
 
-  wifiRecon.lastAttempt = now;
-  wifiRecon.attemptCount++;
-
-  Serial.printf("WiFi reconnection attempt #%d (interval: %lums, last signal: %d dBm)\n",
-                wifiRecon.attemptCount, wifiRecon.currentInterval, wifiRecon.lastSignalStrength);
-
-  // Use cached credentials only (no filesystem reads here)
-  if (!cached_wifi_creds_valid || strlen(cached_wifi_ssid) == 0) {
-    Serial.println("WiFi: No cached SSID found for reconnection");
-    return;
-  }
-
-  bool connected = connectToWiFi(cached_wifi_ssid, cached_wifi_pass, 5000);
-  if (connected) {
-    Serial.println("WiFi reconnection successful!");
-    return;
-  }
-
-  // Failed - check if we should give up temporarily
-  if (wifiRecon.attemptCount >= wifiRecon.maxAttempts) {
-    Serial.println("WiFi: Max attempts reached, entering give-up mode for 5 minutes");
-    queueConsoleMessageF("WiFi: Max reconnection attempts (%d) reached, will retry in 5 minutes", wifiRecon.maxAttempts);
-    wifiRecon.giveUpMode = true;
-    return;
-  }
-
-  // Intelligent exponential backoff
-  if (wifiRecon.currentInterval < 32000) {
-    wifiRecon.currentInterval *= 2;
-  } else if (wifiRecon.currentInterval < 60000) {
-    wifiRecon.currentInterval = 60000;
-  } else if (wifiRecon.currentInterval < 120000) {
-    wifiRecon.currentInterval = 120000;
-  } else {
-    wifiRecon.currentInterval = wifiRecon.maxInterval;
-  }
-
-  Serial.printf("WiFi: Next attempt in %lu seconds\n", wifiRecon.currentInterval / 1000);
-
-  if (wifiRecon.lastSignalStrength != -999 && wifiRecon.lastSignalStrength < -76) {
-    queueConsoleMessageF("WiFi: Weak signal (%d dBm) may be causing disconnections", wifiRecon.lastSignalStrength);
+  if (now - wifiRecon.lastScanKickoff >= WIFI_SCAN_CADENCE_MS) {
+    wifiRecon.lastScanKickoff = now;
+    // iPhone hotspots pick a fresh channel per session — sweep all channels every Nth scan
+    // (and whenever no channel is cached); otherwise it's 120 ms of passive RX on one channel.
+    bool fullSweep = (wifiRecon.channel == 0) || (++wifiRecon.scansSinceSweep >= WIFI_FULL_SWEEP_EVERY);
+    if (fullSweep) wifiRecon.scansSinceSweep = 0;
+    WiFi.scanNetworks(true, false, true, 120, fullSweep ? 0 : (uint8_t)wifiRecon.channel, cached_wifi_ssid);
+    wifiRecon.state = WIFI_RECON_SEEKING;
   }
 }
 void SendWifiData() {

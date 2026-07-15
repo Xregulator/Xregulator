@@ -344,7 +344,7 @@ void triggerWeatherUpdate() {
     return;
   }
 
-  if (WiFi.RSSI() < -76) {
+  if (WiFi.RSSI() < -80) {
     queueConsoleMessageF("Weather: Failed - Weak WiFi signal");
     return;
   }
@@ -3462,9 +3462,12 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   int contentLength = 0;
   WiFiClient *stream = nullptr;
   const size_t CHUNK_SIZE = 1024;
+  const unsigned long OTA_STALL_TIMEOUT_MS = 60000;  // no-data idle limit — a half-open socket never trips !connected()
+  const unsigned long OTA_MAX_DOWNLOAD_MS = 900000;  // absolute cap on the whole download
   uint8_t inputBuffer[CHUNK_SIZE];
   int totalDownloaded = 0;
   unsigned long lastProgress = 0;
+  unsigned long lastDataTime = 0;
   uint8_t hash[32];
   uint8_t signature[520];
   size_t sigLength = 0;
@@ -3541,7 +3544,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
 
   // CRITICAL: Set matching timeouts BEFORE connection attempt
   client.setTimeout(30000);
-  client.setHandshakeTimeout(30000);  // Must match setTimeout
+  client.setHandshakeTimeout(30);  // SECONDS (core multiplies by 1000) — matches setTimeout's 30000 ms
 
   Serial.println("8. Pre-flight memory check...");
   freeHeap = ESP.getFreeHeap();
@@ -3612,6 +3615,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   // Streaming tar extraction
   totalDownloaded = 0;
   lastProgress = 0;
+  lastDataTime = millis();
 
   while (totalDownloaded < contentLength && success) {
     if (!client.connected()) {
@@ -3626,6 +3630,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
       int actualRead = stream->readBytes(inputBuffer, toRead);
 
       if (actualRead > 0) {
+        lastDataTime = millis();
         totalDownloaded += actualRead;
 
         // Update hash for signature verification
@@ -3645,8 +3650,23 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
         }
       }
     } else {
+      // Half-open cellular socket: connected() stays true and available() stays 0 forever,
+      // so without this guard the loop spins feeding the WDT — device frozen with the
+      // alternator disabled until a manual power cycle.
+      if (millis() - lastDataTime > OTA_STALL_TIMEOUT_MS) {
+        Serial.printf("ABORT: OTA download stalled - no data for %lu s\n", OTA_STALL_TIMEOUT_MS / 1000);
+        queueConsoleMessage("OTA FAILED: download stalled, connection dead - aborting");
+        success = false;
+        break;
+      }
       delay(10);
       esp_task_wdt_reset();
+    }
+    if (millis() - downloadStartTime > OTA_MAX_DOWNLOAD_MS) {
+      Serial.printf("ABORT: OTA download exceeded %lu min cap\n", OTA_MAX_DOWNLOAD_MS / 60000);
+      queueConsoleMessage("OTA FAILED: download too slow - aborting");
+      success = false;
+      break;
     }
   }
 
@@ -3986,7 +4006,7 @@ void executeUpdateFirmwareVersion() {
   }
 
   int rssi = WiFi.RSSI();
-  if (rssi < -76) {
+  if (rssi < -80) {
     Serial.printf("FW_UPDATE: WiFi too weak (%d dBm)\n", rssi);
     return;
   }
@@ -4044,7 +4064,7 @@ void executeCheckForcedUpdate() {
   }
 
   int rssi = WiFi.RSSI();
-  if (rssi < -76) {
+  if (rssi < -80) {
     Serial.printf("FORCED_UPDATE: WiFi too weak (%d dBm)\n", rssi);
     return;
   }
@@ -4269,7 +4289,7 @@ void executeGetPendingConfig() {
   if (!isRegistered || authToken.length() == 0) return;
   if (WiFi.status() != WL_CONNECTED) return;
   if (currentMode != MODE_CLIENT) return;
-  if (WiFi.RSSI() < -76) return;
+  if (WiFi.RSSI() < -80) return;
 
   // Lean raw-TLS path (doCloudPOST) instead of HTTPClient over WiFiClientSecure: the combined
   // http.begin(client,url) pattern uses far more internal RAM (CLAUDE.md) and getString() can hang,

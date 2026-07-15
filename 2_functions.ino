@@ -2454,8 +2454,9 @@ void uploadBufferedRecords() {
   esp_task_wdt_reset();
 }
 bool executeUploadPayload(const char *payload) {
+  lastHttpResponseCode = 0;  // per-attempt reset — a transport failure must not leave the previous attempt's code standing
   if (WiFi.status() != WL_CONNECTED) return false;
-  if (WiFi.RSSI() < -76) return false;
+  if (WiFi.RSSI() < -80) return false;
   if (!isRegistered || authToken.isEmpty()) {
     Serial.println("executeUploadPayload: ABORT - no token (file stays in buffer)");
     return false;
@@ -2465,9 +2466,18 @@ bool executeUploadPayload(const char *payload) {
   // setTimeout omitted: Stream::setTimeout is ms (not seconds as some docs claim) and
   // the read loops below use available()+read() polling with explicit millis() deadlines,
   // so the Stream-level timeout doesn't gate anything here.
-  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT / 1000);  // this API takes seconds
 
   uint32_t start = millis();
+  esp_task_wdt_reset();
+
+  // Pre-resolve DNS (worst ~15 s on dead cellular) so it can't stack into the same unfed-WDT
+  // window as the up-to-14 s connect below; the connect's own lookup then hits the lwIP cache.
+  IPAddress hostIP;
+  if (!WiFi.hostByName(host, hostIP)) {
+    Serial.println("Upload: DNS fail");
+    return false;
+  }
   esp_task_wdt_reset();
 
   // Hard-bounded TLS connect (silent on success; logs only on failure)
@@ -2525,9 +2535,10 @@ bool executeUploadPayload(const char *payload) {
 
   // ===== Read status line + drain headers (no header parsing/no truncation spam) =====
   int httpCode = 0;
+  bool ackConfirmed = false;
   uint32_t readStart = millis();
 
-  // 1) Read ONLY the first line (status line). Hard deadline.
+  // 1) Read ONLY the first line (status line). READ_TIMEOUT is idle — each byte restarts it.
   char statusBuf[64];
   size_t statusLen = 0;
   bool gotStatusLine = false;
@@ -2537,6 +2548,7 @@ bool executeUploadPayload(const char *payload) {
 
     while (client.available()) {
       char c = (char)client.read();
+      readStart = millis();
 
       // collect status line until '\n'
       if (statusLen < sizeof(statusBuf) - 1) {
@@ -2572,6 +2584,7 @@ drain_headers:
 
       while (client.available()) {
         char c = (char)client.read();
+        drainStart = millis();
 
         if (state == 0 && c == '\r') state = 1;
         else if (state == 1 && c == '\n') state = 2;
@@ -2586,7 +2599,25 @@ drain_headers:
   }
 
 done_headers:
-  // We ignore body completely.
+  // Read the small ack body: the edge function returns {"success":true,...} on a real ingest.
+  // A captive portal answering 200 with a login page has no such marker, so the ring slot is
+  // kept and retried instead of being dropped on a lie. Retries are duplicate-safe (the server
+  // treats a (device_uid,timestamp) collision as an idempotent 200).
+  {
+    char bodyBuf[257];
+    size_t bodyLen = 0;
+    uint32_t bodyStart = millis();
+    while (client.connected() && bodyLen < sizeof(bodyBuf) - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
+      esp_task_wdt_reset();
+      if (client.available()) bodyStart = millis();
+      while (client.available() && bodyLen < sizeof(bodyBuf) - 1) bodyBuf[bodyLen++] = (char)client.read();
+      bodyBuf[bodyLen] = '\0';
+      // strstr on the raw bytes tolerates HTTP/1.1 chunked framing around the JSON
+      if (strstr(bodyBuf, "\"success\":true")) { ackConfirmed = true; break; }
+      if (millis() - start > GLOBAL_TIMEOUT) break;
+      delay(1);
+    }
+  }
   client.stop();
 
   esp_task_wdt_reset();
@@ -2606,7 +2637,7 @@ done_headers:
   // (bad data, no point retrying). On network/server error → leave ring as-is
   // and the next uploadBufferedRecords() tick will re-queue the same slot.
   if (lastUploadWasBuffered && sensorRingInFlightIndex >= 0) {
-    if (httpCode == 200) {
+    if (httpCode == 200 && ackConfirmed) {
       popTailSnapshot();
       if (ringIsEmpty()) {
         // Only announce "all uploaded" once per drain-to-empty transition.
@@ -2635,10 +2666,15 @@ done_headers:
       sensorRingInFlightIndex = -1;
 
     } else {
-      // Network/server error — keep slot for retry on next tick.
-      Serial.printf("⚠ HTTP %d: keeping ring slot for retry\n", httpCode);
-      snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Cloud sync failed (HTTP %d)", httpCode);
-      queueConsoleMessage(messageBuffer);
+      // Network/server error — or a 200 whose body lacked the edge-function ack
+      // (captive portal / interception). Keep slot for retry on next tick.
+      Serial.printf("⚠ HTTP %d%s: keeping ring slot for retry\n", httpCode, (httpCode == 200) ? " (no ack in body)" : "");
+      if (httpCode == 200) {
+        queueConsoleMessage("Cloud sync failed (server reply was not the cloud's ack - captive portal?)");
+      } else {
+        snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Cloud sync failed (HTTP %d)", httpCode);
+        queueConsoleMessage(messageBuffer);
+      }
       sensorRingInFlightIndex = -1;  // allow re-queue next tick
     }
     lastUploadWasBuffered = false;
@@ -2649,7 +2685,7 @@ done_headers:
     lastUploadWasBuffered = false;
   }
 
-  return (httpCode == 200);
+  return (httpCode == 200 && ackConfirmed);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3354,7 +3390,7 @@ bool buildConfigPayload() {
 }
 bool executeUploadConfig(const char *payload) {
   if (WiFi.status() != WL_CONNECTED) return false;
-  if (WiFi.RSSI() < -76) return false;
+  if (WiFi.RSSI() < -80) return false;
   if (!isRegistered || authToken.isEmpty()) return false;
 
   WiFiClientSecure client;
@@ -3362,9 +3398,16 @@ bool executeUploadConfig(const char *payload) {
   // setTimeout omitted: Stream::setTimeout is ms (not seconds as some docs claim) and
   // the read loops below use available()+read() polling with explicit millis() deadlines,
   // so the Stream-level timeout doesn't gate anything here.
-  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT / 1000);  // this API takes seconds
 
   uint32_t start = millis();
+  esp_task_wdt_reset();
+
+  IPAddress hostIP;  // pre-resolve: keep DNS out of the connect's unfed-WDT window (see executeUploadPayload)
+  if (!WiFi.hostByName(host, hostIP)) {
+    Serial.println("Config: DNS fail");
+    return false;
+  }
   esp_task_wdt_reset();
 
   // Serial.println("Config: Connecting...");
@@ -3409,7 +3452,7 @@ bool executeUploadConfig(const char *payload) {
   int httpCode = 0;
   uint32_t readStart = millis();
 
-  // 1) Read ONLY the first line (status line). Hard deadline.
+  // 1) Read ONLY the first line (status line). READ_TIMEOUT is idle — each byte restarts it.
   char statusBuf[64];
   size_t statusLen = 0;
 
@@ -3418,6 +3461,7 @@ bool executeUploadConfig(const char *payload) {
 
     while (client.available()) {
       char c = (char)client.read();
+      readStart = millis();
 
       if (statusLen < sizeof(statusBuf) - 1) {
         statusBuf[statusLen++] = c;
@@ -3449,6 +3493,7 @@ drain_headers_cfg:
 
       while (client.available()) {
         char c = (char)client.read();
+        drainStart = millis();
 
         if (state == 0 && c == '\r') state = 1;
         else if (state == 1 && c == '\n') state = 2;
@@ -3506,14 +3551,21 @@ static char *syncBodyGet() {
 // differ. Uploads the boat-performance aggregates to the update-boat-performance edge function.
 bool executeUploadBoatPerf(const char *payload) {
   if (WiFi.status() != WL_CONNECTED) return false;
-  if (WiFi.RSSI() < -76) return false;
+  if (WiFi.RSSI() < -80) return false;
   if (!isRegistered || authToken.isEmpty()) return false;
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT / 1000);  // this API takes seconds
 
   uint32_t start = millis();
+  esp_task_wdt_reset();
+
+  IPAddress hostIP;  // pre-resolve: keep DNS out of the connect's unfed-WDT window (see executeUploadPayload)
+  if (!WiFi.hostByName(host, hostIP)) {
+    Serial.println("BoatPerf: DNS fail");
+    return false;
+  }
   esp_task_wdt_reset();
 
   if (!client.connect(host, port, CONNECT_TIMEOUT)) {
@@ -3552,6 +3604,7 @@ bool executeUploadBoatPerf(const char *payload) {
     esp_task_wdt_reset();
     while (client.available()) {
       char c = (char)client.read();
+      readStart = millis();
       if (statusLen < sizeof(statusBuf) - 1) statusBuf[statusLen++] = c;
       if (c == '\n') {
         statusBuf[statusLen] = '\0';
@@ -3573,6 +3626,7 @@ drain_headers_bp:
       esp_task_wdt_reset();
       while (client.available()) {
         char c = (char)client.read();
+        drainStart = millis();
         if (state == 0 && c == '\r') state = 1;
         else if (state == 1 && c == '\n') state = 2;
         else if (state == 2 && c == '\r') state = 3;
@@ -3591,6 +3645,8 @@ done_headers_bp:
     size_t bl = 0;
     uint32_t bodyStart = millis();
     while (client.connected() && bl < SYNC_BODY_CAP - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
+      esp_task_wdt_reset();
+      if (client.available()) bodyStart = millis();
       while (client.available() && bl < SYNC_BODY_CAP - 1) bpBody[bl++] = (char)client.read();
       if (millis() - start > GLOBAL_TIMEOUT) break;
       delay(1);
@@ -3633,14 +3689,21 @@ done_headers_bp:
 // persist it. Same WiFiClientSecure raw-write + manual-read pattern (low internal RAM).
 bool executeUploadAltHealth(const char *payload) {
   if (WiFi.status() != WL_CONNECTED) return false;
-  if (WiFi.RSSI() < -76) return false;
+  if (WiFi.RSSI() < -80) return false;
   if (!isRegistered || authToken.isEmpty()) return false;
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT / 1000);  // this API takes seconds
 
   uint32_t start = millis();
+  esp_task_wdt_reset();
+
+  IPAddress hostIP;  // pre-resolve: keep DNS out of the connect's unfed-WDT window (see executeUploadPayload)
+  if (!WiFi.hostByName(host, hostIP)) {
+    Serial.println("AltHealth: DNS fail");
+    return false;
+  }
   esp_task_wdt_reset();
 
   if (!client.connect(host, port, CONNECT_TIMEOUT)) {
@@ -3679,6 +3742,7 @@ bool executeUploadAltHealth(const char *payload) {
     esp_task_wdt_reset();
     while (client.available()) {
       char c = (char)client.read();
+      readStart = millis();
       if (statusLen < sizeof(statusBuf) - 1) statusBuf[statusLen++] = c;
       if (c == '\n') {
         statusBuf[statusLen] = '\0';
@@ -3700,6 +3764,7 @@ drain_headers_ah:
       esp_task_wdt_reset();
       while (client.available()) {
         char c = (char)client.read();
+        drainStart = millis();
         if (state == 0 && c == '\r') state = 1;
         else if (state == 1 && c == '\n') state = 2;
         else if (state == 2 && c == '\r') state = 3;
@@ -3718,6 +3783,8 @@ done_headers_ah:
     size_t bl = 0;
     uint32_t bodyStart = millis();
     while (client.connected() && bl < SYNC_BODY_CAP - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
+      esp_task_wdt_reset();
+      if (client.available()) bodyStart = millis();
       while (client.available() && bl < SYNC_BODY_CAP - 1) ahBody[bl++] = (char)client.read();
       if (millis() - start > GLOBAL_TIMEOUT) break;
       delay(1);
@@ -3805,7 +3872,7 @@ void syncTimeFromNTP() {
 
 bool canUploadNow() {
   if (WiFi.status() != WL_CONNECTED) return false;
-  if (WiFi.RSSI() < -76) return false;
+  if (WiFi.RSSI() < -80) return false;
   return true;
 }
 

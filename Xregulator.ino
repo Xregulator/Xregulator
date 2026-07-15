@@ -737,18 +737,24 @@ String esp32_ap_ssid = "ALTERNATOR_WIFI";  // Default SSID
 // WiFi connection timeout when trying to avoid Access Point Mode (and connect to ship's wifi on reboot)
 const unsigned long WIFI_TIMEOUT = 20000;  // 20 seconds
 String esp32_ap_password = "alternator123";  // Default ESP32 AP password
-//WiFi Reconnection Management with Signal Strength Awareness
+// Non-blocking reconnect engine state (worked by checkWiFiConnection() every loop pass).
+// No backoff, no give-up — presence scans at a fixed cheap cadence until the network returns
+// (a phone hotspot can appear at any moment; a router user is connected ~always and never pays).
+enum : uint8_t { WIFI_RECON_IDLE = 0,
+                 WIFI_RECON_SEEKING = 1,
+                 WIFI_RECON_JOINING = 2 };
 struct WiFiReconnection {
-  unsigned long lastAttempt = 0;
-  int attemptCount = 0;
-  unsigned long currentInterval = 2000;      // Start at 2 seconds
-  const unsigned long minInterval = 2000;    // 2 seconds minimum
-  const unsigned long maxInterval = 300000;  // 5 minutes maximum
-  const int maxAttempts = 20;                // Give up after 20 attempts
-  bool giveUpMode = false;
-  int lastSignalStrength = -999;       // Track signal strength when connected
-  const int minSignalThreshold = -80;  // Don't retry aggressively if signal was weaker than -80 dBm
+  uint8_t state = WIFI_RECON_IDLE;
+  unsigned long lastScanKickoff = 0;
+  unsigned long joinStart = 0;
+  int32_t channel = 0;       // channel of last sighting/connection; 0 = unknown → full sweep
+  uint8_t scansSinceSweep = 0;
+  int attemptCount = 0;      // failed joins since last connect (diagnostics)
+  int lastSignalStrength = -999;
 } wifiRecon;
+const unsigned long WIFI_SCAN_CADENCE_MS = 2000;   // ~5-6 mA average while disconnected, worst-case ~2 s detect
+const unsigned long WIFI_JOIN_TIMEOUT_MS = 15000;  // assoc+DHCP wall clock before returning to seek
+const uint8_t WIFI_FULL_SWEEP_EVERY = 5;           // every Nth scan sweeps all channels (hotspot channel varies per session)
 
 //Security
 char requiredPassword[32] = "admin";  // Max password length = 31 chars     Password for access to change settings from browser
@@ -865,17 +871,17 @@ const unsigned long TEMP_TASK_TIMEOUT = 20000;  // 20 seconds
 //Cloud Upload Stuff
 static const char *UPLOAD_HOST = "qnbekuaoweuteylitzvo.supabase.co";
 static const uint16_t UPLOAD_PORT = 443;
-static const uint32_t UPLOAD_CONNECT_TIMEOUT_MS = 5000;
-static const uint32_t UPLOAD_HANDSHAKE_TIMEOUT_MS = 5000;
-static const uint32_t UPLOAD_READ_TIMEOUT_MS = 8000;
-static const uint32_t UPLOAD_GLOBAL_TIMEOUT_MS = 14000;
 //snapshot
 const char *host = "qnbekuaoweuteylitzvo.supabase.co";
 const int port = 443;
-const uint32_t CONNECT_TIMEOUT = 5000;    // ms
-const uint32_t HANDSHAKE_TIMEOUT = 5000;  // ms
-const uint32_t READ_TIMEOUT = 8000;       // ms
-const uint32_t GLOBAL_TIMEOUT = 14000;    // ms (must stay < WDT)
+// Slow-cellular profile (phone hotspot). CONNECT+HANDSHAKE share ONE blocking client.connect()
+// with no WDT feed inside — their sum must stay < the 16 s panic WDT (DNS is pre-resolved with
+// a feed at each call site). READ_TIMEOUT is IDLE (any received byte restarts it); GLOBAL_TIMEOUT
+// is the wall-clock cap per attempt and may exceed the WDT because the read loops feed it.
+const uint32_t CONNECT_TIMEOUT = 7000;    // ms
+const uint32_t HANDSHAKE_TIMEOUT = 7000;  // ms (setHandshakeTimeout() takes SECONDS — divide at call site)
+const uint32_t READ_TIMEOUT = 10000;      // ms, idle
+const uint32_t GLOBAL_TIMEOUT = 45000;    // ms
 
 
 //Console
@@ -1808,7 +1814,7 @@ struct SensorSnapshot {
   ImuSnapshot imu;              // frozen IMU subset (resists imuWindow reset between roll and upload)
   uint8_t chargeStage;          // display code (0-7) captured at window roll — uploads are deferred so this can't read live state later
 };
-const uint16_t SENSOR_RING_SIZE = 1000;  // 1000 × ~820 B ≈ 820 KB PSRAM; ~83 hr at 5 min/sample
+const uint16_t SENSOR_RING_SIZE = 1000;  // 1000 × ~820 B ≈ 820 KB PSRAM; ~6.9 days at SENSOR_UPLOAD_INTERVAL (10 min/sample)
 SensorSnapshot *sensorRing = nullptr;    // ps_malloc'd in setup()
 volatile uint16_t sensorRingHead = 0;    // next write slot
 volatile uint16_t sensorRingTail = 0;    // oldest unread slot
@@ -5341,21 +5347,28 @@ void loop() {
 
   // === OTA UPDATE CHECK - USER INITIATED UPDATE FROM NVS ===
   static bool manualUpdateCheckDone = false;
+  static bool pendingUpdateWaiting = false;
   static char pendingVersion[64] = { 0 };
 
+  // Read the staged-update flag ONCE (NVS open per loop pass would be too costly), but only
+  // consume it once WiFi is up: an intermittent hotspot absent at this boot must not eat the
+  // update — the flag stays armed and the install fires when the network next appears.
   if (!manualUpdateCheckDone && millis() > 5000 && currentMode == MODE_CLIENT) {
-    if (checkForPendingUpdateNonBlocking(pendingVersion)) {
-      Serial.printf("UPDATE: Found pending update for %s\n", pendingVersion);
-
-      // Don't wait for core0 - we're shutting it down anyway!
-      clearPendingUpdateNVS();  // Clear NVS flags to prevent boot loop
-
-      // Force core0 to not be busy (we're taking over)
-      core0Busy = true;
-
-      performOTAUpdateToVersion(pendingVersion);  // This calls prepareForOTA() which kills tasks
-    }
+    pendingUpdateWaiting = checkForPendingUpdateNonBlocking(pendingVersion);
+    if (pendingUpdateWaiting) Serial.printf("UPDATE: Found pending update for %s (waiting for WiFi if not connected)\n", pendingVersion);
     manualUpdateCheckDone = true;
+  }
+
+  if (pendingUpdateWaiting && WiFi.status() == WL_CONNECTED) {
+    pendingUpdateWaiting = false;
+
+    // Clear the flag pre-attempt so a mid-install crash can't boot-loop
+    clearPendingUpdateNVS();
+
+    // Force core0 to not be busy (we're taking over)
+    core0Busy = true;
+
+    performOTAUpdateToVersion(pendingVersion);  // This calls prepareForOTA() which kills tasks
   }
   // === END OTA MANUAL UPDATE CHECK ===
 
@@ -5373,7 +5386,7 @@ void loop() {
         bool bothSent = true;
 
         debugStackBeforeHTTPS("updateFirmwareVersionInSupabase");
-        if (WiFi.RSSI() >= -76) {
+        if (WiFi.RSSI() >= -80) {
           HttpsRequest req = { .type = HTTPS_UPDATE_FW_VERSION };
           if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
             Serial.println("OTA: HTTPS queue full — will retry FW version push next loop");
@@ -5382,7 +5395,7 @@ void loop() {
         }
 
         debugStackBeforeHTTPS("checkForForcedUpdate");
-        if (WiFi.RSSI() >= -76) {
+        if (WiFi.RSSI() >= -80) {
           HttpsRequest req = { .type = HTTPS_CHECK_FORCED_UPDATE };
           if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
             Serial.println("OTA: HTTPS queue full — will retry forced-update check next loop");
@@ -5408,7 +5421,7 @@ void loop() {
   // meanwhile, so a device rescaled offline can never have its old-scaled front shipped back to it.
   static unsigned long lastRpmAxisWipeTry = 0;
   if (rpmAxisWipePending && currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED
-      && isRegistered && !core0Busy && WiFi.RSSI() >= -76
+      && isRegistered && !core0Busy && WiFi.RSSI() >= -80
       && (lastRpmAxisWipeTry == 0 || millis() - lastRpmAxisWipeTry > 60000)) {
     lastRpmAxisWipeTry = millis();
     HttpsRequest req = { .type = HTTPS_RESET_RPM_AXIS };
@@ -5420,7 +5433,7 @@ void loop() {
   // compete with the depth-2 httpsQueue; retries next loop if the queue is momentarily full.
   static bool pendingConfigCheckDone = false;
   if (!pendingConfigCheckDone && otaCheckDone && millis() > 6000) {
-    if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && !core0Busy && WiFi.RSSI() >= -76) {
+    if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && !core0Busy && WiFi.RSSI() >= -80) {
       HttpsRequest req = { .type = HTTPS_GET_PENDING_CONFIG };
       if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) pendingConfigCheckDone = true;
     } else if (currentMode != MODE_CLIENT) {
@@ -5892,7 +5905,7 @@ void loop() {
         if (hardwarePresent == 1 && fieldOffSettled(10000) && millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
           lastConfigSnapshotTime = millis();
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered) {
-            if (WiFi.RSSI() >= -76) {
+            if (WiFi.RSSI() >= -80) {
               bool _configBuilt;
               TIMED_CALL(ft_buildConfigPayload, _configBuilt = buildConfigPayload());  // time the payload build separately from the queue send
               if (_configBuilt) {
@@ -5918,7 +5931,7 @@ void loop() {
         // overwrite the local wipe with old-scaled points. Stay silent until the cloud wipe lands.
         if (hardwarePresent == 1 && !rpmAxisWipePending && fieldOffSettled(10000) && millis() - lastBoatPerfUploadTime >= BOATPERF_UPLOAD_INTERVAL) {
           lastBoatPerfUploadTime = millis();
-          if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -76) {
+          if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -80) {
             HttpsRequest req = {};
             req.type = HTTPS_UPLOAD_BOATPERF;
             req.payloadCap = PERF_UPLOAD_BUF_SIZE;
@@ -5940,7 +5953,7 @@ void loop() {
         // is dirty-gated, so this is a no-op when nothing new has been banked.
         if (hardwarePresent == 1 && !rpmAxisWipePending && fieldOffSettled(10000) && millis() - lastAltHealthUploadTime >= ALTHEALTH_UPLOAD_INTERVAL) {
           lastAltHealthUploadTime = millis();
-          if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -76) {
+          if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -80) {
             HttpsRequest req = {};
             req.type = HTTPS_UPLOAD_ALTHEALTH;
             req.payloadCap = ALT_UPLOAD_BUF_SIZE;

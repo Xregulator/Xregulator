@@ -188,6 +188,11 @@ let demoInterval = null;
 //prevent EventSource Infinite Reconnection
 let sseReconnectAttempts = 0;
 const MAX_SSE_RECONNECTS = 10;
+// Network-level failures (dead IP after a hotspot bounce) never reach CLOSED —
+// EventSource sits in CONNECTING and natively retries forever, firing one error
+// per failed attempt. Count those separately so Capacitor can force a re-scan.
+let sseConnectingErrors = 0;
+const MAX_SSE_CONNECTING_ERRORS = 5;
 let sseReconnectTimer = null;
 let isAppInBackground = false;
 let isOfflineMode = false; // True after user clicks "Continue Offline"; cleared on next successful SSE open
@@ -2571,11 +2576,11 @@ const TS_FIELDS = [
 
 // Detect if running in Capacitor (iOS/Android) vs web browser
 const IS_CAPACITOR = !!window.Capacitor;
-const API_BASE_URL = IS_CAPACITOR ? 'http://alternator.local' : '';
-// const API_BASE_URL = IS_CAPACITOR ? 'http://10.0.0.207' : ''; // worked first
-// Alternative: Use mDNS hostname or fallback to IP
-// const API_BASE_URL = IS_CAPACITOR ? 'http://192.168.4.1' : ''; // For AP mode
-// const API_BASE_URL = IS_CAPACITOR ? 'http://alternator.local' : ''; // For Client mode with mDNS
+// Browser: '' = same-origin (this page was served by the regulator itself, nothing to find).
+// Capacitor: seeded with the last base that worked; discoverAndConnect() re-resolves it at
+// launch and after connection loss — mDNS is flaky across an iPhone hotspot, and the
+// regulator's IP changes when the hotspot bounces.
+let API_BASE_URL = IS_CAPACITOR ? (localStorage.getItem('xregDeviceBase') || 'http://alternator.local') : '';
 
 // Supabase project — used by the silent log-relay (pollLogRequest) to fulfil an
 // admin "pull" window. Public anon key (same one already shipped in firmware + Vercel).
@@ -2673,6 +2678,158 @@ function buildURL(path) {
         path = '/' + path;
     }
     return `${API_BASE_URL}${path}`;
+}
+
+// =====================================================================
+// Device discovery — Capacitor only (mDNS name → subnet probe)
+// =====================================================================
+// The regulator answers GET /identify passwordless with
+// {"device":"xregulator",...} — built for this probe. Browsers never run
+// discovery (same-origin page) and can't subnet-scan anyway; the Connection
+// Lost dialog names that limitation instead of hiding it.
+
+let discoveryInProgress = false;
+
+function setSplashText(msg) {
+    const wfr = document.getElementById('waiting-for-regulator');
+    if (!wfr || wfr._wfrHidden) return;
+    const t = wfr.querySelector('.bl-text');
+    if (t) t.textContent = msg;
+}
+
+async function probeIdentify(base, timeoutMs) {
+    // Plain setTimeout: a /24 sweep fires hundreds of these, so they must not
+    // pile up in the activeTimers cleanup list.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        const resp = await fetch(base + '/identify', { signal: ctrl.signal, cache: 'no-store' });
+        if (!resp.ok) return null;
+        const info = await resp.json();
+        return (info && info.device === 'xregulator') ? base : null;
+    } catch (e) {
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Probe a list in parallel; resolves with the first base that identifies, or null.
+function probeFirstHit(bases, timeoutMs) {
+    return new Promise((resolve) => {
+        let pending = bases.length;
+        let won = false;
+        if (!pending) { resolve(null); return; }
+        bases.forEach(base => {
+            probeIdentify(base, timeoutMs).then(hit => {
+                if (hit && !won) { won = true; resolve(hit); }
+                if (--pending === 0 && !won) resolve(null);
+            });
+        });
+    });
+}
+
+async function getPhoneIPv4() {
+    const plugin = IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorWifi;
+    if (!plugin || !plugin.getIpAddress) return null;
+    try {
+        const r = await plugin.getIpAddress();
+        const ip = r && r.ipAddress;
+        // The plugin reads en0 only and returns the FIRST address family it finds,
+        // which can be IPv6 — only a dotted-quad can seed a /24 sweep.
+        return (typeof ip === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) ? ip : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+async function discoverDeviceBase() {
+    // Round 1: mDNS name raced against the last address that worked.
+    const first = ['http://alternator.local'];
+    const last = localStorage.getItem('xregDeviceBase');
+    if (last && first.indexOf(last) === -1) first.push(last);
+    let hit = await probeFirstHit(first, 2500);
+    if (hit) return hit;
+
+    setSplashText('Searching for regulator');
+
+    // Round 2: iPhone-hotspot subnet — DHCP hands clients 172.20.10.2–.14.
+    // Deliberately NOT gated on the phone's own IP: the wifi plugin reads en0
+    // only, which carries no IPv4 while this phone is HOSTING the hotspot
+    // (the hotspot side lives on ap1/bridge interfaces).
+    const hotspot = [];
+    for (let h = 2; h <= 14; h++) hotspot.push('http://172.20.10.' + h);
+    hit = await probeFirstHit(hotspot, 1500);
+    if (hit) return hit;
+
+    // Round 3: router LAN — needs our own IPv4 to pick the /24. ~11 s worst case.
+    const ownIP = await getPhoneIPv4();
+    console.log('[DISCOVERY] phone IPv4: ' + (ownIP || 'unavailable'));
+    if (!ownIP || ownIP.indexOf('172.20.10.') === 0) return null;
+    const prefix = ownIP.slice(0, ownIP.lastIndexOf('.') + 1);
+    for (let start = 1; start <= 254; start += 25) {
+        const batch = [];
+        for (let h = start; h < start + 25 && h <= 254; h++) {
+            const cand = prefix + h;
+            if (cand !== ownIP) batch.push('http://' + cand);
+        }
+        hit = await probeFirstHit(batch, 1000);
+        if (hit) return hit;
+    }
+    return null;
+}
+
+// Resolve where the regulator is, then open SSE. Browsers connect directly
+// (same-origin). Called at launch and from manualReconnect().
+async function discoverAndConnect() {
+    if (!IS_CAPACITOR || DEMO_MODE) { initializeEventSource(); return; }
+    if (discoveryInProgress) return;
+    discoveryInProgress = true;
+    try {
+        const base = await discoverDeviceBase();
+        if (base) {
+            console.log('[DISCOVERY] regulator at ' + base);
+            API_BASE_URL = base;
+            localStorage.setItem('xregDeviceBase', base);
+            sseReconnectAttempts = 0;
+            setSplashText('Connecting to regulator');
+        } else {
+            console.log('[DISCOVERY] no regulator found');
+        }
+    } finally {
+        discoveryInProgress = false;
+    }
+    // Connect even after a failed scan: SSE retries keep running and the
+    // demo-mode / Connection-Lost paths take over from there.
+    initializeEventSource();
+}
+
+// SSE exhausted its retries: expected after a hotspot bounce (new IP), so
+// re-scan once before surrendering to the Connection Lost dialog. The
+// _rediscoveryTried latch (cleared on SSE open / foreground / manual retry)
+// bounds this to one scan per loss so a half-dead link can't loop forever.
+async function rediscoverAfterLoss() {
+    if (discoveryInProgress || DEMO_MODE) return;
+    discoveryInProgress = true;
+    let base = null;
+    try {
+        base = await discoverDeviceBase();
+    } finally {
+        discoveryInProgress = false;
+    }
+    if (DEMO_MODE) return;
+    if (base) {
+        console.log('[DISCOVERY] regulator moved to ' + base);
+        API_BASE_URL = base;
+        localStorage.setItem('xregDeviceBase', base);
+        sseReconnectAttempts = 0;
+        initializeEventSource();
+    } else {
+        console.log('[DISCOVERY] re-scan found nothing');
+        showRecoveryOptions();
+        const reconnectBtn = document.getElementById('reconnect-button');
+        if (reconnectBtn) reconnectBtn.style.display = 'none';
+    }
 }
 
 // =====================================================================
@@ -2800,7 +2957,8 @@ function setupDemoPasswordHandler() {
 function manualReconnect() {
     sseReconnectAttempts = 0;
     isAppInBackground = false;
-    initializeEventSource();
+    window._rediscoveryTried = false;
+    discoverAndConnect();
     document.getElementById('reconnect-button').style.display = 'none';
     closeRecovery(); // Dismiss the Connection Lost dialog if user used the in-page button instead
 }
@@ -2999,9 +3157,10 @@ if (IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
             isAppInBackground = false;
 
             sseReconnectAttempts = 0;
+            window._rediscoveryTried = false;  // each foreground gets a fresh network re-scan chance
 
             // Only reconnect if connection is actually dead
-            if (!source || source.readyState === EventSource.CLOSED) {
+            if ((!source || source.readyState === EventSource.CLOSED) && !discoveryInProgress) {
                 diagLog("Connection was closed, reconnecting...");
                 initializeEventSource();
             } else {
@@ -3035,6 +3194,15 @@ function initializeEventSource() {
         return;
     }
     if (sseReconnectAttempts >= MAX_SSE_RECONNECTS) {
+        // Capacitor: a hotspot bounce hands the regulator a new IP, so retries
+        // against the old one exhausting is the EXPECTED signal — re-scan the
+        // network once (rediscoverAfterLoss shows the dialog itself on failure).
+        if (IS_CAPACITOR && !DEMO_MODE && !window._rediscoveryTried) {
+            window._rediscoveryTried = true;
+            console.log('[DISCOVERY] SSE retries exhausted — re-scanning for the regulator');
+            rediscoverAfterLoss();
+            return;
+        }
         diagLog("Max SSE reconnection attempts reached (10 attempts over 20 seconds). Manual reconnect required.");
 
         // Show the Connection Lost dialog (gives user the choice of full-reload retry
@@ -3060,10 +3228,13 @@ function initializeEventSource() {
     }
 
     try {
+        sseConnectingErrors = 0;  // stale count from a previous source must not insta-trip the new one
         source = new EventSource(buildURL('/events'));
 
         source.addEventListener('open', function () {
             sseReconnectAttempts = 0;
+            sseConnectingErrors = 0;
+            window._rediscoveryTried = false;  // re-arm the one-scan-per-loss latch
             updateInlineStatus(true);  // Flip indicator green on SSE connect
             closeRecovery();           // Dismiss Connection Lost dialog if it's open
             if (isOfflineMode) exitOfflineMode(); // Re-enable inputs if user had gone offline
@@ -3154,6 +3325,29 @@ function initializeEventSource() {
             // ALWAYS visible — not suppressed by diagnostic mode
             console.error('[SSE ERROR]', reason, 'readyState=', state, 'event=', e);
             updateInlineStatus(false);  // Flip indicator red on any SSE error
+
+            if (state === EventSource.CONNECTING) {
+                // Native auto-retry heals a device that comes back at the SAME
+                // address; after a hotspot bounce it retries a dead IP forever.
+                // Enough consecutive failures with no 'open' between them → stop
+                // and re-scan (Capacitor only — browsers can't scan, and native
+                // retry is their best remaining strategy).
+                sseConnectingErrors++;
+                if (IS_CAPACITOR && !DEMO_MODE && sseConnectingErrors >= MAX_SSE_CONNECTING_ERRORS && !discoveryInProgress) {
+                    this.close();
+                    sseConnectingErrors = 0;
+                    if (!window._rediscoveryTried) {
+                        window._rediscoveryTried = true;
+                        console.log('[DISCOVERY] SSE stuck reconnecting — re-scanning for the regulator');
+                        rediscoverAfterLoss();
+                    } else {
+                        showRecoveryOptions();
+                        const reconnectBtn = document.getElementById('reconnect-button');
+                        if (reconnectBtn) reconnectBtn.style.display = 'none';
+                    }
+                    return;
+                }
+            }
 
             if (state === EventSource.CLOSED) {
                 sseReconnectAttempts++;
@@ -3266,8 +3460,14 @@ function checkForDemoMode() {
     // CONNECTING is intentionally NOT a trigger — slow-WiFi users can sit in
     // CONNECTING for many seconds, and tripping demo on that state pinned a
     // permanent demo banner over real data.
-    setTimeout(() => {
+    const check = () => {
         if (source && source.readyState !== EventSource.CLOSED) return;
+        if (discoveryInProgress) {
+            // A /24 sweep can outlast the 10 s grace — demo mode must not win
+            // the race against a discovery that's about to find the device.
+            setTrackedTimeout(check, 3000);
+            return;
+        }
         // No SSE. no-cors probe of the AP gateway distinguishes "on the setup
         // hotspot mid-provisioning" (show the browser hint) from "no device at
         // all" (App Review — MUST still get demo mode).
@@ -3277,7 +3477,8 @@ function checkForDemoMode() {
                 console.log('[DEMO MODE] No ESP32 detected after 10 seconds - enabling demo mode');
                 enableDemoMode();
             });
-    }, 10000);
+    };
+    setTimeout(check, 10000);
 }
 
 function showHotspotSetupHint() {
@@ -11378,11 +11579,13 @@ window.addEventListener("load", function () {
         }
     });
 
-    // Initialize EventSource connection with mobile-safe reconnection
-    initializeEventSource();
-
-    if (IS_CAPACITOR) {     // Check if we need demo mode (App Store testing without ESP32)
-        checkForDemoMode();
+    // Capacitor resolves the regulator's address first (mDNS → subnet probe);
+    // browsers are same-origin with the regulator and connect directly.
+    if (IS_CAPACITOR) {
+        discoverAndConnect();
+        checkForDemoMode();   // App Store testing without ESP32
+    } else {
+        initializeEventSource();
     }
 
     // Stream listeners — extracted so initializeEventSource() can re-bind them on
@@ -14015,6 +14218,17 @@ function showRecoveryOptions() {
     // shim doesn't false-flag this pre-creation existence check.
     if (document.querySelector('#recoveryDialog')) return;
 
+    // App: Retry reloads → discovery re-scans the network, so a moved IP heals.
+    // Browser: it can't scan, and after a hotspot bounce the regulator usually
+    // has a NEW address — say so plainly instead of letting Retry spin forever.
+    let addressHint;
+    if (IS_CAPACITOR) {
+        const lastBase = localStorage.getItem('xregDeviceBase') || 'http://alternator.local';
+        addressHint = `Last found at <b>${lastBase}</b>. Retry re-scans the network in case the regulator came back at a different address.`;
+    } else {
+        addressHint = `This browser can't scan the network for the regulator. If it reconnected at a new address, <b>http://alternator.local</b> usually finds it; otherwise look up its IP in your router or phone-hotspot device list (hotspots assign 172.20.10.2&ndash;14).`;
+    }
+
     const recoveryDiv = document.createElement('div');
     recoveryDiv.id = 'recoveryDialog';
     recoveryDiv.innerHTML = `
@@ -14025,7 +14239,8 @@ function showRecoveryOptions() {
       <button onclick="closeRecovery()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">&#10005;</button>
     </div>
     <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5;">
-      <p style="margin:0 0 14px; color:#bbb;">Lost connection to the alternator regulator.</p>
+      <p style="margin:0 0 10px; color:#bbb;">Lost connection to the alternator regulator.</p>
+      <p style="margin:0 0 14px; color:#888; font-size:0.92em;">${addressHint}</p>
       <div style="display:flex; gap:10px;">
         <button onclick="retryConnection()" style="flex:1; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:5px; padding:9px 16px; cursor:pointer;">Retry Connection</button>
         <button onclick="enterOfflineMode()" style="flex:1; background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:5px; padding:9px 16px; cursor:pointer; font-size:13px;">Continue Offline</button>
