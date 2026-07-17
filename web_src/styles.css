@@ -29,6 +29,8 @@
    Every control/readout/plot that is meaningless without a battery-current sensor is tagged
    .req-batt-current and hidden here — one selector is the whole hide policy. */
 body.no-batt-current .req-batt-current { display: none !important; }
+/* Only the Alternator diag panel survives no-shunt, so drop its now-single-tab switcher. */
+body.no-batt-current #livedata-diag .diag-panel-tabs { display: none !important; }
 
 :root {
   --primary: #333333;
@@ -851,9 +853,11 @@ input[type="submit"]:hover {
 /* Commissioning modal run/start buttons — solid teal gradient + glow so the primary
    action reads as the obvious thing to click against the hardcoded dark panel. The
    tonal .btn-primary looks greyed-out here, worst in light mode where the panel stays
-   dark but the button keeps the dark-teal light-mode text. Scoped to the modal so the
-   global tonal button (and the light-area "Start commissioning…" button) is unchanged. */
-#commission-modal-panel .btn-primary {
+   dark but the button keeps the dark-teal light-mode text. Scoped to these two dark
+   modals (the wizard and its RPM-alignment entry step) so the global tonal button
+   (and the light-area "Start commissioning…" button) is unchanged. */
+#commission-modal-panel .btn-primary,
+#rpmalign-modal-overlay .btn-primary {
   background: linear-gradient(180deg, #14b8af 0%, #00908a 100%) !important;
   color: #fff !important;
   border-color: #16c2b8 !important;
@@ -864,7 +868,8 @@ input[type="submit"]:hover {
   white-space: normal;
   max-width: none;
 }
-#commission-modal-panel .btn-primary:hover {
+#commission-modal-panel .btn-primary:hover,
+#rpmalign-modal-overlay .btn-primary:hover {
   background: linear-gradient(180deg, #18c4ba 0%, #00a39c 100%) !important;
   box-shadow: 0 4px 16px rgba(0, 161, 154, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }

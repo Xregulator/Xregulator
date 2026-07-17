@@ -1359,8 +1359,14 @@ void UpdateAnchorageDetection(bool gpsValid) {
   if (depthAvg > DeepestAnchorage_Ft_AllTime) DeepestAnchorage_Ft_AllTime = depthAvg;
 }
 
+// Single source of truth for "engine is spinning" (tach gate). Feeds run-hour
+// accounting AND the sensor-window engine-on-weighted accumulators.
+bool engineSpinning() {
+  return RPM > 100 && RPM < 20000;
+}
+
 void UpdateEngineRuntime(unsigned long elapsedMillis) {
-  bool engineIsRunning = (RPM > 100 && RPM < 6000);
+  bool engineIsRunning = engineSpinning();
 
   if (engineIsRunning) {
     engineRunAccumulator += elapsedMillis;
@@ -2362,11 +2368,11 @@ int ovHistBin(float rawV) {
   float k = (float)BATTERY_VOLTAGE / 12.0f;
   float v = rawV - BulkVoltage;  // volts above Bulk (raw)
   if (v <= 0.0f) return -1;
-  float fineW = 0.2f * k, fineTop = 3.0f * k;
-  if (v < fineTop) return (int)(v / fineW);  // 0..14
+  float fineW = 0.2f * k, fineTop = 3.6f * k;  // 18 fine bins; top ≈18V at a 14.4 Bulk
+  if (v < fineTop) return (int)(v / fineW);  // 0..17
   float c = (v - fineTop) / (1.0f * k);
-  if (c < (float)OV_HIST_COARSE_BINS) return OV_HIST_FINE_BINS + (int)c;  // 15..26
-  return OV_HIST_BINS - 1;  // 27 overflow
+  if (c < (float)OV_HIST_COARSE_BINS) return OV_HIST_FINE_BINS + (int)c;  // 18..29
+  return OV_HIST_BINS - 1;  // 30 overflow
 }
 
 // Called once per control tick in every mode — field state does not gate it, because external

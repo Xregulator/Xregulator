@@ -1640,8 +1640,9 @@ void AdjustFieldLearnMode() {
   // and FastSetpointRiseHeadroomV vs ChargingVoltageTarget.
   static uint32_t postProtectRiseStartMs = 0;
 
-  // Field-decay-tau early release: once a clamp episode has held for fieldDecayTauMs, the field coil
-  // driving the excess has bled out (one L/R time constant; cold margin baked into the stored value),
+  // Field-drain early release: once a clamp episode has held for fieldDecayTauMs — the MEASURED
+  // cut→10%-of-output drain time (~2.3 L/R time constants; 30% cold margin baked into the stored
+  // value) — the field coil driving the excess has bled out,
   // so the hold latches below release early instead of waiting out their lagged filtered signals
   // (G2 immediately; iExcess once its excess EMA is back under the fire line — see the site gates).
   // OR'd with each latch's natural release — can only shorten a cut, never lengthen it. Reason-blind
@@ -1952,6 +1953,13 @@ void AdjustFieldLearnMode() {
     govMode = GOV_BYPASS_SLEW;
   }
 
+  // Field-decay ramp phase: duty slew OFF by spec — the TEST_ENTRY_RATE_A setpoint slew provides the
+  // smoothness, the PID must be free to move duty as it needs. The later hold/cut/ease phases get the
+  // same bypass from the sysIDRunning override path.
+  if (fieldCutCcActive) {
+    govMode = GOV_BYPASS_SLEW;
+  }
+
   // Manual CC square-wave test in Off mode: bypass duty slew (once the entry ramp has settled) so the edges
   // are truly instant, matching the abrupt setpoint. Default/Custom keep the normal DutyRampRate protection.
   if (TuningMode != 0 && tuningWaveform == 0 && !g_autoTestActive && !tuningSquareAbrupt &&
@@ -2140,9 +2148,10 @@ void AdjustFieldLearnMode() {
   // (mutually exclusive with SystemID via the start-handler mutex). OR it in so the snapshot,
   // override, and restore logic below cover it too.
   sysIDRunning = fieldCurve_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
-  // Field de-energize τ test (commissioning stage 8) — identical duty-override + bumpless-resume path,
-  // mutually exclusive with the others via the start-handler mutex. Inherits the effectiveMinDuty=0 floor
-  // bypass below, so its cut reaches true field-off.
+  // Field de-energize τ test (commissioning stage 8) — mutually exclusive with the others via the
+  // start-handler mutex. Its RAMP phase returns false and drives the real current PID through the
+  // fieldCutCcActive branch below; hold/cut/ease own duty here (cut level is MinDuty, the real
+  // OV-clamp floor, so the effectiveMinDuty=0 bypass below is moot but harmless).
   sysIDRunning = fieldCut_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
 
   bool sysIDJustStarted = !prevSysIDRunning && sysIDRunning;
@@ -2330,6 +2339,24 @@ void AdjustFieldLearnMode() {
         currentPID.Compute();
         // Field is down → hand back to normal control from a low-voltage state (CV ramps up from below).
         if (resTestReleasing && setpointLimited <= 2.0f) { resTestActive = false; resTestReleasing = false; }
+
+      } else if (fieldCutCcActive) {
+        // Field-decay ramp/settle (commissioning stage 8): drive the REAL current loop to
+        // fieldCutCmdA (= the commissioned SystemIDStabilizeAmps), manually slewed at the fixed
+        // conservative test rate — same shape as resTest. voltageControlActive=false suppresses the
+        // target-relative OV layers (G1/G2) so the level can hold; fast-OV/INA228/hard-OC stay live.
+        // fieldCut_tick watches for settle and flips to the duty-override path for hold/cut/ease.
+        setpointCommand = fieldCutCmdA;
+        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                       TEST_ENTRY_RATE_A, SetpointFallRate, actualDtSec);
+        voltageControlActive = false;
+        ctrlLimiter = 0;
+        targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
+                                                                                       : g_pidI_filtered;
+        pidInput = (double)targetCurrent;
+        pidSetpoint = (double)setpointLimited;
+        pidError = setpointLimited - targetCurrent;
+        currentPID.Compute();
 
       } else if (cvPlantFitActive) {
         // Firmware-side CV plant fit (CV_AUTOTUNE_PLAN.md §F): a bounded alternator-current step commanded
@@ -3195,7 +3222,8 @@ void AdjustFieldLearnMode() {
         // cv_I can support at the present current cap. Prevents the integrator from seeing a large up-step
         // when the target jumps. Falls are instantaneous. Operates on the (slew-limited)
         // ChargingVoltageTarget and feeds the CV PI error below.
-        static float voltageTargetSlewed = 0.0f;
+        // voltageTargetSlewed is a global (Xregulator.ino) purely so cvLog_tick can record it; it was a
+        // static local here and retains the same write-once-per-tick, persist-across-calls behaviour.
         if (enteringCV) {
           voltageTargetSlewed = ChargingVoltageTarget;
         }
@@ -3478,6 +3506,7 @@ void AdjustFieldLearnMode() {
                 float slopeBleedAmps = SlopeBleedK * (g_cvBrakeSlopeEma - CvBrakeThreshVps) * dtSec;
                 cv_I = fmaxf(0.0f, cv_I - slopeBleedAmps);
                 g_slopeBleedAmpsThisTick = slopeBleedAmps;  // captured for cvLog; cleared by cvLog_tick after logging
+                g_protEventLatch |= PROT_EVT_BR;            // Plots-tab brake shading (not a protection — see PROT_EVT_BR)
                 if (recovActive && slopeBleedAmps > 0.0f) recovRampHold = true;  // brake has spoken; the ramp must not answer back
                 // cv_I_track synced on next tick by bumpless tracker (out of scope here)
               }
@@ -4827,15 +4856,17 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // counting below. Only while charging is enabled: a shutdown (toggle/key-off/BMS/weather) has
   // nothing to recover, and deferring the cuts just keeps the field energized where its PWM fakes
   // tach readings (phantom RPM in datalogs).
-  // Field-cut test (commissioning stage 8) deliberately cuts the field to 0 to time the current
-  // decay; that abrupt cut starves the LM2907 pickup and false-zeros RPM for ~4.6 s after. Same
-  // dropout as a protection clamp — mask it while the test runs and through the re-bias tail, else
-  // engineFullyStopped would fire RPM_TOO_LOW and abort the cut mid-measurement. Not gated on
-  // chargingEnabled (the test always eases the field back, so there is always something to recover).
-  bool fieldCutRpmGrace = (RPM <= 0.0f)
-                          && ((fieldCutActive != 0)
-                              || (fieldCutLastEndMs != 0
-                                  && (uint32_t)(currentMillis - fieldCutLastEndMs) < FIELDCUT_RPM_GRACE_MS));
+  // Field-cut test (commissioning stage 8) deliberately drops the field to MinDuty to time the
+  // current decay; the abrupt cut corrupts the LM2907 pickup — it spikes HIGH, false-zeros, then
+  // ramps back through garbage low-nonzero values for ~4.6 s while the front end re-biases. RPM
+  // plays no role in the measurement, so mask BOTH RPM gates for ANY reading (not just exact zero —
+  // the 0<RPM<MinRPMForField re-bias ramp was aborting finished runs with RPM_TOO_LOW) while the
+  // test runs and through the re-bias tail. Field at/below the test level cannot over-volt; the
+  // absolute protections stay live. Not gated on chargingEnabled (the test always eases the field
+  // back, so there is always something to recover).
+  bool fieldCutRpmGrace = (fieldCutActive != 0) || fieldCutCcActive || fieldCutRequested
+                          || (fieldCutLastEndMs != 0
+                              && (uint32_t)(currentMillis - fieldCutLastEndMs) < FIELDCUT_RPM_GRACE_MS);
   bool rpmDropoutGrace = fieldCutRpmGrace
                          || ((g_lastProtClampMs != 0)
                              && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS)

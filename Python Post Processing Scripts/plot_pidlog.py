@@ -23,7 +23,7 @@ import os
 import tkinter as tk
 from tkinter import messagebox
 from filepicker import pick_file
-from plotlayout import tile_figures
+from plotlayout import tile_figures, enable_pan
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -278,6 +278,7 @@ def _make_checkbox_panel(fig, lines):
     y0 = max(0.05, 0.52 - panel_h / 2)
     ax_cb = fig.add_axes([0.82, y0, 0.16, panel_h])
     ax_cb.set_frame_on(False)
+    ax_cb.set_navigate(False)   # widget axes: never pan or rubber-band zoom it
     check = CheckButtons(ax_cb, labels, [True] * n)
     for lbl_obj, line in zip(check.labels, lines):
         lbl_obj.set_color(line.get_color())
@@ -863,5 +864,9 @@ fig1.text(0.03, 0.043, "Trim file:", fontsize=10, color="#1a1a1a",
 
 # ---------------------------------------------------------------------------
 print("Tip: use the checkboxes on the right of each plot to show/hide series.")
+# Grab-and-drag panning on every window (plotlayout.enable_pan).
+for _pfig in _all_figs:
+    enable_pan(_pfig)
+
 tile_figures()
 plt.show()

@@ -838,14 +838,14 @@ bool g_blackBoxPrevValid = false;   // true if last session's magic matched (RTC
 
 // Lifetime OV excursion telemetry in RTC noinit RAM (same survival semantics as the black box:
 // lost only on a true power-down — accepted). Histogram of RAW bus voltage, referenced to Bulk.
-// Fine: Bulk .. Bulk+3V in 0.2V steps (15 bins). Coarse: Bulk+3 .. Bulk+15V in 1.0V steps
-// (12 bins). +1 overflow bin. Bin widths scale ×(BATTERY_VOLTAGE/12) so the bin count is fixed
-// across 12/24/48V. Separate from the session counters (g_voltSpikeCount etc.), which reset on
-// reboot and /resetVoltageProtectionCounters; this struct is zeroed only by a magic mismatch or
-// /resetOvTelemetryLifetime.
-#define OV_HIST_FINE_BINS 15
+// Fine: Bulk .. Bulk+3.6V in 0.2V steps (18 bins; top ≈18V at a 14.4 Bulk). Coarse:
+// Bulk+3.6 .. Bulk+15.6V in 1.0V steps (12 bins). +1 overflow bin. Bin widths scale
+// ×(BATTERY_VOLTAGE/12) so the bin count is fixed across 12/24/48V. Separate from the session
+// counters (g_voltSpikeCount etc.), which reset on reboot and /resetVoltageProtectionCounters;
+// this struct is zeroed only by a magic mismatch or /resetOvTelemetryLifetime.
+#define OV_HIST_FINE_BINS 18
 #define OV_HIST_COARSE_BINS 12
-#define OV_HIST_BINS (OV_HIST_FINE_BINS + OV_HIST_COARSE_BINS + 1)  // 28
+#define OV_HIST_BINS (OV_HIST_FINE_BINS + OV_HIST_COARSE_BINS + 1)  // 31
 typedef struct {
   uint64_t timeMs[OV_HIST_BINS];  // cumulative ms with raw bus V in this band (first: 8-byte align; u32 would wrap at 49.7 days/bin)
   uint32_t events[OV_HIST_BINS];  // entries into this band (band-occupancy rising edge; low bins run large from CV ripple — expected, timeMs is the ripple-robust metric)
@@ -854,7 +854,7 @@ typedef struct {
   uint32_t inaCutCount;           // rising edge: REASON_INA_OVERVOLTAGE (INA228 ~1s-avg latched cut — software-failed-to-protect backstop)
   uint32_t brakeEventCount;       // rising edge: approach-brake engagement episodes (bleed after ≥1s quiet) — pre-protection, counts saves not trips
   uint32_t magic;
-} OvTelemetry;  // ~352 B; RTC slow RAM has ample room (black box is the only other user)
+} OvTelemetry;  // ~392 B; RTC slow RAM has ample room (black box is the only other user)
 // Size + bin count folded into the magic so a layout change self-invalidates (no migration —
 // an old-layout histogram is not comparable to a new one).
 #define OVTEL_MAGIC (0x0E7E1E77UL ^ (uint32_t)sizeof(OvTelemetry) ^ ((uint32_t)OV_HIST_BINS << 8))
@@ -1142,37 +1142,62 @@ float kneeFitResidPct  = -1.0f;                 // worst-anchor fit residual (% 
 int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) of the worst residual
 
 // ── Field de-energize time-constant test (commissioning stage 8) ─────────────
-// Cuts the field from a steady output and log-linear-fits the alternator-current decay to
-// get the field's electrical de-energize time constant (τ = L/R) — the time the OV protection's
-// field drain physically takes. RPM/voltage-independent in a fixed install, so it is measured
-// once per install (idle + cruise averaged) and consumed by the OV field-drain release timing.
-// Shares the SystemID duty-override + bumpless-resume path (OR'd into sysIDRunning).
-#define FIELDCUT_BUF_SIZE   256      // decay samples (~10 ms CH1 cadence, PSRAM)
-#define FIELDCUT_FREEZE_MS  2000UL   // after the current is steady, hold the duty FIXED this long before the cut so the field is at a constant, settled operating point (decay starts from a known baseline, not a mid-adjustment transient)
-#define FIELDCUT_MEAS_MS    500UL    // cut window: field at floor, sample the decay (>10τ for any realistic field)
+// Ramps the REAL current loop to the commissioned stabilize level, freezes the duty for a settled
+// baseline, steps the field to MinDuty (the exact floor a real OV clamp drives to) and fits the
+// alternator-current decay for the field's electrical de-energize time constant (τ = L/R) — the
+// time the OV protection's field drain physically takes. Decay is captured on the 20 kSPS fast
+// alt-current channel when present (ADS CH1 fallback), calibrated against the ADS reading at the
+// high (hold) and low (tail) points of this very test. RPM/voltage-independent in a fixed install;
+// run at idle + cruise and averaged only to PROVE the speed-independence, not because τ differs.
+// Ramp phase runs through the normal AUTO path (fieldCutCcActive branch, real currentPID);
+// hold/cut/ease phases share the SystemID duty-override + bumpless-resume path (OR'd into sysIDRunning).
+#define FIELDCUT_BUF_SIZE   256      // ADS fallback decay samples (~10-30 ms CH1 cadence, PSRAM)
+#define FIELDCUT_SETTLE_MS  3000UL   // measured current must sit in-band this long (after the setpoint slew arrives) before the hold starts
+#define FIELDCUT_SETTLE_TIMEOUT_MS 30000UL  // never settles (e.g. target unreachable at idle) → proceed with what we have if it clears FIELDCUT_MIN_BASE_A
+#define FIELDCUT_HOLD_MS    5000UL   // duty FROZEN this long before the cut — field at a constant, settled operating point; baseline + high calibration point averaged over the tail of this window
+#define FIELDCUT_MEAS_MS    10000UL  // cut window: field at MinDuty; decay in the first ~0.5 s, the rest establishes the residual floor + low calibration point
+#define FIELDCUT_SNAP_MS    400UL    // grab the 500 ms fast-channel ring this long after the cut → window spans ~[cut-100, cut+400] ms even with drain lag
 #define FIELDCUT_EASE_MS    1500.0f  // ease duty back to the pre-test operating point on exit — gentle re-engagement can't trip a protection
-#define FIELDCUT_MIN_BASE_A 5.0f     // baseline output must clear this or there is no decay to fit
-#define FIELDCUT_OPERATE_A   35.0f   // pre-cut steady CURRENT target: closed-loop stabilize the field to this (duty is the actuator) so the decay starts from a real output, not the AUTO float duty (~4%). Mirrors SystemIDStabilizeAmps.
-#define FIELDCUT_DUTY_MAX    92.0f   // upper safety clamp on the closed-loop duty command (%) — a bound on the actuator, NOT an operating target
-#define FIELDCUT_RPM_GRACE_MS 6000UL // ms after a field-cut run to keep masking a 0-RPM read as tach dropout (not a stopped engine): the abrupt cut starves the LM2907 pickup, false-zeroing RPM for ~4.6 s while its front end re-biases (see reference_lm2907_frontend_final). Without this the engine-stopped detector aborts the cut mid-measurement with RPM_TOO_LOW.
+#define FIELDCUT_MIN_BASE_A 5.0f     // baseline-above-floor must clear this or there is no decay to fit
+#define FIELDCUT_RPM_GRACE_MS 6000UL // keep masking the RPM gates this long after a run: the cut starves the LM2907 pickup, which spikes/false-zeros/ramps garbage for ~4.6 s while its front end re-biases (see reference_lm2907_frontend_final). RPM plays no role in the measurement.
+#define FIELDCUT_FAST_N     10000    // one full fast-channel ring copy (500 ms @ 20 kSPS), int16 mV
+#define FIELDCUT_PLOT_N     220      // decimated decay points served to the wizard plot
 struct FieldCutSample { uint32_t tMs; float amps; };
 FieldCutSample *fieldCutBuf = nullptr;          // ps_malloc'd on first run, never freed
-int   fieldCutCount = 0;                          // decay samples captured this run
+int   fieldCutCount = 0;                          // ADS decay samples captured this run
 volatile bool fieldCutRequested = false;          // set by /get?fieldCutStart
 volatile bool fieldCutAbortRequested = false;     // set by /get?fieldCutCancel
 uint8_t fieldCutActive = 0;                        // 0=idle 1=running 2=processing (sent to UI)
-uint8_t fieldCutPhase = 0;                         // 0=settle 1=measuring 2=easing (live caption)
+uint8_t fieldCutPhase = 0;                         // UI caption: 0=ramping 1=holding 2=cut/measuring 3=easing
+bool  fieldCutCcActive = false;                    // ramp/settle phase: the normal AUTO path drives the real current PID at fieldCutCmdA
+float fieldCutCmdA = 0.0f;                         // ramp-phase current target (= SystemIDStabilizeAmps at start)
 bool  fieldCutResultsReady = false;
 bool  fieldCutOk = false;                          // true = a usable τ was fit this run
-float fieldCutTauMs   = -1.0f;                     // fitted decay τ this run (ms), -1 = none
-float fieldCutBaseA   = 0.0f;                      // steady output measured just before the cut (A)
+float fieldCutTauMs   = -1.0f;                     // fitted decay τ this run (ms), -1 = none — QA metric (idle/cruise agreement), NOT the stored value
+float fieldCutFallMs  = -1.0f;                     // measured 90%→10% fall time (ms), -1 = none
+float fieldCutDrainMs = -1.0f;                     // measured cut→10%-of-baseline drain time (ms) — model-free; THIS (×1.3 cold margin) is what Apply stores in fieldDecayTauMs
+float fieldCutBaseA   = 0.0f;                      // steady output averaged over the frozen-duty hold (A)
+float fieldCutFloorA  = 0.0f;                      // residual output at MinDuty, averaged over the tail (A) — the decay asymptote
 float fieldCutResidPct = -1.0f;                    // log-fit RMS residual as % (quality; lower is better)
+uint8_t fieldCutSrc = 0;                           // decay data source this run: 1 = 20 kSPS fast channel, 0 = ADS fallback
+int16_t *fcFastBuf = nullptr;                      // PSRAM — decay ring copy (calibrated mV)
+int      fcFastCount = 0;
+int16_t *fcScratch = nullptr;                      // PSRAM — hold-end / tail-end ring copies for the calibration means
+float *fcPlotMs = nullptr, *fcPlotA = nullptr;     // PSRAM — decimated decay served via /fieldcut.json (t relative to the cut edge)
+int    fcPlotN = 0;
 uint32_t fieldCutLastEndMs = 0;                    // cooldown guard
 char  fieldCutAbortMsg[48] = {0};                  // human reason text on a failed/aborted run
-// Commissioned field de-energize time constant (ms), WITH the 30% cold-field margin already applied by
-// the Field-cut wizard step (measured warm → a colder field decays slower, so the wait is padded). The OV
-// field-drain release consumes this value directly. Safe placeholder default until the step is run.
+// Commissioned field DRAIN time (ms): the measured cut→10%-of-output time (≈2.3 L/R time constants),
+// WITH the 30% cold-field margin already applied by the Field-cut wizard step (measured warm → a colder
+// field decays slower, so the wait is padded). The OV field-drain release consumes this value directly.
+// Name kept for NVS/CSV3 continuity (key `fieldDecayTau`, CSV3 slot 314) — nothing fielded ever stored
+// the old 1τ semantics. Safe placeholder default until the step is run.
 uint16_t fieldDecayTauMs = 60;
+// Fast alt-current channel amps calibration (NVS): ampsCal = faCalGain × nominal + faCalOffA. The ESP32
+// ADC path has poor absolute accuracy; the field-decay test two-points it against the ADS1115 reading
+// (hold ≈30 A, tail ≈0 A) each run. Defaults = uncalibrated pass-through.
+float faCalGain = 1.0f;
+float faCalOffA = 0.0f;
 
 // ── Auto-commissioning state machine ──────────────────────────────────────────
 // Persistent across reboots (NVS). 0=NOT_COMMISSIONED, 1=IN_PROGRESS, 2=COMMISSIONED.
@@ -1198,7 +1223,7 @@ volatile bool faCommissionGate = false;         // Phase 2: relax the matrix ste
 volatile uint32_t lastCommissionHeartbeatMs = 0;        // millis() of the last dialog heartbeat (0 = stale/exited)
 #define COMMISSION_REST_FLOOR_PCT 4.0f                  // 12 V-base rest hold floor (% duty); bench-tune knob
 #define COMMISSION_REST_RAMP_PCT 5.0f                   // 12 V-base rest ramp rate (%/s)
-#define COMMISSION_HEARTBEAT_TIMEOUT_MS 5000UL          // stale ping → drop the hold, resume charging
+#define COMMISSION_HEARTBEAT_TIMEOUT_MS 20000UL         // stale ping → drop the hold, resume charging. 20 s, NOT 5 s: Download Logs blocks the browser main thread (cvlog binary→CSV) and hogs the async server, starving the 2 s ping — at 5 s that dropped the rest hold mid-wizard and the field ramped up "on its own"
 
 // Weather Mode Global Variables
 float UVToday = 0.0;
@@ -1685,6 +1710,16 @@ struct SensorWindow {
   int64_t dutyCycle_area_v_us = 0;
   uint64_t dutyCycle_valid_us = 0;
 
+  // Engine-running-weighted accumulators (gated by engineSpinning()). All five source
+  // channels accumulate unconditionally every tick, so ONE shared on-denominator
+  // (active_us) serves them all — per-field on_valid_us would be five copies of it.
+  uint64_t active_us = 0;  // window µs with engine spinning (coverage numerator)
+  int64_t battVolt_on_area_v_us = 0;
+  int64_t battCurr_on_area_v_us = 0;
+  int64_t altCurr_on_area_v_us = 0;
+  int64_t victronCurr_on_area_v_us = 0;
+  int64_t dutyCycle_on_area_v_us = 0;
+
   // Dynamic alternator zero
   int32_t altZero_min = 999900;
   int32_t altZero_max = -999900;
@@ -1814,7 +1849,7 @@ struct SensorSnapshot {
   ImuSnapshot imu;              // frozen IMU subset (resists imuWindow reset between roll and upload)
   uint8_t chargeStage;          // display code (0-7) captured at window roll — uploads are deferred so this can't read live state later
 };
-const uint16_t SENSOR_RING_SIZE = 1000;  // 1000 × ~820 B ≈ 820 KB PSRAM; ~6.9 days at SENSOR_UPLOAD_INTERVAL (10 min/sample)
+const uint16_t SENSOR_RING_SIZE = 1000;  // 1000 × ~870 B ≈ 870 KB PSRAM; ~6.9 days at SENSOR_UPLOAD_INTERVAL (10 min/sample)
 SensorSnapshot *sensorRing = nullptr;    // ps_malloc'd in setup()
 volatile uint16_t sensorRingHead = 0;    // next write slot
 volatile uint16_t sensorRingTail = 0;    // oldest unread slot
@@ -1881,13 +1916,20 @@ struct LongTermRecord {                 // naturally aligned; see static_assert 
   // byte block
   uint8_t chargeStage;                  // 0 off,1 bulk,2 absorption,3 float,4 manual,5 maintain,6 targetV,7 idle
   uint8_t _pad;
-};
-// 16 (4-byte block) + 102 (17 envelope) + 12 (6 avg) + 2 (byte) = 132, a multiple of
-// 4 (no tail padding). Use sizeof() as recordSize everywhere; this pins it so a
-// layout edit can't silently desync the scaffold guard.
-static_assert(sizeof(LongTermRecord) == 132, "LongTermRecord layout changed — update the scaffold recordSize guard");
 
-const uint16_t LONGTERM_RING_SIZE = 4320;    // 30 d × 24 h × 6/h at 10-min cadence (~501 KB @ 116 B)
+  // v4 tail (append-only — offsets above must not move): engine-running-weighted
+  // averages + window coverage. Denominator = µs the engine was spinning (active_us),
+  // vs the wall-clock avg above that dilutes mixed run/rest windows.
+  int16_t onAvg[5];                     // battVolt ×100, battCurr ×10, altCurr ×10, victronCurr ×10, duty ×100
+  uint8_t activeFrac;                   // engine-on % of observed window ×2 (0..200 = 0..100%); 0 ⇒ onAvg invalid
+  uint8_t _pad2;
+};
+// 16 (4-byte block) + 102 (17 envelope) + 12 (6 avg) + 2 (byte) + 10 (onAvg) + 2 (byte)
+// = 144, a multiple of 4 (no tail padding). Use sizeof() as recordSize everywhere; this
+// pins it so a layout edit can't silently desync the scaffold guard.
+static_assert(sizeof(LongTermRecord) == 144, "LongTermRecord layout changed — update the scaffold recordSize guard");
+
+const uint16_t LONGTERM_RING_SIZE = 4320;    // 30 d × 24 h × 6/h at 10-min cadence (~608 KB @ 144 B)
 LongTermRecord *longTermRing      = nullptr; // ps_malloc'd in setup()
 volatile uint16_t longTermHead    = 0;       // next write slot (circular)
 volatile uint16_t longTermCount   = 0;       // 0..LONGTERM_RING_SIZE
@@ -1898,7 +1940,7 @@ uint32_t   longTermFlushedSeq     = 0;       // longTermPushSeq value at last su
 uint32_t   longTermFileRecords    = 0;       // records currently on disk (0 = none/invalid → compact next flush)
 #define LONGTERM_BACKUP_PATH  "/longterm_ring.bin"
 #define LONGTERM_BACKUP_MAGIC 0x4C54504Cu    // 'LTPL'
-#define LONGTERM_BACKUP_VER   3u    // v3: soc avg-only → envelope (128→132 B); old rings discarded
+#define LONGTERM_BACKUP_VER   4u    // v4: +onAvg[5]+activeFrac (132→144 B); old rings discarded
 // Periodic field-off dump interval. The rising-edge dump alone captures a nearly
 // empty ring on a bench (field never cycles), so accumulated records were lost on
 // reboot/power-loss. This re-dumps every interval WHILE field-off (only when the
@@ -2396,10 +2438,10 @@ uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not c
 // ungated and a stopping engine can't sit with an energized field faking tach readings.
 #define PROT_RPM_GRACE_MS 5000
 uint32_t g_lastProtClampMs = 0;      // millis() of the most recent tick any protection clamp was active
-// Field-decay-tau early release. g_ovClampRiseMs stamps the FIRST tick of a clamp episode (rising
+// Field-drain early release. g_ovClampRiseMs stamps the FIRST tick of a clamp episode (rising
 // edge) — distinct from g_lastProtClampMs, which restamps every clamped tick. Once a clamp has held
-// for fieldDecayTauMs (one field-drain L/R time constant, cold-margin already baked into the stored
-// value), the coil current sustaining the excess has bled out, so the G2/iExcess hold latches are
+// for fieldDecayTauMs (the measured cut→10%-of-output drain time, cold-margin already baked into the
+// stored value), the coil current sustaining the excess has bled out, so the G2/iExcess hold latches are
 // released without waiting for the lagged filtered-voltage return (iExcess additionally waits for its
 // excess EMA to fall back under the fire line — see the site gates). OR'd with the natural release, so
 // it can only ever SHORTEN a cut; Load Dump is untouched (it re-asserts every tick, no hold latch).
@@ -3466,6 +3508,7 @@ bool commissionProtBackup   = true;  // saved value of testProtectionsEnabled at
 uint32_t lastVoltageLoopMs = 0;           // timestamp of last voltage loop update
 uint16_t g_voltLoopActualIntervalMs = 0;  // actual interval of last voltage loop fire (ms); 0 until second fire
 float g_slopeBleedAmpsThisTick = 0.0f;   // slope bleed drain applied this voltage loop tick (A); cleared by cvLog_tick after logging
+float voltageTargetSlewed = 0.0f;        // rise-governor output — the setpoint the CV PI tracks. Global (not a static local) only so cvLog_tick can record it; written solely by the governor in AdjustFieldLearnMode.
 float Icv = 0.0f;                         // CV PID output — direct current setpoint (A)
 float cv_I = 0.0f;                        // CV integrator state (A)
 bool voltageControlActive = false;        // true when voltage PID is active (non-idle stages)
@@ -4031,7 +4074,6 @@ uint32_t thermalLogBurstUntilMs = 0;
 #define PID_LOG_SIZE 2400
 #define CV_LOG_SIZE 6000
 #define CV_LOG_HEADER_SIZE 36
-#define CV_LOG_ENTRY_SIZE 50
 
 volatile bool pidLogPaused = false;
 volatile uint32_t pidLogPausedAtMs = 0;
@@ -4135,11 +4177,11 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 // CV / Voltage Tuner Log
 // Logs every CH1 sample (fresh CH1 arrives 5–25ms apart, assume ~30ms) — no internal rate limiter.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
-// 53 bytes/entry × 6000 entries = 318 KB PSRAM → ~28 sec at full rate.
+// 55 bytes/entry × 6000 entries = 330 KB PSRAM → ~28 sec at full rate.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// STRUCT  (51 bytes, offsets below match JS parser exactly)
+// STRUCT  (55 bytes, offsets below match JS parser exactly)
 // ---------------------------------------------------------------------------
 //
 //  offset  field            scale      notes
@@ -4158,7 +4200,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //  24      iMeas            ×10        MeasuredAmps (raw alternator current)
 //  26      duty             ×10        dutyCycle
 //  28      flags            —          see bit definitions below
-//  29      pad              —          zero
+//  29      awState          —          0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
 //  30      rpm              raw        RPM, clamped to int16 range
 //  32      battV_filt_x100  ×100       IBV_filtered (display EMA, VoltageFilterTC)
 //  34      ch1IntervalMs    raw ms     last CH1 inter-sample gap
@@ -4170,6 +4212,12 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //  46      slopeBleedAmps_x1000 ×1000  cv_I drain applied this voltage loop tick (A×1000); 0 on non-VL ticks
 //  48      capReason            —      which layer set fastOvCap this tick
 //  49      ovFilt_x100          ×100   g_ovIbvFilt — Group 2's comparator input (plant-tau EMA of IBV)
+//  51      brakeSlope_x10000    ×10000 g_cvBrakeSlopeEma — the approach-brake gated signal (EMA of cvDSlope)
+//  53      targSlewed_x100      ×100   voltageTargetSlewed — rise-governor output; THE setpoint the CV PI
+//                                      actually tracks. Equals targV unless the governor is clamping a
+//                                      RISING target, so targV is not a safe stand-in on stage changes.
+//                                      Note vErrorMv above is (targV − IBV), NOT the PI's error: the real
+//                                      PI error is (targSlewed − battV).
 //
 //  flags bits:
 //    b0  fastOvActive    any OV clamp fired this tick
@@ -4212,8 +4260,9 @@ struct __attribute__((packed)) CvLogEntry {
   uint8_t capReason;               // which layer set fastOvCap this tick: 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk
   int16_t ovFilt_x100;             // g_ovIbvFilt × 100 (V) — Group 2's comparator input (plant-tau EMA of IBV)
   int16_t brakeSlope_x10000;       // g_cvBrakeSlopeEma × 10000 (V/s) — approach-brake trigger signal
+  int16_t targSlewed_x100;         // voltageTargetSlewed × 100 (V) — rise-governor output; the setpoint the CV PI tracks
 };
-static_assert(sizeof(CvLogEntry) == 53, "CvLogEntry must be 53 bytes");
+static_assert(sizeof(CvLogEntry) == 55, "CvLogEntry must be 55 bytes");
 
 
 struct CvBinDLState {
@@ -4320,13 +4369,17 @@ enum FastOvCapReason : uint8_t {
 };
 uint8_t g_fastOvCapReason = CAP_REASON_NONE;  // exported once per full control tick alongside g_fastOvCurrentCap (see capReasonTick in AdjustFieldLearnMode)
 
-// Protection-event marker bitmask for the Plots-tab vertical designators. The control loop
-// ORs in a bit whenever a protection binds the current cap (momentary, single-tick events);
-// the CSV1 sender reads it at ~10 Hz and clears the bits it consumed, so events that fire
-// between sends are still captured. Visual indicator only — exact reason lives elsewhere.
+// Event marker bitmask for the Plots-tab designators. The control loop ORs in a bit whenever one of
+// these momentary, single-tick events fires; the CSV1 sender reads it at ~10 Hz and clears the bits
+// it consumed, so events that fire between sends are still captured. Visual indicator only — exact
+// reason lives elsewhere.
 #define PROT_EVT_OV 0x01  // overvoltage hard clamp (KHard G1/G2)
 #define PROT_EVT_IX 0x02  // iExcess current-excess supervisor (CV or Bulk)
 #define PROT_EVT_LD 0x04  // load-dump cutoff
+// 0x08 is NOT a protection and no current cap bound — the approach brake merely drained cv_I. The
+// dashboard masks 0x01|0x02|0x04 for its red "a protection fired" markers and shades 0x08 separately;
+// anything reading this mask must do the same or a brake tick reads as a protection trip.
+#define PROT_EVT_BR 0x08  // CV approach brake bled cv_I this tick
 volatile uint8_t g_protEventLatch = 0;
 
 // ── Current ring / MA / dI/dt ─────────────────────────────────────────────

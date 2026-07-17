@@ -2366,6 +2366,7 @@ void cvLog_tick(uint32_t nowMs) {
   e.capReason = g_fastOvCapReason;  // which layer set the binding fastOvCap this tick
   e.ovFilt_x100 = (int16_t)clamp_f(g_ovIbvFilt * 100.0f, -32767.0f, 32767.0f);
   e.brakeSlope_x10000 = (int16_t)clamp_f(g_cvBrakeSlopeEma * 10000.0f, -32767.0f, 32767.0f);
+  e.targSlewed_x100 = (int16_t)clamp_f(voltageTargetSlewed * 100.0f, -32767.0f, 32767.0f);
 
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;
@@ -3557,80 +3558,239 @@ static float fieldCurveInvert(float targetA) {
 // ============================================================
 // fieldCut_tick() — commissioning stage 8: field de-energize τ
 //
-// Sequence: (1) close the loop on CURRENT to reach FIELDCUT_OPERATE_A and hold it steady for 5 s
-// (1 Hz P-control, duty is only the actuator — same mechanism as systemID's stabilize phase);
-// (2) FREEZE the duty and hold it fixed FIELDCUT_FREEZE_MS (~2 s) so the field sits at a constant,
-// settled operating point, averaging current over the hold as the baseline; (3) cut the field to the
-// floor instantly and sample the alternator-current decay; (4) ease the field back to where AUTO left
-// it. The decay is log-linear-fit (ln I vs t) to the electrical time constant τ = L/R. Like
-// systemID_tick it returns true while active; the caller forces GOV_BYPASS_SLEW + MANUAL PID (which
-// also drops the MinDuty/RPM floor to 0, so the cut reaches true field-off) and uses dutyOut as the
-// command. One run per trigger; the wizard runs it at idle and at cruise and averages. Field-off is
-// the SAFE direction. RPM plays NO role in the logic — but the abrupt cut starves the LM2907 tach
-// pickup and false-zeros RPM for a few seconds, so the engine-stopped detector is masked over the
-// test + FIELDCUT_RPM_GRACE_MS tail (fieldCutRpmGrace in the tick builder) precisely so a phantom
-// 0-RPM read can't abort the cut with RPM_TOO_LOW.
+// Sequence: (1) RAMP — the normal AUTO path drives the REAL current PID to SystemIDStabilizeAmps
+// (the level commissioned by the field-curve step) through the fieldCutCcActive branch: manually
+// slewed setpoint at TEST_ENTRY_RATE_A, duty slew bypassed, protections live. This phase returns
+// false — duty belongs to the real loop. (2) HOLD — duty FROZEN at the settled value for
+// FIELDCUT_HOLD_MS; baseline + fast-channel high calibration point averaged over the tail of the
+// hold. From here on the tick returns true (SystemID duty-override path). (3) CUT — duty steps to
+// MinDuty, the exact floor a real OV clamp drives to, and stays there FIELDCUT_MEAS_MS. The decay
+// lives in the 20 kSPS fast alt-current ring — grabbed FIELDCUT_SNAP_MS after the cut; ADS samples
+// are recorded as a fallback, and the tail of the window gives the residual floor + low calibration
+// point. (4) PROCESS — two-point calibrate the fast channel against the ADS, boxcar+zero-phase-EMA
+// filter, log-linear fit of ln(I − floor) for τ, direct 90→10% fall time. Results publish HERE, so
+// a late abort can't discard a finished measurement. (5) EASE back to the pre-test duty.
+// One run per trigger; the wizard runs idle + cruise only to PROVE τ is speed-independent.
+// Field-at-MinDuty is the SAFE direction. RPM plays NO role in the measurement — the cut corrupts
+// the LM2907 tach signal (spike/false-zero/garbage ramp for ~4.6 s), so BOTH RPM gates are masked
+// for the whole test + FIELDCUT_RPM_GRACE_MS tail (fieldCutRpmGrace in the tick builder).
 // ============================================================
-static void fieldCutProcess() {
-  fieldCutOk = false;
-  if (fieldCutBaseA < FIELDCUT_MIN_BASE_A) {
-    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "output too low to measure — raise RPM/charge current and retry");
+
+static float fcMeanMv(const int16_t *b, int n) {
+  if (!b || n <= 0) return NAN;
+  double s = 0;
+  for (int i = 0; i < n; i++) s += b[i];
+  return (float)(s / n);
+}
+
+// Two-point fast-channel calibration from this run's own settled levels. ADS1115 is the reference
+// (hold ≈ stabilize amps, tail ≈ residual at MinDuty). Solves ampsCal = gain × nominal + off and
+// persists it. Rejects a degenerate span or an implausible solution and keeps the previous cal.
+static void fcCalibrateFast(float faHighMv, float faLowMv) {
+  if (isnan(faHighMv) || isnan(faLowMv)) return;
+  float nomHigh = faMvToAmpsNominal(faHighMv), nomLow = faMvToAmpsNominal(faLowMv);
+  float span = nomHigh - nomLow;
+  if (span < 5.0f) {
+    queueConsoleMessageF("Field-cut: fast-channel cal skipped (span %.1f A too small)", span);
     return;
   }
-  // Fit only the clean exponential band: above the ripple/noise floor, below the pre-cut plateau.
-  const float lo = 0.20f * fieldCutBaseA, hi = 0.85f * fieldCutBaseA;
-  double sx = 0, sy = 0, sxx = 0, sxy = 0; int n = 0;
-  for (int i = 0; i < fieldCutCount; i++) {
-    float a = fieldCutBuf[i].amps;
-    if (a < lo || a > hi || a <= 0.01f) continue;
-    double x = (double)fieldCutBuf[i].tMs / 1000.0;   // seconds since the cut
-    double y = log((double)a);
-    sx += x; sy += y; sxx += x * x; sxy += x * y; n++;
-  }
-  if (n < 4) {
-    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "decay too fast/noisy to fit — hold RPM steady and retry");
+  float g = (fieldCutBaseA - fieldCutFloorA) / span;
+  float o = fieldCutBaseA - g * nomHigh;
+  if (g < 0.5f || g > 2.0f || fabsf(o) > 30.0f) {
+    queueConsoleMessageF("Field-cut: fast-channel cal rejected (gain %.3f off %.2f A) — keeping previous", g, o);
     return;
   }
-  double d = (double)n * sxx - sx * sx;
-  if (fabs(d) < 1e-9) { snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "fit failed — retry"); return; }
-  double slope = ((double)n * sxy - sx * sy) / d;   // d(ln I)/dt (1/s); a real decay is negative
-  double icept = (sy - slope * sx) / n;
+  faCalGain = g; faCalOffA = o;
+  settingWrite(NK_faCalGain, String(faCalGain, 4).c_str());
+  settingWrite(NK_faCalOffA, String(faCalOffA, 3).c_str());
+  queueConsoleMessageF("Field-cut: fast-channel calibrated — gain %.3f, offset %.2f A (vs ADS %.1f/%.1f A)",
+                       g, o, fieldCutBaseA, fieldCutFloorA);
+}
+
+// Shared τ fit + fall-time on a filtered, floor-referenced decay trace (t in ms, amps).
+// Band: 85% down to 10% of (base − floor), starting at the first 85% crossing. Also fills the
+// wizard plot arrays (t re-zeroed to the 95% crossing ≈ the cut edge). Returns true on a clean fit.
+static bool fcFitDecay(const float *tMs, const float *amps, int n, int minFitPts) {
+  float base = fieldCutBaseA, floorA = fieldCutFloorA;
+  float dA = base - floorA;
+  if (dA < FIELDCUT_MIN_BASE_A) {
+    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "output too low to measure — raise engine speed a little and re-run");
+    return false;
+  }
+  const float lv95 = floorA + 0.95f * dA, lv90 = floorA + 0.90f * dA,
+              lv85 = floorA + 0.85f * dA, lv50 = floorA + 0.50f * dA, lv10 = floorA + 0.10f * dA;
+  // All crossings anchor around the 50% level: plateau rectifier ripple (±20% seen on the bench)
+  // can dip through 85/90/95% and fake an early edge, but it can never reach 50%. The 85/90/95
+  // crossings are the LAST ones before the 50% point (walk backward), the 10% crossing the first
+  // one after it.
+  int i50 = -1;
+  for (int i = 0; i < n; i++) { if (amps[i] < lv50) { i50 = i; break; } }
+  if (i50 <= 0) {
+    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "no clean decay found (field may not have cut) — re-run");
+    return false;
+  }
+  float t95 = NAN, t90 = NAN, t10 = NAN;
+  int i85 = 0, i10 = n - 1;
+  for (int i = i50; i >= 1; i--) {
+    float a0 = amps[i - 1], a1 = amps[i];
+    if (isnan(t90) && a0 >= lv90 && a1 < lv90) t90 = tMs[i - 1] + (tMs[i] - tMs[i - 1]) * (a0 - lv90) / fmaxf(1e-6f, a0 - a1);
+    if (isnan(t95) && a0 >= lv95 && a1 < lv95) { t95 = tMs[i - 1] + (tMs[i] - tMs[i - 1]) * (a0 - lv95) / fmaxf(1e-6f, a0 - a1); break; }
+  }
+  for (int i = i50; i >= 1; i--) { if (amps[i - 1] >= lv85) { i85 = i; break; } }
+  bool found10 = false;
+  for (int i = i50 + 1; i < n; i++) {
+    float a0 = amps[i - 1], a1 = amps[i];
+    if (a0 >= lv10 && a1 < lv10) { t10 = tMs[i - 1] + (tMs[i] - tMs[i - 1]) * (a0 - lv10) / fmaxf(1e-6f, a0 - a1); i10 = i; found10 = true; break; }
+  }
+  if (!found10) {
+    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "no clean decay found (field may not have cut) — re-run");
+    return false;
+  }
+  double sx = 0, sy = 0, sxx = 0, sxy = 0; int nf = 0;
+  for (int i = i85; i < n; i++) {
+    float ex = amps[i] - floorA;
+    if (ex < 0.10f * dA) break;          // below the fit band — ripple around the floor is not decay
+    if (ex > 0.85f * dA) continue;
+    double x = (double)tMs[i] / 1000.0, y = log((double)ex);
+    sx += x; sy += y; sxx += x * x; sxy += x * y; nf++;
+  }
+  if (nf < minFitPts) {
+    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "decay too fast for this sensor to resolve — re-run");
+    return false;
+  }
+  double d = (double)nf * sxx - sx * sx;
+  if (fabs(d) < 1e-12) { snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "fit failed — re-run"); return false; }
+  double slope = ((double)nf * sxy - sx * sy) / d;   // d(ln(I−floor))/dt (1/s); a real decay is negative
+  double icept = (sy - slope * sx) / nf;
   double tauMs = (slope < 0.0) ? (-1000.0 / slope) : -1.0;
-  if (tauMs < 3.0 || tauMs > 500.0) {
-    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "no clean decay (field may not have cut) — retry");
-    return;
+  if (tauMs < 2.0 || tauMs > 500.0) {
+    snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "no clean decay found (field may not have cut) — re-run");
+    return false;
   }
-  double ss = 0;
-  for (int i = 0; i < fieldCutCount; i++) {
-    float a = fieldCutBuf[i].amps;
-    if (a < lo || a > hi || a <= 0.01f) continue;
-    double x = (double)fieldCutBuf[i].tMs / 1000.0;
-    double e = log((double)a) - (icept + slope * x);
-    ss += e * e;
+  double ss = 0; int nr = 0;
+  for (int i = i85; i < n; i++) {
+    float ex = amps[i] - floorA;
+    if (ex < 0.10f * dA) break;
+    if (ex > 0.85f * dA) continue;
+    double x = (double)tMs[i] / 1000.0;
+    double e = log((double)ex) - (icept + slope * x);
+    ss += e * e; nr++;
   }
-  fieldCutResidPct = (float)((exp(sqrt(ss / n)) - 1.0) * 100.0);
+  fieldCutResidPct = nr ? (float)((exp(sqrt(ss / nr)) - 1.0) * 100.0) : -1.0f;
   fieldCutTauMs = (float)tauMs;
-  fieldCutOk = true;
-  queueConsoleMessageF("Field-cut: tau=%.0f ms (base %.1f A, %d pts, resid %.0f%%)",
-                       fieldCutTauMs, fieldCutBaseA, n, fieldCutResidPct);
+  fieldCutFallMs = (!isnan(t90)) ? (t10 - t90) : -1.0f;
+  // Cut edge = the 95% crossing (falls back to the 85% index when the plateau never made the
+  // window). Drain time = edge → 10%-of-baseline, read directly off the trace — the model-free
+  // "field no longer makes meaningful current" number the OV release actually needs. For a clean
+  // exponential drain ≈ 2.3τ, so the fit cross-checks it.
+  float t0 = !isnan(t95) ? t95 : tMs[i85];
+  fieldCutDrainMs = t10 - t0;
+  int iStart = 0;
+  while (iStart < i85 && tMs[iStart] < t0 - 50.0f) iStart++;
+  int iEnd = (i10 < n) ? i10 : n - 1;
+  float tEnd = tMs[iEnd] + 100.0f;
+  while (iEnd < n - 1 && tMs[iEnd + 1] <= tEnd) iEnd++;
+  int range = iEnd - iStart + 1;
+  int stride = (range + FIELDCUT_PLOT_N - 1) / FIELDCUT_PLOT_N;
+  if (stride < 1) stride = 1;
+  fcPlotN = 0;
+  for (int i = iStart; i <= iEnd && fcPlotN < FIELDCUT_PLOT_N; i += stride) {
+    fcPlotMs[fcPlotN] = tMs[i] - t0;
+    fcPlotA[fcPlotN] = amps[i];
+    fcPlotN++;
+  }
+  return true;
+}
+
+// Post-capture processing: calibrate, filter, fit. faHighMv/faLowMv are the hold-end / tail-end
+// fast-ring means (NAN when the channel wasn't available).
+static void fieldCutProcess(float faHighMv, float faLowMv) {
+  fieldCutOk = false;
+  fcPlotN = 0;
+  fcCalibrateFast(faHighMv, faLowMv);
+
+  // ── Fast path: 20 kSPS ring copy → boxcar-16 decimate (0.8 ms) → zero-phase EMA (τ≈4 ms,
+  //   forward+backward so the smoothing adds no lag bias to the fitted slope). The heavy filter
+  //   kills the HF hash; the ~tens-of-Hz rectifier ripple stays and averages out across the
+  //   hundreds of fit points (it is multiplicative → a zero-mean sinusoid in log space). ──
+  if (fcFastCount >= 4000 && fcPlotMs && fcPlotA) {
+    int nD = fcFastCount / 16;
+    static float *dT = nullptr, *dA = nullptr;   // decimated workspace, PSRAM, allocated once
+    if (!dT) dT = (float *)ps_malloc((FIELDCUT_FAST_N / 16 + 1) * sizeof(float));
+    if (!dA) dA = (float *)ps_malloc((FIELDCUT_FAST_N / 16 + 1) * sizeof(float));
+    if (dT && dA) {
+      const float dtMs = 16.0f * 1000.0f / 20000.0f;   // 0.8 ms per decimated sample
+      for (int i = 0; i < nD; i++) {
+        double s = 0;
+        const int16_t *p = fcFastBuf + i * 16;
+        for (int k = 0; k < 16; k++) s += p[k];
+        dA[i] = faMvToAmps((float)(s / 16.0));
+        dT[i] = i * dtMs;
+      }
+      const float alpha = 0.1667f;   // EMA τ ≈ 4 ms at 0.8 ms samples — well under the ~40 ms decay
+      for (int i = 1; i < nD; i++) dA[i] = dA[i - 1] + alpha * (dA[i] - dA[i - 1]);
+      for (int i = nD - 2; i >= 0; i--) dA[i] = dA[i + 1] + alpha * (dA[i] - dA[i + 1]);
+      if (fcFitDecay(dT, dA, nD, 20)) {
+        fieldCutSrc = 1;
+        fieldCutOk = true;
+      }
+    }
+  }
+
+  // ── ADS fallback: channel absent/dormant (or the fast fit failed) — fit the ~10-30 ms control-tick
+  //   samples instead. Far fewer points; minFitPts drops accordingly. ──
+  if (!fieldCutOk && fieldCutCount >= 4) {
+    static float *aT = nullptr, *aA = nullptr;
+    if (!aT) aT = (float *)ps_malloc(FIELDCUT_BUF_SIZE * sizeof(float));
+    if (!aA) aA = (float *)ps_malloc(FIELDCUT_BUF_SIZE * sizeof(float));
+    if (aT && aA) {
+      for (int i = 0; i < fieldCutCount; i++) { aT[i] = (float)fieldCutBuf[i].tMs; aA[i] = fieldCutBuf[i].amps; }
+      if (fcFitDecay(aT, aA, fieldCutCount, 4)) {
+        fieldCutSrc = 0;
+        fieldCutOk = true;
+        queueConsoleMessage("Field-cut: fast channel unavailable — fitted on ADS samples (coarse)");
+      }
+    }
+  }
+
+  if (fieldCutOk) {
+    fieldCutAbortMsg[0] = '\0';   // a failed fast fit may have latched a reason before the fallback succeeded
+    queueConsoleMessageF("Field-cut: drain(cut->10%%)=%.0f ms, tau=%.0f ms, 90-10 fall=%.0f ms (base %.1f A, floor %.1f A, resid %.0f%%, %s)",
+                         fieldCutDrainMs, fieldCutTauMs, fieldCutFallMs, fieldCutBaseA, fieldCutFloorA, fieldCutResidPct,
+                         fieldCutSrc ? "20k channel" : "ADS");
+  }
 }
 
 bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
-  static uint8_t  phase = 0;             // 0=idle 1=stabilize 2=freeze 3=cut/measure 4=ease-out
+  static uint8_t  phase = 0;             // 0=idle 1=CC ramp/settle 2=hold(frozen duty) 3=cut+tail 4=ease
   static uint32_t phaseStartMs = 0;
-  static float    entryDuty = 0.0f;      // pre-test operating duty (AUTO float, ~4%) — returned to on exit
-  static float    operateDuty = 0.0f;    // closed-loop duty that reached the current target; frozen through the hold + cut
-  static uint32_t stabLastAdjMs = 0;     // 1 Hz P-control update stamp
-  static float    stabRing[SYSID_STABILIZE_SAMPLES];  // rolling 1 Hz current samples for the band check
-  static uint8_t  stabIdx = 0, stabCount = 0;
-  static double   baseSum = 0.0;         // freeze-window current accumulator → pre-cut baseline
-  static uint32_t baseN = 0;
+  static float    entryDuty = 0.0f;      // pre-test operating duty (rest floor / AUTO) — eased back to on exit
+  static float    freezeDuty = 0.0f;     // duty captured when the real loop settled; FROZEN through hold + snapshot
+  static float    fcPreSetpoint = 0.0f;  // setpointLimited before the test — restored so the resume snapshot is clean
+  static float    ampsEma = 0.0f;        // settle detector input
+  static uint32_t arriveMs = 0, inBandSinceMs = 0;
+  static double   adsHoldSum = 0.0;  static uint32_t adsHoldN = 0;   // hold-tail baseline (high cal ref)
+  static double   adsTailSum = 0.0;  static uint32_t adsTailN = 0;   // cut-tail floor (low cal ref)
+  // Calibration points are averaged over MATCHED multi-second windows on both sensors — four
+  // spaced 500 ms ring grabs (~2 s of 20 kSPS data) against the ADS mean over the same span, all
+  // in steady conditions (frozen duty / settled floor) — so ripple, noise, and any fixed pipeline
+  // delay average out instead of landing in the calibration.
+  static double   faHiSum = 0.0, faLoSum = 0.0;
+  static uint8_t  faHiN = 0, faLoN = 0, holdGrabs = 0, tailGrabs = 0;
+  static bool     snapped = false;
 
   // ── Abort ────────────────────────────────────────────────────────────────
   if (phase != 0 && fieldCutAbortRequested) {
     fieldCutAbortRequested = false;
-    // A protection abort latches its reason into the msg before this tick runs — don't overwrite it.
-    if (fieldCutAbortMsg[0] == '\0') snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "aborted");
+    fieldCutCcActive = false;
+    if (fieldCutResultsReady) {
+      // Fit already published (abort landed in the ease) — a finished measurement is kept, the
+      // abort only ends the wind-down early. Clear any protection reason so the UI shows the result.
+      fieldCutAbortMsg[0] = '\0';
+    } else if (fieldCutAbortMsg[0] == '\0') {
+      // A protection abort latches its reason into the msg before this tick runs — don't overwrite it.
+      snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "aborted");
+    }
     fieldCutActive = 0; fieldCutPhase = 0; fieldCutLastEndMs = millis();
     phase = 0; dutyOut = entryDuty;
     return false;
@@ -3641,97 +3801,146 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     if (!fieldCutRequested) return false;
     fieldCutRequested = false;
     fieldCutAbortRequested = false;
-    if (fieldCutBuf == nullptr) {
-      fieldCutBuf = (FieldCutSample *)ps_malloc(FIELDCUT_BUF_SIZE * sizeof(FieldCutSample));
-      if (fieldCutBuf == nullptr) {
-        snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "PSRAM alloc failed");
+    if (fieldCutBuf == nullptr) fieldCutBuf = (FieldCutSample *)ps_malloc(FIELDCUT_BUF_SIZE * sizeof(FieldCutSample));
+    if (fcFastBuf == nullptr) fcFastBuf = (int16_t *)ps_malloc(FIELDCUT_FAST_N * sizeof(int16_t));
+    if (fcScratch == nullptr) fcScratch = (int16_t *)ps_malloc(FIELDCUT_FAST_N * sizeof(int16_t));
+    if (fcPlotMs == nullptr) fcPlotMs = (float *)ps_malloc(FIELDCUT_PLOT_N * sizeof(float));
+    if (fcPlotA == nullptr) fcPlotA = (float *)ps_malloc(FIELDCUT_PLOT_N * sizeof(float));
+    if (!fieldCutBuf || !fcFastBuf || !fcScratch || !fcPlotMs || !fcPlotA) {
+      snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "PSRAM alloc failed");
+      fieldCutOk = false; fieldCutResultsReady = true;
+      return false;
+    }
+    entryDuty = (dutyOut > 1.0f) ? dutyOut : 1.0f;   // where the field sat pre-test — eased back to on exit
+    fcPreSetpoint = setpointLimited;
+    fieldCutCmdA = constrain(SystemIDStabilizeAmps, 10.0f, 100.0f);
+    fieldCutCount = 0; fcFastCount = 0; fcPlotN = 0;
+    adsHoldSum = 0.0; adsHoldN = 0; adsTailSum = 0.0; adsTailN = 0;
+    faHiSum = 0.0; faLoSum = 0.0; faHiN = 0; faLoN = 0; holdGrabs = 0; tailGrabs = 0; snapped = false;
+    ampsEma = ampsRaw; arriveMs = 0; inBandSinceMs = 0;
+    fieldCutTauMs = -1.0f; fieldCutFallMs = -1.0f; fieldCutDrainMs = -1.0f; fieldCutBaseA = 0.0f; fieldCutFloorA = 0.0f;
+    fieldCutResidPct = -1.0f; fieldCutSrc = 0;
+    fieldCutResultsReady = false; fieldCutOk = false; fieldCutAbortMsg[0] = '\0';
+    fieldCutActive = 1; fieldCutPhase = 0;
+    fieldCutCcActive = true;   // hand the setpoint to the real current loop (branch in AdjustField)
+    phase = 1; phaseStartMs = nowMs;
+    queueConsoleMessageF("Field-cut: ramping to %.0f A through the current loop", fieldCutCmdA);
+    return false;   // ramp phase does NOT own duty — the real PID does
+  }
+
+  // ── RAMP/SETTLE: the fieldCutCcActive branch slews the setpoint to fieldCutCmdA at
+  //   TEST_ENTRY_RATE_A and the real PID drives duty (slew bypassed, protections live). Here we only
+  //   WATCH: once the slewed setpoint has arrived and the measured current has sat inside the band
+  //   for FIELDCUT_SETTLE_MS, capture the applied duty and freeze it. ──
+  if (phase == 1) {
+    fieldCutPhase = 0;
+    ampsEma += 0.05f * (ampsRaw - ampsEma);
+    bool arrived = fabsf(setpointLimited - fieldCutCmdA) < 0.5f;
+    if (arrived && arriveMs == 0) arriveMs = nowMs;
+    float band = fmaxf(3.0f, 0.08f * fieldCutCmdA);
+    bool settled = false;
+    if (arrived && fabsf(ampsEma - fieldCutCmdA) < band) {
+      if (inBandSinceMs == 0) inBandSinceMs = nowMs;
+      settled = (nowMs - inBandSinceMs >= FIELDCUT_SETTLE_MS);
+    } else {
+      inBandSinceMs = 0;
+    }
+    // Target unreachable (e.g. commissioned level above what the alternator makes at idle): the PID
+    // rails, current plateaus below band. Proceed with whatever real output we got — the fit only
+    // needs a baseline clear of the floor. Truly no output → fail with a plain reason.
+    if (!settled && (nowMs - phaseStartMs >= FIELDCUT_SETTLE_TIMEOUT_MS)) {
+      if (ampsEma >= FIELDCUT_MIN_BASE_A) {
+        settled = true;
+        queueConsoleMessageF("Field-cut: %.0f A not reachable here — proceeding at %.1f A", fieldCutCmdA, ampsEma);
+      } else {
+        fieldCutCcActive = false;
+        snprintf(fieldCutAbortMsg, sizeof(fieldCutAbortMsg), "no charging output at this speed — re-run once the alternator is producing");
         fieldCutOk = false; fieldCutResultsReady = true;
+        fieldCutActive = 0; fieldCutPhase = 0; fieldCutLastEndMs = millis();
+        phase = 0;
         return false;
       }
     }
-    entryDuty = (dutyOut > 1.0f) ? dutyOut : 1.0f;   // where AUTO left the field — restored on exit
-    operateDuty = entryDuty;
-    fieldCutCount = 0; stabIdx = 0; stabCount = 0; stabLastAdjMs = nowMs; baseSum = 0.0; baseN = 0;
-    fieldCutTauMs = -1.0f; fieldCutBaseA = 0.0f; fieldCutResidPct = -1.0f;
-    fieldCutResultsReady = false; fieldCutOk = false; fieldCutAbortMsg[0] = '\0';
-    fieldCutActive = 1; fieldCutPhase = 0;
-    phase = 1; phaseStartMs = nowMs;
-    dutyOut = entryDuty;
-    return true;
-  }
-
-  // ── STABILIZE: close the loop on CURRENT. Adjust duty at 1 Hz (P-control, duty is only the knob)
-  //   until the field output holds at FIELDCUT_OPERATE_A within band for a full 5 s rolling window —
-  //   same mechanism as systemID's stabilize phase. Runs under GOV_BYPASS_SLEW, so each 1 Hz step is
-  //   a direct duty command. On success the loop is done adjusting; the FREEZE phase then locks this
-  //   duty. ──
-  if (phase == 1) {
-    fieldCutPhase = 0;
-    if (nowMs - stabLastAdjMs >= 1000) {
-      float err = FIELDCUT_OPERATE_A - ampsRaw;
-      operateDuty = constrain(operateDuty + err * 0.5f, 5.0f, FIELDCUT_DUTY_MAX);
-      stabRing[stabIdx] = ampsRaw;
-      stabIdx = (stabIdx + 1) % SYSID_STABILIZE_SAMPLES;
-      if (stabCount < SYSID_STABILIZE_SAMPLES) stabCount++;
-      stabLastAdjMs = nowMs;
-      if (stabCount >= SYSID_STABILIZE_SAMPLES) {
-        float sum = 0; for (uint8_t i = 0; i < SYSID_STABILIZE_SAMPLES; i++) sum += stabRing[i];
-        float avg = sum / SYSID_STABILIZE_SAMPLES;
-        if (fabsf(avg - FIELDCUT_OPERATE_A) < SYSID_STABILIZE_BAND_A) {
-          queueConsoleMessageF("Field-cut: current steady at %.1f A (duty %.1f%%) — freezing duty", avg, operateDuty);
-          phase = 2; phaseStartMs = nowMs;
-        }
-      }
-    }
-    dutyOut = operateDuty;
-    // Backstop: if the current never holds in band (e.g. hunting), don't hang — freeze the current
-    // duty and proceed. fieldCutProcess still rejects the run if the resulting baseline is unusable.
-    if (phase == 1 && (nowMs - phaseStartMs) >= SYSID_STABILIZE_TIMEOUT_MS) {
-      queueConsoleMessageF("Field-cut: current never settled — freezing duty %.1f%% and proceeding", operateDuty);
+    if (settled) {
+      freezeDuty = lastAppliedDuty;
+      fieldCutCcActive = false;
+      // Restore the pre-test setpoint BEFORE returning true: the SystemID resume snapshot fires on
+      // this tick's rising edge (after this call) and must capture the pre-test value, not the 30 A
+      // test target — otherwise test end would re-assert the test current.
+      setpointLimited = fcPreSetpoint;
+      queueConsoleMessageF("Field-cut: settled at %.1f A — freezing duty %.1f%%", ampsEma, freezeDuty);
       phase = 2; phaseStartMs = nowMs;
+      fieldCutPhase = 1;
+      dutyOut = freezeDuty;
+      return true;
     }
-    return true;
+    return false;
   }
 
-  // ── FREEZE: duty is now FIXED at operateDuty (loop off). Hold it steady FIELDCUT_FREEZE_MS so the
-  //   field sits at a constant operating point, and average the current over the hold as the pre-cut
-  //   baseline. The decay then starts from a known, settled value, not a mid-adjustment transient. ──
+  // ── HOLD: duty FROZEN at freezeDuty for FIELDCUT_HOLD_MS — a constant, settled operating point.
+  //   Baseline = ADS average over the last 2.5 s; high calibration point = four spaced 500 ms ring
+  //   grabs across the SAME 2.5 s (windows [2.0-2.5] [2.8-3.3] [3.6-4.1] [4.4-4.9] s). ──
   if (phase == 2) {
-    dutyOut = operateDuty; fieldCutPhase = 0;
-    baseSum += ampsRaw; baseN++;
-    if (nowMs - phaseStartMs >= FIELDCUT_FREEZE_MS) {
-      fieldCutBaseA = (baseN > 0) ? (float)(baseSum / baseN) : ampsRaw;
+    dutyOut = freezeDuty; fieldCutPhase = 1;
+    uint32_t el = nowMs - phaseStartMs;
+    if (el >= FIELDCUT_HOLD_MS - 2500UL) { adsHoldSum += ampsRaw; adsHoldN++; }
+    if (holdGrabs < 4 && el >= 2500UL + 800UL * holdGrabs) {
+      int n = faGrabRecent(fcScratch, FIELDCUT_FAST_N);
+      if (n >= 2000) { faHiSum += fcMeanMv(fcScratch, n); faHiN++; }
+      holdGrabs++;
+    }
+    if (el >= FIELDCUT_HOLD_MS) {
+      fieldCutBaseA = (adsHoldN > 0) ? (float)(adsHoldSum / adsHoldN) : ampsRaw;
       phase = 3; phaseStartMs = nowMs;
     }
     return true;
   }
 
-  // ── CUT/MEASURE: field to floor, sample the decay every fresh CH1 (~10 ms) ──
+  // ── CUT + TAIL: duty steps to MinDuty (the real OV-clamp floor) and stays FIELDCUT_MEAS_MS.
+  //   Decay: fast ring grabbed FIELDCUT_SNAP_MS after the cut; ADS samples recorded for fallback.
+  //   Tail: residual floor (ADS) + low calibration point (four spaced ring grabs) over the same
+  //   final 2.4 s — long after the decay, pure settled floor. ──
   if (phase == 3) {
-    dutyOut = 0.0f; fieldCutPhase = 1;   // sysIDRunning drops the MinDuty/RPM floor → true field-off
-    if (fieldCutCount < FIELDCUT_BUF_SIZE) {
-      fieldCutBuf[fieldCutCount].tMs = nowMs - phaseStartMs;
+    dutyOut = MinDuty; fieldCutPhase = 2;
+    uint32_t el = nowMs - phaseStartMs;
+    if (el <= 2500 && fieldCutCount < FIELDCUT_BUF_SIZE) {
+      fieldCutBuf[fieldCutCount].tMs = el;
       fieldCutBuf[fieldCutCount].amps = ampsRaw;
       fieldCutCount++;
     }
-    if ((nowMs - phaseStartMs >= FIELDCUT_MEAS_MS) || fieldCutCount >= FIELDCUT_BUF_SIZE) {
-      fieldCutProcess();
-      fieldCutActive = 2; fieldCutPhase = 2;
+    if (!snapped && el >= FIELDCUT_SNAP_MS) {
+      fcFastCount = faGrabRecent(fcFastBuf, FIELDCUT_FAST_N);
+      snapped = true;
+    }
+    if (el >= FIELDCUT_MEAS_MS - 2500UL) { adsTailSum += ampsRaw; adsTailN++; }
+    // Four non-overlapping 500 ms windows at 8.0/8.65/9.3/9.95 s — [7.5-8.0][8.15-8.65][8.8-9.3][9.45-9.95]
+    if (tailGrabs < 4 && el >= (FIELDCUT_MEAS_MS - 2000UL) + 650UL * tailGrabs) {
+      int n = faGrabRecent(fcScratch, FIELDCUT_FAST_N);
+      if (n >= 2000) { faLoSum += fcMeanMv(fcScratch, n); faLoN++; }
+      tailGrabs++;
+    }
+    if (el >= FIELDCUT_MEAS_MS) {
+      fieldCutFloorA = (adsTailN > 0) ? (float)(adsTailSum / adsTailN) : ampsRaw;
+      fieldCutActive = 2;
+      fieldCutProcess(faHiN ? (float)(faHiSum / faHiN) : NAN,
+                      faLoN ? (float)(faLoSum / faLoN) : NAN);
+      fieldCutResultsReady = true;   // published BEFORE the ease — a late abort keeps the result
       phase = 4; phaseStartMs = nowMs;
+      fieldCutPhase = 3;
     }
     return true;
   }
 
-  // ── EASE-OUT: ramp duty 0 → entryDuty so re-engagement can't trip a protection ──
+  // ── EASE-OUT: ramp duty MinDuty → entryDuty so re-engagement can't trip a protection ──
   if (phase == 4) {
+    fieldCutPhase = 3;
     float frac = (float)(nowMs - phaseStartMs) / FIELDCUT_EASE_MS;
     if (frac >= 1.0f) {
-      fieldCutResultsReady = true;
       fieldCutActive = 0; fieldCutPhase = 0; fieldCutLastEndMs = millis();
       phase = 0; dutyOut = entryDuty;
       return false;
     }
-    dutyOut = entryDuty * frac;
+    dutyOut = MinDuty + (entryDuty - MinDuty) * frac;
     return true;
   }
   return false;

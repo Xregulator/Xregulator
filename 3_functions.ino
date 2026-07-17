@@ -57,7 +57,7 @@ enum Csv1Index {
   CSV1_iExcessThreshold, // iExcess detector: computed fire threshold E (A ×10) — tuning trace
   CSV1_mExcessEmaPeak,   // iExcess: per-CSV1-frame peak averaged excess (A ×10) — live sparkline
   CSV1_iExcessThreshMin, // iExcess: per-CSV1-frame min fire threshold E (A ×10) — live sparkline
-  CSV1_protEventMask,    // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
+  CSV1_protEventMask,    // event bitmask this frame (1=OV 2=iExcess 4=LoadDump — vertical markers; 8=ApproachBrake — Voltage-plot shading, NOT a protection)
   CSV1_fieldEventReason, // FieldEventReason enum code — plain-English cause the banner shows next to OFF
 
   CSV1_FIELD_COUNT  // = 42
@@ -983,7 +983,7 @@ enum Csv3Index {
   CSV3_testSlewMode,           // manual CC square-wave test slew mode (0=off, 1=default rates, 2=custom)
   CSV3_cvTestSlewMode,         // manual CV square-wave test slew mode (0=off, 1=default rates, 2=custom)
   CSV3_CvBrakeTauMs,           // approach-brake sustained-slope EMA time constant (ms)
-  CSV3_fieldDecayTauMs,        // commissioned field de-energize τ (ms); 30% cold margin already baked in
+  CSV3_fieldDecayTauMs,        // commissioned field drain time, cut→10% of output (ms); 30% cold margin already baked in
   CSV3_commissionManualMask,   // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
@@ -1212,6 +1212,34 @@ void startMdnsOnce() {
   }
 }
 
+// A failed join only prints WiFi.status()==6 ("not connected"), which can't tell a wrong
+// password from an AP refusing the association (e.g. an MVNO hotspot device cap) from an SSID
+// not found. This logs the AP's real disconnect reason so phone-hotspot joins are diagnosable.
+static const char *wifiDisconnectReasonStr(uint8_t reason) {
+  switch (reason) {
+    case 2:   return "AUTH_EXPIRE";
+    case 4:   return "ASSOC_EXPIRE";
+    case 5:   return "ASSOC_TOOMANY (AP at device limit)";
+    case 6:   return "NOT_AUTHED";
+    case 7:   return "NOT_ASSOCED";
+    case 15:  return "4WAY_HANDSHAKE_TIMEOUT (usually wrong password)";
+    case 23:  return "802.1X_AUTH_FAILED";
+    case 24:  return "CIPHER_SUITE_REJECTED";
+    case 200: return "BEACON_TIMEOUT";
+    case 201: return "NO_AP_FOUND (SSID not seen / wrong band)";
+    case 202: return "AUTH_FAIL";
+    case 203: return "ASSOC_FAIL";
+    case 204: return "HANDSHAKE_TIMEOUT (PMF/auth negotiation)";
+    case 205: return "CONNECTION_FAIL";
+    default:  return "see wifi_err_reason_t in esp_wifi_types.h";
+  }
+}
+
+static void onWiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+  uint8_t reason = info.wifi_sta_disconnected.reason;
+  Serial.printf("WiFi STA disconnect reason: %u (%s)\n", reason, wifiDisconnectReasonStr(reason));
+}
+
 // Boot-time (setup) connect only — a blocking wait is fine before the control loop starts.
 // Runtime reconnects go through checkWiFiConnection()'s non-blocking engine.
 bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout) {
@@ -1229,6 +1257,12 @@ bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);          // Disable WiFi power save
   WiFi.setAutoReconnect(false);  // checkWiFiConnection() handles reconnection
+
+  static bool wifiReasonLoggerRegistered = false;
+  if (!wifiReasonLoggerRegistered) {
+    WiFi.onEvent(onWiFiStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    wifiReasonLoggerRegistered = true;
+  }
 
   if (strlen(password) > 0) {
     WiFi.begin(ssid, password);
@@ -2675,7 +2709,7 @@ void setupServer() {
 
         size_t written = 0;
         while (written < maxLen) {
-          // Phase 1: drain 24-byte header
+          // Phase 1: drain the CV_LOG_HEADER_SIZE-byte header
           if (state.headerPos < CV_LOG_HEADER_SIZE) {
             size_t canSend = min(maxLen - written,
                                  (size_t)(CV_LOG_HEADER_SIZE - state.headerPos));
@@ -6853,25 +6887,28 @@ void setupServer() {
     request->send(200, "application/json", buf);
   });
 
-  // Field de-energize τ test (commissioning stage 8): decay samples + fitted τ. The wizard polls this,
-  // plots the current decay, and averages the idle+cruise τ. "aborted" reported independently of "active"
-  // (same rationale as /fieldcurve.json).
+  // Field de-energize τ test (commissioning stage 8): filtered decay trace + fitted τ / 90→10 fall
+  // time. pts.t is ms relative to the detected cut edge (small negative lead-in shows the plateau).
+  // The wizard polls this, plots idle vs cruise, and checks the two τ agree (speed-independence).
+  // "aborted" reported independently of "active" (same rationale as /fieldcurve.json).
   server.on("/fieldcut.json", HTTP_GET, [](AsyncWebServerRequest *request) {
-    std::shared_ptr<char> bufPtr((char *)ps_malloc(4096), [](char *p) { if (p) free(p); });
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(8192), [](char *p) { if (p) free(p); });
     if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
     char *buf = bufPtr.get();
     int pos = 0;
-    pos += snprintf(buf + pos, 4096 - pos, "{\"pts\":[");
-    for (int i = 0; i < fieldCutCount && pos < 3700; i++) {
-      pos += snprintf(buf + pos, 4096 - pos, "%s{\"t\":%lu,\"a\":%.2f}",
-                      i > 0 ? "," : "", (unsigned long)fieldCutBuf[i].tMs, fieldCutBuf[i].amps);
+    pos += snprintf(buf + pos, 8192 - pos, "{\"pts\":[");
+    for (int i = 0; i < fcPlotN && pos < 7400; i++) {
+      pos += snprintf(buf + pos, 8192 - pos, "%s{\"t\":%.1f,\"a\":%.2f}",
+                      i > 0 ? "," : "", fcPlotMs[i], fcPlotA[i]);
     }
-    pos += snprintf(buf + pos, 4096 - pos,
-                    "],\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"tauMs\":%.1f,"
-                    "\"baseA\":%.1f,\"residPct\":%.1f,\"nPts\":%d,\"aborted\":%d,\"abort\":\"%s\"}",
+    pos += snprintf(buf + pos, 8192 - pos,
+                    "],\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"tauMs\":%.1f,\"fallMs\":%.1f,\"drainMs\":%.1f,"
+                    "\"baseA\":%.1f,\"floorA\":%.2f,\"residPct\":%.1f,\"nPts\":%d,\"src\":%d,"
+                    "\"calGain\":%.4f,\"calOffA\":%.3f,\"aborted\":%d,\"abort\":\"%s\"}",
                     fieldCutActive != 0 ? 1 : 0, (int)fieldCutPhase, fieldCutResultsReady ? 1 : 0,
-                    fieldCutOk ? 1 : 0, fieldCutTauMs, fieldCutBaseA, fieldCutResidPct,
-                    fieldCutCount, fieldCutAbortRequested ? 1 : 0, fieldCutAbortMsg);
+                    fieldCutOk ? 1 : 0, fieldCutTauMs, fieldCutFallMs, fieldCutDrainMs, fieldCutBaseA, fieldCutFloorA,
+                    fieldCutResidPct, fcPlotN, (int)fieldCutSrc, faCalGain, faCalOffA,
+                    fieldCutAbortRequested ? 1 : 0, fieldCutAbortMsg);
     request->send(200, "application/json", buf);
   });
 
@@ -7323,7 +7360,7 @@ void setupServer() {
   // Lifetime OV telemetry for the Diagnostics panel. Not in CSV2 (avoids field-count churn) —
   // polled on demand. time_ms as decimal strings: uint64 dwell is beyond JS's 53-bit integers.
   server.on("/getOvTelemetry", HTTP_GET, [](AsyncWebServerRequest *request) {
-    const size_t cap = 2048;  // worst-case body ~1.1 KB (28 bins × two arrays + metadata)
+    const size_t cap = 2048;  // worst-case body ~1.2 KB (31 bins × two arrays + metadata)
     char *buf = (char *)ps_malloc(cap);
     if (!buf) {
       request->send(500, "text/plain", "Out of memory");

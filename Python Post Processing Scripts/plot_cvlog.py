@@ -2,10 +2,13 @@
 plot_cvlog.py
 Diagnostic plotter for CVlog data from the ESP32 alternator regulator.
 
-3 plot windows:
+6 plot windows:
   Plot 1 — Voltage: battV, battV_filt_V, ovFilt_V, targV, vPred | duty% right axis
   Plot 2 — Current command chain (top) + overvoltage protection layers (bottom)
   Plot 3 — Engine RPM + CH1 scheduling jitter | duty% right axis
+  Plot 4 — CV PI term decomposition (P / I / total; no D term in this log format)
+  Plot 5 — Voltage loop firing health (stall diagnostic)
+  Plot 6 — Approach brake: voltage domain + current domain + armed window
 
 State strip (below each plot):
   - binding-cap track (capReason): which layer actually set the current ceiling each tick
@@ -25,7 +28,7 @@ import os
 import tkinter as tk
 from tkinter import messagebox
 from filepicker import pick_file
-from plotlayout import tile_figures
+from plotlayout import tile_figures, enable_pan, block_pan_on
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -176,6 +179,9 @@ numeric_cols = [
     "capReason",
     "ovFilt_V",
     "recovActive",
+    "brakeSlope_Vps",
+    "targSlewed_V",
+    "brakeArmed", "brakeActive", "brakeThresh_Vps", "brakeArmAboveV",
 ]
 
 for col in numeric_cols:
@@ -266,27 +272,87 @@ if np.isnan(_kp) and ("gainKp" in df.columns or "innerKp" in df.columns):
 outer_label = f"VoltageKp={_kp:.4g}  VoltageKi={_ki:.4g}"
 print(f"Voltage loop gains: {outer_label}")
 
-# Extract SlopeBleed constants from the header comment line emitted by cvBinToCsv.
-# Format: "# SlopeBleed: SlopeBleedThresh=0.100V/s SlopeBleedK=50.0A/(V/s) SlopeBleedProxV=0.150V"
-_sb_thresh = float("nan")
-_sb_k      = float("nan")
-_sb_proxv  = float("nan")
+# Extract approach-brake constants from the header comment line emitted by cvBinToCsv.
+# Current format (2026-07-13 onward, the slope-EMA brake):
+#   "# ApproachBrake: CvBrakeThreshVps=0.700V/s SlopeBleedK=50.0A/(V/s) CvBrakeArmV=1.250V CvBrakeTauMs=250ms"
+# Legacy format (the projected-arrival proximity bleed it replaced):
+#   "# SlopeBleed: SlopeBleedThresh=0.100V/s SlopeBleedK=50.0A/(V/s) SlopeBleedProxV=0.150V"
+# Legacy SlopeBleedProxV maps onto the arm distance: both are "how close to target before
+# the bleed may act". Matching on the KEY, not the line tag — "SlopeBleed" alone still
+# appears inside SlopeBleedK on the new line, which silently defeated a tag-based match.
+_brk_thresh = float("nan")   # V/s — gate on the slope EMA
+_brk_k      = float("nan")   # A/(V/s) — drain gain
+_brk_armv   = float("nan")   # V — max distance under target for the brake to arm
+_brk_tau    = float("nan")   # ms — EMA time constant behind brakeSlope_Vps
 for _raw in _lines[:_header_idx]:
-    if "SlopeBleed" in _raw and "SlopeBleedThresh" in _raw:
-        m = re.search(r"SlopeBleedThresh=([\d.]+)", _raw)
-        if m: _sb_thresh = float(m.group(1))
-        m = re.search(r"SlopeBleedK=([\d.]+)", _raw)
-        if m: _sb_k = float(m.group(1))
-        m = re.search(r"SlopeBleedProxV=([\d.]+)", _raw)
-        if m: _sb_proxv = float(m.group(1))
-        break
-_sb_label = (
-    f"SlopeBleedThresh={_sb_thresh:.3g}V/s  "
-    f"SlopeBleedK={_sb_k:.4g}A/(V/s)  "
-    f"SlopeBleedProxV={_sb_proxv:.3g}V"
-    if not np.isnan(_sb_thresh) else "SlopeBleed params not in header (older log)"
+    if "CvBrakeThreshVps" not in _raw and "SlopeBleedThresh" not in _raw:
+        continue
+    m = re.search(r"CvBrakeThreshVps=([\d.]+)", _raw) or re.search(r"SlopeBleedThresh=([\d.]+)", _raw)
+    if m: _brk_thresh = float(m.group(1))
+    m = re.search(r"SlopeBleedK=([\d.]+)", _raw)
+    if m: _brk_k = float(m.group(1))
+    m = re.search(r"CvBrakeArmV=([\d.]+)", _raw) or re.search(r"SlopeBleedProxV=([\d.]+)", _raw)
+    if m: _brk_armv = float(m.group(1))
+    m = re.search(r"CvBrakeTauMs=([\d.]+)", _raw)
+    if m: _brk_tau = float(m.group(1))
+    break
+_brk_label = (
+    f"CvBrakeThreshVps={_brk_thresh:.3g}V/s  "
+    f"SlopeBleedK={_brk_k:.4g}A/(V/s)  "
+    f"CvBrakeArmV={_brk_armv:.3g}V  "
+    f"CvBrakeTauMs={_brk_tau:.4g}ms"
+    if not np.isnan(_brk_thresh) else "Approach-brake params not in header (older log)"
 )
-print(f"Slope bleed params: {_sb_label}")
+print(f"Approach brake params: {_brk_label}")
+
+# Loop-shape toggles (cvBinToCsv "# Toggles:" line). cvHelpersEnabled=0 means the brake never ran at
+# all — without this a reader cannot tell "never triggered" from "switched off".
+_helpers_en = None
+_risegov_en = None
+for _raw in _lines[:_header_idx]:
+    if "cvHelpersEnabled" in _raw:
+        m = re.search(r"cvHelpersEnabled=(\d+)", _raw)
+        if m: _helpers_en = int(m.group(1))
+        m = re.search(r"cvRiseGovEnable=(\d+)", _raw)
+        if m: _risegov_en = int(m.group(1))
+        break
+if _helpers_en is not None:
+    print(f"Toggles: cvHelpersEnabled={_helpers_en} cvRiseGovEnable={_risegov_en}"
+          + ("   *** HELPERS OFF — approach brake did not run ***" if _helpers_en == 0 else ""))
+
+# Approach-brake activity — GROUND TRUTH, not a reconstruction of the gate.
+# The firmware gate passing strictly implies a positive cv_I drain (dtSec is constrain(...,0.001,0.5),
+# SlopeBleedK defaults 50), so "armed" ⟺ slopeBleedAmps_A > 0 on a voltage-loop tick. Do NOT re-derive
+# it from the gate formula: cvHelpersEnabled / fitProbeActive / voltageTargetSlewed drive that gate and
+# a log can be captured with any of them against you.
+# slopeBleedAmps_A lands on the single row of the VL tick that bled, so hold it across the interval that
+# bleed governs cv_I for — the gate is only EVALUATED at 10 Hz while this log samples ~100 Hz, so a
+# per-row test would both stipple the band and overstate its tail by up to one VL interval.
+# cvBinToCsv exports this as brakeActive; derive it identically for CSVs predating that column.
+if "brakeActive" not in df.columns:
+    if all(c in df.columns for c in ("slopeBleedAmps_A", "voltLoopFired")):
+        _held, _vals = 0, []
+        for _sb, _vl in zip(df["slopeBleedAmps_A"], df["voltLoopFired"]):
+            if _sb > 0:  _held = 1
+            elif _vl:    _held = 0
+            _vals.append(_held)
+        df["brakeActive"] = _vals
+    else:
+        df["brakeActive"] = 0
+
+# Arm floor = the voltage above which the distance half of the gate opens. Prefer the exported column
+# (already computed off targSlewed), then targSlewed, then targV — the last is exact only while the rise
+# governor is not clamping a rising target.
+if "brakeArmAboveV" in df.columns and df["brakeArmAboveV"].notna().any():
+    df["armFloor_V"] = df["brakeArmAboveV"]
+elif not np.isnan(_brk_armv):
+    _arm_ref = "targSlewed_V" if ("targSlewed_V" in df.columns and df["targSlewed_V"].notna().any()) else "targV"
+    df["armFloor_V"] = df[_arm_ref] - _brk_armv
+
+# The setpoint the CV PI actually tracks. targV is the RAW target and differs whenever the rise
+# governor clamps; vError_V is logged as (targV − battV), which is NOT the PI's error.
+_targ_pi = "targSlewed_V" if ("targSlewed_V" in df.columns and df["targSlewed_V"].notna().any()) else "targV"
+_targ_pi_exact = (_targ_pi == "targSlewed_V")
 
 # ---------------------------------------------------------------------------
 # 3. Shared drawing helpers
@@ -312,6 +378,7 @@ def _make_checkbox_panel(fig, lines):
     y0 = max(0.05, 0.52 - panel_h / 2)
     ax_cb = fig.add_axes([0.82, y0, 0.16, panel_h])
     ax_cb.set_frame_on(False)
+    ax_cb.set_navigate(False)   # widget axes: never pan or rubber-band zoom it
     check = CheckButtons(ax_cb, labels, [True] * n)
     for lbl_obj, line in zip(check.labels, lines):
         lbl_obj.set_color(line.get_color())
@@ -327,6 +394,7 @@ def _make_checkbox_panel(fig, lines):
 
 
 def draw_state_strip(ax, df):
+    ax._pan_x_only = True   # y here is bar layout, not data
     ax.set_ylim(0, 1)
     ax.set_yticks([])
     ax.set_xlim(df["t_plot"].iloc[0], df["t_plot"].iloc[-1])
@@ -397,6 +465,26 @@ def add_cvbatt_shading(ax, df):
         ax.axvspan(b_start, df["t_plot"].iloc[-1], color="#f9a825", alpha=0.07)
 
 
+BRAKE_COLOR = "#00838f"   # teal — approach brake; distinct from loadDump orange and hardClamp purple
+
+
+def add_brake_shading(ax, df, label=False):
+    """Teal background where the approach brake actually drained cv_I (brakeActive — ground truth)."""
+    if "brakeActive" not in df.columns:
+        return
+    in_b, b_start, first = False, None, True
+    for _, row in df.iterrows():
+        if row["brakeActive"] and not in_b:
+            b_start, in_b = row["t_plot"], True
+        elif not row["brakeActive"] and in_b:
+            ax.axvspan(b_start, row["t_plot"], color=BRAKE_COLOR, alpha=0.16,
+                       label="Approach brake active" if (label and first) else None)
+            in_b, first = False, False
+    if in_b:
+        ax.axvspan(b_start, df["t_plot"].iloc[-1], color=BRAKE_COLOR, alpha=0.16,
+                   label="Approach brake active" if (label and first) else None)
+
+
 COMMISSIONING_COLOR = "#795548"   # brown — matches plot_pidlog / plot_thermallog commissioning mode
 
 
@@ -433,6 +521,7 @@ def save_fig(fig, suffix):
 
 def draw_flag_bars(ax, df):
     """Mode bar + duration bars + VLoop ticks — replaces state strip on all plots."""
+    ax._pan_x_only = True   # y here is row layout, not data — dragging it vertically only hides rows
     flag_h  = 0.18
     spacing = 0.26
     n_rows  = 8   # capReason + cvActive + voltLoopFired + recovery + 4 protection flags
@@ -743,6 +832,8 @@ def _kmove(ev):
 def _krelease(ev):
     _key_drag["on"] = False
 
+block_pan_on(fig2, _key_text)   # the key box owns its own left-drag; don't pan under it
+
 fig2.canvas.mpl_connect("button_press_event", _kpress)
 fig2.canvas.mpl_connect("motion_notify_event", _kmove)
 fig2.canvas.mpl_connect("button_release_event", _krelease)
@@ -826,34 +917,33 @@ draw_flag_bars(ax3s, df)
 
 
 # ---------------------------------------------------------------------------
-# PLOT 4 — CV PID term decomposition
+# PLOT 4 — CV PI term decomposition
 #
 # Reconstructs P, I, D contributions from logged signals + header gains.
 # D term is subtracted in the firmware, so it appears as a negative contribution
 # when voltage is rising. P + I − D should equal Icv_A (before clamping).
 # ---------------------------------------------------------------------------
-fig4 = plt.figure(figsize=(18, 9), num="Plot 4 — PID Term Decomposition")
+fig4 = plt.figure(figsize=(18, 9), num="Plot 4 — PI Term Decomposition")
 gs4  = gridspec.GridSpec(3, 1, height_ratios=[4, 1.5, 0.9], hspace=0.10)
 ax4  = fig4.add_subplot(gs4[0])
 ax4b = fig4.add_subplot(gs4[1], sharex=ax4)
 ax4s = fig4.add_subplot(gs4[2], sharex=ax4)
 plt.setp(ax4.get_xticklabels(),  visible=False)
 plt.setp(ax4b.get_xticklabels(), visible=False)
-fig4.suptitle(f"Plot 4 — CV PID Term Decomposition  |  {outer_label}", fontsize=14, y=0.99)
+fig4.suptitle(f"Plot 4 — CV PI Term Decomposition  |  {outer_label}", fontsize=14, y=0.99)
 add_subtitle(fig4,
-    "What is the voltage loop actually doing? P reacts to filtered voltage error (targV − battV_filt_V), "
-    "I holds the running correction, D backs off current as voltage rises. "
-    "Sum of P + I − D should closely match Icv_A. "
-    "SlopeBleed (orange scatter) shows per-tick cv_I drain on voltage loop ticks where slope exceeded threshold.")
+    "What is the voltage loop actually doing? P reacts to the RAW error the PI is fed, I holds the running "
+    "correction; P + I should closely match Icv_A. There is no D term.\n"
+    "Approach-brake signals live on Plot 6.")
 fig4.subplots_adjust(top=0.90, right=0.80)
 
 # Compute P term from header gains + logged signals.
 # D term removed — VoltageKd is no longer present in the log format.
-# P term uses (targV - battV): the firmware PI error runs on RAW IBV (no filter lag).
-# voltageTargetSlewed (the slewed target) is not logged; targV is used as the target
-# approximation — differs only briefly on CV entry or setpoint change.
+# The firmware PI error is (voltageTargetSlewed − IBV): the rise-governor output, against RAW IBV (no
+# filter lag). NOT the logged vError_V, which is (targV − IBV). On a 55-byte log targSlewed_V is the
+# real thing; older logs fall back to targV and the P term is wrong wherever the governor clamped.
 if not np.isnan(_kp):
-    df["pid_P"] = _kp * (df["targV"] - df["battV"])
+    df["pid_P"] = _kp * (df[_targ_pi] - df["battV"])
     _have_gains = True
 else:
     _have_gains = False
@@ -866,8 +956,9 @@ if _have_gains and "cv_I_A" in df.columns:
 
 # --- Plot P, I, and total ---
 if _have_gains:
+    _p_lbl = "targSlewed_V" if _targ_pi_exact else "targV (approx — targSlewed not logged)"
     ax4.plot(df["t_plot"], df["pid_P"],
-             color="#1565c0", lw=2.0, label=f"P term  =  Kp({_kp:.4g}) × (targV − battV)  (A)")
+             color="#1565c0", lw=2.0, label=f"P term  =  Kp({_kp:.4g}) × ({_p_lbl} − battV)  (A)")
 if "cv_I_A" in df.columns:
     ax4.plot(df["t_plot"], df["cv_I_A"],
              color="#2e7d32", lw=2.0, label="I term  =  cv_I_A  (running integral, A)")
@@ -880,19 +971,7 @@ if "pid_reconstructed" in df.columns:
              color="#888888", lw=1.2, linestyle=":",
              label="P + I  (reconstructed — should match Icv_A)", alpha=0.70)
 
-# Slope bleed drain: scatter on voltage-loop ticks where bleed was non-zero.
-# Units: A drained from cv_I that tick. Only meaningful on voltLoopFired rows.
-if "slopeBleedAmps_A" in df.columns:
-    _sb = df[(df["voltLoopFired"] == 1) & (df["slopeBleedAmps_A"] > 0)].copy()
-    if not _sb.empty:
-        ax4.scatter(_sb["t_plot"], _sb["slopeBleedAmps_A"],
-                    s=28, color="#f57c00", zorder=5,
-                    label="SlopeBleed drain (A per VL tick — actual cv_I drain)")
-        ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
-    else:
-        ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
-else:
-    ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
+ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
 ax4.set_ylabel("Current contribution (A)")
 ax4.grid(**GRID_KW)
 ax4_d = add_duty_axis(ax4)
@@ -903,32 +982,23 @@ _leg4.set_draggable(True)
 add_ov_shading(ax4, df)
 add_voltloop_vlines(ax4, df)
 
-# vError context panel — the RAW error is what the firmware feeds to Kp; the filtered
-# error is shown for reference only (display EMA, VoltageFilterTC).
-df["filt_error_V"] = df["targV"] - df["battV_filt_V"]
+# vError context panel. vError_V is logged as (targV − battV) — NOT the error the PI runs on, which is
+# (targSlewed − battV) and is plotted separately when the log carries it. The filtered error is
+# reference only (display EMA, VoltageFilterTC).
+df["filt_error_V"] = df[_targ_pi] - df["battV_filt_V"]
 ax4b.plot(df["t_plot"], df["vError_V"],
-          color="#212121", lw=1.8, alpha=0.90, label="vError_V  (raw error fed to P term)")
+          color="#212121", lw=1.8, alpha=0.90, label="vError_V  (logged: targV − battV)")
+if _targ_pi_exact:
+    df["pi_error_V"] = df["targSlewed_V"] - df["battV"]
+    ax4b.plot(df["t_plot"], df["pi_error_V"],
+              color="#c62828", lw=1.4, alpha=0.85,
+              label="targSlewed_V − battV  (the error the PI actually runs on)")
 ax4b.plot(df["t_plot"], df["filt_error_V"],
           color="#9e9e9e", lw=1.2, linestyle="--", alpha=0.70, label="targV − battV_filt_V  (display EMA, reference)")
 ax4b.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
 ax4b.set_ylabel("vError (V)")
 
-# cvDSlope on a right twin axis — V/s scale is very different from V error scale.
-# cvDSlope = the input signal (purple); SlopeBleedThresh = threshold reference line
-# kept in the slope-bleed orange family to visually link it to slopeBleedAmps_A scatter above.
-if "cvDSlope_Vps" in df.columns:
-    _ax4b_slope = ax4b.twinx()
-    _ax4b_slope.plot(df["t_plot"], df["cvDSlope_Vps"],
-                     color="#7b1fa2", lw=1.4, alpha=0.80, linestyle="-.",
-                     label="cvDSlope  (V/s — slope bleed input)")
-    if not np.isnan(_sb_thresh):
-        _ax4b_slope.axhline(_sb_thresh, color="#f57c00", linewidth=1.0, linestyle="--",
-                            alpha=0.75, label=f"SlopeBleedThresh ({_sb_thresh:.3g} V/s)")
-    _ax4b_slope.set_ylabel("cvDSlope (V/s)", color="#7b1fa2", fontsize=11)
-    _ax4b_slope.tick_params(axis="y", colors="#7b1fa2", labelsize=10)
-    _h4b_slope = [l for l in _ax4b_slope.get_lines() if not l.get_label().startswith("_")]
-else:
-    _h4b_slope = []
+_h4b_slope = []
 
 ax4b.grid(**GRID_KW)
 _h4b = [l for l in ax4b.get_lines() if not l.get_label().startswith("_")]
@@ -1039,10 +1109,147 @@ if len(_fires) > 1 and "voltLoopInterval_ms" in df.columns:
 
 
 # ---------------------------------------------------------------------------
+# PLOT 6 — Approach Brake
+# Everything the brake gate touches, on one time base: the voltage domain it watches
+# (top), the current domain it acts on (bottom), and the armed window across both.
+# ---------------------------------------------------------------------------
+# Row 1 is split left/right: amps and V/s are unrelated scales and sharing one frame with a twin axis
+# made both unreadable. Both still sharex with the voltage panel, so the linked zoom drives all three.
+fig6 = plt.figure(figsize=(18, 10), num="Plot 6 — Approach Brake")
+gs6  = gridspec.GridSpec(3, 2, height_ratios=[3.2, 2.6, 0.9], hspace=0.13, wspace=0.16)
+ax6  = fig6.add_subplot(gs6[0, :])
+ax6b = fig6.add_subplot(gs6[1, 0], sharex=ax6)   # current domain
+ax6c = fig6.add_subplot(gs6[1, 1], sharex=ax6)   # slope domain (the gate signal)
+ax6s = fig6.add_subplot(gs6[2, :], sharex=ax6)
+plt.setp(ax6.get_xticklabels(), visible=False)
+fig6.suptitle(f"Plot 6 — Approach Brake  |  {outer_label}", fontsize=14, y=0.99)
+add_subtitle(fig6,
+    f"{_brk_label}\n"
+    "Teal band = brake actually draining cv_I (ground truth, held across the 10 Hz gate tick).  "
+    "Orange scatter = the drain itself.")
+fig6.subplots_adjust(top=0.88, right=0.80)
+
+# --- 6a: voltage domain ---
+ax6.plot(df["t_plot"], df["battV"],
+         color="#1565c0", lw=2.5, label="battV (measured)")
+ax6.plot(df["t_plot"], df["battV_filt_V"],
+         color="#90caf9", lw=1.8, linestyle="--", alpha=0.90, label="battV_filt_V (EMA — gate's arm-distance input)")
+if "ovFilt_V" in df.columns and df["ovFilt_V"].notna().any():
+    ax6.plot(df["t_plot"], df["ovFilt_V"],
+             color="#6a1b9a", lw=1.8, alpha=0.90, label="ovFilt_V (G2 comparator input)")
+# The governor output — the setpoint the PI tracks. Only diverges from targV on a RISING target, which
+# is exactly when overshoot is studied, so it is drawn whenever the log carries it. Drawn UNDER targV
+# (thicker, solid) so that when the two coincide the dashed targV still reads on top of it, rather than
+# one silently hiding the other.
+if _targ_pi_exact:
+    ax6.plot(df["t_plot"], df["targSlewed_V"],
+             color="#ff8f00", lw=3.0, alpha=0.90,
+             label="targSlewed_V (governor output — what the PI tracks)")
+ax6.plot(df["t_plot"], df["targV"],
+         color="#e91e63", lw=1.8, linestyle="--", label="targV (raw setpoint)")
+# Arm floor: at/above this line the brake is close enough to target to arm. Tracks a moving setpoint.
+if "armFloor_V" in df.columns:
+    _af_ref = "targSlewed" if _targ_pi_exact else "targV"
+    ax6.plot(df["t_plot"], df["armFloor_V"],
+             color="#00838f", lw=1.4, linestyle=":", alpha=0.85,
+             label=f"{_af_ref} − CvBrakeArmV ({_brk_armv:.3g} V) — arm floor")
+ax6.set_ylabel("Voltage (V)")
+ax6.grid(**GRID_KW)
+ax6_d = add_duty_axis(ax6)
+_h6 = [l for l in ax6.get_lines() if not l.get_label().startswith("_")]
+_h6_duty = [l for l in ax6_d.get_lines() if not l.get_label().startswith("_")]
+# Legends sit lower-right: on a brake log the episode is a rise INTO target, so the upper-left
+# quadrant every other plot uses is exactly where the event is. Draggable if a log breaks that.
+_leg6 = ax6_d.legend(_h6 + _h6_duty, [l.get_label() for l in _h6 + _h6_duty], loc="lower right", fontsize=9)
+_leg6.set_draggable(True)
+add_brake_shading(ax6, df)
+add_ov_shading(ax6, df)
+
+# --- 6b: current domain + the gate signal ---
+if "iMeas_A" in df.columns:
+    ax6b.plot(df["t_plot"], df["iMeas_A"],
+              color="#c62828", lw=2.0, alpha=0.90, label="Actual current  (iMeas_A)")
+if "spLimited_A" in df.columns:
+    ax6b.plot(df["t_plot"], df["spLimited_A"],
+              color="#2e7d32", lw=2.0, label="Current target — PID command  (spLimited_A)")
+if "Icv_A" in df.columns:
+    ax6b.plot(df["t_plot"], df["Icv_A"],
+              color="#e91e63", lw=1.8, linestyle="--", alpha=0.85, label="CV setpoint  (Icv_A — what the brake drains)")
+# Ground truth: drain actually applied, VL ticks only. No scatter = brake never fired,
+# whatever the reconstructed band says.
+if "slopeBleedAmps_A" in df.columns:
+    _sb6 = df[(df["voltLoopFired"] == 1) & (df["slopeBleedAmps_A"] > 0)]
+    if not _sb6.empty:
+        ax6b.scatter(_sb6["t_plot"], _sb6["slopeBleedAmps_A"],
+                     s=42, color="#f57c00", zorder=6, edgecolor="#e65100", linewidth=0.6,
+                     label="Brake drain (A off cv_I this VL tick — ground truth)")
+ax6b.set_ylabel("Current (A)")
+ax6b.set_xlabel(time_label, fontsize=11)
+ax6b.grid(**GRID_KW)
+ax6b.set_title("Current domain — what the brake drains", fontsize=10, color="#444444", style="italic", pad=4)
+add_brake_shading(ax6b, df)
+_h6b = [l for l in ax6b.get_lines() if not l.get_label().startswith("_")]
+_sc6 = [c for c in ax6b.collections if not c.get_label().startswith("_")]
+_leg6b = ax6b.legend(_h6b + _sc6, [a.get_label() for a in _h6b + _sc6], loc="lower right", fontsize=9)
+_leg6b.set_draggable(True)
+
+# --- 6c: the gate signal, on its own axes (V/s never shares a frame with amps) ---
+# brakeSlope_Vps IS the gated signal (g_cvBrakeSlopeEma); cvDSlope_Vps is its raw input, shown faint
+# for reference — the threshold applies to the EMA only, never to cvDSlope.
+if "brakeSlope_Vps" in df.columns:
+    ax6c.plot(df["t_plot"], df["brakeSlope_Vps"],
+              color="#00838f", lw=1.8, alpha=0.95,
+              label="brakeSlope_Vps  (rise EMA — the gated signal)")
+if "cvDSlope_Vps" in df.columns:
+    ax6c.plot(df["t_plot"], df["cvDSlope_Vps"],
+              color="#b0bec5", lw=1.0, linestyle=":", alpha=0.80,
+              label="cvDSlope_Vps  (raw 500ms diff — EMA input, NOT gated)")
+if not np.isnan(_brk_thresh):
+    ax6c.axhline(_brk_thresh, color="#f57c00", linewidth=1.2, linestyle="--",
+                 alpha=0.85, label=f"CvBrakeThreshVps ({_brk_thresh:.3g} V/s)")
+ax6c.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
+ax6c.set_ylabel("Rise slope (V/s)")
+ax6c.set_xlabel(time_label, fontsize=11)
+ax6c.grid(**GRID_KW)
+ax6c.set_title("Gate domain — why it armed (EMA vs threshold)", fontsize=10, color="#444444", style="italic", pad=4)
+add_brake_shading(ax6c, df)
+_h6c = [l for l in ax6c.get_lines() if not l.get_label().startswith("_")]
+_leg6c = ax6c.legend(_h6c, [l.get_label() for l in _h6c], loc="lower right", fontsize=9)
+_leg6c.set_draggable(True)
+
+_cb6 = _make_checkbox_panel(fig6, _h6 + _h6_duty + _h6b + _h6c)
+
+draw_flag_bars(ax6s, df)
+
+# Episode summary. Contiguous brakeActive runs = one engagement, matching the firmware's ≥1s-quiet
+# re-arm rule closely enough for counts to line up with the console's "Approach brake #N" messages.
+if "brakeActive" in df.columns and df["brakeActive"].any():
+    _bg = (df["brakeActive"].diff() == 1).cumsum()
+    _eps6 = [g for _, g in df[df["brakeActive"] == 1].groupby(_bg)]
+    print(f"Approach brake: {len(_eps6)} engagement(s)")
+    for _i6, _g6 in enumerate(_eps6, 1):
+        _drain = _g6.loc[_g6["voltLoopFired"] == 1, "slopeBleedAmps_A"]
+        _fired = _drain[_drain > 0]
+        print(f"  #{_i6}: t={_g6['t_s'].iloc[0]:.3f}–{_g6['t_s'].iloc[-1]:.3f}s  "
+              f"peak slope={_g6['brakeSlope_Vps'].max():.3f} V/s  "
+              f"{len(_fired)} drain tick(s), {_fired.sum():.2f} A total, peak {_fired.max() if len(_fired) else 0:.2f} A")
+elif _helpers_en == 0:
+    print("Approach brake: never engaged — cvHelpersEnabled=0, the brake was switched OFF")
+else:
+    # Nearest miss: how close the EMA got to the threshold. Answers "why didn't it fire?" without a re-run.
+    _msg = "Approach brake: never engaged in this log"
+    if "brakeSlope_Vps" in df.columns and not np.isnan(_brk_thresh):
+        _pk = df["brakeSlope_Vps"].max()
+        _msg += f"  (peak rise EMA {_pk:.3f} V/s vs threshold {_brk_thresh:.3g} V/s"
+        _msg += " — never crossed)" if _pk <= _brk_thresh else " — crossed, so the distance gate held it off)"
+    print(_msg)
+
+
+# ---------------------------------------------------------------------------
 # Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
 # ---------------------------------------------------------------------------
-_all_primary_axes = [ax1, ax2a, ax3, ax4, ax5]
-_all_figs         = [fig1, fig2, fig3, fig4, fig5]
+_all_primary_axes = [ax1, ax2a, ax3, ax4, ax5, ax6]
+_all_figs         = [fig1, fig2, fig3, fig4, fig5, fig6]
 _syncing = [False]
 
 def _on_xlim_changed(changed_ax):
@@ -1061,6 +1268,11 @@ def _on_xlim_changed(changed_ax):
 
 for _ax in _all_primary_axes:
     _ax.callbacks.connect("xlim_changed", _on_xlim_changed)
+
+# Grab-and-drag panning on every window. Panning x fires the xlim_changed sync above, so a drag in
+# one figure carries the others with it — same as a zoom.
+for _fig in _all_figs:
+    enable_pan(_fig)
 
 # ---------------------------------------------------------------------------
 # File Trimmer
@@ -1116,6 +1328,8 @@ def _do_trim(event=None):
 _ax_trim_s   = fig1.add_axes([0.12, 0.018, 0.10, 0.05])
 _ax_trim_e   = fig1.add_axes([0.28, 0.018, 0.10, 0.05])
 _ax_trim_go  = fig1.add_axes([0.40, 0.018, 0.04, 0.05])
+for _ax_w in (_ax_trim_s, _ax_trim_e, _ax_trim_go):
+    _ax_w.set_navigate(False)   # widget axes: never pan or rubber-band zoom them
 _tb_trim_start = TextBox(_ax_trim_s, "Start (s) ", initial="0")
 _tb_trim_end   = TextBox(_ax_trim_e, "End (s) ",   initial=str(round(_trim_total_s, 1)))
 _btn_trim_go   = MplButton(_ax_trim_go, "Go", color="#1565c0", hovercolor="#0d47a1")

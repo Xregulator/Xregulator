@@ -2288,7 +2288,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g2">G2</span>
                       Trip Margin Above Target (OvMeasMargin) (V) (<span id="OvMeasMarginV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Group 2 trips when the filtered battery voltage exceeds the charge target by this margin. Lower = engages sooner. Set it above the worst filtered-signal ripple you see while holding target, so ordinary fluctuation can't trip it. Rescales automatically with the system voltage set in Vessel Info. Does not affect the iExcess detectors (Group 3/4) — see their own Strict Over-Current Band.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Group 2 trips when the filtered battery voltage exceeds the charge target by this margin, then drops the field to its floor until the voltage falls back to target — self-releasing, no lockout. Lower = engages sooner. Set it above the worst filtered-signal ripple you see while holding target, so ordinary fluctuation can't trip it. On lead-acid and AGM it can sit wider, since brief voltage excursions don't harm those chemistries; lithium is kept tight because it tolerates overvoltage poorly. Rescales automatically with the system voltage set in Vessel Info. Does not affect the iExcess detectors (Group 3/4) — see their own Strict Over-Current Band.</span></span>
                       <span class="sinfo" data-sinfo="ovG2" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
@@ -2718,8 +2718,8 @@
                   <article class="protections-param" data-groups="g1 g2">
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span>
-                      Field Decay Time Constant (ms) (<span id="fieldDecayTauMs_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long the alternator field coil takes to electrically drain once the field is cut — its de-energize time constant, in milliseconds. Measured by the Field Decay commissioning step, which stores the average of the idle and cruise measurements plus a 30% cold-coil margin; the number here is that final value. Editing it overrides the stored value directly — no margin is re-applied.</span></span>
+                      Field Drain Time (ms) (<span id="fieldDecayTauMs_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long the alternator field coil takes to drain once the field is cut, measured from the cut until output falls to 10% of its pre-cut level, in milliseconds. Measured by the Field Decay commissioning step, which stores the combined idle/cruise result plus a 30% cold-coil margin; the number here is that final value. The over-voltage response holds a field cut at least this long before treating the coil as drained. Editing it overrides the stored value directly — no margin is re-applied.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -11438,11 +11438,9 @@
   
     <div id="livedata-diag" class="sub-tab-content">
 
-      <div class="settings-card" style="padding-top:0;">
-        <div class="alt-tabs alt-tabs-primary">
-          <button class="alt-tab-btn alt-tab-btn-primary diag-panel-tab active" onclick="showDiagPanel('alternator', event)">Alternator</button>
-          <button class="alt-tab-btn alt-tab-btn-primary diag-panel-tab req-batt-current" onclick="showDiagPanel('battery', event)">Battery</button>
-        </div>
+      <div class="diag-panel-tabs">
+        <button class="diag-panel-tab active" onclick="showDiagPanel('alternator', event)">Alternator</button>
+        <button class="diag-panel-tab req-batt-current" onclick="showDiagPanel('battery', event)">Battery</button>
       </div>
 
       <div id="diag-panel-alternator" class="diag-panel active">
@@ -11906,7 +11904,11 @@
         <div class="settings-card">
           <p style="font-size:0.8em;color:var(--text-muted);margin:0 0 10px 0;">
             Lifetime record of bus-voltage excursions above the Bulk target, from any charge source
-            (alternator, solar, shore). It survives restarts and firmware updates; a full power-down
+            (alternator, solar, shore). Each band measures how far the voltage climbed above the Bulk
+            target in effect at that moment — the record follows the target wherever it is set or
+            adjusted. Coverage is continuous from the Bulk target to more than 15&nbsp;V above it:
+            0.2&nbsp;V resolution through ≈18&nbsp;V on a 12&nbsp;V system, 1&nbsp;V bands beyond, and
+            an overflow band at the top. It survives restarts and firmware updates; a full power-down
             (battery disconnected) starts it fresh.
           </p>
 
@@ -11956,7 +11958,10 @@
             </table>
           </div>
           <p style="font-size:0.74em;color:var(--text-muted);margin:8px 0 0 0;">
-            Bands the voltage has never entered are not listed. The lowest bands accumulate large
+            Only bands with activity are listed, plus the first empty band above them — that zero row
+            marks where the record continues upward. Band labels are printed using the
+            current Bulk setting — if Bulk is later changed, past time keeps its above-target meaning
+            and the printed voltages shift to match. The lowest bands accumulate large
             event counts from normal regulation ripple crossing band edges — total time is the
             better severity measure there.
           </p>
@@ -12354,7 +12359,7 @@
         <hr />
         <div class="form-row">
           <div class="form-label">Filename Tag <small style="color: #888; font-size: 11px;">(optional)</small>
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Optional text added to the end of every downloaded log filename, after the date/time — e.g. "dock-test" gives pidlog_20260710_1432_dock-test.csv. Leave blank for none. Spaces and unusual characters become dashes.</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Optional text added to the end of every downloaded log filename, after the date/time — e.g. "dock-test" gives pidlog_20260710_143205_dock-test.csv. Leave blank for none. Spaces and unusual characters become dashes. The tag is locked in when you press Download — retyping it mid-transfer won't rename files already in flight.</span></span>
           </div>
           <div class="form-input">
             <input type="text" id="logNameSuffix" maxlength="40" placeholder="e.g. dock-test" style="width: 100%;" />

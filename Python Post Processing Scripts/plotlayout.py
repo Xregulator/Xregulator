@@ -1,16 +1,114 @@
 """
-plotlayout.py — tile all open matplotlib (TkAgg) figure windows into a grid so
-the multi-plot analyzers stop opening full-screen stacked on top of each other.
+plotlayout.py — shared window/interaction helpers for the multi-plot analyzers.
 
-Call tile_figures() once, right before plt.show(). The grid auto-sizes to the
-number of open figures so none overlap:
+tile_figures() — tile all open matplotlib (TkAgg) figure windows into a grid so
+the analyzers stop opening full-screen stacked on top of each other.
+Call it once, right before plt.show(). The grid auto-sizes to the number of open
+figures so none overlap:
     1-4 -> 2x2 (true quadrants),  5-6 -> 3x2,  7-9 -> 3x3,  10-12 -> 4x3.
 Pass cols/rows to force a specific layout (e.g. tile_figures(cols=2, rows=2)).
 
-No-op on a non-Tk backend or when no windows exist, so it is always safe to call.
+enable_pan() — left-drag anywhere in a plot to pan it, with no toolbar mode to
+select first. Call once per figure, after the axes exist.
+
+Both are no-ops on a non-Tk backend / when no windows exist, so they are always
+safe to call.
 """
 
 import matplotlib.pyplot as plt
+
+
+# ---------------------------------------------------------------------------
+# Grab-and-drag panning
+# ---------------------------------------------------------------------------
+# Left-drag inside a plot pans it — no need to arm the toolbar's pan tool first.
+# Built on the Axes' own start_pan/drag_pan/end_pan (the same machinery the toolbar
+# drives) so log scales, fixed aspect and shared axes all behave.
+#
+# Per-axes opt-outs, both honoured here:
+#   ax.set_navigate(False)   -> never panned. Correct for widget axes (CheckButtons,
+#                               TextBox, Button): it also stops the toolbar's rubber-band
+#                               zoom from mangling them.
+#   ax._pan_x_only = True    -> drag pans x but never y. For the event/state strips, whose
+#                               y range is a fixed 0..1 layout, not data.
+#
+# Drag ownership: a press is ignored when the toolbar has a mode armed, when it lands on a
+# draggable legend, or when it lands on an artist registered in fig._pan_block_artists —
+# otherwise a legend drag would pan the axes underneath it at the same time.
+
+def _pan_axes_at(fig, x, y):
+    """Every navigable axes whose box contains the point — plural, because a twinx() pair
+    shares one box and both must move together or the two y scales silently desync."""
+    return [ax for ax in fig.axes if ax.get_navigate() and ax.bbox.contains(x, y)]
+
+
+def _pan_blocked(fig, event):
+    for ax in fig.axes:
+        leg = ax.get_legend()
+        if leg is None or not leg.get_visible():
+            continue
+        try:
+            if leg.get_window_extent().contains(event.x, event.y):
+                return True
+        except Exception:
+            pass
+    for art in getattr(fig, "_pan_block_artists", ()):
+        try:
+            if art.get_window_extent(fig.canvas.get_renderer()).contains(event.x, event.y):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def enable_pan(fig):
+    """Left-drag to pan every navigable axes under the cursor. Hold x or y to constrain."""
+    state = {"axes": []}
+
+    def _on_press(event):
+        if event.button != 1 or event.inaxes is None:
+            return
+        tb = getattr(fig.canvas, "toolbar", None)
+        if tb is not None and getattr(tb, "mode", ""):
+            return                      # toolbar zoom/pan is armed; it owns the drag
+        if _pan_blocked(fig, event):
+            return
+        axes = _pan_axes_at(fig, event.x, event.y)
+        if not axes:
+            return
+        for ax in axes:
+            ax.start_pan(event.x, event.y, event.button)
+        state["axes"] = axes
+
+    def _on_motion(event):
+        if not state["axes"]:
+            return
+        for ax in state["axes"]:
+            key = "x" if getattr(ax, "_pan_x_only", False) else event.key
+            try:
+                ax.drag_pan(1, key, event.x, event.y)
+            except Exception:
+                pass
+        fig.canvas.draw_idle()
+
+    def _on_release(event):
+        for ax in state["axes"]:
+            try:
+                ax.end_pan()
+            except Exception:
+                pass
+        state["axes"] = []
+
+    fig.canvas.mpl_connect("button_press_event", _on_press)
+    fig.canvas.mpl_connect("motion_notify_event", _on_motion)
+    fig.canvas.mpl_connect("button_release_event", _on_release)
+
+
+def block_pan_on(fig, *artists):
+    """Register artists that own their own left-drag, so a press on them never also pans."""
+    cur = list(getattr(fig, "_pan_block_artists", ()))
+    cur.extend(artists)
+    fig._pan_block_artists = cur
 
 
 def _grid_for(n):

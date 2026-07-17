@@ -326,7 +326,9 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineFreqStart "SysIDSineFStrt"
 #define NK_systemIDSineFreqEnd "SysIDSineFEnd"
 #define NK_sysidPlantTau "sysidPlantTau"
-#define NK_fieldDecayTau "fieldDecayTau"       // commissioned field de-energize τ (ms), 30% cold-margin baked in
+#define NK_fieldDecayTau "fieldDecayTau"       // commissioned field drain time cut→10% (ms), 30% cold-margin baked in; key name is historical
+#define NK_faCalGain "faCalGain"               // fast alt-current channel amps calibration: gain vs ADS1115 (field-decay test writes it)
+#define NK_faCalOffA "faCalOffA"               // fast alt-current channel amps calibration: offset (A)
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
@@ -1848,6 +1850,13 @@ void resetSensorWindow() {
   currentWindow->dutyCycle_area_v_us = 0;
   currentWindow->dutyCycle_valid_us = 0;
 
+  currentWindow->active_us = 0;
+  currentWindow->battVolt_on_area_v_us = 0;
+  currentWindow->battCurr_on_area_v_us = 0;
+  currentWindow->altCurr_on_area_v_us = 0;
+  currentWindow->victronCurr_on_area_v_us = 0;
+  currentWindow->dutyCycle_on_area_v_us = 0;
+
   currentWindow->altZero_min = 999900;
   currentWindow->altZero_max = -999900;
   currentWindow->altZero_area_v_us = 0;
@@ -2010,6 +2019,10 @@ void updateSensorWindow() {
   // If this is the first call (delta_us == 0), skip accumulation but still update min/max
   bool shouldAccumulate = (delta_us > 0);
 
+  // Engine-running-weighted accumulators — engine spinning (tach gate), NOT field-on,
+  // so the on-avg stays stable across bulk/absorption/float.
+  bool engineOn = engineSpinning();
+
   // Battery voltage
   int32_t battVolt = (int32_t)(getBatteryVoltage() * 100.0);
   if (battVolt < currentWindow->battVolt_min) currentWindow->battVolt_min = battVolt;
@@ -2017,6 +2030,10 @@ void updateSensorWindow() {
   if (shouldAccumulate) {
     currentWindow->battVolt_area_v_us += (int64_t)battVolt * delta_us;
     currentWindow->battVolt_valid_us += delta_us;
+    if (engineOn) {
+      currentWindow->active_us += delta_us;
+      currentWindow->battVolt_on_area_v_us += (int64_t)battVolt * delta_us;
+    }
   }
 
   // Battery current
@@ -2026,6 +2043,7 @@ void updateSensorWindow() {
   if (shouldAccumulate) {
     currentWindow->battCurr_area_v_us += (int64_t)battCurr * delta_us;
     currentWindow->battCurr_valid_us += delta_us;
+    if (engineOn) currentWindow->battCurr_on_area_v_us += (int64_t)battCurr * delta_us;
   }
 
   // Alternator current
@@ -2035,6 +2053,7 @@ void updateSensorWindow() {
   if (shouldAccumulate) {
     currentWindow->altCurr_area_v_us += (int64_t)altCurr * delta_us;
     currentWindow->altCurr_valid_us += delta_us;
+    if (engineOn) currentWindow->altCurr_on_area_v_us += (int64_t)altCurr * delta_us;
   }
 
   // Victron current
@@ -2044,6 +2063,7 @@ void updateSensorWindow() {
   if (shouldAccumulate) {
     currentWindow->victronCurr_area_v_us += (int64_t)victronCurr * delta_us;
     currentWindow->victronCurr_valid_us += delta_us;
+    if (engineOn) currentWindow->victronCurr_on_area_v_us += (int64_t)victronCurr * delta_us;
   }
 
   // SOC
@@ -2131,6 +2151,7 @@ void updateSensorWindow() {
   if (shouldAccumulate) {
     currentWindow->dutyCycle_area_v_us += (int64_t)duty * delta_us;
     currentWindow->dutyCycle_valid_us += delta_us;
+    if (engineOn) currentWindow->dutyCycle_on_area_v_us += (int64_t)duty * delta_us;
   }
 
   // Dynamic alternator zero
@@ -2287,7 +2308,8 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     // payload_v = ingest payload schema version; bump when this body's shape changes.
     // Edge fn inserts an explicit column whitelist, so it safely ignores this. See CLOUD_PLATFORM.md §3a.
     // v2 adds imu_suspicious (IMU install-validation flag).
-    "\"payload_v\":2,"
+    // v3 adds engine-on-weighted averages (*_onavg) + engine_on_pct coverage.
+    "\"payload_v\":3,"
     "\"current_time_source\":%d,"
     // Battery
     "\"batt_volt_min\":%.2f,\"batt_volt_max\":%.2f,\"batt_volt_avg\":%.2f,"
@@ -2323,6 +2345,10 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     "\"twa_min\":%.2f,\"twa_max\":%.2f,\"twa_avg\":%.2f,"
     "\"cog_avg\":%.2f,\"heading_avg\":%.2f,\"alt_zero_avg\":%.2f,"
     "\"charge_stage\":%d,"
+    // Engine-on-weighted averages (denominator = µs engine was spinning this window)
+    // + coverage. engine_on_pct 0 ⇒ engine never ran ⇒ *_onavg values meaningless (0s).
+    "\"batt_volt_onavg\":%.2f,\"batt_curr_onavg\":%.2f,\"alt_curr_onavg\":%.2f,"
+    "\"victron_curr_onavg\":%.2f,\"duty_cycle_onavg\":%.2f,\"engine_on_pct\":%.2f,"
     // IMU peak motion (per-window aggregates)
     "\"imu_heel_min\":%.2f,\"imu_heel_max\":%.2f,\"imu_heel_avg\":%.2f,"
     "\"imu_pitch_min\":%.2f,\"imu_pitch_max\":%.2f,\"imu_pitch_avg\":%.2f,"
@@ -2388,6 +2414,13 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     SAFE_AVG_100(snap.window.heading_area_v_us, snap.window.heading_valid_us),
     SAFE_AVG_100(snap.window.altZero_area_v_us, snap.window.altZero_valid_us),
     (int)snap.chargeStage,
+    SAFE_AVG_100(snap.window.battVolt_on_area_v_us, snap.window.active_us),
+    SAFE_AVG_100(snap.window.battCurr_on_area_v_us, snap.window.active_us),
+    SAFE_AVG_100(snap.window.altCurr_on_area_v_us, snap.window.active_us),
+    SAFE_AVG_100(snap.window.victronCurr_on_area_v_us, snap.window.active_us),
+    SAFE_AVG_100(snap.window.dutyCycle_on_area_v_us, snap.window.active_us),
+    snap.window.battVolt_valid_us > 0
+      ? 100.0 * (double)snap.window.active_us / (double)snap.window.battVolt_valid_us : 0.0,
     // IMU values read from the frozen ImuSnapshot — values matching the moment
     // the window was rolled, not whatever imuWindow currently holds at upload time.
     snap.imu.heel_min / 100.0, snap.imu.heel_max / 100.0,
@@ -3004,6 +3037,22 @@ void pushLongTermRecord() {
     rec.validMask |= (1u << 23);
   }
   rec.chargeStage = getChargeStageDisplayCode();
+
+  // v4 tail: coverage + engine-on-weighted averages. Coverage = active/observed,
+  // ×2 (0.5% steps), ROUNDED — a window with <0.25% engine time rounds to 0 and is
+  // treated as "engine never ran" (XFF-style discard; the min/max band keeps any spike).
+  // Divisors mirror the LT_ENV calls above. rec zero-init leaves activeFrac 0 otherwise.
+  if (currentWindow->battVolt_valid_us > 0 && currentWindow->active_us > 0) {
+    uint64_t obs = currentWindow->battVolt_valid_us;
+    uint64_t fr = (currentWindow->active_us * 200ULL + obs / 2) / obs;
+    rec.activeFrac = (fr > 200) ? 200 : (uint8_t)fr;
+    int64_t on_us = (int64_t)currentWindow->active_us;
+    rec.onAvg[0] = ltScale((int32_t)(currentWindow->battVolt_on_area_v_us / on_us), 1);
+    rec.onAvg[1] = ltScale((int32_t)(currentWindow->battCurr_on_area_v_us / on_us), 10);
+    rec.onAvg[2] = ltScale((int32_t)(currentWindow->altCurr_on_area_v_us / on_us), 10);
+    rec.onAvg[3] = ltScale((int32_t)(currentWindow->victronCurr_on_area_v_us / on_us), 10);
+    rec.onAvg[4] = ltScale((int32_t)(currentWindow->dutyCycle_on_area_v_us / on_us), 1);
+  }
 
   longTermRing[longTermHead] = rec;
   longTermHead = (longTermHead + 1) % LONGTERM_RING_SIZE;
@@ -4493,6 +4542,15 @@ static inline float faAmpsPerVolt() {
 }
 
 static inline float faMvToAmps(float mv) {
+  // faCalGain/faCalOffA: two-point calibration against the ADS1115 path, learned by the
+  // field-decay test (defaults 1.0/0.0 = uncalibrated). Gain also scales AC amplitudes
+  // (matrix/ripple) — a correction, not a break; offset cancels in anything AC.
+  return (mv - FA_ZERO_MV) * (faAmpsPerVolt() * 0.001f) * faCalGain + faCalOffA;
+}
+
+// UNcalibrated conversion — the field-decay test solves for faCalGain/faCalOffA from
+// nominal readings vs ADS references, so it must see the raw scaling.
+static inline float faMvToAmpsNominal(float mv) {
   return (mv - FA_ZERO_MV) * (faAmpsPerVolt() * 0.001f);
 }
 
@@ -5382,6 +5440,35 @@ size_t faScopeSnapshot(uint8_t *buf, size_t cap) {
     portEXIT_CRITICAL(&faRingMux);
   }
   return need;
+}
+
+// Copy the most recent maxN raw samples (calibrated mV, oldest-first) into dst.
+// Returns samples copied, 0 if the channel isn't sampling. Same mux-held copy as
+// faScopeSnapshot. Consumer: the field-decay test (decay record + calibration means).
+int faGrabRecent(int16_t *dst, int maxN) {
+  if (faChanState != 1 || !faRawRing || !dst || maxN <= 0) return 0;
+  int count = (faTotalSamples >= (uint32_t)FA_RAW_RING_N) ? FA_RAW_RING_N : (int)faTotalSamples;
+  if (count > maxN) count = maxN;
+  if (count <= 0) return 0;
+  portENTER_CRITICAL(&faRingMux);
+  uint16_t head = faRingHead;  // next write = oldest sample when the ring is full
+  // newest `count` samples end just before head
+  int start = (int)head - count;
+  if (faTotalSamples < (uint32_t)FA_RAW_RING_N) {
+    if (start < 0) start = 0;  // partial fill: data is [0, head)
+    memcpy(dst, faRawRing + start, (size_t)count * 2);
+  } else {
+    if (start < 0) start += FA_RAW_RING_N;
+    int tail = FA_RAW_RING_N - start;
+    if (tail >= count) {
+      memcpy(dst, faRawRing + start, (size_t)count * 2);
+    } else {
+      memcpy(dst, faRawRing + start, (size_t)tail * 2);
+      memcpy(dst + tail, faRawRing, (size_t)(count - tail) * 2);
+    }
+  }
+  portEXIT_CRITICAL(&faRingMux);
+  return count;
 }
 
 // Boot init. PSRAM buffers + continuous driver, 6 dB default range. Any failure leaves the

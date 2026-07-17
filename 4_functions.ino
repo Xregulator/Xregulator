@@ -1004,6 +1004,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     } else {
       fieldDecayTauMs = (uint16_t)settingRead(NK_fieldDecayTau).toInt();
     }
+    if (!settingExists(NK_faCalGain)) {
+      settingWrite(NK_faCalGain, String(faCalGain, 4).c_str());
+    } else {
+      faCalGain = settingRead(NK_faCalGain).toFloat();
+    }
+    if (!settingExists(NK_faCalOffA)) {
+      settingWrite(NK_faCalOffA, String(faCalOffA, 3).c_str());
+    } else {
+      faCalOffA = settingRead(NK_faCalOffA).toFloat();
+    }
     // Survives reboots on purpose: a device rescaled while offline must keep suppressing front
     // sync until the cloud wipe lands, or the cloud ships the old-scaled front straight back.
     rpmAxisWipePending = (settingExists(NK_RpmAxisWipePend) && settingRead(NK_RpmAxisWipePend) == "1");
