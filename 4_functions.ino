@@ -1655,7 +1655,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     settingWrite(NK_cvCrossover, String(cvCrossover, 3).c_str());
   }
-  // CV PI zero ρ — NVS key renamed cvKiRatio → cvPiZero (§F.3). Same mint-new-key + migrate (value unchanged).
+  // CV PI zero ρ — NVS key renamed cvKiRatio → cvPiZero. Same mint-new-key + migrate (value unchanged).
   if (settingExists(NK_cvPiZero)) {
     cvPiZero = settingRead(NK_cvPiZero).toFloat();
   } else if (settingExists("cvKiRatio")) {
@@ -1664,6 +1664,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingRemove("cvKiRatio");
   } else {
     settingWrite(NK_cvPiZero, String(cvPiZero, 3).c_str());
+  }
+  if (!settingExists(NK_cvAlpha)) {
+    settingWrite(NK_cvAlpha, String(cvAlpha, 3).c_str());
+  } else {
+    cvAlpha = settingRead(NK_cvAlpha).toFloat();
   }
   if (!settingExists(NK_vTgtRampEnable)) {
     settingWrite(NK_vTgtRampEnable, String((int)vTgtRampEnable).c_str());

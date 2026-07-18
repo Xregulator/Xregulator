@@ -2546,6 +2546,7 @@ const CSV3_FIELDS = [
     "fieldDecayTauMs",               // commissioned field de-energize τ (ms); 30% cold margin baked in
     "commissionManualMask",          // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
     "CvKdMaxTrimA",                  // CV D-term back-off ceiling (A ×10)
+    "cvAlpha",                       // CV auto-gain aggressiveness α (fraction of deadbeat-ohmic gain); ×1000
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5671,7 +5672,7 @@ function updateAllEchosOptimized(data) {
         { key: 'FastSetpointRiseHeadroomV', id: 'FastSetpointRiseHeadroomV_echo', transform: v => (v / 100).toFixed(2) },
         // cvPlantK + the ω slider are rendered in updateCvGainModeUI() (drag-guarded).
         // cvComputedKp/Ki have no echo — cvFitStatus shows committed K_dc→Kp/Ki (JS-computed); CSV3 still carries them.
-        { key: 'cvCrossover',       id: 'cvRespS_echo',           transform: v => Math.round(4 / ((v / 100) || 0.2)) },  // ω_c(rad/s)→settle seconds = 4/ω_c
+        { key: 'cvAlpha',           id: 'cvAlpha_echo',           transform: v => (v / 1000).toFixed(2) },
         { key: 'cvPiZero',          id: 'cvPiZero_echo',          transform: v => (v / 100).toFixed(2) },
         { key: 'vTgtRampUp',        id: 'vTgtRampUp_echo',        transform: v => (v / 1000).toFixed(3) },
         { key: 'vTgtRampDn',        id: 'vTgtRampDn_echo',        transform: v => (v / 1000).toFixed(3) },
@@ -6283,7 +6284,8 @@ const BATTDEF_FW_DEFAULT = {
     VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0, AlternatorHardShutdownV: 15.0,
     capSocLowMax: 20, capMinSpan: 70, capRestFloor: 30, capSettleRate: 2.0, bhStepLowA: 30, bhStepDeltaA: 30,
     CvKdDeadbandVps: 0.50, CvKdArmV: 1.25,
-    vTgtRampUp: 0.15, vTgtRampDn: 0.15
+    vTgtRampUp: 0.15, vTgtRampDn: 0.15,
+    cvAlpha: 0.15, cvPiZero: 0.5
 };
 // Stored NVS string → UI units (everything else is stored in UI units already)
 const BATTDEF_FROM_STORED = {
@@ -6429,6 +6431,11 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
     // rides as 0.30 on 24V / 0.60 on 48V). 12V base 0.15 matches the firmware initializer's seedVScale seed.
     rows.push({ param: 'vTgtRampUp', label: 'Voltage Setpoint — Rise Rate (V/s)', value: r2(0.15 * kV) });
     rows.push({ param: 'vTgtRampDn', label: 'Voltage Setpoint — Fall Rate (V/s)', value: r2(0.15 * kV) });
+
+    // α/ρ are dimensionless and chemistry-independent (the ohmic anchor carries the per-install
+    // variation); proposed so devices tuned under the old crossover rule pick up the current defaults.
+    rows.push({ param: 'cvAlpha', label: 'Voltage Loop Aggressiveness (α)', value: 0.15 });
+    rows.push({ param: 'cvPiZero', label: 'Voltage Loop Ki/Kp Ratio (ρ)', value: 0.5 });
     return { rows, useFloat };
 }
 
@@ -11098,9 +11105,8 @@ function gotoRpmTableHighlightFirstAmps() {
 // ── CV gain-mode UI (Auto ω-based vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
 function updateCvGainModeUI(data) {
     if (data.cvGainMode === undefined) return;
-    // Refresh the live auto-tune constants from the device so the fit preview matches what it will apply.
-    if (data.cvCrossover !== undefined) CV_CROSSOVER_TARGET = (parseFloat(data.cvCrossover) || 40) / 100;
-    if (data.cvPiZero    !== undefined) CV_PI_ZERO          = (parseFloat(data.cvPiZero)    || 70) / 100;
+    if (data.cvPiZero !== undefined) CV_PI_ZERO = (parseFloat(data.cvPiZero) || 50) / 100;
+    if (data.cvAlpha  !== undefined) CV_ALPHA   = (parseFloat(data.cvAlpha)  || 150) / 1000;
     const auto = (parseInt(data.cvGainMode, 10) === 1);
     const autoBlk = document.getElementById('cvAutoBlock');
     const manBlk  = document.getElementById('cvManualBlock');
@@ -11121,20 +11127,19 @@ function updateCvGainModeUI(data) {
             ? `<strong>Active gains:</strong> Kp ${(cKp * tScale).toFixed(1)} / Ki ${(cKi * tScale).toFixed(1)} (12 V-equiv)${scaleTxt} &middot; ${auto ? 'Auto' : 'Manual'}`
             : '<strong>Active gains:</strong> &mdash;';
     }
-    // measured DC gain + computed gains (new measured-K_dc rule — see CV_AUTOTUNE_PLAN.md §E). τ/λ are
-    // retired; only K_dc drives the gains via Kp = ω_target/K_dc, Ki = ρ·Kp (in 12V-equiv space).
-    const K   = (parseFloat(data.cvPlantK) || 0) / 10000;   // V/A (K_dc)
+    // measured ohmic stiffness + computed gains (ohmic-anchor rule): Kp = α/K, Ki = ρ·Kp (12V-equiv space).
+    const K   = (parseFloat(data.cvPlantK) || 0) / 10000;   // V/A — fast (~0.2 s) ohmic stiffness
     const valid = (K > 1e-6);
     const sysV  = window._nominalStored || 12;
     const Knorm = K * (12 / sysV);
-    window._cvKdc = K; window._cvKnorm = Knorm;             // stashed for previewCvResp() (the before-Set preview)
-    const g = valid ? cvGainsFromKnorm(Knorm, CV_CROSSOVER_TARGET, CV_PI_ZERO) : { Kp: 0, Ki: 0 };
+    window._cvKdc = K; window._cvKnorm = Knorm;             // stashed for previewCvAlpha() (the before-Set preview)
+    const g = valid ? cvGainsFromKnorm(Knorm, CV_ALPHA, CV_PI_ZERO) : { Kp: 0, Ki: 0 };
     const Kp = g.Kp, Ki = g.Ki;
     const status = document.getElementById('cvFitStatus');
     if (status) status.innerHTML = valid
-        ? `<strong>From commissioning:</strong> plant gain ${(K * 1000).toFixed(1)} mV/A at this response time &rarr; Kp ${Kp.toFixed(1)} / Ki ${Ki.toFixed(1)} (12 V-equiv)`
+        ? `<strong>From commissioning:</strong> battery stiffness ${(K * 1000).toFixed(1)} mV/A (fast ~0.2 s response) &rarr; Kp ${Kp.toFixed(1)} / Ki ${Ki.toFixed(1)} (12 V-equiv)`
         : 'No fit yet — run the Voltage Control Autotuning step in commissioning. Auto uses safe defaults until then.';
-    previewCvResp();
+    previewCvAlpha();
     renderBattTempDerate();
     syncCvDependentVis();
 }
@@ -11151,26 +11156,21 @@ function syncCvDependentVis() {
     if (dd && derate) dd.style.display = derate.checked ? '' : 'none';
 }
 
-// Live "what Set will apply" preview under the CV Response Time box. Uses the typed seconds if the user is
-// editing, else the device's committed ω (4/sec). Same formula as cvFitStatus / firmware recomputeCvGains so
-// pending and committed only differ by the number being typed.
-function previewCvResp() {
-    const out = document.getElementById('cvRespPreview');
-    const ramp = document.getElementById('cvRespRampNote');   // live field ramp-rate, shown in the tooltip floor note
-    if (ramp) { const r = getEchoText('DutyRampRate_echo'); if (r && r !== '--' && r !== '?') ramp.textContent = r; }
+// Live "what Set will apply" preview under the Aggressiveness (α) box — typed α if editing, else the
+// device's committed value.
+function previewCvAlpha() {
+    const out = document.getElementById('cvAlphaPreview');
     if (!out) return;
-    const el  = document.getElementById('cvRespS_input');
-    let sec = (el && el.value !== '') ? parseFloat(el.value) : (4 / (CV_CROSSOVER_TARGET || 0.2));
-    if (!(sec > 0)) { out.innerHTML = '&nbsp;'; return; }
-    const omega = 4 / sec;
+    const el  = document.getElementById('cvAlpha_input');
+    const alpha = (el && el.value !== '') ? parseFloat(el.value) : CV_ALPHA;
+    if (!(alpha > 0)) { out.innerHTML = '&nbsp;'; return; }
     const Knorm = window._cvKnorm || 0;
     if (!(Knorm > 1e-6)) {
-        out.innerHTML = `≈ ${Math.round(sec)} s settle (ω ≈ ${omega.toFixed(2)} rad/s) — run Voltage Control Autotuning to compute Kp/Ki.`;
+        out.innerHTML = `α = ${alpha.toFixed(2)} — run Voltage Control Autotuning to compute Kp/Ki.`;
         return;
     }
-    const g = cvGainsFromKnorm(Knorm, omega, CV_PI_ZERO || 0.7);
-    const Kp = g.Kp, Ki = g.Ki;
-    out.innerHTML = `Will apply: <strong>Kp ≈ ${Kp.toFixed(1)}</strong>, <strong>Ki ≈ ${Ki.toFixed(1)}</strong> (12 V-equiv) · ω_c ≈ ${omega.toFixed(2)} rad/s · plant gain ${((window._cvKdc || 0) * 1000).toFixed(1)} mV/A at this response time`;
+    const g = cvGainsFromKnorm(Knorm, alpha, CV_PI_ZERO || 0.5);
+    out.innerHTML = `Will apply: <strong>Kp ≈ ${g.Kp.toFixed(1)}</strong>, <strong>Ki ≈ ${g.Ki.toFixed(1)}</strong> (12 V-equiv) · battery stiffness ${((window._cvKdc || 0) * 1000).toFixed(1)} mV/A`;
 }
 
 // Battery-temperature derate readout. Pulls the commissioning reference temp + coefficient from CSV3
@@ -19813,10 +19813,10 @@ function cxFinePrint(phase) {
     case 1: return 'Open-loop field-duty ramp across the full range maps duty→amps, finds the saturation knee, and proposes the plant test\'s wave floor (baseline current) and step size. No feedback control — raw duty only.';
     case 2: return 'Briefly ramps field at each held RPM until output current just begins (the onset knee). The onset follows a 1/RPM law, so those three points fit the whole Min% column, parked a margin below and maintained automatically over alternator life. Above your highest captured RPM the floor is forced to zero, so the field can always shut fully off at speed. Only over-voltage is active during the ramp.';
     case 3: return 'Open-loop sine sweep on field duty identifies the plant (time constant τ, gain, dead time) and proposes the PI gains and filter time constants. This characterizes the alternator\'s own field→current behavior, so it runs on <strong>alternator current</strong> — the same signal the inner loop regulates in every mode. Wave floor and step size carry over from the Field curve step\'s proposal (the Plant Delay tab). The sweep frequency range is fixed at <strong>0.5–20 Hz</strong> (0.3–30 Hz on an auto-widen retry).';
-    case 4: return 'Closed-loop check: drives the target current as a sine from slow to fast and measures overshoot (peak gain ≤ 1.15, or it rings toward over-voltage) and speed (bandwidth, want ≥ 5× the voltage loop’s target speed — the Response Time setting, ~10 s by default), on alternator current. It sweeps past the speed the loop can follow on purpose — the response getting small and ragged at the top end is how the bandwidth is found, not a bad reading. Eyeball the raw sweep on the Current Control plot before accepting.';
+    case 4: return 'Closed-loop check: drives the target current as a sine from slow to fast and measures overshoot (peak gain ≤ 1.15, or it rings toward over-voltage) and speed (bandwidth, want ≥ 5× the voltage loop’s speed, derived from the CV gain settings), on alternator current. It sweeps past the speed the loop can follow on purpose — the response getting small and ragged at the top end is how the bandwidth is found, not a bad reading. Eyeball the raw sweep on the Current Control plot before accepting.';
     case 5: return 'Records the low-frequency disturbance at each engine speed into a map; you can stop as soon as the worst-ripple speed is pinned down and no unswept gap could hide a bigger peak — no need to cover every speed. During the sweep the wizard holds the alternator at a <strong>fixed test current</strong> (25% of your RPM/Amps table max) and captures the <strong>measured filtered ripple</strong> (the same IExcessTau-averaged signal each over-current detector trips on) per RPM bin, for both the alternator and battery detectors — a value only commits when two readings at that speed agree, so a throttle transient can\'t poison the table. The optional current-check then commands 3 current levels at the worst-ripple RPM and fits ripple = a0 + a1·I per detector. This produces the <strong>measured-ripple projection</strong> only — it never sets a threshold. Review it against your settings in the next step and on the Protections ripple plots.';
     case 6: return 'Sets the over-current trip line from the ripple measured in Step 6. The trip line is <code>Slope·current + CV base</code>, floored and capped: Slope is set to the measured ripple slope and CV base to ripple-at-idle + the Safety Margin, so the line runs parallel to the ripple that margin above it. The CC (current-limited) line runs the same slope, the CC offset above CV. Any current where the ripple would cross the line is shaded red. These are the exact G3 settings on Settings ▸ Alternator ▸ Protections — editing here writes them live. No fit yet (Step 6 skipped) → set them by hand.';
-    case 7: return 'Commands one bounded current step (~6–40 A, auto-sized for ~300 mV) through the already-tuned current loop and records how battery voltage responds — measured at the battery shunt, or at the alternator sensor when no shunt is fitted (with loads held steady the two steps are equal). It reads the step gain at the <strong>voltage loop\'s own response timescale</strong> (at 1/ω_c, ~5 s at the default response time), against a <strong>flat pre-step baseline</strong>, and only after a short rest where it waits for the battery to stop drifting — so slow surface-charge (AGM / flooded lead-acid) doesn\'t inflate the reading. If the bank nears its over-voltage ceiling the step is automatically reduced. The voltage-loop gains follow via the exact PI magnitude condition, Ki = ρ·Kp, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
+    case 7: return 'Measures how stiff the battery is — how many millivolts it moves per amp — at the <strong>voltage loop\'s own fast (~0.2 s) reaction timescale</strong>, the number that is stable across battery chemistries (a multi-second reading is mostly slow diffusion "soak" and swings 2–3× between lithium, AGM and flooded banks). The wizard settles at a baseline current, sizes a safe test step (auto-reduced if the bank nears its over-voltage ceiling), runs a practice hold through the current loop to learn the two field settings, then fires <strong>4 abrupt field pulses</strong> and reads the settled voltage change 150–250 ms after each edge against the settled current change — median over the 8 edges, so a disturbed edge is thrown out instead of biasing the result. Measured at the battery shunt, or at the alternator sensor when no shunt is fitted (with loads held steady the two are equal). The gains follow as <strong>Kp = α ÷ stiffness</strong>, <strong>Ki = ρ × Kp</strong>, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
     case 8: return 'Measures how long the field takes to drain once cut: the current loop ramps to the commissioned test level, the duty is frozen 5 s for a settled baseline, then the field steps to the exact floor a real over-voltage cut drives to (Min Duty) and holds 10 s while the full decay is recorded on the 20 kHz current channel (calibrated against the precision sensor over matched multi-second windows during the same run). The stored number is the measured time from the moment the field is commanded off until output falls to 10% of its pre-cut level — read directly off the trace, no model, stored as measured; the fitted time constant (τ = L/R, from a straight-line fit of the log of the mid-decay) is reported alongside as a cross-check (drain ≈ 2.3τ for a clean coil). Engine speed cannot affect a coil constant — two different cruising speeds are run to prove that (idle is skipped: belt and tach ripple at low RPM contaminate the trace), with a median-of-three tiebreaker if they disagree — and the tach gates are suspended during the run (the cut corrupts the tach signal briefly). The over-voltage response holds a field cut at least the stored time before treating the coil as drained. Field at the cut floor cannot over-volt, so the test is inherently safe.';
     default: return '';
   }
@@ -20499,7 +20499,7 @@ function cxPlantApply(run = false) {
 //   speed   — closed-loop −3 dB bandwidth ≥ 5× the voltage-loop crossover (cascade separation: the inner loop
 //             must settle well before the outer moves, or the two hunt against each other)
 // bw < 0 from the poll = the response never rolled off inside the sweep, so bandwidth is ABOVE the top
-// frequency — faster than we need (a pass on speed). CV_CROSSOVER_TARGET is the voltage-loop ω_c (rad/s).
+// frequency — faster than we need (a pass on speed). The CV-loop speed reference is cvLoopOmega().
 // Coherence is deliberately NOT graded: it collapses at the top of every sweep because the roll-off shoulder
 // is dead signal against the alternator's ~0.5 A ripple floor — and that is exactly the region a bandwidth
 // sweep must enter, so a low worst-coherence is the expected result, not a bad run. Trust is confirmed by
@@ -20507,7 +20507,7 @@ function cxPlantApply(run = false) {
 // corrupted) is the one measurement flag kept; it's undefined on firmware older than 2026-07-10 (absent there).
 function cxVerifyEvaluate(pts, railed) {
     const isRailed = (railed === 1 || railed === true);
-    const wCV = (typeof CV_CROSSOVER_TARGET === 'number' && CV_CROSSOVER_TARGET > 0) ? CV_CROSSOVER_TARGET : 0.4;
+    const wCV = cvLoopOmega();
     const fCV = wCV / (2 * Math.PI);                 // voltage-loop crossover, Hz
     const bwFloorHz = 5 * fCV, bwGoodHz = 10 * fCV;  // 5× minimum separation, 10× comfortable
     let peak = 0; pts.forEach(p => { if (p.g > peak) peak = p.g; });
@@ -20681,13 +20681,13 @@ function cxRenderVerify(b) {
     const cB = v.railed ? '#c9c9c9' : (v.bwOK ? '#5a5' : '#f0a500');
     const sepTxt = (v.bwAboveRange ? '&gt;' : '') + Math.round(v.sepRatio) + '×';
     const bwTxt  = v.bwAboveRange ? ('above ~' + v.topF.toFixed(0) + ' Hz') : ('~' + v.bwHz.toFixed(1) + ' Hz');
-    const wCVnow = (typeof CV_CROSSOVER_TARGET === 'number' && CV_CROSSOVER_TARGET > 0) ? CV_CROSSOVER_TARGET : 0.4;
-    const respS  = Math.round(4 / wCVnow);           // voltage-loop target response time = 4/ω_c
+    const wCVnow = cvLoopOmega();
+    const respS  = Math.round(4 / wCVnow);           // implied settle = 4/ω_c
     let body = '<div style="margin:10px 0; padding:9px 11px; background:#222; border-radius:6px; line-height:1.7;">' +
         'Damping — peak gain <strong style="color:' + cD + ';">' + v.peakGain.toFixed(2) + '</strong> ' +
         '<span style="color:#8a8a8a;">(want ≤ 1.15 — higher overshoots)</span><br>' +
         'Speed — bandwidth <strong style="color:' + cB + ';">' + bwTxt + '</strong> ' +
-        '<span style="color:#8a8a8a;">= ' + sepTxt + ' the voltage loop’s ~' + respS + ' s target speed (want ≥ 5×, i.e. ≥ ' + v.bwFloorHz.toFixed(2) + ' Hz)</span>' +
+        '<span style="color:#8a8a8a;">= ' + sepTxt + ' the voltage loop’s ~' + respS + ' s speed (from the α/ρ gain settings; want ≥ 5×, i.e. ≥ ' + v.bwFloorHz.toFixed(2) + ' Hz)</span>' +
         '</div>';
 
     // Visual trust gate: the numbers are only as good as the sweep looked, so before advancing the user
@@ -20796,23 +20796,19 @@ function cvFitOnCsv1(data) {
     cvFitCapture.samples.push({ t: (performance.now() - cvFitCapture.t0) / 1000, v: v, iB: iB, iA: isFinite(iA) ? iA : 0 });
 }
 
-// CV plant identification — measure ONLY the DC gain K_dc (the fast step edge, slow ramp removed) and preview the gains from a
-// conservative target crossover. The old rise-to-63% τ/L FOPDT fit is RETIRED: on a battery the step is
-// dominated by an instantaneous ohmic jump, so τ/L floored out and the integral gain ran away. A real
-// step test proved the loop is stability-robust (86–95° phase margin even at the "disaster" gains), so
-// only K_dc binds. See Working Markdown Docs/CV_AUTOTUNE_PLAN.md §E. These two constants MUST match
-// CV_CROSSOVER_TARGET / CV_PI_ZERO in 6_functions.ino recomputeCvGains() (the authoritative compute).
-// These mirror the device settings cvCrossover / cvPiZero (Tuning ▸ Voltage). They're `let` and refreshed
-// from the CSV3 echo in updateCvGainModeUI() so the fit preview matches whatever the device will apply.
-let CV_CROSSOVER_TARGET = 0.40;  // ω_c, rad/s — TRUE CV closed-loop crossover (≈10 s response default; live value from device)
-let CV_PI_ZERO     = 0.70;   // ρ, rad/s — PI integral zero; Ki = ρ·Kp (default; live value from device)
-// Exact PI magnitude condition at ω_c (CV_AUTOTUNE_PLAN.md §F.3) — the SAME math as firmware
-// recomputeCvGains(). Knorm = K20·(12/sysV) in V per 12V-equiv per A. Returns clamped 12V-equiv {Kp,Ki}.
-function cvGainsFromKnorm(Knorm, omega_c, rho) {
-    omega_c = (omega_c > 1e-3) ? omega_c : 0.20; rho = rho || 0.70;
-    const Kp = 1 / (Knorm * Math.sqrt(1 + (rho / omega_c) * (rho / omega_c)));
+// CV gain mirrors of the device settings cvAlpha/cvPiZero — refreshed from the CSV3 echo in
+// updateCvGainModeUI() so previews match what the device will apply.
+let CV_PI_ZERO     = 0.50;   // ρ, rad/s — PI integral zero; Ki = ρ·Kp
+let CV_ALPHA       = 0.15;   // α — aggressiveness, fraction of the deadbeat-ohmic gain
+// Same math as firmware recomputeCvGains(): Kp = α/Knorm, Ki = ρ·Kp from the un-clamped Kp, then clamp.
+function cvGainsFromKnorm(Knorm, alpha, rho) {
+    alpha = alpha || 0.15; rho = rho || 0.50;
+    const Kp = alpha / Knorm;
     return { Kp: Math.min(120, Math.max(2, Kp)), Ki: Math.min(80, Math.max(1, rho * Kp)) };
 }
+// CV-loop crossover implied by the live gains: with P≈K and C=Kp(1+ρ/s), |CP|=1 lands at ω≈α·ρ (the plant
+// cancels); ×2 covers the diffusion lift of |P| at low frequency. Used by the CC-verify separation gate.
+function cvLoopOmega() { return 2 * (CV_ALPHA || 0.15) * (CV_PI_ZERO || 0.5); }
 
 // Weak-signal remedy panel (big/stiff bank absorbed the test) — offers a stronger, cap-table-bounded re-run,
 // tells the operator the RPM to run, and spells out the cost of keeping the rough reading.
@@ -20851,7 +20847,7 @@ function cxRenderCVPlant(b) {
                 ? '<br><span style="color:#f0a500;">Heads up (you can still Apply):<br>• ' + f.warns.join('<br>• ') + '</span>'
                 : (f.remedy ? '' : '<br>Data is valid.');
             body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
-                'Measured plant curve <strong>K(t) = ' + (f.Ka * 1000).toFixed(2) + ' + ' + (f.Kb * 1000).toFixed(2) + '·&radic;t mV/A</strong>, giving <strong>' + (f.K20 * 1000).toFixed(1) + ' mV/A</strong> at your ' + (f.horizonS != null ? f.horizonS.toFixed(1) : '?') + ' s read horizon. ' +
+                'Measured battery stiffness <strong>' + (f.K20 * 1000).toFixed(1) + ' mV/A</strong> at the loop\'s fast (~0.2 s) reaction timescale. ' +
                 'Proposed <strong>Kp ' + f.Kp.toFixed(1) + '</strong>, <strong>Ki ' + f.Ki.toFixed(1) + '</strong> (12 V-equiv).' +
                 concerns +
                 (cx.cvApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>' +
@@ -20862,7 +20858,7 @@ function cxRenderCVPlant(b) {
     }
     // Engine state entering this step is indeterminate (post-sweep, then a read-only Thresholds step),
     // so the instruction is one wording valid from idle or cruise — no live steady/unsteady branch.
-    if (!cx.cvFitRunning && !f) body += '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine to a steady cruising speed and press Run.</strong> The test briefly steps the charge current and measures how the battery responds, then proposes the voltage-loop gains.</p>' +
+    if (!cx.cvFitRunning && !f) body += '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine to a steady cruising speed and press Run.</strong> The test briefly pulses the charge current and measures how quickly the battery\'s voltage responds, then proposes the voltage-loop gains.</p>' +
         '<p style="font-size:13px;color:#f0a500;line-height:1.45;">⚠️ Don\'t switch other loads on or off during the test (inverter, thrusters, fridge, windlass…) — it spoils the reading.</p>' +
         '<button onclick="cxCVPlantStart()" class="btn-primary btn-sm">Run</button>';
     else if (!cx.cvFitRunning && f && !remedyPending) {
@@ -20876,10 +20872,8 @@ function cxRenderCVPlant(b) {
     b.innerHTML = body;
 }
 
-// Firmware-side CV plant fit (CV_AUTOTUNE_PLAN.md §F): the browser only TRIGGERS the run and polls
-// /cvplantfit.json for phase + result. The whole sequence (settle → pilot-sized step → settled-baseline-
-// gated rest → measured step → release), the sampling, and the gain fit (read at 1/ω_c with a flat baseline)
-// all run on-device — deterministic timing, connection-tolerant, one code path for every chemistry/size.
+// Firmware-side CV plant fit (ohmic-anchor pulse train): the browser only triggers the run and polls
+// /cvplantfit.json — the phase machine, sampling, and per-edge median fit all run on-device.
 function cxCVPlantStart(diMax) {
     // Max-mode CSV1 feeds the plots peak values instead of true samples — the on-device fit reads true INA228.
     if (g_lastCsv3 && g_lastCsv3.battMaxMode == 1) {
@@ -20904,8 +20898,8 @@ function cxCVPollFit() {
     if (!cx.cvFitRunning) return;
     const giveUp = () => (performance.now() - (cx._cvPollStart || 0) > 120000);
     fetch(buildURL('/cvplantfit.json')).then(r => r.json()).then(j => {
-        const phaseTxt = ['Settling at baseline…', 'Sizing the step…', 'Resting — waiting for the battery to settle…',
-                          'Holding the step — measuring…', 'Returning to baseline…'];
+        const phaseTxt = ['Settling at the baseline current…', 'Probing to size the test step…', 'Practice run — holding the step…',
+                          'Pulsing — measuring the fast response…', 'Returning to baseline…'];
         cx.cvFitPhase = phaseTxt[j.phase] || 'Running…';
         const el = document.getElementById('cvFitPhase'); if (el) el.textContent = cx.cvFitPhase; else commissionRender();
         if (j.active) { setTrackedTimeout(cxCVPollFit, 800); return; }
@@ -20922,9 +20916,8 @@ function cxCVPollFit() {
     });
 }
 
-// Map the device /cvplantfit.json result into the shape cxRenderCVPlant / cxCVPlantApply expect. K20 keeps
-// its field name for render/apply compatibility and carries the gain at the CURRENT 1/ω_c; Ka/Kb carry the
-// whole measured curve, which is what actually gets stored.
+// Map /cvplantfit.json into the shape cxRenderCVPlant / cxCVPlantApply expect. K20 keeps its field name
+// for compatibility but carries the fast ohmic stiffness (= Ka); Kb is always 0 now.
 function cvFitFromDevice(j) {
     if (!j || !j.ok) return { ok: false, reason: (j && j.abort) ? j.abort : 'fit failed — re-run' };
     const w = j.warn | 0, weakW = [], faceExtra = [];
@@ -20932,11 +20925,9 @@ function cvFitFromDevice(j) {
     // actionable remedy panel, so they ride along to the Console log but not the wizard face.
     if (w & 1)  weakW.push('The current step came up short — alternator may be weak at this RPM. Re-run at a higher RPM.');
     if (w & 2)  weakW.push('Weak signal vs. noise — result is usable but rough. A higher or quieter RPM would help.');
-    if (w & 4)  faceExtra.push('The battery was still drifting when the step began. That inflates the slow end of the measured curve, so a slow response-time setting will run more aggressively than it should. Re-run after a longer rest.');
+    if (w & 4)  faceExtra.push('Some pulse edges were unusable (a disturbance or timing hiccup) — the result comes from the clean ones. Re-run if you want a firmer reading.');
     if (w & 8)  faceExtra.push('Something else moved during the test (a load switched, or another charger). Re-run with all other loads steady.');
     if (w & 16) faceExtra.push('Over-voltage headroom was tight — the step was reduced to protect the bank.');
-    if (w & 32) faceExtra.push('The voltage fell as the step went on — a load switched, or the baseline drifted. The slow part of the curve was discarded; re-run with all other loads steady.');
-    if (w & 64) faceExtra.push('The current was still climbing when the measurement window opened, so the gain may read low — re-run. If it repeats, the alternator can’t reach the step fast enough at this RPM; run at a higher RPM.');
     // Weak-signal remedy: size a stronger current step from the measured SNR + delivered ΔI, bounded by the
     // alternator cap-table headroom the device reports (capHeadroomA) and an absolute 100 A backstop.
     const K = (j.K_mVpA || 0) / 1000, dI = j.dI || 0, snr = j.snr || 0;
@@ -20959,9 +20950,8 @@ function cvFitFromDevice(j) {
 
 function cxCVPlantApply() {
     const f = cx.cvFit; if (!f || !f.ok) return;
-    // Store the whole measured curve (raw V/A at the pack), not the single point at today's ω_c — that is what
-    // lets the response-time slider move later. recomputeCvGains() re-evaluates it and applies the normalization
-    // + the exact PI magnitude condition and switches CV gains to Auto. Confidence record → cvfit.csv download.
+    // Store the measured stiffness as cvPlantKa (Kb rides along as 0); recomputeCvGains() applies
+    // Kp = α/K, Ki = ρ·Kp and the gain source switches to Auto.
     cxGet('cvPlantKa=' + f.Ka.toFixed(5) + '&cvPlantKb=' + f.Kb.toFixed(5))
         .then(() => cxGet('cvGainMode=1'))
         .then(() => { cx.cvApplied = true; commissionRender(); })
@@ -21220,7 +21210,7 @@ function cxCVFitLog(f, m) {
     if (!f || !f.ok) {
         L.push('CVfit: no usable result — ' + (f ? f.reason : 'no fit'));
     } else {
-        L.push('CVfit: K(t) = ' + (f.Ka * 1000).toFixed(2) + ' + ' + (f.Kb * 1000).toFixed(2) + '·√t mV/A  ->  K = ' + (f.K20 * 1000).toFixed(1) + ' mV/A at ' + (f.horizonS != null ? f.horizonS.toFixed(1) : '?') + 's = 1/ω_c  Kp ' + f.Kp.toFixed(1) + '  Ki ' + f.Ki.toFixed(1) + ' (12V-equiv)');
+        L.push('CVfit: ohmic K = ' + (f.K20 * 1000).toFixed(1) + ' mV/A (settled ΔV/ΔI at ~' + (f.horizonS != null ? f.horizonS.toFixed(1) : '0.2') + 's, median over pulse edges)  Kp ' + f.Kp.toFixed(1) + '  Ki ' + f.Ki.toFixed(1) + ' (12V-equiv)');
         L.push('CVfit: ΔV ' + (f.achievedDV * 1000).toFixed(0) + ' mV  ΔI ' + (f.dIalt != null ? f.dIalt.toFixed(1) : '?') + ' A  SNR ' + (f.snr != null ? f.snr.toFixed(0) : '?') + '×');
         const wl = f.warnsLog || f.warns; if (wl && wl.length) L.push('CVfit: advisories — ' + wl.join(' | '));
     }

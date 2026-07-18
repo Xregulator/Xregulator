@@ -991,6 +991,7 @@ enum Csv3Index {
   CSV3_fieldDecayTauMs,        // commissioned field drain time, command→10% of output (ms); stored as measured (cold margin removed 07-18)
   CSV3_commissionManualMask,   // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
   CSV3_CvKdMaxTrimA,           // CV D-term back-off ceiling (A ×10); caps kdTrim so a fast rise saturates instead of flooring the field
+  CSV3_cvAlpha,                // CV auto-gain aggressiveness α (fraction of the deadbeat-ohmic gain); ×1000
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -5255,8 +5256,15 @@ void setupServer() {
       recomputeCvGains();
       queueConsoleMessageF("CV gain mode: %s", cvGainMode ? "AUTO (lambda-based)" : "MANUAL");
     }
-    // No cvLambdaMult handler — the Response Speed slider drives cvCrossover.
-    if (request->hasParam("cvCrossover")) {  // CV crossover ω_c (rad/s) — exact magnitude formula, §F.3
+    if (request->hasParam("cvAlpha")) {  // CV auto-gain aggressiveness α — Kp = α / measured ohmic K
+      foundParameter = true;
+      cvAlpha = clamp_f(request->getParam("cvAlpha")->value().toFloat(), 0.02f, 0.50f);
+      settingWrite(NK_cvAlpha, String(cvAlpha, 3).c_str());
+      recomputeCvGains();
+      queueConsoleMessageF("CV aggressiveness alpha: %.2f", cvAlpha);
+    }
+    // Legacy — inert in AUTO under the ohmic-anchor rule; kept so a bench curl / stale page can't 404.
+    if (request->hasParam("cvCrossover")) {  // CV crossover ω_c (rad/s)
       foundParameter = true;
       cvCrossover = clamp_f(request->getParam("cvCrossover")->value().toFloat(), 0.05f, 0.80f);  // 0.80 ≈ 5 s, fast end of the seconds control
       settingWrite(NK_cvCrossover, String(cvCrossover, 3).c_str());
@@ -5273,7 +5281,7 @@ void setupServer() {
       recomputeCvGains();
       queueConsoleMessageF("CV response time: %.0f s (crossover %.2f rad/s)", 4.0f / cvCrossover, cvCrossover);
     }
-    if (request->hasParam("cvPiZero")) {  // CV PI integral zero ρ (rad/s) — Ki = ρ·Kp (§F.3)
+    if (request->hasParam("cvPiZero")) {  // CV PI integral zero ρ (rad/s) — Ki = ρ·Kp
       foundParameter = true;
       cvPiZero = clamp_f(request->getParam("cvPiZero")->value().toFloat(), 0.2f, 1.5f);
       settingWrite(NK_cvPiZero, String(cvPiZero, 3).c_str());
@@ -8539,7 +8547,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8857,7 +8865,8 @@ void SendWifiData() {
                                (int)CvKdOneSided,
                                SafeInt(fieldDecayTauMs),
                                (int)commissionManualMask,
-                               SafeInt(CvKdMaxTrimA, 10));
+                               SafeInt(CvKdMaxTrimA, 10),
+                               SafeInt(cvAlpha, 1000));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

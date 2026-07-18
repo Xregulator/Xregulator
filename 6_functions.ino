@@ -136,37 +136,21 @@ float computeCvTempScale() {
   return clamp_f(cvResistanceRatio(tCommC) / cvResistanceRatio(tNowC), CVTS_SCALE_MIN, CVTS_SCALE_MAX);
 }
 
-// recomputeCvGains — derive the gains the CV loop actually uses (VoltageKp_active / VoltageKi_active)
-// from the selected gain mode, the measured DC gain K_dc, and the 12V-block normalization. Call after
-// any related setting change (cvGainMode, manual VoltageKp/Ki, a plant fit, or BATTERY_VOLTAGE), on a
-// board-temp drift (for the temp derate), and once at boot. Everything is computed in 12V-equivalent
-// ("normalized") space — so the same gain numbers work on 12/24/48 V — then ×(12/BATTERY_VOLTAGE) bakes
-// it back to the pack-space gain the loop multiplies by the raw pack-volt error. The battery-temp derate
-// (computeCvTempScale) is the final multiplier on the active gains and applies in BOTH modes (the plant
-// changes with temperature regardless of how the base gains were chosen). See CV_AUTOTUNE_PLAN.md §E.
+// recomputeCvGains — derive VoltageKp_active/VoltageKi_active from the gain mode + measured stiffness.
+// Call after any related setting change, on board-temp drift, and at boot. Computed in 12V-equivalent
+// space (same numbers on 12/24/48 V), then ×vNorm bakes back to pack space; the battery-temp derate is
+// the final multiplier in BOTH modes (the plant shifts with temperature however the gains were chosen).
 void recomputeCvGains() {
   float vNorm = 12.0f / (float)BATTERY_VOLTAGE;     // 1, 0.5, 0.25 for 12/24/48 V
-  // Re-evaluate the measured curve at THIS loop's timescale. The crossover formula wants |P(jω_c)|, which the
-  // step response approximates at t = 1/ω_c — so the plant gain is a function of the response-time setting,
-  // not a constant. Clamped to the span the fit actually measured: never extrapolated.
-  float h = 1.0f / ((cvCrossover > 1e-3f) ? cvCrossover : 0.20f);
-  cvPlantK = cvPlantKa + cvPlantKb * sqrtf(clamp_f(h, CVPF_H_MIN_S, CVPF_H_MAX_S));
-  bool plantValid = (cvPlantK > 1e-6f);             // only K is required (τ/L unused)
+  cvPlantK = cvPlantKa;                             // the ~200 ms ohmic anchor; the √t-tail (cvPlantKb) is retired
+  bool plantValid = (cvPlantK > 1e-6f);
   float kpNorm, kiNorm;                             // 12V-equivalent gains (what the user sees)
   if (cvGainMode == 1 && plantValid) {
-    // AUTO (measured-K_dc rule). Normalize the measured pack-space K_dc into 12V-equivalent space so
-    // the resulting gain is system-voltage-independent like the manual numbers, then set the gains
-    // from the conservative target crossover. Kp ∝ 1/K_dc is the per-install gain schedule.
-    float Knorm = cvPlantK * vNorm;                 // V per 12V-equivalent, per A (K20, finite-horizon gain)
-    // Exact PI magnitude condition at the target crossover (CV_AUTOTUNE_PLAN.md §F.3). With the plant a
-    // pure gain in this regime (P≈K_norm) and C = Kp·(1 + ρ/(jω)), |C·P| = 1 at ω_c gives
-    //   Kp = 1 / ( K_norm · sqrt(1 + (ρ/ω_c)²) ),   Ki = ρ·Kp.
-    // cvCrossover holds the TRUE crossover ω_c (default 0.20 rad/s); cvPiZero is the PI
-    // integral zero ρ (default 0.70 rad/s).
-    float omega_c = (cvCrossover > 1e-3f) ? cvCrossover : 0.20f;
-    float rho     = cvPiZero;
-    kpNorm = 1.0f / (Knorm * sqrtf(1.0f + (rho / omega_c) * (rho / omega_c)));
-    kiNorm = rho * kpNorm;                            // Ki = ρ · Kp
+    // AUTO: Kp = α/K anchored to the ~200 ms ohmic stiffness (chemistry-stable; a multi-second chord is
+    // mostly √t soak and swings 2-3× across chemistries). Response time is an outcome, not an input.
+    float Knorm = cvPlantK * vNorm;                 // V per 12V-equivalent, per A
+    kpNorm = cvAlpha / Knorm;
+    kiNorm = cvPiZero * kpNorm;                     // Ki = ρ · Kp (from the UN-clamped Kp, then clamp both)
     // Safety bounds — a bad fit must never produce dangerous gains.
     kpNorm = clamp_f(kpNorm, 2.0f, 120.0f);
     kiNorm = clamp_f(kiNorm, 1.0f, 80.0f);
@@ -549,6 +533,11 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
     fieldCutAbortRequested = true;
     strncpy(fieldCutAbortMsg, reasonToString(reason), sizeof(fieldCutAbortMsg) - 1);
     fieldCutAbortMsg[sizeof(fieldCutAbortMsg) - 1] = '\0';
+  }
+  // CV plant fit: abort directly (state resets at start — no stale-phase latch; cvpfState=3 blocks a
+  // partial-buffer fit).
+  if (cvPlantFitActive) {
+    cvpfAbort("a protection cut in during the test — re-run once charging is steady");
   }
 }
 
@@ -1973,10 +1962,8 @@ void AdjustFieldLearnMode() {
     govMode = GOV_BYPASS_SLEW;
   }
 
-  // CV plant fit: the measured current STEP rides a fixed CVPF_ENTRY_RATE_A setpoint ramp, so the duty must
-  // track it unthrottled — a slow (or user-lowered) DutyRampRate would otherwise stretch the step past the
-  // fit window and bias K low. The setpoint slew (rise AND fall) keeps the duty trajectory smooth, so there
-  // is no coupling-cap slam. Reverts next tick when cvPlantFitActive clears (finish/abort/deadman/cancel).
+  // CV plant fit: pulse edges must land in one tick and the CC phases ride their own setpoint ramp — a
+  // slow DutyRampRate would smear both. Reverts when cvPlantFitActive clears.
   if (cvPlantFitActive) {
     govMode = GOV_BYPASS_SLEW;
   }
@@ -2181,6 +2168,9 @@ void AdjustFieldLearnMode() {
   // fieldCutCcActive branch below; hold/cut/ease own duty here (cut level is MinDuty, the real
   // OV-clamp floor, so the effectiveMinDuty=0 bypass below is moot but harmless).
   sysIDRunning = fieldCut_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
+  // CV plant-fit pulse train (Step 9) — same mutex family. SETTLE/PILOT/HOLD return false (the
+  // cvpfCcActive branch below drives the current PID); the abrupt PULSES/RELEASE own duty here.
+  sysIDRunning = cvpf_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
 
   bool sysIDJustStarted = !prevSysIDRunning && sysIDRunning;
   bool sysIDJustCompleted = prevSysIDRunning && !sysIDRunning;
@@ -2400,17 +2390,13 @@ void AdjustFieldLearnMode() {
         pidError = setpointLimited - targetCurrent;
         currentPID.Compute();
 
-      } else if (cvPlantFitActive) {
-        // Firmware-side CV plant fit (CV_AUTOTUNE_PLAN.md §F): a bounded alternator-current step commanded
-        // through the inner current loop; the battery-voltage step gain is read at the loop's own timescale
-        // (1/cvCrossover) with a settled-baseline gate. Protections identical to resTest — voltageControlActive
-        // stays false so G1/G2 are suppressed and the step manifests; fast-OV/INA228/hard-OC stay live. The
-        // phase machine (settle→pilot→settled-rest→step→release) sets cvpfCmdA / cvpfReleasing each tick.
-        cvPlantFit_advance(tick.nowMs);
+      } else if (cvpfCcActive) {
+        // CV plant-fit current-PID phases: drive the real current loop to cvpfCmdA (set by cvpf_tick,
+        // already run this tick). voltageControlActive=false suppresses target-relative G1/G2 so the
+        // step manifests; fast-OV/INA228/hard-OC stay live.
         setpointCommand = cvpfCmdA;
-        float cvpfFall = cvpfReleasing ? SetpointFallRate : TEST_ENTRY_RATE_A;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                       CVPF_ENTRY_RATE_A, cvpfFall, actualDtSec);
+                                       CVPF_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
         voltageControlActive = false;
         ctrlLimiter = 0;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N

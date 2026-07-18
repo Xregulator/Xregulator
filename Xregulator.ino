@@ -2980,43 +2980,39 @@ float    capLastDvdtMv10    = 999.0f; // last settle rate (confidence + display)
 uint32_t capLastUpdateEpoch = 0;
 float    capLastPct         = NAN;    // most recent capacity % (display)
 
-// ── CV plant-fit (firmware-side voltage-loop plant identification) — CV_AUTOTUNE_PLAN.md §F ──
-// Commands a bounded alternator-current step through the inner current loop and reads the battery-voltage
-// step gain at the LOOP's OWN timescale (read horizon = 1/cvCrossover), which is what the crossover formula
-// needs — NOT the old 20s-horizon K20 that folded in slow surface-charge/SOC creep and read every AGM/
-// lead-acid install ~2.5x too soft. Deterministic on-device timing + a settled-baseline gate (chemistry-
-// agnostic: AGM/flooded surface charge must relax before the measured step, which the old fixed 5s rest
-// got wrong). Replaces the browser-orchestrated fit; result → cvPlantK on the user's Apply.
+// ── CV plant-fit — ohmic-anchor pulse train (spec: CV_Gain_Ohmic_Anchor_Redesign_Spec.md) ──
+// Measures the fast (~200 ms) ohmic stiffness — chemistry-stable, unlike a multi-second chord (mostly √t
+// soak, 2-3× spread across chemistries). Abrupt direct-duty pulses because the inner current PID (~200 ms)
+// is as slow as the window being probed. Fit = per-edge settled ΔV/ΔI, median of 8 edges → cvPlantKa.
 struct CvPlantFitSample { uint32_t tMs; float v; float iAlt; float iBat; };  // 16 B; v=IBV iAlt=MeasuredAmps iBat=Bcur
 CvPlantFitSample *cvpfBuf = nullptr;
 int      cvpfBufCap   = 0;
 int      cvpfBufCount = 0;
-volatile bool cvPlantFitActive = false;   // read by the control loop's plant-fit branch
+volatile bool cvPlantFitActive = false;   // master test flag (mutexes, D-term hold-off, idle-rest suppression)
+volatile bool cvpfCcActive = false;       // SETTLE/PILOT/HOLD drive the real current PID (branch in AdjustField); pulses own duty
 volatile uint8_t cvpfState = 0;           // 0 IDLE, 1 RUNNING, 2 DONE-OK, 3 ABORTED
-volatile uint8_t cvpfPhase = 0;           // 0 SETTLE, 1 PILOT, 2 REST, 3 STEP, 4 RELEASE (UI progress)
+volatile uint8_t cvpfPhase = 0;           // 0 SETTLE, 1 PILOT/SIZE, 2 HOLD (practice run), 3 PULSES, 4 RELEASE (UI progress)
 volatile bool cvpfReady = false;          // a run finished (ok or not) — poller shows result
 volatile bool cvpfOk    = false;          // fit produced a usable gain
-// Horizon bounds. The fit reads the step at 1/ω_c — the loop's own timescale, which is what the crossover
-// formula needs. H_MIN is where the commanded current has finished settling; below it the plant is not
-// measurable, only guessable. H_MAX = 1/0.05 is the slowest ω_c the slider allows. The step is held long
-// enough to span BOTH, so a later ω_c change re-derives K by interpolation, never extrapolation.
-static const float CVPF_H_MIN_S = 2.5f;
-static const float CVPF_H_MAX_S = 20.0f;
-float    cvpfK        = 0.0f;             // V/A — gain at the CURRENT horizon, derived from Ka/Kb
-float    cvpfKa       = 0.0f;             // V/A    — K(t) = Ka + Kb·√t : ohmic + charge-transfer intercept
-float    cvpfKb       = 0.0f;             // V/A/√s —                     Warburg diffusion tail
-float    cvpfDV       = 0.0f;             // V — step ΔV at the read horizon
-float    cvpfDI       = 0.0f;             // A — measured current step (alt or battery)
+float    cvpfK        = 0.0f;             // V/A — measured fast ohmic stiffness (= Ka; flat curve)
+float    cvpfKa       = 0.0f;             // V/A — median settled ΔV/ΔI over the pulse edges (the ohmic anchor)
+float    cvpfKb       = 0.0f;             // V/A/√s — retired √t tail; always 0 now (kept for JSON/Apply compat)
+float    cvpfDV       = 0.0f;             // V — median per-edge ΔV
+float    cvpfDI       = 0.0f;             // A — median per-edge settled current step (alt or battery)
 float    cvpfSNR      = 0.0f;
 float    cvpfKp       = 0.0f, cvpfKi = 0.0f;   // display gains (recomputeCvGains is authoritative on Apply)
-float    cvpfHorizonS = 5.0f;             // read horizon actually used = 1/ω_c
-uint8_t  cvpfWarn     = 0;                 // bit0 delivery bit1 SNR bit2 baseline-moving bit3 gap-drift bit4 OV-fallback bit5 falling-tail
+float    cvpfHorizonS = 0.2f;             // s — the fixed ~200 ms edge readout window (display only)
+uint8_t  cvpfWarn     = 0;                 // bit0 delivery bit1 SNR bit2 edges-dropped bit3 gap-drift bit4 OV-fallback
 const char *cvpfAbortMsg = "";
-// phase-machine internals (init in cvpfStartTest, advanced in cvPlantFit_advance)
-uint32_t cvpfPhaseStartMs = 0, cvpfStepT0Ms = 0, cvpfSampleLastMs = 0, cvpfTestStartMs = 0, cvpfRestChkMs = 0;
+// phase-machine internals (init in cvpfStartTest, advanced in cvpf_tick)
+uint32_t cvpfPhaseStartMs = 0, cvpfSampleLastMs = 0, cvpfTestStartMs = 0;
 float    cvpfBaseA = 10.0f, cvpfPilotA = 6.0f, cvpfStepA = 6.0f, cvpfTargetDV = 0.30f;
 float    cvpfPilotK = 0.02f, cvpfPilotVbase = 12.0f, cvpfCmdA = 10.0f;
-bool     cvpfFellBack = false, cvpfReleasing = false;
+bool     cvpfFellBack = false;
+float    cvpfBaseDuty = 0.0f, cvpfStepDuty = 0.0f;  // settled duties captured from the current PID, replayed abruptly
+float    cvpfPreSetpoint = 0.0f;   // setpointLimited before the test — restored pre-override so the resume snapshot is clean
+uint32_t cvpfEdgeMs[8] = { 0 };    // tick timestamp of each abrupt duty edge (4 up + 4 down)
+uint8_t  cvpfEdgeCount = 0;
 float    cvpfDiMaxA = 40.0f;       // per-run current-step ceiling (A); raised only when the operator accepts the weak-signal re-run, reset each start
 float    cvpfRpmAtFit = 0.0f;      // RPM at fit completion — feeds the re-run RPM advice
 float    cvpfCapHeadroomA = 0.0f;  // A — alternator cap-table headroom at fit time (g_I_cap − cvpfBaseA); how much bigger a step the table allows
@@ -3032,7 +3028,7 @@ bool   cvpfStartTest(float diMaxReq);
 void   cvpfAbort(const char *reason);
 void   cvpfProcess();
 void   cvpfServiceCompletion();
-void   cvPlantFit_advance(uint32_t nowMs);
+bool   cvpf_tick(float &dutyOut, float measA, uint32_t nowMs);
 void   bhFlushCapNVS();
 void   bhInitSettings();
 String bhSerializeResults();
@@ -3378,16 +3374,14 @@ volatile float PidKd_active = 0.0f;  // DERIVED duty-space Kd.
 // them directly — it reads VoltageKp_active/VoltageKi_active, which recomputeCvGains() derives from the
 // selected mode and bakes the 12V-block normalization (×12/BATTERY_VOLTAGE) into.
 uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) — DEFAULT, so a fresh/never-commissioned
-                                  // device runs the seeded manual gains; 1 = AUTO (measured-K_dc, see CV_AUTOTUNE_PLAN.md §E).
+                                  // device runs the seeded manual gains; 1 = AUTO (ohmic-anchored, Kp = α/K).
                                   // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply (cxCVPlantApply).
-// cvLambdaMult's old CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged
-// (gains come from cvCrossover/ω_c).
-// K(t) = cvPlantKa + cvPlantKb·√t — the plant gain as a function of read horizon (V/A at the pack). Storing
-// the CURVE, not one point, is what lets the response-time slider move after commissioning: recomputeCvGains()
-// re-evaluates K at the new 1/ω_c. Defaults = 2026-07-03 bench seed (flat) so Auto has sane gains pre-commission.
+// cvLambdaMult's old CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged.
+// cvPlantKa = measured fast (~200 ms) ohmic stiffness (V/A at the pack), the AUTO anchor (Kp = α/Ka).
+// Pre-commission default deliberately HIGH: bigger Ka → smaller Kp → gentle until a real measurement lands.
 float   cvPlantKa    = 0.0216f;
-float   cvPlantKb    = 0.0f;      // 0 = flat: hand-entered gains and the pre-commission seed have no measured tail
-float   cvPlantK     = 0.0216f;   // DERIVED, not persisted: Ka + Kb·√(clamped 1/ω_c). Telemetry + dashboard only.
+float   cvPlantKb    = 0.0f;      // retired √t tail — always 0; NVS key kept so old exports/POSTs still parse
+float   cvPlantK     = 0.0216f;   // DERIVED, not persisted: = cvPlantKa. Telemetry + dashboard only.
 // Measured ripple projection (RIPPLE_DETECTION_REARCH_SPEC §3.3). The commissioning current-check
 // runs a 3-level test per detector and line-fits ripple(I) = a0 + a1·I to the IExcessTau-filtered
 // excess pk-pk (the same quantity the detector trips on). This is REFERENCE DATA ONLY — it drives the
@@ -3427,14 +3421,11 @@ static void ripFitDecode(const String &s, RipFit &r) {
 }
 float   cvComputedKp = 30.0f;     // user-facing (12V-equivalent) gains the Auto path produced — dashboard display only
 float   cvComputedKi = 25.0f;
-// CV measured-gain auto-tune knobs (design constants CV_CROSSOVER_TARGET / CV_PI_ZERO; user-adjustable in
-// Tuning ▸ Voltage). recomputeCvGains() uses these in the exact PI magnitude condition:
-// Kp = 1/(K20(12V-equiv)·sqrt(1+(ρ/ω_c)²)), Ki = ρ·Kp. See CV_AUTOTUNE_PLAN.md §F.3.
-// NVS keys NK_cvCrossover / NK_cvPiZero (CSV3 fields cvCrossover / cvPiZero); InitSystemSettings
-// migrates the retired cvOmega/cvKiRatio keys into these.
-float   cvCrossover  = 0.20f;     // rad/s — TRUE CV closed-loop crossover ω_c (CV_CROSSOVER_TARGET). User sets it as a
-                                  // RESPONSE TIME in seconds (dashboard shows settle = 4/ω_c); 0.20 ≈ 20 s, recommended default.
-float   cvPiZero     = 0.70f;     // rad/s — PI integral zero ρ (CV_PI_ZERO); Ki = ρ·Kp
+// CV auto-gain knobs (Tuning ▸ Voltage): Kp = cvAlpha/(cvPlantKa·vNorm), Ki = cvPiZero·Kp. α is
+// dimensionless (fraction of the deadbeat gain 1/K), so one α gives every chemistry the same character.
+float   cvAlpha      = 0.15f;
+float   cvCrossover  = 0.20f;     // rad/s — retired ω_c input, inert; NVS key + CSV3 slot kept (never repurpose)
+float   cvPiZero     = 0.50f;     // rad/s — PI integral zero ρ; Ki = ρ·Kp
 // Battery-temperature gain derate. Board temp (ambientTemp, °F) is a PROXY for battery temp; as the
 // battery cools its internal resistance — which IS the CV plant gain K_dc — rises, so gains computed at
 // the commissioning temperature run too hot when it's colder (and sluggish when warmer). We counter-
@@ -3701,7 +3692,7 @@ float cvRecovSec = 2.5f;     // recovery time target (s): cv_I ramps from its Re
 float cvRecovEmaxV = 0.25f;  // recovery error cap (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use): max positive error the CV PI sees during recovery, so P+I drive can't scale with the post-cut collapse
 bool    g_autoTestActive  = false;  // set per control-loop tick: an automated/guided test owns the limiters now (commissioning / battery-health DCIR / resonance / system-ID). While true the four user limiter toggles above are inert so a stray user setting can't corrupt a measurement; each test's own built-in slew behavior governs.
 const float TEST_ENTRY_RATE_A = 8.0f;  // A/s — FIXED, conservative ramp rate for an automated test's transition up from the rest floor and back down (NOT the user's SetpointRiseRate/FallRate, which a user could set aggressively). Used by DCIR, the resonance check, and the TuningMode entry ramp so a test never slams the field coming on/off. Current-domain, so no bus-voltage scaling.
-const float CVPF_ENTRY_RATE_A = 50.0f; // A/s — CV-plant-fit STEP entry rate only; fast enough that a full CVPF_DI_MAX (40 A) step arrives (~0.8 s) well inside the 2 s fit window. At 8 A/s a big step was still ramping when the √t window opened → K biased low. Duty slew is bypassed in the cvPlantFit branch so DutyRampRate can't re-throttle it.
+const float CVPF_ENTRY_RATE_A = 50.0f; // A/s — cvpf current-PID phase setpoint rate; the measured edges are direct-duty, so this only paces the practice run
 bool    g_tuningEntrySettled = false;  // set per tick from tuningEntryRamped: false while a TuningMode test is still ramping up from rest, true once settled. Gates the sine duty-slew bypass so the entry eases in (duty slew engaged) before the actuator is unclamped for the clean sine.
 // Large up-step gentling: up-moves whose remaining gap exceeds SetpointBigStepThresh climb at the
 // slower SetpointBigStepRiseRate (instead of SetpointRiseRate) until the gap closes inside the

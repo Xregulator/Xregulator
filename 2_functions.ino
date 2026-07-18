@@ -282,6 +282,7 @@ bool fsRemove(const char *path) {
 #define NK_cvGainMode "cvGainMode"
 #define NK_cvCrossover "cvCrossover"
 #define NK_cvPiZero "cvPiZero"
+#define NK_cvAlpha "cvAlpha"
 #define NK_vTgtRampEnable "vTgtRampEn"
 #define NK_vTgtRampUp "vTgtRampUp"
 #define NK_vTgtRampDn "vTgtRampDn"
