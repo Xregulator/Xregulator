@@ -852,7 +852,7 @@ typedef struct {
   uint32_t softExceedCount;       // rising edge: filtered V crossed target + OvMeasMarginV (Group-2 soft cap actually engaged)
   uint32_t swHardCutCount;        // rising edge: REASON_FAST_OVERVOLTAGE (SW hard cut, raw/per-tick)
   uint32_t inaCutCount;           // rising edge: REASON_INA_OVERVOLTAGE (INA228 ~1s-avg latched cut — software-failed-to-protect backstop)
-  uint32_t brakeEventCount;       // rising edge: approach-brake engagement episodes (bleed after ≥1s quiet) — pre-protection, counts saves not trips
+  uint32_t kdEventCount;          // rising edge: CV D-term engagement episodes (trim after ≥1s quiet) — pre-protection, counts saves not trips
   uint32_t magic;
 } OvTelemetry;  // ~392 B; RTC slow RAM has ample room (black box is the only other user)
 // Size + bin count folded into the magic so a layout change self-invalidates (no migration —
@@ -1175,21 +1175,22 @@ bool  fieldCutResultsReady = false;
 bool  fieldCutOk = false;                          // true = a usable τ was fit this run
 float fieldCutTauMs   = -1.0f;                     // fitted decay τ this run (ms), -1 = none — QA metric (idle/cruise agreement), NOT the stored value
 float fieldCutFallMs  = -1.0f;                     // measured 90%→10% fall time (ms), -1 = none
-float fieldCutDrainMs = -1.0f;                     // measured cut→10%-of-baseline drain time (ms) — model-free; THIS (×1.3 cold margin) is what Apply stores in fieldDecayTauMs
+float fieldCutDrainMs = -1.0f;                     // measured command→10%-of-baseline drain time (ms) — model-free; THIS is what Apply stores in fieldDecayTauMs (as measured — 30% cold margin removed 07-18)
 float fieldCutBaseA   = 0.0f;                      // steady output averaged over the frozen-duty hold (A)
 float fieldCutFloorA  = 0.0f;                      // residual output at MinDuty, averaged over the tail (A) — the decay asymptote
 float fieldCutResidPct = -1.0f;                    // log-fit RMS residual as % (quality; lower is better)
 uint8_t fieldCutSrc = 0;                           // decay data source this run: 1 = 20 kSPS fast channel, 0 = ADS fallback
 int16_t *fcFastBuf = nullptr;                      // PSRAM — decay ring copy (calibrated mV)
 int      fcFastCount = 0;
+float    fcSnapElapsedMs = 400.0f;                 // ms from the cut command to the fast-ring grab (FIELDCUT_SNAP_MS + one tick jitter); last decimated sample = the grab, so command instant = last-sample-time − this
 int16_t *fcScratch = nullptr;                      // PSRAM — hold-end / tail-end ring copies for the calibration means
-float *fcPlotMs = nullptr, *fcPlotA = nullptr;     // PSRAM — decimated decay served via /fieldcut.json (t relative to the cut edge)
+float *fcPlotMs = nullptr, *fcPlotA = nullptr;     // PSRAM — decimated decay served via /fieldcut.json (t relative to the cut command)
 int    fcPlotN = 0;
 uint32_t fieldCutLastEndMs = 0;                    // cooldown guard
 char  fieldCutAbortMsg[48] = {0};                  // human reason text on a failed/aborted run
-// Commissioned field DRAIN time (ms): the measured cut→10%-of-output time (≈2.3 L/R time constants),
-// WITH the 30% cold-field margin already applied by the Field-cut wizard step (measured warm → a colder
-// field decays slower, so the wait is padded). The OV field-drain release consumes this value directly.
+// Commissioned field DRAIN time (ms): the measured command→10%-of-output time (≈ dead-time + 2.3 L/R
+// time constants), stored AS MEASURED by the Field-cut wizard step — the 30% cold-field margin was
+// removed 07-18 (testing without). The OV field-drain release consumes this value directly.
 // Name kept for NVS/CSV3 continuity (key `fieldDecayTau`, CSV3 slot 314) — nothing fielded ever stored
 // the old 1τ semantics. Safe placeholder default until the step is run.
 uint16_t fieldDecayTauMs = 60;
@@ -2440,8 +2441,8 @@ uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not c
 uint32_t g_lastProtClampMs = 0;      // millis() of the most recent tick any protection clamp was active
 // Field-drain early release. g_ovClampRiseMs stamps the FIRST tick of a clamp episode (rising
 // edge) — distinct from g_lastProtClampMs, which restamps every clamped tick. Once a clamp has held
-// for fieldDecayTauMs (the measured cut→10%-of-output drain time, cold-margin already baked into the
-// stored value), the coil current sustaining the excess has bled out, so the G2/iExcess hold latches are
+// for fieldDecayTauMs (the measured command→10%-of-output drain time, stored as measured — no cold
+// margin), the coil current sustaining the excess has bled out, so the G2/iExcess hold latches are
 // released without waiting for the lagged filtered-voltage return (iExcess additionally waits for its
 // excess EMA to fall back under the fire line — see the site gates). OR'd with the natural release, so
 // it can only ever SHORTEN a cut; Load Dump is untouched (it re-asserts every tick, no hold latch).
@@ -3124,6 +3125,7 @@ struct TuningRecord {
   float battV;           // bus voltage during the test
   uint8_t chargeStage;   // getChargeStageDisplayCode() at commit
   uint32_t epoch;        // wall-clock Unix seconds at commit (0 = clock not synced)
+  char note[51];         // user free-text label captured at commit (from ccTuningNote)
 };
 
 struct TuningScoreState {
@@ -3142,6 +3144,9 @@ struct TuningScoreState {
   float score;        // current normalized score = errorAccum / activeTimeSec
 };
 
+
+char ccTuningNote[51] = {0};  // live CC test note; captured into the record at commit (RAM only, not persisted)
+char cvTuningNote[51] = {0};  // live CV test note; captured into the record at commit (RAM only, not persisted)
 
 TuningRecord *tuningLog = nullptr;  // ps_malloc(50 × sizeof(TuningRecord))
 uint8_t tuningLogCount = 0;         // records currently in ring buffer (0–50)
@@ -3221,7 +3226,7 @@ const uint32_t ACC_THERM_CV_YIELD_MS = 10000;   // CV must own the command this 
 
 // === CV Loop Tuning Score System ===
 float cvWaveAmplitudeV = 0.30f;   // V — target rises by this during HIGH phase (LOW phase sits at the real target)
-int cvWavePeriodSec = 30;         // s — full period of the Waveform Generator wave (one LOW + one HIGH); each half-period = this / 2. Default matches the UI input minimum.
+int cvWavePeriodSec = 30;         // s — full period of the Waveform Generator wave (one LOW + one HIGH); each half-period = this / 2. UI minimum 8s; the UI warns below ~14s where a HIGH half no longer fits settle + CV_P2P_SKIP_MS + CV_P2P_EVAL_MS, so the p2p metric reads n/a (scoring still works).
 float cvKOvershoot = 10.0f;       // penalty weight on integrated overshoot (user-exposed)
 uint8_t cvConsecutiveReads = 10;  // consecutive filtered reads within the class-scaled settle band (CV_SETTLE_V_THRESH) to declare settled (~1s at 100ms rate)
 int CVTuningMode = 0;             // 0=off, 1=on
@@ -3233,6 +3238,8 @@ const float CV_HIGH_DEADBAND_V   = 0.025f;  // V at 12V — HIGH phase overshoot
 const float CV_LOW_GRACE_SEC     = 1.0f;    // s — grace period from LOW phase start before undershoot scoring begins
 const float CV_LOW_RAMP_SEC      = 10.0f;   // s — undershoot weight ramps 0→1 over this window after grace
 const float CV_UNDERSHOOT_SCALE  = 0.15f;   // undershoot ISE weight relative to overshoot ISE
+const uint32_t CV_P2P_SKIP_MS = 1000UL;     // ms to wait after V first reaches target before the steady-state p2p window opens
+const uint32_t CV_P2P_EVAL_MS = 3000UL;     // length of the steady-state p2p evaluation window
 
 struct CVTuningRecord {
   uint16_t runNumber;
@@ -3251,7 +3258,7 @@ struct CVTuningRecord {
   float awBleedRate, awRecoverRate;
   uint16_t awSeedProtectMs;
   float reseedFrac;
-  float slopeBleedK;  // A/(V/s) — slope-aware integrator bleed gain (column "KS")
+  float voltageKd;  // A/(V/s) — CV D-term gain (column "KD")
   // FastOV supervisor
   float kHard;
   // iExcess
@@ -3276,7 +3283,9 @@ struct CVTuningRecord {
   float avgLowIntOvVs;  // avg integrated overvoltage above lowTarget (V·s)
   float worstLowOvV;          // peak above lowTarget during any scored LOW phase (after zero crossing)
   float worstLowUndershootV;  // peak below lowTarget during any scored LOW phase
+  float steadyP2PV;           // mean steady-state peak-to-peak of measured V across HIGH steps (-1 = n/a: no step long enough)
   uint32_t epoch;             // wall-clock Unix seconds at commit (0 = clock not synced)
+  char note[51];              // user free-text label captured at commit (from cvTuningNote)
 };
 
 struct CVTuningScoreState {
@@ -3288,6 +3297,13 @@ struct CVTuningScoreState {
   uint32_t phaseStartMs;
   bool phaseSettled;
   uint8_t consecutiveInBand;
+  // Steady-state peak-to-peak (per HIGH phase): stamp when V first reaches the settle band,
+  // skip CV_P2P_SKIP_MS, then min/max over CV_P2P_EVAL_MS. One p2p sample per phase → mean at commit.
+  uint32_t reachedTargetMs;   // 0 = V has not reached the band yet this HIGH phase
+  bool p2pCaptured;           // eval window has closed for this HIGH phase
+  float p2pMin, p2pMax;       // extremes of IBV during the eval window
+  float totalSteadyP2PV;      // sum of per-phase (max-min) across qualifying HIGH phases
+  uint8_t steadyP2PCount;     // HIGH phases that fit a full eval window
   // Accumulators across scored HIGH phases
   uint8_t scoredHighCount;
   float totalSettlingTimeSec;
@@ -3352,10 +3368,10 @@ float pidError = 0.0f;  // PID error for display (A)
 // overwrites both.
 float PidKp = 0.4662f;  // 12V-equivalent proportional gain
 float PidKi = 4.5384f;  // 12V-equivalent integral gain
-float PidKd = 0.01f;  // 12V-equivalent derivative gain
+float PidKd = 0.0f;  // 12V-equivalent derivative gain (default off; current-loop D adds noise, little benefit)
 volatile float PidKp_active = 0.579f;  // DERIVED duty-space gain the PID uses (PidKp × 12/BATTERY_VOLTAGE). Set by recomputeCcGains().
 volatile float PidKi_active = 5.150f;  // DERIVED duty-space Ki.
-volatile float PidKd_active = 0.01f;  // DERIVED duty-space Kd.
+volatile float PidKd_active = 0.0f;  // DERIVED duty-space Kd.
 // --- Voltage (CV) PID ---
 // ── CV gain-mode system (Auto λ-based vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
 // VoltageKp/VoltageKi below are the MANUAL gains (12V-equivalent space). The control loop never reads
@@ -3445,18 +3461,26 @@ float   cvTempDerateScale    = 1.0f;  // live multiplier recomputeCvGains() appl
 // CV loop AND the OV protections see the smooth value. 0 = instant for that direction. Hard-shutdown unaffected.
 uint8_t vTgtRampEnable = 1;       // master switch for the target slew (1=on, default). 0 = instant target,
                                   // byte-identical to pre-ramp behaviour; lets you A/B the limiter, incl. in CV tuning.
-float   vTgtRampUp   = 0.050f;    // V/s — max rate the target may RISE  (up-steps are loop-limited anyway)
-float   vTgtRampDn   = 0.050f;    // V/s — max rate the target may FALL  (the knob that prevents the OV trip)
+float   vTgtRampUp   = 0.15f;     // V/s — max rate the target may RISE  (up-steps are loop-limited anyway)
+float   vTgtRampDn   = 0.15f;     // V/s — max rate the target may FALL  (the knob that prevents the OV trip)
 volatile float VoltageKp_active = 8.5f;  // DERIVED pack-space Kp the loop uses (selected gain × 12/BATTERY_VOLTAGE). Set by recomputeCvGains().
 volatile float VoltageKi_active = 6.0f;  // DERIVED pack-space Ki the loop uses.
+volatile float VoltageKd_active = 10.0f; // DERIVED pack-space D gain the loop uses (VoltageKd × 12/BATTERY_VOLTAGE × temp derate). Set by recomputeCvGains(), same pipeline as Kp/Ki.
 volatile float VoltageKp = 8.5f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID); from commissioning CV plant fit (K20=32.2 mV/A, 12 V-equiv)
 volatile float VoltageKi = 6.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi; from commissioning CV plant fit. Deferred cv_I anti-windup still open (see CV_Loop_Dev_Summary.md Future Work)
-// No CV D term — redundant with the approach brake (SlopeBleedK).
-float CvBrakeThreshVps = 0.70f;     // V/s — approach brake fires when the sustained (EMA'd) rise of filtered V exceeds this. Bench-raced 2026-07-13: 0.5–0.6 thins low-Hz resonance margin, 0.8+ misses ~3×-stiffer banks
-float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess sustained slope, drain this many A/s from cv_I
-float CvBrakeTauMs = 250.0f;        // ms — EMA TC of the brake's sustained-slope signal. Co-set with CvBrakeThreshVps (filter+threshold are one DOF, like IExcessTau)
-float CvBrakeArmV = 1.25f;          // V below live target within which the brake is armed. Sized to exceed a typical Hi->Lo / load-sag hole (~1.2 V) so the brake stays armed through the whole climb-back and catches the fast rise — not just the last fraction near target. Undershoot-safe (over-braking just re-integrates)
-bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "helpers" (asymmetric 7× KiDown unwind + slope-aware integrator bleed). ON = both active (reduce overshoot / speed OV recovery). OFF = symmetric plain PI, easier to tune/understand. Does NOT touch real OV protections.
+// CV D term — one-sided, deadbanded derivative on measurement. Subtracted at the Icv output, never
+// from cv_I: the trim is a position recomputed each tick, so it releases the tick the rise stops and
+// leaves the integrator intact. Replaced the integrating slope bleed 2026-07-17, which drained cv_I
+// cumulatively and could not see its own effect through the ~0.6 s actuator lag — it over-dosed 60%
+// and cut current 48 A -> 7.3 A (cvlog_20260715_1409). Bounded by CvKdMaxTrimA so a fast rise saturates
+// the back-off instead of flooring the field. Design + evidence: CV_Approach_Brake_Brainstorm.md.
+float VoltageKd = 10.0f;            // A/(V/s) — D gain, 12V-EQUIVALENT: normalized to VoltageKd_active (×12/Vbatt×derate) at runtime exactly like VoltageKp/Ki, so one number works on 12/24/48 V (do NOT class-scale this at seed). With the cap, Kd only sets the knee: trim hits CvKdMaxTrimA at slope = deadband + cap/Kd (0.50 + 50/10 = 5.5 V/s per cell, on all banks — cap flat + Kd÷V + deadband×V make the knee per-cell-equal), then holds flat. Deliberately low so the back-off is PROPORTIONAL across the real-event band (2–5 V/s) rather than bang-bang at the cap; raise toward ~18 to reach the cap on a hard blip. Cross-checked on cvlog_20260717_1822 (blip 3.28 V/s); Kd alone is not the safety limit — CvKdMaxTrimA is
+float CvKdDeadbandVps = 0.50f;      // V/s — D acts only on rise faster than this. Sits at the 99th pct of settled idle raw-slope ripple (measured 0.50 V/s, cvlog_20260715_1409); below ~0.4 it half-wave-rectifies belt ripple into a DC cut. NOT independent of CvKdOneSided
+bool  CvKdOneSided = false;         // false (default) = TWO-SIDED, quadrant-gated: removes current on a fast rise, and adds current on a fast fall ONLY while below target — that below-target gate is what makes two-sided safe, damping the undershoot ring without the old symmetric-D failure (its lagging window ADDED current at the above-target overshoot crossing and re-lifted the bus). true = remove-only (the earlier default), an A/B fallback
+float CvKdArmV = 1.25f;             // V below live target within which the D term acts; 0 = always on whenever CV is active. Not cosmetic: a sag recovery climbs at 0.5–1.2 V/s, above the deadband, so an always-on D term brakes legitimate recoveries
+float CvKdMaxTrimA = 50.0f;         // A — hard ceiling on the D-term back-off. THIS is the no-field-cut guarantee: an uncapped Kd would command a huge removal and floor the field (the exact torque-step the softener must not cause). Raised 20→50 (2026-07-17): at 20 A the D term saturated on every real event (blip 3.28 V/s × Kd10 = 33 A clamped to 20) and still overshot +0.87 V (cvlog_20260717_1822); 50 A gives the fast-rise brake the authority to drain field before G2, while a cut this size only lands during an RPM surge that already has torque headroom. FLAT amps, voltage-independent (like every amp setting): a per-cell-equivalent overshoot needs the SAME back-off amps on every bank (Kd÷V cancels the ×V slope), so a flat cap keeps the knee per-cell-equal — a ÷V cap would clip the 48 V response to ¼ and make the damper bang-bang. NVH is a torque-RATE issue already bounded by the setpoint slew, not the cap depth; a specific rig can lower this knob
+float CvKdVoltFiltTC = 103.0f;      // ms — dedicated EMA on IBV feeding ONLY the D term's slope (g_cvKdFiltV), so tuning the D-term noise floor never disturbs the shared VoltageFilterTC (stage machine). Default = VoltageFilterTC so behavior is unchanged from the pre-split build. This is a filter on VOLTAGE (before the derivative); NOT the old CvBrakeTauMs, which filtered the SLOPE (after) and was deleted for lagging past the crest
+bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "helpers" (asymmetric 7× KiDown unwind + the one-sided D term). ON = both active (reduce overshoot / speed OV recovery). OFF = symmetric plain PI, easier to tune/understand. Does NOT touch real OV protections.
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 // --- FastOV supervisor ---
 float KHard = 35.0f;  // A/V — OV cap slope (Group 1: Vpred > target+OvPredMarginV; Group 2: IBV > target+OvMeasMarginV)
@@ -3507,7 +3531,7 @@ bool commissionProtBackup   = true;  // saved value of testProtectionsEnabled at
 // --- CV loop runtime state ---
 uint32_t lastVoltageLoopMs = 0;           // timestamp of last voltage loop update
 uint16_t g_voltLoopActualIntervalMs = 0;  // actual interval of last voltage loop fire (ms); 0 until second fire
-float g_slopeBleedAmpsThisTick = 0.0f;   // slope bleed drain applied this voltage loop tick (A); cleared by cvLog_tick after logging
+float g_kdTrimThisTick = 0.0f;   // D-term current reduction latched for the next cvLog entry (A) — most recent nonzero trim since the last log write; cleared by cvLog_tick after logging
 float voltageTargetSlewed = 0.0f;        // rise-governor output — the setpoint the CV PI tracks. Global (not a static local) only so cvLog_tick can record it; written solely by the governor in AdjustFieldLearnMode.
 float Icv = 0.0f;                         // CV PID output — direct current setpoint (A)
 float cv_I = 0.0f;                        // CV integrator state (A)
@@ -3672,7 +3696,7 @@ const float SETPOINT_FALL_DEFAULT = 50.0f;  // A/s
 uint8_t cvTestSlewMode = 2;
 const float VTGT_RAMP_DEFAULT = 0.050f;  // V/s @12V — factory target ramp for cvTestSlewMode=Default; scaled ×BATTERY_VOLTAGE/12 at use
 uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise governor (anti-windup clamp). 0 = rises are not clamped — integrator can wind up into an OV trip on an up-step; applies in the CV test and normal operation
-uint8_t cvRecovEnable = 1;   // master switch for the post-protection CV recovery window (timed cv_I re-injection + error cap). 0 = legacy behavior: recovery pace scales with the post-cut voltage error, so it crawls at low targets and can re-trip predictive OV at high ones
+uint8_t cvRecovEnable = 0;   // master switch for the post-protection CV recovery window (timed cv_I re-injection + error cap). DEFAULT OFF (2026-07-18): the timed window masks CV gain problems; recovery is left to the bare loop so gains must be tuned to survive a step. 1 = timed re-injection + error cap; 0 = plain PI walks itself back (pace scales with post-cut error)
 float cvRecovSec = 2.5f;     // recovery time target (s): cv_I ramps from its ReseedFrac seed back to the pre-event value over this span, at any target voltage / chemistry / bank size
 float cvRecovEmaxV = 0.25f;  // recovery error cap (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use): max positive error the CV PI sees during recovery, so P+I drive can't scale with the post-cut collapse
 bool    g_autoTestActive  = false;  // set per control-loop tick: an automated/guided test owns the limiters now (commissioning / battery-health DCIR / resonance / system-ID). While true the four user limiter toggles above are inert so a stray user setting can't corrupt a measurement; each test's own built-in slew behavior governs.
@@ -3913,9 +3937,8 @@ uint32_t thermalSlopeLastPushMs = 0;  // gates slope buffer push to TempPIDInter
 // there the trend really is stale and must be cleared. Consumed (reset) inside the re-enable path.
 bool thermalPreserveSlopeOnResume = false;
 
-float cvDSlope = 0.0f;              // V/s — mirrors g_fastOvDvdt; feeds the approach-brake slope EMA and the recovery starve exit
-float g_cvBrakeSlopeEma = 0.0f;     // V/s — CvBrakeTauMs EMA of cvDSlope; the approach brake's trigger signal, logged to cvLog
-uint32_t g_cvBrakeCount = 0;        // session count of approach-brake engagement episodes; lifetime twin lives in g_ovTel.brakeEventCount
+float cvDSlope = 0.0f;              // V/s — sliding-window backward diff of g_cvKdFiltV (~VoltageLoopInterval window, refreshed every output tick); the CV D term's input and the recovery starve exit's
+uint32_t g_cvKdCount = 0;           // session count of D-term engagement episodes; lifetime twin lives in g_ovTel.kdEventCount
 
 float outerImpliedPenalty = 0.0f;
 bool outerAntiWindupFired = false;
@@ -4073,7 +4096,7 @@ uint32_t thermalLogBurstUntilMs = 0;
 
 #define PID_LOG_SIZE 2400
 #define CV_LOG_SIZE 6000
-#define CV_LOG_HEADER_SIZE 36
+#define CV_LOG_HEADER_SIZE 40
 
 volatile bool pidLogPaused = false;
 volatile uint32_t pidLogPausedAtMs = 0;
@@ -4177,11 +4200,11 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 // CV / Voltage Tuner Log
 // Logs every CH1 sample (fresh CH1 arrives 5–25ms apart, assume ~30ms) — no internal rate limiter.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
-// 55 bytes/entry × 6000 entries = 330 KB PSRAM → ~28 sec at full rate.
+// 57 bytes/entry × 6000 entries = 342 KB PSRAM → ~28 sec at full rate.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// STRUCT  (55 bytes, offsets below match JS parser exactly)
+// STRUCT  (57 bytes, offsets below match JS parser exactly)
 // ---------------------------------------------------------------------------
 //
 //  offset  field            scale      notes
@@ -4204,20 +4227,28 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //  30      rpm              raw        RPM, clamped to int16 range
 //  32      battV_filt_x100  ×100       IBV_filtered (display EMA, VoltageFilterTC)
 //  34      ch1IntervalMs    raw ms     last CH1 inter-sample gap
-//  36      cvDSlope_x10000  ×10000     cvDSlope (500ms backward diff on filtered V)
+//  36      cvDSlope_x10000  ×10000     cvDSlope — sliding-window backward diff of g_cvKdFiltV over ~one
+//                                      voltage-loop interval, refreshed every output tick. The CV D
+//                                      term's input; positive on a rise, negative on a fall.
 //  38      battI_x10        ×10        getBatteryCurrent() — INA228 or Victron
 //  40      dBcur_dt_Aps     raw A/s    g_dBcur_dt clamped to int16
 //  42      voltLoopIntervalMs  raw ms  actual voltage loop interval when fired this tick; 0 if not fired
 //  44      inaIntervalMs       raw ms  ina_last_ms at log time — INA228 read freshness
-//  46      slopeBleedAmps_x1000 ×1000  cv_I drain applied this voltage loop tick (A×1000); 0 on non-VL ticks
+//  46      kdTrim_x1000         ×1000  D-term current reduction applied at the Icv output this voltage
+//                                      loop tick (A×1000); 0 on non-VL ticks. Signed: negative only when
+//                                      CvKdOneSided is off. This is a POSITION, not a cumulative drain —
+//                                      it does not integrate into cv_I.
 //  48      capReason            —      which layer set fastOvCap this tick
 //  49      ovFilt_x100          ×100   g_ovIbvFilt — Group 2's comparator input (plant-tau EMA of IBV)
-//  51      brakeSlope_x10000    ×10000 g_cvBrakeSlopeEma — the approach-brake gated signal (EMA of cvDSlope)
-//  53      targSlewed_x100      ×100   voltageTargetSlewed — rise-governor output; THE setpoint the CV PI
+//  51      targSlewed_x100      ×100   voltageTargetSlewed — rise-governor output; THE setpoint the CV PI
 //                                      actually tracks. Equals targV unless the governor is clamping a
 //                                      RISING target, so targV is not a safe stand-in on stage changes.
 //                                      Note vErrorMv above is (targV − IBV), NOT the PI's error: the real
 //                                      PI error is (targSlewed − battV).
+//  53      pTerm_x10            ×10    g_cvPTerm — P contribution to Icv (VoltageKp_active × error). With
+//                                      cv_I (offset 16 = I) and kdTrim (offset 46 = D), the full P/I/D split.
+//  55      cvKdFiltV_x100       ×100   g_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC (header offset 36); the
+//                                      D term's slope input, distinct from battV_filt (VoltageFilterTC).
 //
 //  flags bits:
 //    b0  fastOvActive    any OV clamp fired this tick
@@ -4251,18 +4282,19 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t rpm;
   int16_t battV_filt_x100;  // IBV_filtered × 100 (V) — display EMA, VoltageFilterTC
   int16_t ch1IntervalMs;    // last CH1 inter-sample gap   (ms)
-  int16_t cvDSlope_x10000;  // cvDSlope × 10000 (V/s × 10000 → ~0.0001 V/s per count)
+  int16_t cvDSlope_x10000;  // cvDSlope × 10000 — sliding-window backward diff of g_cvKdFiltV (V/s); the D-term input
   int16_t battI_x10;        // getBatteryCurrent() × 10 (A) — INA228 or Victron
   int16_t dBcur_dt_Aps;       // g_dBcur_dt clamped to int16 (A/s) — load dump derivative
   int16_t voltLoopIntervalMs;      // actual voltage loop interval when fired this tick (ms); 0 if not fired
   int16_t inaIntervalMs;           // ina_last_ms at log time — INA228 read freshness (ms)
-  int16_t slopeBleedAmps_x1000;    // cv_I drain applied this voltage loop tick (A × 1000); 0 on non-VL ticks
+  int16_t kdTrim_x1000;            // D-term current reduction applied at the Icv output (A × 1000); most recent nonzero trim since the last log write, 0 if none; signed (negative only if CvKdOneSided off)
   uint8_t capReason;               // which layer set fastOvCap this tick: 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk
   int16_t ovFilt_x100;             // g_ovIbvFilt × 100 (V) — Group 2's comparator input (plant-tau EMA of IBV)
-  int16_t brakeSlope_x10000;       // g_cvBrakeSlopeEma × 10000 (V/s) — approach-brake trigger signal
   int16_t targSlewed_x100;         // voltageTargetSlewed × 100 (V) — rise-governor output; the setpoint the CV PI tracks
+  int16_t pTerm_x10;               // g_cvPTerm × 10 (A) — P contribution to Icv (VoltageKp_active × error); I=cv_I_x10, D=kdTrim_x1000
+  int16_t cvKdFiltV_x100;          // g_cvKdFiltV × 100 (V) — IBV smoothed by CvKdVoltFiltTC; the D term's slope input ("Voltage for D term")
 };
-static_assert(sizeof(CvLogEntry) == 55, "CvLogEntry must be 55 bytes");
+static_assert(sizeof(CvLogEntry) == 57, "CvLogEntry must be 57 bytes");
 
 
 struct CvBinDLState {
@@ -4278,17 +4310,18 @@ struct CvBinDLState {
 };
 
 // ---------------------------------------------------------------------------
-// BINARY HEADER  (32 bytes)
+// BINARY HEADER  (40 bytes)
 // offset  field           type      notes
 //   0     count           uint32    number of valid entries
-//   4     entrySize       uint32    = 51
+//   4     entrySize       uint32    = 57
 //   8     voltageKp       float     VoltageKp at download time
 //  12     voltageKi       float     VoltageKi at download time
 //  16     voltageInterval uint32    VoltageLoopInterval ms
-//  20     brThresh        float     CvBrakeThreshVps (V/s)
-//  24     brK             float     SlopeBleedK (A/(V/s))
-//  28     brArmV          float     CvBrakeArmV (V)
-//  32     brTauMs         float     CvBrakeTauMs (ms)
+//  20     kdDeadband      float     CvKdDeadbandVps (V/s)
+//  24     kd              float     VoltageKd (A/(V/s))
+//  28     kdArmV          float     CvKdArmV (V)
+//  32     kdOneSided      float     CvKdOneSided (0/1, stored as float for header layout stability)
+//  36     kdVoltFiltTC    float     CvKdVoltFiltTC (ms) — the D term's dedicated voltage-EMA time constant
 // ---------------------------------------------------------------------------
 
 static CvLogEntry *cvLog = nullptr;
@@ -4306,6 +4339,14 @@ float g_fastOvVpred = 0.0f;       // predicted voltage, updated when voltageCont
 float g_ovIbvFilt = 0.0f;         // Group 2 comparator input: plant-tau-derived EMA of IBV (see fast-OV block)
 bool g_cvRecovActive = false;     // post-protection recovery window state, exported for cvLog flags b7
 bool g_fastOvHardActive = false;  // K_HARD or hysteresis block fired this tick
+
+// CV P/I/D decomposition telemetry — the three contributions to Icv, streamed live (CSV1) for the
+// tuning plots and logged to cvlog. g_cvKdFiltV is the dedicated CvKdVoltFiltTC-EMA of IBV the D
+// term differentiates (also the "Voltage for D term" plot trace). g_cvKdTrimLive persists every
+// tick (0 when idle) — unlike g_kdTrimThisTick, which cvLog_tick clears after each log write.
+float g_cvKdFiltV = 0.0f;         // V — IBV smoothed by CvKdVoltFiltTC; the D term's slope input
+float g_cvPTerm = 0.0f;           // A — proportional contribution to Icv (VoltageKp_active × error)
+float g_cvKdTrimLive = 0.0f;      // A — D-term back-off applied at the Icv output this tick (0 when not trimming)
 uint32_t g_fastOvHardCount = 0;
 
 // ---- Gate-tuning live readouts: 10s rolling extreme per gated quantity (PSRAM) ----
@@ -4376,10 +4417,10 @@ uint8_t g_fastOvCapReason = CAP_REASON_NONE;  // exported once per full control 
 #define PROT_EVT_OV 0x01  // overvoltage hard clamp (KHard G1/G2)
 #define PROT_EVT_IX 0x02  // iExcess current-excess supervisor (CV or Bulk)
 #define PROT_EVT_LD 0x04  // load-dump cutoff
-// 0x08 is NOT a protection and no current cap bound — the approach brake merely drained cv_I. The
+// 0x08 is NOT a protection and no current cap bound — the CV D term merely trimmed the current setpoint. The
 // dashboard masks 0x01|0x02|0x04 for its red "a protection fired" markers and shades 0x08 separately;
-// anything reading this mask must do the same or a brake tick reads as a protection trip.
-#define PROT_EVT_BR 0x08  // CV approach brake bled cv_I this tick
+// anything reading this mask must do the same or a D-term tick reads as a protection trip.
+#define PROT_EVT_KD 0x08  // CV D term applied a current-reduction trim this tick
 volatile uint8_t g_protEventLatch = 0;
 
 // ── Current ring / MA / dI/dt ─────────────────────────────────────────────

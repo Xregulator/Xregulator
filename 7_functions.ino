@@ -2355,8 +2355,8 @@ void cvLog_tick(uint32_t nowMs) {
   e.dBcur_dt_Aps = (int16_t)clamp_f(g_dBcur_dt, -32767.0f, 32767.0f);
   e.voltLoopIntervalMs = pidLog_voltageLoopRanThisTick ? (int16_t)g_voltLoopActualIntervalMs : 0;
   e.inaIntervalMs = (int16_t)ina_last_ms;
-  e.slopeBleedAmps_x1000 = (int16_t)clamp_f(g_slopeBleedAmpsThisTick * 1000.0f, 0.0f, 32767.0f);
-  g_slopeBleedAmpsThisTick = 0.0f;  // clear after logging so non-VL ticks show 0
+  e.kdTrim_x1000 = (int16_t)clamp_f(g_kdTrimThisTick * 1000.0f, -32767.0f, 32767.0f);  // signed: <0 only in symmetric mode
+  g_kdTrimThisTick = 0.0f;  // clear after logging so a no-trim interval logs 0
 
   if (g_iExcessBulkActive) e.flags |= (1 << 3);  // iExcess BULK sub-mode (current-control phase)
   if (g_iExcessActive)   e.flags |= (1 << 5);
@@ -2365,8 +2365,9 @@ void cvLog_tick(uint32_t nowMs) {
 
   e.capReason = g_fastOvCapReason;  // which layer set the binding fastOvCap this tick
   e.ovFilt_x100 = (int16_t)clamp_f(g_ovIbvFilt * 100.0f, -32767.0f, 32767.0f);
-  e.brakeSlope_x10000 = (int16_t)clamp_f(g_cvBrakeSlopeEma * 10000.0f, -32767.0f, 32767.0f);
   e.targSlewed_x100 = (int16_t)clamp_f(voltageTargetSlewed * 100.0f, -32767.0f, 32767.0f);
+  e.pTerm_x10 = (int16_t)clamp_f(g_cvPTerm * 10.0f, -32767.0f, 32767.0f);      // P contribution to Icv (A); I=cv_I_x10, D=kdTrim_x1000
+  e.cvKdFiltV_x100 = (int16_t)clamp_f(g_cvKdFiltV * 100.0f, -32767.0f, 32767.0f);  // D term's dedicated filtered voltage
 
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;
@@ -3607,10 +3608,11 @@ static void fcCalibrateFast(float faHighMv, float faLowMv) {
                        g, o, fieldCutBaseA, fieldCutFloorA);
 }
 
-// Shared τ fit + fall-time on a filtered, floor-referenced decay trace (t in ms, amps).
-// Band: 85% down to 10% of (base − floor), starting at the first 85% crossing. Also fills the
-// wizard plot arrays (t re-zeroed to the 95% crossing ≈ the cut edge). Returns true on a clean fit.
-static bool fcFitDecay(const float *tMs, const float *amps, int n, int minFitPts) {
+// Shared τ fit + fall-time on a filtered, floor-referenced decay trace (t in ms, amps). tCmd = the cut
+// command instant in THIS trace's time base (NaN → unknown). Band: 85% down to 10% of (base − floor),
+// starting at the first 85% crossing. Also fills the wizard plot arrays (t re-zeroed to tCmd — the cut
+// command — so the plot origin matches the drain number). Returns true on a clean fit.
+static bool fcFitDecay(const float *tMs, const float *amps, int n, int minFitPts, float tCmd) {
   float base = fieldCutBaseA, floorA = fieldCutFloorA;
   float dA = base - floorA;
   if (dA < FIELDCUT_MIN_BASE_A) {
@@ -3679,11 +3681,13 @@ static bool fcFitDecay(const float *tMs, const float *amps, int n, int minFitPts
   fieldCutResidPct = nr ? (float)((exp(sqrt(ss / nr)) - 1.0) * 100.0) : -1.0f;
   fieldCutTauMs = (float)tauMs;
   fieldCutFallMs = (!isnan(t90)) ? (t10 - t90) : -1.0f;
-  // Cut edge = the 95% crossing (falls back to the 85% index when the plateau never made the
-  // window). Drain time = edge → 10%-of-baseline, read directly off the trace — the model-free
-  // "field no longer makes meaningful current" number the OV release actually needs. For a clean
-  // exponential drain ≈ 2.3τ, so the fit cross-checks it.
+  // Drain + plot zero anchor to the cut COMMAND (tCmd): the OV release waits from when IT commands the
+  // cut, so the command→response dead time belongs inside the number. Fall back to the 95% crossing
+  // (then the 85% index) when tCmd is missing or out of range. Drain = anchor → 10%-of-baseline, read
+  // directly off the trace — the model-free "field no longer makes meaningful current" number the OV
+  // release needs. For a clean coil drain ≈ dead-time + 2.3τ, so the fit still cross-checks it.
   float t0 = !isnan(t95) ? t95 : tMs[i85];
+  if (!isnan(tCmd) && tCmd >= tMs[0] && tCmd < t10) t0 = tCmd;
   fieldCutDrainMs = t10 - t0;
   int iStart = 0;
   while (iStart < i85 && tMs[iStart] < t0 - 50.0f) iStart++;
@@ -3730,7 +3734,9 @@ static void fieldCutProcess(float faHighMv, float faLowMv) {
       const float alpha = 0.1667f;   // EMA τ ≈ 4 ms at 0.8 ms samples — well under the ~40 ms decay
       for (int i = 1; i < nD; i++) dA[i] = dA[i - 1] + alpha * (dA[i] - dA[i - 1]);
       for (int i = nD - 2; i >= 0; i--) dA[i] = dA[i + 1] + alpha * (dA[i] - dA[i + 1]);
-      if (fcFitDecay(dT, dA, nD, 20)) {
+      // Last decimated sample = the grab moment; walk back the measured grab offset to the cut command.
+      float tCmd = (nD > 0) ? (dT[nD - 1] - fcSnapElapsedMs) : NAN;
+      if (fcFitDecay(dT, dA, nD, 20, tCmd)) {
         fieldCutSrc = 1;
         fieldCutOk = true;
       }
@@ -3745,7 +3751,7 @@ static void fieldCutProcess(float faHighMv, float faLowMv) {
     if (!aA) aA = (float *)ps_malloc(FIELDCUT_BUF_SIZE * sizeof(float));
     if (aT && aA) {
       for (int i = 0; i < fieldCutCount; i++) { aT[i] = (float)fieldCutBuf[i].tMs; aA[i] = fieldCutBuf[i].amps; }
-      if (fcFitDecay(aT, aA, fieldCutCount, 4)) {
+      if (fcFitDecay(aT, aA, fieldCutCount, 4, 0.0f)) {   // ADS tMs is already cut-relative (el = 0 at the cut)
         fieldCutSrc = 0;
         fieldCutOk = true;
         queueConsoleMessage("Field-cut: fast channel unavailable — fitted on ADS samples (coarse)");
@@ -3910,6 +3916,7 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     }
     if (!snapped && el >= FIELDCUT_SNAP_MS) {
       fcFastCount = faGrabRecent(fcFastBuf, FIELDCUT_FAST_N);
+      fcSnapElapsedMs = (float)el;   // grab lands one tick past FIELDCUT_SNAP_MS — record the true offset so the command maps exactly into the ring copy
       snapped = true;
     }
     if (el >= FIELDCUT_MEAS_MS - 2500UL) { adsTailSum += ampsRaw; adsTailN++; }

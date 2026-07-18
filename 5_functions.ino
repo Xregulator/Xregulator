@@ -2591,11 +2591,16 @@ void _ReadAnalogInputs_inner() {
                          static uint32_t lastIbvEmaMs = 0;
                          if (!ibv_ema_init) {
                            IBV_filtered = IBV;
+                           g_cvKdFiltV = IBV;
                            ibv_ema_init = true;
                          } else {
                            float dt_f = fmaxf(1.0f, (float)(nowIna - lastIbvEmaMs));
                            float alpha = dt_f / (VoltageFilterTC + dt_f);
                            IBV_filtered = alpha * IBV + (1.0f - alpha) * IBV_filtered;
+                           // Dedicated D-term voltage EMA — separate TC so tuning the D term's noise floor
+                           // never shifts the shared IBV_filtered (stage machine). CvKdVoltFiltTC=0 -> raw IBV.
+                           float alphaKd = dt_f / (fmaxf(CvKdVoltFiltTC, 1.0f) + dt_f);
+                           g_cvKdFiltV = alphaKd * IBV + (1.0f - alphaKd) * g_cvKdFiltV;
                          }
                          lastIbvEmaMs = nowIna;
                          ibvFreshFlag = true;

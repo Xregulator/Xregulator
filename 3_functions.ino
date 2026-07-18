@@ -57,10 +57,14 @@ enum Csv1Index {
   CSV1_iExcessThreshold, // iExcess detector: computed fire threshold E (A ×10) — tuning trace
   CSV1_mExcessEmaPeak,   // iExcess: per-CSV1-frame peak averaged excess (A ×10) — live sparkline
   CSV1_iExcessThreshMin, // iExcess: per-CSV1-frame min fire threshold E (A ×10) — live sparkline
-  CSV1_protEventMask,    // event bitmask this frame (1=OV 2=iExcess 4=LoadDump — vertical markers; 8=ApproachBrake — Voltage-plot shading, NOT a protection)
+  CSV1_protEventMask,    // event bitmask this frame (1=OV 2=iExcess 4=LoadDump — vertical markers; 8=CV D term — Voltage-plot shading, NOT a protection)
   CSV1_fieldEventReason, // FieldEventReason enum code — plain-English cause the banner shows next to OFF
+  CSV1_cvPTerm,          // CV loop P contribution to Icv (A ×100) — VoltageKp_active × error; P/I/D tuning plot
+  CSV1_cvIterm,          // CV loop I contribution to Icv (A ×100) — cv_I integrator, live (also on CSV2 at 5 s); P/I/D plot
+  CSV1_cvKdTrim,         // CV loop D back-off applied at the Icv output (A ×100); plotted negated as the D contribution
+  CSV1_cvKdFiltV,        // IBV smoothed by CvKdVoltFiltTC (V ×100) — the D term's slope input; "Voltage for D term" trace
 
-  CSV1_FIELD_COUNT  // = 42
+  CSV1_FIELD_COUNT  // = 46
 };
 
 enum Csv2Index {
@@ -635,7 +639,7 @@ enum Csv2Index {
   CSV2_accThermSess,    // containment sessions since reset
   CSV2_accThermWorst,   // worst over-temp vs limit (°F ×100) — unconditional
   CSV2_imuInstallCode,  // 0=OK 1=never zeroed 2=mount not vertical 3=zeroed pre-mount-check 4=no IMU
-  CSV2_cvBrakeCount,    // approach-brake engagement episodes this session (rising edge, ≥1s quiet re-arm)
+  CSV2_cvKdCount,       // CV D-term engagement episodes this session (rising edge, ≥1s quiet re-arm)
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -847,10 +851,11 @@ enum Csv3Index {
   CSV3_OutputPIDMA_N,
   CSV3_OutputPIDFilterTC,
   CSV3_VoltageFilterTC,
-  CSV3_CvBrakeThreshVps,
-  CSV3_SlopeBleedK,
+  CSV3_CvKdVoltFiltTC,
+  CSV3_CvKdDeadbandVps,
+  CSV3_VoltageKd,
   CSV3_DvdtTC,
-  CSV3_CvBrakeArmV,
+  CSV3_CvKdArmV,
   CSV3_StartupRiseRate,
   CSV3_absorptionCompleteTime,
   CSV3_OnOff,
@@ -982,9 +987,10 @@ enum Csv3Index {
   CSV3_cvRecovEmaxV,            // recovery error cap (V per 12V block); ×1000
   CSV3_testSlewMode,           // manual CC square-wave test slew mode (0=off, 1=default rates, 2=custom)
   CSV3_cvTestSlewMode,         // manual CV square-wave test slew mode (0=off, 1=default rates, 2=custom)
-  CSV3_CvBrakeTauMs,           // approach-brake sustained-slope EMA time constant (ms)
-  CSV3_fieldDecayTauMs,        // commissioned field drain time, cut→10% of output (ms); 30% cold margin already baked in
+  CSV3_CvKdOneSided,           // CV D-term mode: 1=one-sided (removes current only), 0=symmetric
+  CSV3_fieldDecayTauMs,        // commissioned field drain time, command→10% of output (ms); stored as measured (cold margin removed 07-18)
   CSV3_commissionManualMask,   // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
+  CSV3_CvKdMaxTrimA,           // CV D-term back-off ceiling (A ×10); caps kdTrim so a fast rise saturates instead of flooring the field
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -2680,20 +2686,22 @@ void setupServer() {
     float ki = (float)VoltageKi_active;
     uint32_t interval = (uint32_t)VoltageLoopInterval;
 
-    float brThresh = CvBrakeThreshVps;
-    float brK      = SlopeBleedK;
-    float brArmV   = CvBrakeArmV;
-    float brTauMs  = CvBrakeTauMs;
+    float kdDeadband = CvKdDeadbandVps;
+    float kd         = VoltageKd;
+    float kdArmV     = CvKdArmV;
+    float kdOneSided = (float)(CvKdOneSided ? 1 : 0);
+    float kdVoltFiltTC = CvKdVoltFiltTC;
 
-    memcpy(state.header + 0,  &cnt,      4);
+    memcpy(state.header + 0,  &cnt,       4);
     memcpy(state.header + 4,  &entrySize, 4);
-    memcpy(state.header + 8,  &kp,       4);
-    memcpy(state.header + 12, &ki,       4);
-    memcpy(state.header + 16, &interval, 4);
-    memcpy(state.header + 20, &brThresh, 4);  // CvBrakeThreshVps (V/s)
-    memcpy(state.header + 24, &brK,      4);  // SlopeBleedK (A/(V/s))
-    memcpy(state.header + 28, &brArmV,   4);  // CvBrakeArmV (V)
-    memcpy(state.header + 32, &brTauMs,  4);  // CvBrakeTauMs (ms)
+    memcpy(state.header + 8,  &kp,        4);
+    memcpy(state.header + 12, &ki,        4);
+    memcpy(state.header + 16, &interval,  4);
+    memcpy(state.header + 20, &kdDeadband, 4);  // CvKdDeadbandVps (V/s)
+    memcpy(state.header + 24, &kd,         4);  // VoltageKd (A/(V/s))
+    memcpy(state.header + 28, &kdArmV,     4);  // CvKdArmV (V)
+    memcpy(state.header + 32, &kdOneSided, 4);  // CvKdOneSided (0/1)
+    memcpy(state.header + 36, &kdVoltFiltTC, 4);  // CvKdVoltFiltTC (ms) — D-term voltage EMA TC
 
     state.count = cvLogCount;
     state.oldest = (cvLogHead - cvLogCount + CV_LOG_SIZE) % CV_LOG_SIZE;
@@ -3168,9 +3176,9 @@ void setupServer() {
       settingWrite(NK_sysidPlantTau, String(systemIDPlantTauMs).c_str());
     }
     if (request->hasParam("fieldDecayTauMs")) {
-      // Commissioned field de-energize τ (ms) — the Field-cut step's Apply-Average writes the averaged
-      // measurement × 1.30 (cold margin); a manual override writes the typed value directly. Clamped to a
-      // sane physical band. Consumed by the OV field-drain release timing.
+      // Commissioned field de-energize time (ms) — the Field-cut step's Apply-Average writes the averaged
+      // measurement as-is (30% cold margin removed 07-18); a manual override writes the typed value
+      // directly. Clamped to a sane physical band. Consumed by the OV field-drain release timing.
       foundParameter = true;
       inputMessage = request->getParam("fieldDecayTauMs")->value();
       int v = inputMessage.toInt();
@@ -4883,6 +4891,10 @@ void setupServer() {
       foundParameter = true;   // transient (NOT persisted): CV plant fit asks for abrupt square edges
       tuningSquareAbrupt = (request->getParam("tuningSquareAbrupt")->value().toInt() != 0);
     }
+    if (request->hasParam("ccTuningNote")) {
+      foundParameter = true;   // transient (NOT persisted): free-text label for the next committed CC record
+      sanitizeTuningNote(ccTuningNote, request->getParam("ccTuningNote")->value().c_str());
+    }
     if (request->hasParam("commitTuningScore")) {
       foundParameter = true;
       manualCommitTuningRequested = true;
@@ -5408,41 +5420,55 @@ void setupServer() {
       resTestTargetA = request->getParam("resTestTargetA")->value().toFloat();
       resTestLastCmdMs = millis();  // keepalive refresh (deadman)
     }
-    // No VoltageKd handler — voltage loop has no D term.
-    if (request->hasParam("CvBrakeThreshVps")) {
+    if (request->hasParam("CvKdDeadbandVps")) {
       foundParameter = true;
-      inputMessage = request->getParam("CvBrakeThreshVps")->value();
-      CvBrakeThreshVps = inputMessage.toFloat();
-      settingWrite(NK_CvBrakeThreshVps, String(CvBrakeThreshVps, 3).c_str());
-      queueConsoleMessageF("Approach brake threshold: %.3f V/s", CvBrakeThreshVps);
+      inputMessage = request->getParam("CvKdDeadbandVps")->value();
+      CvKdDeadbandVps = inputMessage.toFloat();
+      settingWrite(NK_CvKdDeadbandVps, String(CvKdDeadbandVps, 3).c_str());
+      queueConsoleMessageF("CV D-term deadband: %.3f V/s", CvKdDeadbandVps);
     }
-    if (request->hasParam("CvBrakeTauMs")) {
+    if (request->hasParam("CvKdOneSided")) {
       foundParameter = true;
-      inputMessage = request->getParam("CvBrakeTauMs")->value();
-      CvBrakeTauMs = inputMessage.toFloat();
-      settingWrite(NK_CvBrakeTauMs, String(CvBrakeTauMs, 0).c_str());
-      queueConsoleMessageF("Approach brake averaging TC: %.0f ms", CvBrakeTauMs);
+      inputMessage = request->getParam("CvKdOneSided")->value();
+      CvKdOneSided = inputMessage.toInt() != 0;
+      settingWrite(NK_CvKdOneSided, String((int)CvKdOneSided).c_str());
+      queueConsoleMessageF("CV D-term mode: %s", CvKdOneSided ? "ONE-SIDED (removes current only)" : "SYMMETRIC (adds on falling bus)");
     }
-    if (request->hasParam("SlopeBleedK")) {
+    if (request->hasParam("VoltageKd")) {
       foundParameter = true;
-      inputMessage = request->getParam("SlopeBleedK")->value();
-      SlopeBleedK = inputMessage.toFloat();
-      settingWrite(NK_SlopeBleedK, String(SlopeBleedK, 1).c_str());
-      queueConsoleMessageF("Approach brake bleed gain: %.1f A/(V/s)", SlopeBleedK);
+      inputMessage = request->getParam("VoltageKd")->value();
+      VoltageKd = inputMessage.toFloat();
+      settingWrite(NK_VoltageKd, String(VoltageKd, 1).c_str());
+      recomputeCvGains();  // manual gain changed → refresh the active gain
+      queueConsoleMessageF("CV D-term gain: %.1f A/(V/s)", VoltageKd);
+    }
+    if (request->hasParam("CvKdVoltFiltTC")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvKdVoltFiltTC")->value();
+      CvKdVoltFiltTC = inputMessage.toFloat();
+      settingWrite(NK_CvKdVoltFiltTC, String(CvKdVoltFiltTC, 0).c_str());
+      queueConsoleMessageF("CV D-term voltage filter TC: %.0f ms", CvKdVoltFiltTC);
     }
     if (request->hasParam("cvHelpersEnabled")) {
       foundParameter = true;
       inputMessage = request->getParam("cvHelpersEnabled")->value();
       cvHelpersEnabled = inputMessage.toInt() != 0;
       settingWrite(NK_cvHelpersEnabled, String((int)cvHelpersEnabled).c_str());
-      queueConsoleMessageF("CV tuning helpers (asymmetric unwind + slope bleed): %s", cvHelpersEnabled ? "ENABLED" : "DISABLED");
+      queueConsoleMessageF("CV tuning helpers (asymmetric unwind + D term): %s", cvHelpersEnabled ? "ENABLED" : "DISABLED");
     }
-    if (request->hasParam("CvBrakeArmV")) {
+    if (request->hasParam("CvKdArmV")) {
       foundParameter = true;
-      inputMessage = request->getParam("CvBrakeArmV")->value();
-      CvBrakeArmV = inputMessage.toFloat();
-      settingWrite(NK_CvBrakeArmV, String(CvBrakeArmV, 2).c_str());
-      queueConsoleMessageF("Approach brake arm window: %.2f V", CvBrakeArmV);
+      inputMessage = request->getParam("CvKdArmV")->value();
+      CvKdArmV = inputMessage.toFloat();
+      settingWrite(NK_CvKdArmV, String(CvKdArmV, 2).c_str());
+      queueConsoleMessageF("CV D-term arm window: %.2f V", CvKdArmV);
+    }
+    if (request->hasParam("CvKdMaxTrimA")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvKdMaxTrimA")->value();
+      CvKdMaxTrimA = fmaxf(0.0f, inputMessage.toFloat());
+      settingWrite(NK_CvKdMaxTrimA, String(CvKdMaxTrimA, 1).c_str());
+      queueConsoleMessageF("CV D-term max back-off: %.1f A", CvKdMaxTrimA);
     }
     if (request->hasParam("TempPIDKp")) {
       foundParameter = true;
@@ -5889,6 +5915,10 @@ void setupServer() {
         settingWrite(NK_CVTuningMode, inputMessage.c_str());
         CVTuningMode = requested;
       }
+    }
+    if (request->hasParam("cvTuningNote")) {
+      foundParameter = true;   // transient (NOT persisted): free-text label for the next committed CV record
+      sanitizeTuningNote(cvTuningNote, request->getParam("cvTuningNote")->value().c_str());
     }
     if (request->hasParam("commitCVTuningScore")) {
       foundParameter = true;
@@ -6757,8 +6787,9 @@ void setupServer() {
 
   server.on("/tuninglog", HTTP_GET, [](AsyncWebServerRequest *request) {
     // PSRAM-backed buffer; shared_ptr deleter frees on response destruction
-    // (normal completion OR abort). Avoids 10 KB transient on the internal heap.
-    std::shared_ptr<char> bufPtr((char *)ps_malloc(10240), [](char *p) { if (p) free(p); });
+    // (normal completion OR abort). Chunked send keeps only ~1.5 KB on the internal heap.
+    // 16 KB (was 10 KB): the per-record Notes field widened each row.
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(16384), [](char *p) { if (p) free(p); });
     if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
     char *buf = bufPtr.get();
 
@@ -6777,21 +6808,21 @@ void setupServer() {
     }
 
     int pos = 0;
-    pos += snprintf(buf + pos, 10240 - pos, "{\"rec\":[");
-    for (int i = 0; i < tuningLogCount && pos < 9800; i++) {
+    pos += snprintf(buf + pos, 16384 - pos, "{\"rec\":[");
+    for (int i = 0; i < tuningLogCount && pos < 15900; i++) {
       TuningRecord &r = tuningLog[sortIdx[i]];
-      pos += snprintf(buf + pos, 10240 - pos,
+      pos += snprintf(buf + pos, 16384 - pos,
         "%s{\"n\":%d,\"s\":%.2f,\"t\":%.1f,"
         "\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.5f,"
         "\"sd\":%d,\"tg\":%.2f,\"dr\":%.1f,"
         "\"wa\":%d,\"wp\":%d,\"wf\":%d,"
-        "\"rpm\":%.0f,\"temp\":%.1f,\"worst\":%.1f,\"bv\":%.2f,\"cs\":%d,\"ts\":%u}",
+        "\"rpm\":%.0f,\"temp\":%.1f,\"worst\":%.1f,\"bv\":%.2f,\"cs\":%d,\"ts\":%u,\"note\":\"%s\"}",
         i > 0 ? "," : "",
         r.runNumber, r.score, r.activeTimeSec,
         r.kp, r.ki, r.kd,
         r.sampleDivisor, r.trackingGain, r.dutyRampRate,
         (int)r.waveAmplitude, (int)r.wavePeriod, (int)r.waveFloor,
-        r.avgRPM, r.avgAltTempF, r.worstErrorA, r.battV, (int)r.chargeStage, (unsigned)r.epoch);
+        r.avgRPM, r.avgAltTempF, r.worstErrorA, r.battV, (int)r.chargeStage, (unsigned)r.epoch, r.note);
     }
     bool testActive = (TuningMode && tuningScore.toggleCount > 0);
     float ts = (tuningScore.activeTimeSec > 0.0f)
@@ -6799,7 +6830,7 @@ void setupServer() {
     // "live" carries the since-reset Control Accuracy v4 numbers for this loop:
     // [Tracking % (in-band while active), worst over-current (A), 0, 0]. (4-slot
     // shape kept for the tuning UI parser.)
-    pos += snprintf(buf + pos, 10240 - pos,
+    pos += snprintf(buf + pos, 16384 - pos,
       "],\"live\":[%.2f,%.2f,%.2f,%.2f],"
       "\"ts\":%.2f,\"tt\":%d,\"ta\":%d}",
       (accCur4.activeSec > 0.5) ? (float)(100.0 * accCur4.inbandActiveSec / accCur4.activeSec) : 0.0f,
@@ -7191,7 +7222,7 @@ void setupServer() {
         "\"iefr\":%.3f,\"ietau\":%.0f,\"iekb\":%.2f,"
         "\"lddt\":%.0f,\"ldt1\":%.0f,\"ldt3\":%.0f,"
         "\"wa\":%.2f,\"wp\":%d,\"ko\":%.1f,\"cr\":%d,"
-        "\"rpm\":%.0f,\"tmp\":%.1f,\"bv\":%.2f,\"soc\":%.1f,\"cvt\":%.2f,\"cs\":%d,\"ts\":%u}",
+        "\"rpm\":%.0f,\"tmp\":%.1f,\"bv\":%.2f,\"soc\":%.1f,\"cvt\":%.2f,\"cs\":%d,\"ts\":%u,\"p2p\":%.3f,\"note\":\"%s\"}",
         i > 0 ? "," : "",
         r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootV,
         r.avgIntegratedOvershootVs, r.activeTimeSec,
@@ -7200,12 +7231,12 @@ void setupServer() {
         r.voltageKp, r.voltageKi,
         r.setpointRiseRate, r.setpointFallRate,
         r.awBleedRate, r.awRecoverRate, (int)r.awSeedProtectMs, r.reseedFrac,
-        r.slopeBleedK, r.kHard,
+        r.voltageKd, r.kHard,
         r.iExcessFrac, r.iExcessTau, r.iExcessKBleed,
         r.loadDumpDtThresh, r.loadDumpDtThresh1, r.loadDumpDtThresh3,
         r.waveAmplitudeV, (int)r.wavePeriodSec, r.kOvershoot, (int)r.consecutiveReads,
         r.avgRPM, r.avgAltTempF, r.battVAtStart, r.socAtStart * 100.0f, r.chargingVoltageTarget,
-        (int)r.chargeStage, (unsigned)r.epoch);
+        (int)r.chargeStage, (unsigned)r.epoch, r.steadyP2PV, r.note);
     }
     // Active test state
     bool cvTestActive = (CVTuningMode && cvTuningScore.testStarted);
@@ -7338,7 +7369,7 @@ void setupServer() {
     g_fastOvClampCount = 0;
     g_fastOvHardCount = 0;
     g_iExcessCount = 0;
-    g_cvBrakeCount = 0;
+    g_cvKdCount = 0;
     g_inaOVCount = 0;
     g_hardOCCount = 0;
     g_voltSpikeCount = 0;
@@ -7369,10 +7400,10 @@ void setupServer() {
     int off = snprintf(buf, cap,
                        "{\"bulk\":%.2f,\"k\":%.2f,\"bins_fine\":%d,\"bins_coarse\":%d,"
                        "\"fine_width_12v\":0.2,\"coarse_width_12v\":1.0,"
-                       "\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"brake\":%lu,\"events\":[",
+                       "\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"kd\":%lu,\"events\":[",
                        BulkVoltage, (float)BATTERY_VOLTAGE / 12.0f, OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS,
                        (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
-                       (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.brakeEventCount);
+                       (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.kdEventCount);
     for (int i = 0; i < OV_HIST_BINS && off > 0 && off < (int)cap; i++)
       off += snprintf(buf + off, cap - off, "%s%lu", i ? "," : "", (unsigned long)g_ovTel.events[i]);
     if (off > 0 && off < (int)cap) off += snprintf(buf + off, cap - off, "],\"time_ms\":[");
@@ -7694,7 +7725,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason; +4: cvPTerm, cvIterm, cvKdTrim, cvKdFiltV
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -7739,7 +7770,11 @@ void SendWifiData() {
                                SafeInt(g_iExcessArmedWin ? g_mExcessEmaPeak : g_mExcessEma, 10),       // CSV1_mExcessEmaPeak (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_iExcessThreshWinMin : g_iExcessThreshold, 10), // CSV1_iExcessThreshMin (A ×10)
                                SafeInt(protMask),              // CSV1_protEventMask — protection-event bits this frame
-                               SafeInt(g_fieldEventReason)     // CSV1_fieldEventReason — FieldEventReason code (banner OFF-reason)
+                               SafeInt(g_fieldEventReason),    // CSV1_fieldEventReason — FieldEventReason code (banner OFF-reason)
+                               SafeInt(g_cvPTerm, 100),        // CSV1_cvPTerm — P contribution to Icv (A ×100)
+                               SafeInt(cv_I, 100),             // CSV1_cvIterm — I contribution to Icv (A ×100)
+                               SafeInt(g_cvKdTrimLive, 100),   // CSV1_cvKdTrim — D back-off at the Icv output (A ×100)
+                               SafeInt(g_cvKdFiltV, 100)       // CSV1_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC (V ×100)
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
@@ -8437,7 +8472,7 @@ void SendWifiData() {
                                (int)accThermSessions,
                                SafeInt(accThermWorstOverF, 100),
                                (int)imuInstallCode(),
-                               SafeInt(g_cvBrakeCount));
+                               SafeInt(g_cvKdCount));
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
@@ -8493,6 +8528,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,"
+                               "%d,"  // +1 CvKdVoltFiltTC (int) — pairs the arg inserted after VoltageFilterTC; sits in the all-integer run before IExcessArmMarginV so every field stays type-aligned
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -8503,7 +8539,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8685,10 +8721,11 @@ void SendWifiData() {
                                OutputPIDMA_N,
                                (int)OutputPIDFilterTC,
                                (int)VoltageFilterTC,
-                               SafeInt(CvBrakeThreshVps, 100),
-                               (int)SlopeBleedK,
+                               (int)CvKdVoltFiltTC,
+                               SafeInt(CvKdDeadbandVps, 100),
+                               SafeInt(VoltageKd, 10),
                                SafeInt(DvdtTC, 10),
-                               SafeInt(CvBrakeArmV, 100),
+                               SafeInt(CvKdArmV, 100),
                                SafeInt(StartupRiseRate, 100),
                                SafeInt(absorptionCompleteTime),
                                SafeInt(OnOff),
@@ -8817,9 +8854,10 @@ void SendWifiData() {
                                SafeInt(cvRecovEmaxV, 1000),
                                (int)testSlewMode,
                                (int)cvTestSlewMode,
-                               SafeInt(CvBrakeTauMs),
+                               (int)CvKdOneSided,
                                SafeInt(fieldDecayTauMs),
-                               (int)commissionManualMask);
+                               (int)commissionManualMask,
+                               SafeInt(CvKdMaxTrimA, 10));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

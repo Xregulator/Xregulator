@@ -1604,24 +1604,33 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     VoltageKi = settingRead(NK_VoltageKi).toFloat();
   }
-  if (!settingExists(NK_CvBrakeThreshVps)) {
-    CvBrakeThreshVps *= seedVScale;
-    settingWrite(NK_CvBrakeThreshVps, String(CvBrakeThreshVps, 3).c_str());
+  if (!settingExists(NK_CvKdDeadbandVps)) {
+    CvKdDeadbandVps *= seedVScale;  // V/s rise rate — voltage-domain first-creation class scale
+    settingWrite(NK_CvKdDeadbandVps, String(CvKdDeadbandVps, 3).c_str());
   } else {
-    CvBrakeThreshVps = settingRead(NK_CvBrakeThreshVps).toFloat();
+    CvKdDeadbandVps = settingRead(NK_CvKdDeadbandVps).toFloat();
   }
-  if (!settingExists(NK_CvBrakeTauMs)) {
-    settingWrite(NK_CvBrakeTauMs, String(CvBrakeTauMs, 0).c_str());
+  if (!settingExists(NK_VoltageKd)) {
+    settingWrite(NK_VoltageKd, String(VoltageKd, 1).c_str());  // A/(V/s), 12V-equivalent — no seed scaling; runtime-normalized to VoltageKd_active like VoltageKp/Ki
   } else {
-    CvBrakeTauMs = settingRead(NK_CvBrakeTauMs).toFloat();
+    VoltageKd = settingRead(NK_VoltageKd).toFloat();
   }
-  if (!settingExists(NK_SlopeBleedK)) {
-    SlopeBleedK *= seedDScale;
-    settingWrite(NK_SlopeBleedK, String(SlopeBleedK, 1).c_str());
+  if (!settingExists(NK_CvKdVoltFiltTC)) {
+    settingWrite(NK_CvKdVoltFiltTC, String(CvKdVoltFiltTC, 0).c_str());  // ms — not class-scaled
   } else {
-    SlopeBleedK = settingRead(NK_SlopeBleedK).toFloat();
+    CvKdVoltFiltTC = settingRead(NK_CvKdVoltFiltTC).toFloat();
   }
-  // cvHelpersEnabled — master switch for the asymmetric KiDown unwind + slope-aware bleed
+  if (!settingExists(NK_CvKdOneSided)) {
+    settingWrite(NK_CvKdOneSided, String((int)CvKdOneSided).c_str());
+  } else {
+    CvKdOneSided = (bool)settingRead(NK_CvKdOneSided).toInt();
+  }
+  if (!settingExists(NK_CvKdMaxTrimA)) {
+    settingWrite(NK_CvKdMaxTrimA, String(CvKdMaxTrimA, 1).c_str());  // A — flat, voltage-independent (like every amp setting); a per-cell-equivalent back-off is the same amps on every bank, so a flat cap keeps the knee per-cell-equal
+  } else {
+    CvKdMaxTrimA = settingRead(NK_CvKdMaxTrimA).toFloat();
+  }
+  // cvHelpersEnabled — master switch for the asymmetric KiDown unwind + the one-sided D term
   if (!settingExists(NK_cvHelpersEnabled)) {
     settingWrite(NK_cvHelpersEnabled, String((int)cvHelpersEnabled).c_str());
   } else {
@@ -1754,11 +1763,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     MinChargeTempF = settingRead(NK_MinChargeTempF).toFloat();
   }
-  if (!settingExists(NK_CvBrakeArmV)) {
-    CvBrakeArmV *= seedVScale;
-    settingWrite(NK_CvBrakeArmV, String(CvBrakeArmV, 2).c_str());
+  if (!settingExists(NK_CvKdArmV)) {
+    CvKdArmV *= seedVScale;
+    settingWrite(NK_CvKdArmV, String(CvKdArmV, 2).c_str());
   } else {
-    CvBrakeArmV = settingRead(NK_CvBrakeArmV).toFloat();
+    CvKdArmV = settingRead(NK_CvKdArmV).toFloat();
   }
   if (!settingExists(NK_PidKp)) {
     settingWrite(NK_PidKp, String(PidKp, 3).c_str());

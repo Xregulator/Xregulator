@@ -245,8 +245,12 @@ const CSV1_FIELDS = [
     "iExcessThreshold",  // iExcess detector: fire threshold E (A ×10) — tuning trace
     "mExcessEmaPeak",    // iExcess: per-frame peak averaged excess (A ×10) — live sparkline
     "iExcessThreshMin",  // iExcess: per-frame min fire threshold E (A ×10) — live sparkline
-    "protEventMask",     // event bitmask this frame (1=OV 2=iExcess 4=LoadDump — vertical markers; 8=ApproachBrake — Voltage-plot shading, NOT a protection)
+    "protEventMask",     // event bitmask this frame (1=OV 2=iExcess 4=LoadDump — vertical markers; 8=CV D term — Voltage-plot shading, NOT a protection)
     "fieldEventReason",  // FieldEventReason enum code — plain-English cause shown next to the banner OFF word
+    "cvPTerm",           // CV loop P contribution to Icv (A ×100) — P/I/D tuning plot
+    "cvIterm",           // CV loop I contribution to Icv (A ×100) — cv_I integrator, live
+    "cvKdTrim",          // CV loop D back-off at the Icv output (A ×100) — plotted negated
+    "cvKdFiltV",         // IBV smoothed by CvKdVoltFiltTC (V ×100) — "Voltage for D term" trace
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -791,7 +795,7 @@ const CSV2_FIELDS = [
     "accThermSess",    // containment sessions since reset
     "accThermWorst",   // worst over-temp vs limit (°F ×100) — unconditional
     "imuInstallCode",  // 0=OK 1=never zeroed 2=mount not vertical 3=zeroed pre-mount-check 4=no IMU
-    "cvBrakeCount",    // approach-brake engagement episodes this session
+    "cvKdCount",    // CV D-term engagement episodes this session
 ];
 
 // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). Sits between CSV1 (10 Hz)
@@ -830,7 +834,7 @@ const GATE_READOUTS_CSV2 = [
     { spans: ['faAmpsDriftFloorA_live', 'faAmpsDriftPct_live'],                              f: 'faAmpsDrift10sMax', s: 100,  lbl: '10s peak drift',   u: 'A',   d: 2 },
     { spans: ['faPeakMinA_live'],                                                            f: 'faTonePk10sMax',   s: 100,   lbl: '10s peak tone',    u: 'A',   d: 2 },
     { spans: ['LoadDumpDtThresh1_live', 'LoadDumpDtThresh_live', 'LoadDumpDtThresh3_live'],  f: 'ldSlew10sMax',     s: 10,    lbl: '10s peak slew',    u: 'A/s', d: 1 },
-    { spans: ['CvBrakeThreshVps_live'],                                                      f: 'cvSlope10sMax',    s: 10000, lbl: '10s peak sustained rise', u: 'V/s', d: 3 },
+    { spans: ['CvKdDeadbandVps_live'],                                                       f: 'cvSlope10sMax',    s: 10000, lbl: '10s peak rise rate', u: 'V/s', d: 3 },
     // Ripple-capture admission gates — firmware streams (window quantity − its limit); <=0 = passing.
     // The self-scaling limits are invisible per-window values, so each label spells its limit rule out.
     { spans: ['ripCmdGate_live'],                                                            f: 'ripCmdExc10sMax',  s: 100,   lbl: 'command travel beyond limit (larger of Floor / Slope % × mean), 10s worst, ≤0 passes',   u: 'A', d: 2 },
@@ -2403,10 +2407,11 @@ const CSV3_FIELDS = [
     "OutputPIDMA_N",
     "OutputPIDFilterTC",
     "VoltageFilterTC",
-    "CvBrakeThreshVps",
-    "SlopeBleedK",
+    "CvKdVoltFiltTC",
+    "CvKdDeadbandVps",
+    "VoltageKd",
     "DvdtTC",
-    "CvBrakeArmV",
+    "CvKdArmV",
     "StartupRiseRate",
     "absorptionCompleteTime",
     "OnOff",
@@ -2537,9 +2542,10 @@ const CSV3_FIELDS = [
     "cvRecovEmaxV",                  // recovery error cap (V per 12V block); ×1000
     "testSlewMode",                  // manual CC square-wave test slew mode (0=off, 1=default, 2=custom)
     "cvTestSlewMode",                // manual CV square-wave test slew mode (0=off, 1=default, 2=custom)
-    "CvBrakeTauMs",                  // approach-brake sustained-slope EMA time constant (ms)
+    "CvKdOneSided",                  // CV D-term mode: 1=one-sided (removes current only), 0=two-sided (also adds below target)
     "fieldDecayTauMs",               // commissioned field de-energize τ (ms); 30% cold margin baked in
     "commissionManualMask",          // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
+    "CvKdMaxTrimA",                  // CV D-term back-off ceiling (A ×10)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3781,6 +3787,7 @@ const plotInterp = {
     temperature: { prevY: [0, 0],                     nextY: [0, 0],                     arrivalTime: 0, lerpDuration: 200 },
     pid:         { prevY: [0, 0, 0, 0, 0, 0, 0],      nextY: [0, 0, 0, 0, 0, 0, 0],      arrivalTime: 0, lerpDuration: 200 },
     cv:          { prevY: [null, null, null, null],    nextY: [null, null, null, null],    arrivalTime: 0, lerpDuration: 200 },
+    cvpid:       { prevY: [null, null, null, null],    nextY: [null, null, null, null],    arrivalTime: 0, lerpDuration: 200 },
 };
 
 let interpLoopRunning = false;
@@ -3916,6 +3923,10 @@ function startInterpLoop() {
             }
             if (cvTuningPlot && cvTuningData && applyInterp(plotInterp.cv, cvTuningData, 4)) {
                 cvTuningPlot.setData(cvTuningData);
+            }
+            healPlotWidth(cvPidPlot, 'cv-pid-plot', 300);
+            if (cvPidPlot && cvPidData && applyInterp(plotInterp.cvpid, cvPidData, 4)) {
+                cvPidPlot.setData(cvPidData);
             }
         }
 
@@ -4930,8 +4941,10 @@ function processCSVDataOptimized(data) {
         // Always appends; the corner "lock" button only freezes the Y axes, never the data.
         if (cvTuningData) {
             const voltTarget = 'voltageTarget' in data ? parseFloat(data.voltageTarget) / 100 : null;
-            const battV      = 'BatteryV_raw' in data ? parseFloat(data.BatteryV_raw) / 100 : null;
-            const ibvRaw     = 'IBV' in data ? parseFloat(data.IBV) / 100 : null;
+            // [2] = INA228 bus voltage (raw), the voltage the CV loop actually regulates on.
+            // [3] = the dedicated CvKdVoltFiltTC EMA the D term differentiates ("Voltage for D term").
+            const inaV       = 'IBV' in data ? parseFloat(data.IBV) / 100 : null;
+            const vForD      = 'cvKdFiltV' in data ? parseFloat(data.cvKdFiltV) / 100 : null;
             const icv        = 'Icv' in data ? parseFloat(data.Icv) / 100 : null;
             const last_cv = cvTuningData[1].length - 1;
             const prevY_cv = [
@@ -4946,12 +4959,36 @@ function processCSVDataOptimized(data) {
             }
             const last = cvTuningData[1].length - 1;
             cvTuningData[1][last] = voltTarget;
-            cvTuningData[2][last] = battV;
-            cvTuningData[3][last] = ibvRaw;
+            cvTuningData[2][last] = inaV;
+            cvTuningData[3][last] = vForD;
             cvTuningData[4][last] = icv;
             plotInterp.cv.prevY = prevY_cv;
-            plotInterp.cv.nextY = [voltTarget, battV, ibvRaw, icv];
+            plotInterp.cv.nextY = [voltTarget, inaV, vForD, icv];
             plotInterp.cv.arrivalTime = performance.now();
+        }
+
+        // CV P/I/D decomposition plot — P, I (integrator), D (−kdTrim), Icv (total). All from CSV1.
+        // D is streamed as the positive trim (cvKdTrim) and plotted negated: it subtracts from Icv.
+        if (cvPidData) {
+            const cvP = 'cvPTerm'  in data ? parseFloat(data.cvPTerm) / 100 : null;
+            const cvI = 'cvIterm'  in data ? parseFloat(data.cvIterm) / 100 : null;
+            const cvD = 'cvKdTrim' in data ? -parseFloat(data.cvKdTrim) / 100 : null;
+            const cvIcv = 'Icv' in data ? parseFloat(data.Icv) / 100 : null;
+            const lastP = cvPidData[1].length - 1;
+            const prevY_pid = [cvPidData[1][lastP], cvPidData[2][lastP], cvPidData[3][lastP], cvPidData[4][lastP]];
+            for (let i = 1; i < cvPidData[1].length; i++) {
+                cvPidData[1][i - 1] = cvPidData[1][i];
+                cvPidData[2][i - 1] = cvPidData[2][i];
+                cvPidData[3][i - 1] = cvPidData[3][i];
+                cvPidData[4][i - 1] = cvPidData[4][i];
+            }
+            cvPidData[1][lastP] = cvP;
+            cvPidData[2][lastP] = cvI;
+            cvPidData[3][lastP] = cvD;
+            cvPidData[4][lastP] = cvIcv;
+            plotInterp.cvpid.prevY = prevY_pid;
+            plotInterp.cvpid.nextY = [cvP, cvI, cvD, cvIcv];
+            plotInterp.cvpid.arrivalTime = performance.now();
         }
 
         return 1;
@@ -5005,6 +5042,7 @@ function updatePlotConfiguration(data) {
         // (Window changes never reach here; only an actual interval change reallocates these.)
         if (pidTuningPlot) rebuildPidTuningWindow();
         if (cvTuningPlot) rebuildCVTuningWindow();
+        if (cvPidPlot) rebuildCVPidWindow();
 
         configChanged = true;
     }
@@ -5056,11 +5094,11 @@ function updatePlotConfiguration(data) {
 }
 
 // protEventMask bit groups. PROT_EVT_BITS is the "a protection fired" set that earns a red marker;
-// PROT_EVT_BRAKE rides in the same mask but is NOT a protection (no cap bound — the approach brake
-// only drained cv_I) and gets its own shading on the Voltage plot. Masking here is load-bearing: an
-// unmasked truthy test paints a brake-only frame as a red protection line with an empty label.
+// PROT_EVT_KD rides in the same mask but is NOT a protection (no cap bound — the CV D term only
+// trimmed the current setpoint) and gets its own shading on the Voltage plot. Masking here is
+// load-bearing: an unmasked truthy test paints a D-term frame as a red protection line with an empty label.
 const PROT_EVT_BITS  = 0x07;
-const PROT_EVT_BRAKE = 0x08;
+const PROT_EVT_KD    = 0x08;
 
 // uPlot draw hook — paint a thin vertical line at every buffer sample where a protection
 // fired this frame, plus a tiny abbreviation at the top (OV / iX / LD). Shared by all four
@@ -5104,17 +5142,17 @@ function drawProtectionMarkers(u) {
     ctx.restore();
 }
 
-// uPlot draw hook — teal band across every run of samples where the CV approach brake drained cv_I
-// (protEventMask bit 8). Wired to the Voltage plot ONLY: the brake is a voltage-loop actor, so the
-// band is signal there and noise on the current/RPM/temp plots.
-// Consecutive frames are merged into one span rather than drawn per-sample: the brake fires on
+// uPlot draw hook — teal band across every run of samples where the CV D term trimmed the current
+// setpoint (protEventMask bit 8). Wired to the Voltage plot ONLY: the D term is a voltage-loop actor,
+// so the band is signal there and noise on the current/RPM/temp plots.
+// Consecutive frames are merged into one span rather than drawn per-sample: the D term fires on
 // back-to-back 10 Hz voltage-loop ticks, so per-sample lines would render as a picket fence. A lone
 // tick still gets a floor width or it would be a zero-pixel invisible rect.
 // Teal matches the Plot 6 band in plot_cvlog.py, and is deliberately not the protections' red —
-// a brake engagement is the loop working, not a trip.
-const BRAKE_FILL_RGBA = 'rgba(0,131,143,0.16)';
-const BRAKE_TEXT_RGBA = 'rgba(0,131,143,0.95)';
-function drawBrakeShading(u) {
+// a D-term engagement is the loop working, not a trip.
+const KD_FILL_RGBA = 'rgba(0,131,143,0.16)';
+const KD_TEXT_RGBA = 'rgba(0,131,143,0.95)';
+function drawKdShading(u) {
     if (!protEventData || !protEventData.length) return;
     const xd = u.data[0];
     if (!xd) return;
@@ -5132,20 +5170,20 @@ function drawBrakeShading(u) {
         const x0 = u.valToPos(Math.max(xa, xmin), 'x', true);
         let   x1 = u.valToPos(Math.min(xb, xmax), 'x', true);
         if (x1 - x0 < 2) x1 = x0 + 2;
-        ctx.fillStyle = BRAKE_FILL_RGBA;
+        ctx.fillStyle = KD_FILL_RGBA;
         ctx.fillRect(x0, top, x1 - x0, hgt);
         if (x0 - lastLabelX >= 22) {
-            ctx.fillStyle = BRAKE_TEXT_RGBA;
+            ctx.fillStyle = KD_TEXT_RGBA;
             ctx.font = '9px sans-serif';
             ctx.textAlign = 'left';
             ctx.textBaseline = 'top';
-            ctx.fillText('BR', x0 + 2, top + 12);   // below the OV/iX/LD row so labels never collide
+            ctx.fillText('D', x0 + 2, top + 12);   // below the OV/iX/LD row so labels never collide
             lastLabelX = x0;
         }
     };
 
     for (let i = 0; i <= n; i++) {                            // <= n so a run touching the end flushes
-        const on = i < n && (protEventData[i] & PROT_EVT_BRAKE) !== 0;
+        const on = i < n && (protEventData[i] & PROT_EVT_KD) !== 0;
         if (on && run < 0) run = i;
         else if (!on && run >= 0) { flush(run, i - 1); run = -1; }
     }
@@ -5601,7 +5639,6 @@ function updateAllEchosOptimized(data) {
         { key: 'FIELD_COLLAPSE_DELAY', id: 'FIELD_COLLAPSE_DELAY_echo', transform: v => Math.round(v / 1000) },
         { key: 'hardwarePresent', id: 'HardwarePresent_echo', transform: v => v },
         { key: 'VoltageKi', id: 'VoltageKi_echo', transform: v => (v / 100).toFixed(2) },
-        // VoltageKd echo removed — D term removed
         { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SetpointBigStepThresh', id: 'SetpointBigStepThresh_echo', transform: v => (v / 100).toFixed(1) },
@@ -5669,11 +5706,13 @@ function updateAllEchosOptimized(data) {
         { key: 'bulkVoltageHoldMs', id: 'bulkVoltageHoldMs_echo', transform: v => (v / 1000).toFixed(2) },
         { key: 'capLimitMode', id: 'capLimitMode_echo', transform: v => v },
         { key: 'OutputPIDFilterTC', id: 'OutputPIDFilterTC_echo_pid', transform: v => v },
-        { key: 'CvBrakeThreshVps',      id: 'CvBrakeThreshVps_echo',          transform: v => (v / 100).toFixed(2) },
-        { key: 'CvBrakeTauMs',          id: 'CvBrakeTauMs_echo',              transform: v => v },
-        { key: 'SlopeBleedK',           id: 'SlopeBleedK_echo',               transform: v => v },
+        { key: 'CvKdDeadbandVps',       id: 'CvKdDeadbandVps_echo',           transform: v => (v / 100).toFixed(2) },
+        { key: 'VoltageKd',             id: 'VoltageKd_echo',                 transform: v => (v / 10).toFixed(1) },
+        { key: 'CvKdOneSided',          id: 'CvKdOneSided_echo',              transform: v => (v ? 'One-sided' : 'Two-sided') },
         { key: 'DvdtTC',                id: 'DvdtTC_echo',                    transform: v => (v / 10).toFixed(1) },
-        { key: 'CvBrakeArmV',           id: 'CvBrakeArmV_echo',               transform: v => (v / 100).toFixed(2) },
+        { key: 'CvKdArmV',              id: 'CvKdArmV_echo',                  transform: v => (v / 100).toFixed(2) },
+        { key: 'CvKdMaxTrimA',          id: 'CvKdMaxTrimA_echo',              transform: v => (v / 10).toFixed(1) },
+        { key: 'CvKdVoltFiltTC',        id: 'CvKdVoltFiltTC_echo',            transform: v => Math.round(v) },
         { key: 'StartupRiseRate',       id: 'StartupRiseRate_echo',           transform: v => (v / 100).toFixed(2) },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'systemIDTestType',      id: 'systemIDTestType_echo',      transform: v => v == 1 ? 'Sine sweep' : 'Step' },
@@ -6047,6 +6086,7 @@ async function fetchAndPopulateVesselInfo() {
 
         const allFieldsFilled =
             data.boat_length_ft &&
+            data.boat_displacement_lbs &&
             data.boat_type &&
             data.boat_make_model &&
             data.boat_year &&
@@ -6056,6 +6096,7 @@ async function fetchAndPopulateVesselInfo() {
             data.battery_voltage &&
             data.battery_capacity_ah &&
             data.battery_type &&
+            data.battery_make_model &&
             data.alternator_brand_model !== undefined &&
             data.solar_watts !== undefined &&
             data.imu_mount_orientation !== undefined &&
@@ -6103,7 +6144,7 @@ async function handleVesselInfoSave(event) {
 
     const vesselData = {
         boat_length_ft: parseFloat(form.BOAT_LENGTH_FT.value),
-        boat_displacement_lbs: parseFloat(form.BOAT_DISPLACEMENT_LBS.value) || 0,
+        boat_displacement_lbs: parseFloat(form.BOAT_DISPLACEMENT_LBS.value),
         boat_type: form.BOAT_TYPE.value,
         boat_make_model: form.BOAT_MAKE_MODEL.value,
         boat_year: parseInt(form.BOAT_YEAR.value),
@@ -6240,7 +6281,9 @@ const BATTDEF_FW_DEFAULT = {
     coldChargeLockoutEnable: 1, battTempDerateEnable: 1, PeukertExponent: 1.05, ChargeEfficiency: 99,
     AbsorptionTimeoutMs: 20,
     VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0, AlternatorHardShutdownV: 15.0,
-    capSocLowMax: 20, capMinSpan: 70, capRestFloor: 30, capSettleRate: 2.0, bhStepLowA: 30, bhStepDeltaA: 30
+    capSocLowMax: 20, capMinSpan: 70, capRestFloor: 30, capSettleRate: 2.0, bhStepLowA: 30, bhStepDeltaA: 30,
+    CvKdDeadbandVps: 0.50, CvKdArmV: 1.25,
+    vTgtRampUp: 0.15, vTgtRampDn: 0.15
 };
 // Stored NVS string → UI units (everything else is stored in UI units already)
 const BATTDEF_FROM_STORED = {
@@ -6373,6 +6416,19 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
         rows.push({ param: 'bhStepLowA', label: 'Resistance Test — Step Low (A)', value: step });
         rows.push({ param: 'bhStepDeltaA', label: 'Resistance Test — Step Delta (A)', value: step });
     }
+
+    // Voltage D term — only the two params that actually vary with bank voltage are proposed here (V/s
+    // and V thresholds, × class). Kd (voltage-normalized 12 V-equivalent), the back-off cap (flat amps),
+    // the voltage filter (ms) and the mode (one-sided vs two-sided) are universal — one value works on
+    // every bank, so like Kp/Ki they are not proposed here; they live in Setup → Voltage. These match the server rescale
+    // (×class) exactly, so on a voltage-class change a defaults bank reads back as "matches".
+    rows.push({ param: 'CvKdDeadbandVps', label: 'Voltage D Term — Deadband (V/s)', value: r2(0.50 * kV) });
+    rows.push({ param: 'CvKdArmV', label: 'Voltage D Term — Arm Window Below Target (V)', value: r2(1.25 * kV) });
+
+    // Setpoint slew is a per-bank V/s rate, so like the D-term thresholds it scales × class (0.15 V/s on 12V
+    // rides as 0.30 on 24V / 0.60 on 48V). 12V base 0.15 matches the firmware initializer's seedVScale seed.
+    rows.push({ param: 'vTgtRampUp', label: 'Voltage Setpoint — Rise Rate (V/s)', value: r2(0.15 * kV) });
+    rows.push({ param: 'vTgtRampDn', label: 'Voltage Setpoint — Fall Rate (V/s)', value: r2(0.15 * kV) });
     return { rows, useFloat };
 }
 
@@ -7387,6 +7443,7 @@ function renderTuningLog(data) {
             <td style="padding:2px 5px;">${(r.bv != null ? r.bv : 0).toFixed(2)}</td>
             <td style="padding:2px 5px;">${stageLabel(r.cs)}</td>
             <td style="padding:2px 5px;white-space:nowrap;">${fmtTuningTs(r.ts)}</td>
+            <td style="padding:2px 5px;">${(r.note || '').replace(/&/g, '&amp;')}</td>
         </tr>`;
     }).join('');
 }
@@ -7477,7 +7534,7 @@ function fetchOvTelemetry() {
             put('ovtSoftCount', d.soft);
             put('ovtSwHardCount', d.sw_hard);
             put('ovtInaCount', d.ina);
-            put('ovtBrakeCount', d.brake !== undefined ? d.brake : '—');
+            put('ovtKdCount', d.kd !== undefined ? d.kd : '—');
             if (!body) return;
             const fineW = d.fine_width_12v * d.k, coarseW = d.coarse_width_12v * d.k;
             const fineTop = d.bulk + d.bins_fine * fineW;
@@ -7786,8 +7843,21 @@ function renderCVTuningLog(data) {
             <td style="padding:2px 4px;">${r.cvt.toFixed(2)}</td>
             <td style="padding:2px 4px;">${stageLabel(r.cs)}</td>
             <td style="padding:2px 4px;white-space:nowrap;">${fmtTuningTs(r.ts)}</td>
+            <td style="padding:2px 4px;">${(r.p2p == null || r.p2p < 0) ? 'n/a' : r.p2p.toFixed(3)}</td>
+            <td style="padding:2px 4px;">${(r.note || '').replace(/&/g, '&amp;')}</td>
         </tr>`;
     }).join('');
+}
+
+// Non-blocking warning when the CV wave period is set below the point where the high phase can
+// still fit the steady-state peak-to-peak window (settle + 1s skip + 3s eval ≈ a 14s period).
+// The value is always sent (returns true); the warning just tells the user P2P may read n/a.
+function warnCvPeriod(form) {
+    const v = parseInt(form.cvWavePeriodSec?.value, 10);
+    if (v >= 8 && v < 14) {
+        xAlert('At a ' + v + 's period the high phase may be too short to fit settling plus the 4s steady-state window — the Peak-to-Peak (P2P) column can read n/a. Settling, overshoot and score still work.', 'Short wave period');
+    }
+    return true;
 }
 
 async function resetCVTuningLog() {
@@ -8103,6 +8173,13 @@ let cvTuningPlotResizeObserver = null;
 let cvYAxesLocked = false;
 let _cvLockWasAuto = { volts: false, amps: false };
 
+// CV P/I/D decomposition plot — shares the CV tuning plot's X window (cvXTime).
+let cvPidPlot = null;
+let cvPidData = null;
+let cvPidPlotResizeObserver = null;
+let cvPidAmpsMin = null, cvPidAmpsMax = null;
+let cvPidSeriesVisible = { p: true, i: true, d: true, icv: true };
+
 // Cache of last-seen CSV2 values for the CV tuning plot.
 // voltageTarget and Icv are CSV2 — not available in processCSVDataOptimized's data object.
 // BatteryV_raw is CSV1 and is read directly from data; it is NOT cached here.
@@ -8137,8 +8214,8 @@ function initCVTuningDataStructures() {
     cvTuningData = [
         [...xAxisData],
         new Array(maxPoints).fill(null),   // [1] voltageTarget (V)
-        new Array(maxPoints).fill(null),   // [2] BatteryV_raw / battV (V)
-        new Array(maxPoints).fill(null),   // [3] IBV raw (V)
+        new Array(maxPoints).fill(null),   // [2] IBV — INA228 bus voltage, raw (V); the loop's regulated voltage
+        new Array(maxPoints).fill(null),   // [3] cvKdFiltV — Voltage for D term (V)
         new Array(maxPoints).fill(null),   // [4] Icv (A) — right axis
     ];
     plotInterp.cv.arrivalTime = 0;
@@ -8163,17 +8240,16 @@ function initCVTuningPlot() {
                 dash:   [6, 3],
             },
             {
-                label:  'Filtered Voltage',
+                label:  'Battery Voltage (INA228)',
                 stroke: cvTuningSeriesVisible.battV ? '#4CAF50' : 'transparent',
                 width:  2,
                 scale:  'volts',
             },
             {
-                label:  'IBV (raw)',
-                stroke: cvTuningSeriesVisible.ibv ? '#B0BEC5' : 'transparent',
-                width:  1,
+                label:  'Voltage for D term',
+                stroke: cvTuningSeriesVisible.ibv ? '#8e24aa' : 'transparent',
+                width:  2,
                 scale:  'volts',
-                dash:   [2, 2],
             },
             {
                 label:  'Icv (A)',
@@ -8309,10 +8385,10 @@ function createCVTuningLegend() {
     legendDiv.style.cssText = 'display:flex;justify-content:center;gap:15px;margin-top:8px;flex-wrap:wrap;';
 
     const items = [
-        { key: 'voltTarget', label: 'Voltage Target', color: '#FF6B6B', idx: 1 },
-        { key: 'battV',      label: 'Battery Voltage',  color: '#4CAF50', idx: 2 },
-        { key: 'ibv',        label: 'IBV (raw)',         color: '#B0BEC5', idx: 3 },
-        { key: 'icv',        label: 'Icv (A)',           color: '#FFA726', idx: 4 },
+        { key: 'voltTarget', label: 'Voltage Target',          color: '#FF6B6B', idx: 1 },
+        { key: 'battV',      label: 'Battery Voltage (INA228)', color: '#4CAF50', idx: 2 },
+        { key: 'ibv',        label: 'Voltage for D term',       color: '#8e24aa', idx: 3 },
+        { key: 'icv',        label: 'Icv (A)',                  color: '#FFA726', idx: 4 },
     ];
 
     items.forEach(item => {
@@ -8347,6 +8423,122 @@ function queueCVTuningPlotUpdate() {
     });
 }
 
+// ── CV P/I/D decomposition plot ───────────────────────────────────────────
+// Shows how the three PI(D) terms build the current setpoint: P (Kp×error),
+// I (the integrator cv_I), D (−Kd trim: removes on a fast rise, adds on a fast fall below target), and Icv (the clamped sum).
+// Shares the CV tuning plot's X window (cvXTime). Single amps axis, autoscaled.
+function initCVPidDataStructures() {
+    const intervalMs = window._lastKnownInterval || 200;
+    const maxPoints = Math.ceil(LIVE_BUFFER_SEC * 1000 / intervalMs);
+    const intervalSec = intervalMs / 1000;
+    const xAxisData = [];
+    for (let i = 0; i < maxPoints; i++) xAxisData[i] = -(maxPoints - 1 - i) * intervalSec;
+    cvPidData = [
+        [...xAxisData],
+        new Array(maxPoints).fill(null),   // [1] P (A)
+        new Array(maxPoints).fill(null),   // [2] I (A)
+        new Array(maxPoints).fill(null),   // [3] D = −kdTrim (A)
+        new Array(maxPoints).fill(null),   // [4] Icv total (A)
+    ];
+    plotInterp.cvpid.arrivalTime = 0;
+}
+
+function initCVPidPlot() {
+    const plotEl = document.getElementById('cv-pid-plot');
+    if (!plotEl) return;
+    if (!cvPidData) initCVPidDataStructures();
+
+    const opts = {
+        width:  plotFitWidth(plotEl, 600, 800),
+        height: 300,
+        series: [
+            {},
+            { label: 'P (Kp×err)',     stroke: cvPidSeriesVisible.p   ? '#1565c0' : 'transparent', width: 2, scale: 'amps' },
+            { label: 'I (integrator)', stroke: cvPidSeriesVisible.i   ? '#2e7d32' : 'transparent', width: 2, scale: 'amps' },
+            { label: 'D (−Kd trim)',   stroke: cvPidSeriesVisible.d   ? '#8e24aa' : 'transparent', width: 2, scale: 'amps' },
+            { label: 'Icv (total)',    stroke: cvPidSeriesVisible.icv ? '#FFA726' : 'transparent', width: 2, scale: 'amps', dash: [6, 3] },
+        ],
+        axes: [
+            {},
+            { scale: 'amps', label: 'Current (A)', side: 3, grid: { show: true },
+              splits: edgeLabeledSplits(() => cvPidAmpsMin !== null) },
+        ],
+        scales: {
+            x:    { time: false, auto: false, range: () => { const w = (cvXTime && cvXTime > 0) ? cvXTime : (xTime || 30); return [-w, 0]; } },
+            amps: { range: (u, mn, mx) => (cvPidAmpsMin !== null && cvPidAmpsMax !== null) ? [cvPidAmpsMin, cvPidAmpsMax] : stableAutoRange(mn, mx, 0.1) },
+        },
+        hooks: { draw: [(u) => drawGapMarkers(u)] },
+    };
+
+    if (cvPidPlot) cvPidPlot.destroy();
+    cvPidPlot = new uPlot(opts, cvPidData, plotEl);
+    if (document.body.classList.contains('dark-mode')) updateUplotTheme(cvPidPlot);
+    createCVPidLegend();
+
+    plotEl.style.position = 'relative';
+    attachYAxisEdit(cvPidPlot, [
+        { scale: 'amps', decimals: 1, apply: (mn, mx) => { cvPidAmpsMin = mn; cvPidAmpsMax = mx; if (cvPidPlot && cvPidData) cvPidPlot.setData(cvPidData); } }
+    ]);
+
+    if (cvPidPlotResizeObserver) cvPidPlotResizeObserver.disconnect();
+    cvPidPlotResizeObserver = new ResizeObserver(() => {
+        if (cvPidPlot) cvPidPlot.setSize({ width: plotEl.clientWidth, height: 300 });
+    });
+    cvPidPlotResizeObserver.observe(plotEl);
+}
+
+function createCVPidLegend() {
+    const plotEl = document.getElementById('cv-pid-plot');
+    if (!plotEl) return;
+    const existing = plotEl.querySelector('.cv-custom-legend');
+    if (existing) existing.remove();
+
+    const legendDiv = document.createElement('div');
+    legendDiv.className = 'cv-custom-legend';
+    legendDiv.style.cssText = 'display:flex;justify-content:center;gap:15px;margin-top:8px;flex-wrap:wrap;';
+
+    const items = [
+        { key: 'p',   label: 'P (Kp×err)',     color: '#1565c0', idx: 1 },
+        { key: 'i',   label: 'I (integrator)', color: '#2e7d32', idx: 2 },
+        { key: 'd',   label: 'D (−Kd trim)',   color: '#8e24aa', idx: 3 },
+        { key: 'icv', label: 'Icv (total)',    color: '#FFA726', idx: 4 },
+    ];
+
+    items.forEach(item => {
+        const lbl = document.createElement('label');
+        lbl.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;user-select:none;';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = cvPidSeriesVisible[item.key];
+        cb.style.cssText = 'cursor:pointer;margin:0;';
+        cb.addEventListener('change', () => {
+            cvPidSeriesVisible[item.key] = cb.checked;
+            if (cvPidPlot) cvPidPlot.setSeries(item.idx, { show: cb.checked });
+        });
+        const box = document.createElement('div');
+        box.style.cssText = legendSwatchCss(item.color, seriesDashOf(cvPidPlot, item.idx));
+        const span = document.createElement('span');
+        span.textContent = item.label;
+        span.style.cssText = 'color:var(--text-dark);';
+        lbl.appendChild(cb); lbl.appendChild(box); lbl.appendChild(span);
+        legendDiv.appendChild(lbl);
+    });
+    plotEl.appendChild(legendDiv);
+}
+
+function rebuildCVPidWindow() {
+    const old = cvPidData;
+    initCVPidDataStructures();
+    if (old) {
+        const oldN = old[1].length, newN = cvPidData[1].length;
+        const n = Math.min(oldN, newN);
+        for (let s = 1; s <= 4; s++)
+            for (let i = 0; i < n; i++)
+                cvPidData[s][newN - 1 - i] = old[s][oldN - 1 - i];
+    }
+    if (cvPidPlot) cvPidPlot.setData(cvPidData);
+}
+
 // Resize the rolling window WITHOUT losing history or recreating the plot:
 // rebuild the x axis at the new length, right-align the newest overlapping
 // samples into it (shrink keeps the newest tail; grow pads the past with
@@ -8372,6 +8564,7 @@ function setCVXTime(val) {
     // Re-window in place: the buffer already holds 5 min, so just re-run the x-range fn — no realloc,
     // no history loss (the old rebuild truncated history to the new window and lost the rest).
     if (cvTuningPlot && cvTuningData) cvTuningPlot.setData(cvTuningData, true);
+    if (cvPidPlot && cvPidData) cvPidPlot.setData(cvPidData, true);   // P/I/D plot shares cvXTime
     updateCVXButtons();
 }
 
@@ -9625,7 +9818,7 @@ function initVoltagePlot() {
                         voltageResizeObserver.observe(plotEl);
                     }
                 ],
-                draw: [(u) => drawBrakeShading(u), (u) => drawProtectionMarkers(u), (u) => drawGapMarkers(u)]
+                draw: [(u) => drawKdShading(u), (u) => drawProtectionMarkers(u), (u) => drawGapMarkers(u)]
             }
         }]
     };
@@ -10797,6 +10990,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("OvGroup1Enable_checkbox", data.OvGroup1Enable, "OvGroup1Enable");
         updateCheckbox("OvGroup2Enable_checkbox", data.OvGroup2Enable, "OvGroup2Enable");
         updateCheckbox("cvHelpersEnabled_checkbox", data.cvHelpersEnabled, "cvHelpersEnabled");
+        updateCheckbox("CvKdOneSided_checkbox", data.CvKdOneSided, "CvKdOneSided");
         updateCheckbox("vTgtRampEnable_checkbox", data.vTgtRampEnable, "vTgtRampEnable");
         updateCheckbox("setpointSlewEnable_checkbox", data.setpointSlewEnable, "setpointSlewEnable");
         updateCheckbox("cvRiseGovEnable_checkbox", data.cvRiseGovEnable, "cvRiseGovEnable");
@@ -10827,7 +11021,7 @@ function updateTogglesFromData(data) {
     }
 }
 //function to handle user toggle changes without double toggle
-// Manual CC-test slew-mode pill (Test Limiters). Fetches /get like the other admin toggles; the pend
+// Manual CC-test slew-mode pill (Current Target Generator). Fetches /get like the other admin toggles; the pend
 // timestamp holds the telemetry echo from clobbering the just-clicked pill for a few seconds.
 let _testSlewModePendMs = 0;
 function setTestSlewMode(v) {
@@ -10949,7 +11143,7 @@ function updateCvGainModeUI(data) {
 // shows an inert knob. The derate coefficient + status are meaningless unless
 // battTempDerateEnable (computeCvTempScale returns 1.0 when off). Driven off the live
 // checkbox state (set by updateCheckbox / handleUserToggle just before this runs).
-// (The approach-brake knobs live on the Protections tab and stay visible; the brake itself
+// (The CV D-term knobs live on the CV tuning tab and stay visible; the D term itself
 // is gated by cvHelpersEnabled in firmware.)
 function syncCvDependentVis() {
     const derate = document.getElementById('battTempDerateEnable_checkbox');
@@ -11242,8 +11436,52 @@ function setCapMode(mode) {
     }
 }
 
-// Header minimize: mirrors the live header values into the one-line collapsed strip.
-// No-op unless collapsed, so the 500ms poll below is free while the header is expanded.
+// Field-OFF reasons that are protective shut-downs (fault-class) rather than a normal rest —
+// mirrors the fault codes in fieldOffReasonText(). Used to colour a fault red vs a normal OFF gray.
+const FIELD_FAULT_REASONS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 16, 17]);
+
+// Single OFF-state classifier shared by the minimized pill AND the expanded status word so the two
+// can never disagree. reason 10 while enabled = engine-on-but-not-charging (IDLE); faults = FAULT.
+function classifyFieldOff(reason, enabled) {
+    if (FIELD_FAULT_REASONS.has(reason)) return { word: 'FAULT', pillCls: 'st-fault', expClass: 'field-status-fault' };
+    if (reason === 10 && enabled)        return { word: 'IDLE',  pillCls: 'st-idle',  expClass: 'field-status-idle' };
+    return { word: 'OFF', pillCls: 'st-off', expClass: 'field-status-inactive' };
+}
+
+// State word + colour class for the minimized pill. Read from the live header DOM (field-status +
+// charge-stage) so it tracks whatever the expanded header shows; the charge-stage badge already
+// resolves BULK/ABSORPTION/FLOAT and the commissioning/test override words.
+function computeStripState() {
+    const txt = id => (document.getElementById(id)?.textContent || '').trim().toUpperCase();
+    const fs = txt('field-status');
+    const cs = txt('charge-stage');
+    if (cs === 'COMMISSIONING')                    return { label: 'SETUP', cls: 'st-test' };
+    if (cs === 'PLANT TEST' || cs === 'CURR TEST') return { label: 'TEST',  cls: 'st-test' };
+    if (cs === 'WAVE GEN')                         return { label: 'WAVE',  cls: 'st-test' };
+    if (fs === 'ACTIVE')        return { label: cs || 'ACTIVE', cls: 'st-charging' };
+    if (fs === 'RAMP DOWN')     return { label: 'RAMP DOWN', cls: 'st-charging' };
+    if (fs === 'MANUAL')        return { label: 'MANUAL', cls: 'st-manual' };
+    if (fs === 'WAITING CLOUD') return { label: 'WAIT CLOUD', cls: 'st-idle' };
+    const cb = document.getElementById('header-alternator-enable');
+    const off = classifyFieldOff(Number(window._lastFieldEventReason), !!(cb && cb.checked));
+    return { label: off.word, cls: off.pillCls };
+}
+
+// The strip's On/Off drives the exact same path as the header checkbox — including the safety rule
+// that OFF is always allowed but ON needs an unlocked system (handleAlternatorToggle reverts a
+// locked-ON attempt). stopPropagation lives on the element; here we just resync the visual after.
+function stripAltToggle(ev) {
+    if (ev) ev.stopPropagation();
+    const cb = document.getElementById('header-alternator-enable');
+    if (!cb) return;
+    cb.checked = !cb.checked;
+    if (handleAlternatorToggle(cb)) { if (cb.form) cb.form.submit(); submitMessage(); }
+    syncHeaderStrip();
+}
+
+// Header minimize: mirrors the live header values into the collapsed strip. No-op unless collapsed,
+// so the 500ms poll below is free while the header is expanded. Fields are grouped Alt│Batt│Engine;
+// CSS container queries decide which are visible at the current width.
 function syncHeaderStrip() {
     const hdr = document.querySelector('.permanent-header');
     if (!hdr || !hdr.classList.contains('header-collapsed')) return;
@@ -11252,12 +11490,23 @@ function syncHeaderStrip() {
         const to = document.getElementById(toId);
         if (from && to) to.textContent = from.textContent;
     };
-    copy('field-status', 'hcs-status');
     copy('header-voltage', 'hcs-volt');
     copy('header-soc', 'hcs-soc');
-    const alt = document.getElementById('header-alternator-enable');
-    const dot = document.getElementById('hcs-altdot');
-    if (dot) dot.classList.toggle('on', !!(alt && alt.checked));
+    copy('header-alt-current', 'hcs-alt');
+    copy('header-batt-current', 'hcs-batt');
+    copy('header-alt-temp', 'hcs-temp');
+    copy('header-rpm', 'hcs-rpm');
+    copy('dutyCycleID3', 'hcs-duty');
+
+    const pill = document.getElementById('hcs-pill');
+    if (pill) {
+        const st = computeStripState();
+        pill.textContent = st.label;
+        pill.className = 'hcs-pill ' + st.cls;
+    }
+    const cb = document.getElementById('header-alternator-enable');
+    const tog = document.getElementById('hcs-toggle');
+    if (tog) tog.classList.toggle('on', !!(cb && cb.checked));
 }
 
 function toggleHeaderCollapse() {
@@ -11404,6 +11653,8 @@ window.addEventListener("load", function () {
     updatePIDXButtons();
     initCVTuningDataStructures();
     initCVTuningPlot();
+    initCVPidDataStructures();
+    initCVPidPlot();
     startInterpLoop();
 
     const cloudFeaturesCheckbox = document.getElementById("CloudFeatures_checkbox");
@@ -11805,8 +12056,12 @@ window.addEventListener("load", function () {
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'none';
                     if (dutyPercentSign)  dutyPercentSign.style.display  = 'none';
                 } else {
-                    fieldIndicator.textContent = 'OFF';
-                    if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster field-status-inactive';
+                    // OFF splits into FAULT (red) / IDLE (slate) / OFF (gray) — same classifier and
+                    // palette the minimized pill uses, so the two views always agree.
+                    const enableOn = (() => { const cb = document.getElementById('header-alternator-enable'); return cb ? cb.checked : false; })();
+                    const off = classifyFieldOff(Number(window._lastFieldEventReason), enableOn);
+                    fieldIndicator.textContent = off.word;
+                    if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster ' + off.expClass;
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'none';
                     if (dutyPercentSign)  dutyPercentSign.style.display  = 'none';
                 }
@@ -12828,7 +13083,7 @@ window.addEventListener("load", function () {
                 ["fastOvClampCountID", "fastOvClampCount"],
                 ["fastOvHardCountID", "fastOvHardCount"],
                 ["iExcessCountID", "iExcessCount"],
-                ["cvBrakeCountID", "cvBrakeCount"],
+                ["cvKdCountID", "cvKdCount"],
                 ["inaOVCountID", "inaOVCount"],
                 ["hardOCCountID", "hardOCCount"],
                 ["voltSpikeCountID", "voltSpikeCount"],
@@ -13965,6 +14220,7 @@ function resizeLivePlotsOnShow() {
     fix(temperaturePlot, 'temperature-plot',  300);
     fix(pidTuningPlot,   'pid-tuning-plot',   400);
     fix(cvTuningPlot,    'cv-tuning-plot',    350);
+    fix(cvPidPlot,       'cv-pid-plot',       300);
 }
 
 function showMainTab(tabName) {
@@ -15062,12 +15318,13 @@ const SINFO = {
         ['Filter', 'averaging (EMA) sized from the commissioned plant response (~10–80 ms) — rejects belt-ripple crests; logged as ovFilt_V in the CV log'],
         ['Compared to', svTargetV()],
     ],
-    // ── Protections: Approach Brake (pre-protection) ──
-    cvBrake: () => [
-        ['Signal', 'sustained rise rate of the smoothed battery voltage — per-tick slope, averaged over ' + svv('CvBrakeTauMs_echo', 'ms') + ' so ripple wobble cancels and only a one-directional climb counts; logged as brakeSlope_Vps in the CV log'],
+    // ── CV Tuning: voltage D term (rate-of-rise damping, pre-protection) ──
+    cvKd: () => [
+        ['Signal', 'rate of rise of the smoothed battery voltage — the per-tick slope of the Voltage-sensor-filtered signal; logged as cvDSlope_Vps in the CV log'],
         ['Source', S_INA_V + ', through the Voltage sensor smoothing filter (Tuning → Plant Delay)'],
-        ['Compared to', svv('CvBrakeThreshVps_echo', 'V/s') + ', armed only within ' + svv('CvBrakeArmV_echo', 'V') + ' below ' + svTargetV()],
-        ['Action', 'drains the voltage-loop integrator at ' + svv('SlopeBleedK_echo', 'A') + '/s per V/s of excess — removal only, it never adds current'],
+        ['Compared to', svv('CvKdDeadbandVps_echo', 'V/s') + ' deadband, armed only within ' + svv('CvKdArmV_echo', 'V') + ' below ' + svTargetV()],
+        ['Action', 'trims the current setpoint by ' + svv('VoltageKd_echo', 'A') + ' per V/s beyond the deadband, recomputed each tick and released the instant the slope falls back — removes current on a fast rise, and (two-sided) adds current on a fast fall while below target to damp undershoot'],
+        ['Capped at', svv('CvKdMaxTrimA_echo', 'A') + ' — the back-off saturates here so a fast rise never floors the field (that torque step is a real protection\'s job, not the softener\'s)'],
     ],
     // ── Live Data ▸ Diag: Overvoltage History (lifetime counters) ──
     ovtSoft: () => [
@@ -17469,21 +17726,22 @@ function updateFloatVisibility(pendingVal) {
 // CV / Voltage Tuner Log — JavaScript
 //
 // Decodes /cvlog.bin and downloads as CSV.
-// Binary layout: 36-byte header + N × entrySize-byte CvLogEntry structs (little-endian).
-// entrySize comes from the header (55 on current firmware).
+// Binary layout: 40-byte header + N × entrySize-byte CvLogEntry structs (little-endian).
+// entrySize comes from the header (57 on current firmware).
 //
-// Header (36 bytes):
+// Header (40 bytes):
 //   offset  0  uint32  count
-//   offset  4  uint32  entrySize (55)
+//   offset  4  uint32  entrySize (57)
 //   offset  8  float32 VoltageKp
 //   offset 12  float32 VoltageKi
 //   offset 16  uint32  VoltageLoopInterval (ms)
-//   offset 20  float32 CvBrakeThreshVps (V/s)
-//   offset 24  float32 SlopeBleedK (A/(V/s))
-//   offset 28  float32 CvBrakeArmV (V)
-//   offset 32  float32 CvBrakeTauMs (ms)
+//   offset 20  float32 CvKdDeadbandVps (V/s)
+//   offset 24  float32 VoltageKd (A/(V/s))
+//   offset 28  float32 CvKdArmV (V)
+//   offset 32  float32 CvKdOneSided (0/1)
+//   offset 36  float32 CvKdVoltFiltTC (ms) — the D term's dedicated voltage-EMA time constant
 //
-// Entry (55 bytes, packed — see static_assert(sizeof(CvLogEntry)==55) in firmware):
+// Entry (57 bytes, packed — see static_assert(sizeof(CvLogEntry)==57) in firmware):
 //   offset  0  uint32   ts
 //   offset  4  int16    battV       / 100  → V
 //   offset  6  int16    targV       / 100  → V
@@ -17504,22 +17762,26 @@ function updateFloatVisibility(pendingVal) {
 //   offset 30  int16    rpm
 //   offset 32  int16    battV_filt_x100 / 100 → V  (IBV_filtered — display EMA, VoltageFilterTC)
 //   offset 34  int16    ch1IntervalMs        → ms  (last CH1 inter-sample gap)
-//   offset 36  int16    cvDSlope_x10000 / 10000 → V/s (cvDSlope — backward diff of filtered V)
+//   offset 36  int16    cvDSlope_x10000 / 10000 → V/s (cvDSlope — sliding-window backward diff of cvKdFiltV)
 //   offset 38  int16    battI_x10       / 10  → A  (getBatteryCurrent — INA228 or Victron)
 //   offset 40  int16    dBcur_dt_Aps    raw A/s   (g_dBcur_dt clamped to int16)
 //   offset 42  int16    voltLoopIntervalMs  ms    actual voltage loop interval when fired (0 if not)
 //   offset 44  int16    inaIntervalMs       ms    ina_last_ms at log time — INA228 read freshness
-//   offset 46  int16    slopeBleedAmps_x1000 / 1000 → A  cv_I drain this VL tick (0 on non-VL ticks)
+//   offset 46  int16    kdTrim_x1000 / 1000 → A  D-term current reduction at the Icv output
+//                                     (most recent nonzero trim since the last log write, 0 if none;
+//                                     SIGNED — negative only in two-sided mode. A position recomputed
+//                                     each tick, NOT a cumulative drain into cv_I.)
 //   offset 48  uint8    capReason   0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump (binding cap this tick)
 //   offset 49  int16    ovFilt_x100 / 100 → V  (g_ovIbvFilt — Group 2's comparator input, plant-tau EMA of IBV)
-//   offset 51  int16    brakeSlope_x10000 / 10000 → V/s (g_cvBrakeSlopeEma — approach-brake trigger signal)
-//   offset 53  int16    targSlewed_x100 / 100 → V (voltageTargetSlewed — rise-governor output; the setpoint
+//   offset 51  int16    targSlewed_x100 / 100 → V (voltageTargetSlewed — rise-governor output; the setpoint
 //                                     the CV PI actually tracks. vErrorMv above is (targV − IBV), NOT the
 //                                     PI's error; the real PI error is (targSlewed − battV).)
+//   offset 53  int16    pTerm_x10 / 10 → A  (g_cvPTerm — P contribution to Icv; I=cv_I offset 16, D=kdTrim offset 46)
+//   offset 55  int16    cvKdFiltV_x100 / 100 → V (g_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC; the D term's slope input)
 // ===========================================================================
 
-const CV_LOG_HEADER_SIZE = 36;
-const CV_LOG_ENTRY_SIZE = 51;   // minimum accepted stride (ovFilt-era); actual stride comes from the header
+const CV_LOG_HEADER_SIZE = 40;
+const CV_LOG_MIN_ENTRY_SIZE = 51;   // minimum accepted stride (ovFilt-era); actual stride comes from the header
 
 // ---------------------------------------------------------------------------
 // parseCvBin(buf)
@@ -17527,7 +17789,7 @@ const CV_LOG_ENTRY_SIZE = 51;   // minimum accepted stride (ovFilt-era); actual 
 // Returns null on bad input.
 // ---------------------------------------------------------------------------
 function parseCvBin(buf) {
-    if (!buf || buf.byteLength < CV_LOG_HEADER_SIZE + CV_LOG_ENTRY_SIZE) {
+    if (!buf || buf.byteLength < CV_LOG_HEADER_SIZE + CV_LOG_MIN_ENTRY_SIZE) {
         return null;
     }
 
@@ -17539,14 +17801,15 @@ function parseCvBin(buf) {
     const voltKp = view.getFloat32(8, true);
     const voltKi = view.getFloat32(12, true);
     const voltInterval = view.getUint32(16, true);
-    const brThresh = view.getFloat32(20, true);   // CvBrakeThreshVps (V/s)
-    const brK      = view.getFloat32(24, true);   // SlopeBleedK (A/(V/s))
-    const brArmV   = view.getFloat32(28, true);   // CvBrakeArmV (V)
-    const brTauMs  = view.getFloat32(32, true);   // CvBrakeTauMs (ms)
+    const kdDeadband = view.getFloat32(20, true);   // CvKdDeadbandVps (V/s)
+    const kd         = view.getFloat32(24, true);   // VoltageKd (A/(V/s))
+    const kdArmV     = view.getFloat32(28, true);   // CvKdArmV (V)
+    const kdOneSided = view.getFloat32(32, true);   // CvKdOneSided (0/1)
+    const kdVoltFiltTC = view.getFloat32(36, true); // CvKdVoltFiltTC (ms) — D-term voltage EMA TC
 
     if (count === 0) return null;
 
-    if (entrySize < CV_LOG_ENTRY_SIZE) {
+    if (entrySize < CV_LOG_MIN_ENTRY_SIZE) {
         console.error('cvlog.bin entrySize too small:', entrySize);
         return null;
     }
@@ -17556,8 +17819,8 @@ function parseCvBin(buf) {
         return null;
     }
     const hasOvFilt = entrySize >= 51;
-    const hasBrakeSlope = entrySize >= 53;
-    const hasTargSlewed = entrySize >= 55;
+    const hasTargSlewed = entrySize >= 53;  // targSlewed moved 53→51 when brakeSlope was dropped (D-term rework)
+    const hasPidTerms = entrySize >= 57;    // pTerm (53) + cvKdFiltV (55) added with the dedicated D-term voltage filter
 
     // --- Arrays ---
     const ts = new Array(count);
@@ -17589,13 +17852,14 @@ function parseCvBin(buf) {
     const awState = new Array(count);
     const voltLoopInterval = new Array(count);
     const inaInterval = new Array(count);
-    const slopeBleedAmps = new Array(count);
+    const kdTrim = new Array(count);
     const capReason = new Array(count);
     const iExcessBulk = new Array(count);
     const ovFilt = new Array(count);
     const recovActive = new Array(count);
-    const brakeSlope = new Array(count);
     const targSlewed = new Array(count);
+    const pTerm = new Array(count);
+    const cvKdFiltV = new Array(count);
 
     const tsBase = view.getUint32(CV_LOG_HEADER_SIZE, true);
 
@@ -17631,11 +17895,12 @@ function parseCvBin(buf) {
         dBcur_dt[i] = view.getInt16(b + 40, true);
         voltLoopInterval[i] = view.getInt16(b + 42, true);
         inaInterval[i] = view.getInt16(b + 44, true);
-        slopeBleedAmps[i] = view.getInt16(b + 46, true) / 1000.0;
+        kdTrim[i] = view.getInt16(b + 46, true) / 1000.0;   // signed: negative only in two-sided mode
         capReason[i] = view.getUint8(b + 48);
         ovFilt[i] = hasOvFilt ? view.getInt16(b + 49, true) / 100.0 : null;  // blank on old logs — never fabricate
-        brakeSlope[i] = hasBrakeSlope ? view.getInt16(b + 51, true) / 10000.0 : null;  // blank on pre-brake logs
-        targSlewed[i] = hasTargSlewed ? view.getInt16(b + 53, true) / 100.0 : null;    // blank on pre-governor-logging logs
+        targSlewed[i] = hasTargSlewed ? view.getInt16(b + 51, true) / 100.0 : null;    // blank on pre-governor-logging logs
+        pTerm[i] = hasPidTerms ? view.getInt16(b + 53, true) / 10.0 : null;            // blank on pre-P/I/D-split logs — never fabricate
+        cvKdFiltV[i] = hasPidTerms ? view.getInt16(b + 55, true) / 100.0 : null;
         iExcess[i] = (f >> 5) & 1;
         loadDumpActive[i] = (f >> 6) & 1;
         recovActive[i] = hasOvFilt ? (f >> 7) & 1 : null;  // b7 only written by ovFilt-era firmware — blank on old logs
@@ -17643,14 +17908,15 @@ function parseCvBin(buf) {
 
     return {
         count, voltKp, voltKi, voltInterval,
-        brThresh, brK, brArmV, brTauMs, targSlewed,
+        kdDeadband, kd, kdArmV, kdOneSided, kdVoltFiltTC, targSlewed,
         ts, battV, targV, vError, dvdt, vPred,
         fastOvCap, cv_I, Icv, uTarget, spLimited,
         iMeas, duty, flags,
         fastOvActive, voltLoopFired, cvActive, hardClamp,
         rpm, battV_filt, ch1Interval, cvDSlope, iExcess, battI,
         dBcur_dt, loadDumpActive, awState, voltLoopInterval, inaInterval,
-        slopeBleedAmps, capReason, iExcessBulk, ovFilt, recovActive, brakeSlope,
+        kdTrim, capReason, iExcessBulk, ovFilt, recovActive,
+        pTerm, cvKdFiltV,
     };
 }
 
@@ -17684,11 +17950,11 @@ function cvBinToCsv(d, csv3) {
         ` IExcessFrac=${fmtDiv(c.IExcessFrac, 10, 1)}% IExcessTau=${fmtRaw(c.IExcessTau, 0)}ms`
     );
     lines.push(
-        `# ApproachBrake: CvBrakeThreshVps=${d.brThresh.toFixed(3)}V/s SlopeBleedK=${d.brK.toFixed(1)}A/(V/s) CvBrakeArmV=${d.brArmV.toFixed(3)}V CvBrakeTauMs=${d.brTauMs.toFixed(0)}ms`
+        `# VoltageD: VoltageKd=${d.kd.toFixed(1)}A/(V/s) CvKdDeadbandVps=${d.kdDeadband.toFixed(3)}V/s CvKdArmV=${d.kdArmV.toFixed(3)}V CvKdOneSided=${d.kdOneSided.toFixed(0)} CvKdVoltFiltTC=${d.kdVoltFiltTC !== undefined ? d.kdVoltFiltTC.toFixed(0) : '—'}ms`
     );
-    // Loop-shape toggles: with cvHelpersEnabled=0 the brake never runs at all, and with
+    // Loop-shape toggles: with cvHelpersEnabled=0 the D term never runs at all, and with
     // cvRiseGovEnable=0 targSlewed follows targV exactly. Without these a reader cannot tell
-    // "brake never triggered" from "brake was switched off".
+    // "D term never triggered" from "D term was switched off".
     lines.push(
         `# Toggles: cvHelpersEnabled=${fmtRaw(c.cvHelpersEnabled, 0)} cvRiseGovEnable=${fmtRaw(c.cvRiseGovEnable, 0)}`
     );
@@ -17699,27 +17965,27 @@ function cvBinToCsv(d, csv3) {
         `# capReason codes: 0=none(unclamped) 1=KHard_G1(predictive) 2=KHard_G2(measured) 3=iExcess 4=loadDump 5=iExcessBulk(current-control phase)`
     );
 
-    // brakeActive = the brake ACTUALLY drained cv_I. slopeBleedAmps lands on the single row of the
-    // voltage-loop tick that bled, so a raw >0 test plots as isolated pixels; holding it across the
-    // interval that bleed governs cv_I for is what the firmware actually did. This is ground truth,
-    // not a reconstruction: the gate passing strictly implies a positive drain (dtSec is
-    // constrain(...,0.001,0.5) and SlopeBleedK defaults 50), so armed ⟺ slopeBleedAmps > 0 on a VL tick.
-    // brakeArmed = the DISTANCE half of the gate alone (close enough to target to arm, slope ignored) —
-    // deliberately NOT the same thing as brakeActive. Gated on targSlewed, which is what the firmware
-    // compares; falls back to targV on pre-55-byte logs, where it is exact only while the rise governor
-    // is not clamping a rising target.
-    const brakeActive = new Array(d.count);
-    const brakeArmed = new Array(d.count);
+    // kdActive = the D term ACTUALLY trimmed current. kdTrim lands on the single row of the
+    // voltage-loop tick that trimmed, so a raw !=0 test plots as isolated pixels; holding it across the
+    // interval that trim governs Icv for is what the firmware actually did. This is ground truth, not a
+    // reconstruction: kdTrim!=0 ⟺ the D term acted on that VL tick — already logged, no gate re-derivation.
+    // kdArmed = the DISTANCE half of the gate alone (close enough to target to arm, slope ignored) —
+    // deliberately NOT the same thing as kdActive. Gated on targSlewed vs cvKdFiltV, which is what the
+    // firmware compares (voltageTargetSlewed − g_cvKdFiltV); falls back to targV / battV_filt on logs
+    // that predate those fields. CvKdArmV=0 means always-armed.
+    const kdActive = new Array(d.count);
+    const kdArmed = new Array(d.count);
     const armFloor = new Array(d.count);   // the voltage above which the distance gate opens
     {
         let held = 0;
         for (let i = 0; i < d.count; i++) {
-            if (d.slopeBleedAmps[i] > 0) held = 1;
+            if (d.kdTrim[i] !== 0) held = 1;
             else if (d.voltLoopFired[i]) held = 0;
-            brakeActive[i] = held;
+            kdActive[i] = held;
             const armRef = (d.targSlewed && d.targSlewed[i] !== null) ? d.targSlewed[i] : d.targV[i];
-            brakeArmed[i] = (armRef - d.battV_filt[i]) < d.brArmV ? 1 : 0;
-            armFloor[i] = armRef - d.brArmV;
+            const armV = (d.cvKdFiltV && d.cvKdFiltV[i] !== null) ? d.cvKdFiltV[i] : d.battV_filt[i];
+            kdArmed[i] = (d.kdArmV <= 0 || (armRef - armV) < d.kdArmV) ? 1 : 0;
+            armFloor[i] = d.kdArmV <= 0 ? -99 : armRef - d.kdArmV;
         }
     }
 
@@ -17735,9 +18001,10 @@ function cvBinToCsv(d, csv3) {
         'battI_A', 'dBcur_dt_Aps', 'loadDumpActive',
         'cvDSlope_Vps', 'awState',
         'voltLoopInterval_ms', 'inaInterval_ms',
-        'slopeBleedAmps_A', 'capReason', 'ovFilt_V', 'recovActive', 'brakeSlope_Vps',
+        'kdTrim_A', 'capReason', 'ovFilt_V', 'recovActive',
         'targSlewed_V',
-        'brakeArmed', 'brakeActive', 'brakeThresh_Vps', 'brakeArmAboveV',
+        'kdArmed', 'kdActive', 'kdDeadband_Vps', 'kdArmAboveV',
+        'pTerm_A', 'cvKdFiltV_V',
     ].join(','));
 
     for (let i = 0; i < d.count; i++) {
@@ -17758,13 +18025,14 @@ function cvBinToCsv(d, csv3) {
             d.battI[i].toFixed(1), d.dBcur_dt[i], d.loadDumpActive[i],
             d.cvDSlope[i].toFixed(4), d.awState[i],
             d.voltLoopInterval[i], d.inaInterval[i],
-            d.slopeBleedAmps[i].toFixed(4), d.capReason[i],
+            d.kdTrim[i].toFixed(4), d.capReason[i],
             d.ovFilt[i] === null ? '' : d.ovFilt[i].toFixed(2),
             d.recovActive[i] === null ? '' : d.recovActive[i],
-            d.brakeSlope[i] === null ? '' : d.brakeSlope[i].toFixed(4),
             d.targSlewed[i] === null ? '' : d.targSlewed[i].toFixed(2),
-            brakeArmed[i], brakeActive[i],
-            d.brThresh.toFixed(3), armFloor[i].toFixed(2),
+            kdArmed[i], kdActive[i],
+            d.kdDeadband.toFixed(3), armFloor[i].toFixed(2),
+            d.pTerm[i] === null ? '' : d.pTerm[i].toFixed(2),
+            d.cvKdFiltV[i] === null ? '' : d.cvKdFiltV[i].toFixed(2),
         ].join(','));
     }
 
@@ -17790,7 +18058,7 @@ async function downloadCvLog(ts = getLogTimestamp(), sfx = getLogNameSuffix()) {
         return;
     }
 
-    if (!buf || buf.byteLength < CV_LOG_HEADER_SIZE + CV_LOG_ENTRY_SIZE) {
+    if (!buf || buf.byteLength < CV_LOG_HEADER_SIZE + CV_LOG_MIN_ENTRY_SIZE) {
         console.warn('CV log empty — run in AUTO mode with voltage control active first.');
         return;
     }
@@ -17994,6 +18262,13 @@ function applyClassScaledInputAttrs() {
     if (md) md.step = String(1 / k);
     const cw = document.querySelector('input[name="cvWaveAmplitudeV"]');
     if (cw) { cw.min = String(0.05 * k); cw.max = String(2.0 * k); cw.step = String(0.05 * k); }
+    // D-term deadband (V/s) and arm window (V) are WYSIWYG per-bus (scale ×class), so their input
+    // bounds must too, else a 24/48 V user is capped at the 12 V ceiling. Kd/cap are NOT here — Kd is
+    // voltage-normalized (12 V-equivalent) and the cap is flat amps, both class-invariant.
+    const db = document.querySelector('input[name="CvKdDeadbandVps"]');
+    if (db) { db.max = String(4 * k); db.step = String(0.05 * k); }
+    const aw = document.querySelector('input[name="CvKdArmV"]');
+    if (aw) { aw.max = String(3 * k); aw.step = String(0.1 * k); }
 }
 
 function updateCVPanelDelta() {
@@ -19542,7 +19817,7 @@ function cxFinePrint(phase) {
     case 5: return 'Records the low-frequency disturbance at each engine speed into a map; you can stop as soon as the worst-ripple speed is pinned down and no unswept gap could hide a bigger peak — no need to cover every speed. During the sweep the wizard holds the alternator at a <strong>fixed test current</strong> (25% of your RPM/Amps table max) and captures the <strong>measured filtered ripple</strong> (the same IExcessTau-averaged signal each over-current detector trips on) per RPM bin, for both the alternator and battery detectors — a value only commits when two readings at that speed agree, so a throttle transient can\'t poison the table. The optional current-check then commands 3 current levels at the worst-ripple RPM and fits ripple = a0 + a1·I per detector. This produces the <strong>measured-ripple projection</strong> only — it never sets a threshold. Review it against your settings in the next step and on the Protections ripple plots.';
     case 6: return 'Sets the over-current trip line from the ripple measured in Step 6. The trip line is <code>Slope·current + CV base</code>, floored and capped: Slope is set to the measured ripple slope and CV base to ripple-at-idle + the Safety Margin, so the line runs parallel to the ripple that margin above it. The CC (current-limited) line runs the same slope, the CC offset above CV. Any current where the ripple would cross the line is shaded red. These are the exact G3 settings on Settings ▸ Alternator ▸ Protections — editing here writes them live. No fit yet (Step 6 skipped) → set them by hand.';
     case 7: return 'Commands one bounded current step (~6–40 A, auto-sized for ~300 mV) through the already-tuned current loop and records how battery voltage responds — measured at the battery shunt, or at the alternator sensor when no shunt is fitted (with loads held steady the two steps are equal). It reads the step gain at the <strong>voltage loop\'s own response timescale</strong> (at 1/ω_c, ~5 s at the default response time), against a <strong>flat pre-step baseline</strong>, and only after a short rest where it waits for the battery to stop drifting — so slow surface-charge (AGM / flooded lead-acid) doesn\'t inflate the reading. If the bank nears its over-voltage ceiling the step is automatically reduced. The voltage-loop gains follow via the exact PI magnitude condition, Ki = ρ·Kp, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
-    case 8: return 'Measures how long the field takes to drain once cut: the current loop ramps to the commissioned test level, the duty is frozen 5 s for a settled baseline, then the field steps to the exact floor a real over-voltage cut drives to (Min Duty) and holds 10 s while the full decay is recorded on the 20 kHz current channel (calibrated against the precision sensor over matched multi-second windows during the same run). The stored number is the measured time from the cut until output falls to 10% of its pre-cut level — read directly off the trace, no model — plus a 30% cold-coil margin; the fitted time constant (τ = L/R, from a straight-line fit of the log of the mid-decay) is reported alongside as a cross-check (drain ≈ 2.3τ for a clean coil). Engine speed cannot affect a coil constant — idle + cruise are run to prove that, with a median-of-three tiebreaker if they disagree — and the tach gates are suspended during the run (the cut corrupts the tach signal briefly). The over-voltage response holds a field cut at least the stored time before treating the coil as drained. Field at the cut floor cannot over-volt, so the test is inherently safe.';
+    case 8: return 'Measures how long the field takes to drain once cut: the current loop ramps to the commissioned test level, the duty is frozen 5 s for a settled baseline, then the field steps to the exact floor a real over-voltage cut drives to (Min Duty) and holds 10 s while the full decay is recorded on the 20 kHz current channel (calibrated against the precision sensor over matched multi-second windows during the same run). The stored number is the measured time from the moment the field is commanded off until output falls to 10% of its pre-cut level — read directly off the trace, no model, stored as measured; the fitted time constant (τ = L/R, from a straight-line fit of the log of the mid-decay) is reported alongside as a cross-check (drain ≈ 2.3τ for a clean coil). Engine speed cannot affect a coil constant — two different cruising speeds are run to prove that (idle is skipped: belt and tach ripple at low RPM contaminate the trace), with a median-of-three tiebreaker if they disagree — and the tach gates are suspended during the run (the cut corrupts the tach signal briefly). The over-voltage response holds a field cut at least the stored time before treating the coil as drained. Field at the cut floor cannot over-volt, so the test is inherently safe.';
     default: return '';
   }
 }
@@ -20292,17 +20567,37 @@ function cxDrawBode(pts) {
 
             // Fresh scale/axis objects per plot — uPlot writes computed min/max onto scale objects, so
             // sharing one across two instances would let them clobber each other.
-            const mkXScale = () => ({ distr: 3, range: () => [f0 * 0.85, fN * 1.18] });
+            // Left edge snaps to the decade at/below the first point so the axis opens on a clean decade
+            // boundary (that alignment is what reads as log); right edge snaps up to the nearest nice tick —
+            // a full decade past a ~15 Hz sweep would blank most of the plot.
+            const decLo = Math.pow(10, Math.floor(Math.log10(f0)));
+            const hiTick = [1, 2, 3, 5, 10, 20, 30, 50, 100].find(v => v >= fN) || fN * 1.15;
+            const mkXScale = () => ({ distr: 3, range: () => [decLo, hiTick] });
             const mkXAxis = (label) => ({ scale: 'x', grid: { show: true, stroke: '#333' }, stroke: '#8a8a8a', font: '11px sans-serif',
                 label: label, labelSize: label ? 24 : undefined, labelFont: '600 11px sans-serif',
                 splits: (u, ax, mn, mx) => [0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5, 10, 20, 50].filter(v => v >= mn && v <= mx),
                 // log axis (distr:3): grid lines are drawn for every split, but the default filter labels only the
                 // decades (1, 10) — too sparse to read a bandwidth off. Label a curated half-decade subset instead;
-                // it stays legible down to 320px mobile width because only 0.3/1/3/10 ever fall in the swept range.
+                // it stays legible down to 320px mobile width because only 0.1/0.3/1/3/10 ever fall in the swept range.
                 filter: (u, s) => s.map(v => ([0.1, 0.3, 1, 3, 10, 30, 100].indexOf(v) >= 0 ? v : null)),
                 // don't .toFixed() a null (a filtered-out tick) — that throws inside draw → blank canvas
                 values: (u, s) => s.map(v => v == null ? null : (v >= 1 ? String(Math.round(v)) : String(+v.toFixed(1)))) });
             const common = { cursor: { drag: { x: false, y: false } }, legend: { show: false } };
+
+            // uPlot draws one uniform grid stroke for every split, so major and minor lines look identical.
+            // Overdraw just the decades (0.1/1/10) heavier on top of the faint auto-grid: the minors tightening
+            // toward each decade is the unmistakable log-axis tell.
+            const drawDecades = u => {
+                const ctx = u.ctx; ctx.save();
+                ctx.strokeStyle = '#6a6a6a'; ctx.lineWidth = 1.5;
+                for (let e = -2; e <= 3; e++) {
+                    const d = Math.pow(10, e);
+                    if (d < decLo || d > hiTick) continue;
+                    const x = Math.round(u.valToPos(d, 'x', true)) + 0.5;
+                    ctx.beginPath(); ctx.moveTo(x, u.bbox.top); ctx.lineTo(x, u.bbox.top + u.bbox.height); ctx.stroke();
+                }
+                ctx.restore();
+            };
 
             const magPlot = new uPlot(Object.assign({}, common, {
                 width: plotFitWidth(magEl, 320), height: 205, padding: [10, 12, 0, 0],
@@ -20312,6 +20607,7 @@ function cxDrawBode(pts) {
                                     label: 'Gain', labelSize: 22, labelFont: '600 11px sans-serif',
                                     values: (u, t) => t.map(v => v.toFixed(2)) }],
                 hooks: { draw: [u => {
+                    drawDecades(u);
                     const ctx = u.ctx; ctx.save();
                     // Each reference line carries the whole meaning of the plot, so label it in-canvas at the right
                     // edge. below=true drops the text under the near-top damping ceiling (a label above it would
@@ -20335,9 +20631,10 @@ function cxDrawBode(pts) {
                 width: plotFitWidth(phEl, 320), height: 185, padding: [10, 12, 0, 0],
                 scales: { x: mkXScale(), y: { auto: false, range: () => cxBodePhY || [phMin - phPad, phMax + phPad] } },
                 series: [{}, { stroke: '#c0862c', width: 2, points: { show: true, size: 6, fill: '#c0862c' } }],
-                axes: [mkXAxis('Frequency (Hz)'), { scale: 'y', grid: { show: true, stroke: '#333' }, stroke: '#8a8a8a', font: '11px sans-serif',
+                axes: [mkXAxis('Frequency (Hz, log)'), { scale: 'y', grid: { show: true, stroke: '#333' }, stroke: '#8a8a8a', font: '11px sans-serif',
                                     label: 'Phase lag', labelSize: 22, labelFont: '600 11px sans-serif',
-                                    values: (u, t) => t.map(v => Math.round(v) + '°') }]
+                                    values: (u, t) => t.map(v => Math.round(v) + '°') }],
+                hooks: { draw: [u => drawDecades(u)] }
             }), [f, ph], phEl);
 
             cxBodePlots = [magPlot, phPlot];
@@ -20675,8 +20972,9 @@ function cxCVPlantApply() {
 // One firmware "field cut" per Run: the real current loop ramps to the commissioned stabilize level,
 // duty freezes 5 s, the field steps to MinDuty (the real over-voltage clamp floor) for 10 s, and the
 // decay is fitted on the 20 kSPS fast current channel (ADS fallback). The browser only triggers and
-// polls /fieldcut.json; idle/cruise stored separately purely to PROVE τ is speed-independent.
-// Apply Average writes (idle+cruise)/2 × 1.30 (the cold-field margin) to fieldDecayTauMs; a manual
+// polls /fieldcut.json; two cruising-speed runs stored separately purely to PROVE τ is speed-independent
+// (idle is skipped — belt/tach ripple at low RPM contaminates the decay trace).
+// Apply Average writes (run1+run2)/2 × 1.30 (the cold-field margin) to fieldDecayTauMs; a manual
 // override writes a typed value directly.
 let cxFcPlot = null, cxFcObs = null, cxFcRaf = 0, cxFcY = null;
 
@@ -20697,7 +20995,7 @@ function cxFcErrText(raw) {
 
 function cxFieldCutStart(target) {
     if (!cx.fc) cx.fc = {};
-    cx.fc.target = target;              // 'idle' | 'cruise'
+    cx.fc.target = target;              // 'run1' | 'run2' | 'extra'
     cx.fc.running = true; cx.fc.err = null; cx.fc.phase = 'Starting…'; cx.fc.applied = false;
     cxShowTab('plots', 'displays');     // watch current on Plots ▸ Short Term
     cxFieldArm();                       // take field ownership → invalidates any pending deferred release
@@ -20722,7 +21020,7 @@ function cxFieldCutPoll() {
         if (j.aborted) { cx.fc.running = false; cx.fc.err = cxFcErrText(j.abort || 'aborted'); commissionRender(); return; }
         if (j.active) { cx.fc._sawActive = true; setTrackedTimeout(cxFieldCutPoll, 800); return; }
         // ready from a run we never saw active is the PREVIOUS run's latched result (start was refused:
-        // cooldown/busy) — accepting it would store stale data under this run's idle/cruise label. A failed
+        // cooldown/busy) — accepting it would store stale data under this run's slot label. A failed
         // result (!ok) can't corrupt a slot, so let it through (covers an immediate start failure like alloc).
         if (j.ready && (cx.fc._sawActive || !j.ok)) {
             const res = { ok: !!j.ok, tauMs: j.tauMs, fallMs: j.fallMs, drainMs: j.drainMs, baseA: j.baseA,
@@ -20744,7 +21042,7 @@ function cxFieldCutPoll() {
 // trace. Two agreeing runs → mean; three runs (tiebreaker) → median, which discards the outlier
 // without having to name it.
 function cxFcDrains(f) {
-    return ['idle', 'cruise', 'extra'].map(k => f[k]).filter(r => r && r.ok && r.drainMs > 0).map(r => r.drainMs);
+    return ['run1', 'run2', 'extra'].map(k => f[k]).filter(r => r && r.ok && r.drainMs > 0).map(r => r.drainMs);
 }
 function cxFcCombined(f) {
     const d = cxFcDrains(f);
@@ -20753,9 +21051,9 @@ function cxFcCombined(f) {
     return null;
 }
 function cxFieldCutApply() {
-    const f = cx.fc; if (!f || !(f.idle && f.idle.ok) || !(f.cruise && f.cruise.ok)) return;
+    const f = cx.fc; if (!f || !(f.run1 && f.run1.ok) || !(f.run2 && f.run2.ok)) return;
     const comb = cxFcCombined(f); if (comb == null) return;
-    const applied = Math.round(comb * 1.30);   // 30% cold-field margin (measured warm → colder decays slower)
+    const applied = Math.round(comb);   // stored as measured — 30% cold-field margin removed 07-18 (testing without)
     cxGet('fieldDecayTauMs=' + applied)
         .then(() => { f.applied = true; f.appliedVal = applied; commissionRender(); })
         .catch(e => xAlert('Apply failed: ' + e));
@@ -20769,14 +21067,14 @@ function cxFieldCutManual(v) {
         .catch(e => xAlert('Save failed: ' + e));
 }
 
-function cxFieldCutReset() { if (cx.fc) { cx.fc.idle = null; cx.fc.cruise = null; cx.fc.extra = null; cx.fc.applied = false; cx.fc.appliedVal = null; cx.fc.err = null; } commissionRender(); }
+function cxFieldCutReset() { if (cx.fc) { cx.fc.run1 = null; cx.fc.run2 = null; cx.fc.extra = null; cx.fc.applied = false; cx.fc.appliedVal = null; cx.fc.err = null; } commissionRender(); }
 
 function cxFieldCutMarkup(f) {
-    const hasI = f.idle && f.idle.pts && f.idle.pts.length, hasC = f.cruise && f.cruise.pts && f.cruise.pts.length;
+    const hasI = f.run1 && f.run1.pts && f.run1.pts.length, hasC = f.run2 && f.run2.pts && f.run2.pts.length;
     const hasX = f.extra && f.extra.pts && f.extra.pts.length;
     if (!hasI && !hasC && !hasX) return '';
     return '<div style="margin-top:12px;">' +
-        '<div style="font-size:.82em;color:#8a8a8a;margin-bottom:3px;">Alternator-current decay after the cut — <span style="color:#4a9eff;">idle</span> / <span style="color:#c0862c;">cruise</span>' +
+        '<div style="font-size:.82em;color:#8a8a8a;margin-bottom:3px;">Alternator-current decay after the cut — <span style="color:#4a9eff;">cruise 1</span> / <span style="color:#c0862c;">cruise 2</span>' +
         (hasX ? ' / <span style="color:#2ec4b6;">tiebreaker</span>' : '') + '</div>' +
         '<div id="cx-fc-plot" style="width:100%;height:210px;position:relative;"></div></div>';
 }
@@ -20786,20 +21084,20 @@ function cxFieldCutDraw(f) {
     if (cxFcPlot) { try { cxFcPlot.destroy(); } catch (e) { } cxFcPlot = null; }
     if (cxFcRaf) { cancelAnimationFrame(cxFcRaf); cxFcRaf = 0; }
     if (typeof uPlot === 'undefined') return;
-    const idle = (f.idle && f.idle.pts) ? f.idle.pts : [], cruise = (f.cruise && f.cruise.pts) ? f.cruise.pts : [];
+    const r1 = (f.run1 && f.run1.pts) ? f.run1.pts : [], r2 = (f.run2 && f.run2.pts) ? f.run2.pts : [];
     const extra = (f.extra && f.extra.pts) ? f.extra.pts : [];
-    if (!idle.length && !cruise.length && !extra.length) return;
+    if (!r1.length && !r2.length && !extra.length) return;
     // Deferred build (see cxDrawBode): the markup was just written into the scrollable modal, so the div
     // needs committed layout before uPlot measures its width.
     cxFcRaf = requestAnimationFrame(() => {
         cxFcRaf = 0;
         const el = document.getElementById('cx-fc-plot'); if (!el) return;
         try {
-            const tset = new Set(); idle.forEach(p => tset.add(p.t)); cruise.forEach(p => tset.add(p.t)); extra.forEach(p => tset.add(p.t));
+            const tset = new Set(); r1.forEach(p => tset.add(p.t)); r2.forEach(p => tset.add(p.t)); extra.forEach(p => tset.add(p.t));
             const xs = [...tset].sort((a, b) => a - b); const im = new Map(xs.map((t, i) => [t, i]));
             const yi = xs.map(() => null), yc = xs.map(() => null), yx = xs.map(() => null);
-            idle.forEach(p => { yi[im.get(p.t)] = p.a; }); cruise.forEach(p => { yc[im.get(p.t)] = p.a; }); extra.forEach(p => { yx[im.get(p.t)] = p.a; });
-            let ymax = 0; idle.forEach(p => { if (p.a > ymax) ymax = p.a; }); cruise.forEach(p => { if (p.a > ymax) ymax = p.a; }); extra.forEach(p => { if (p.a > ymax) ymax = p.a; });
+            r1.forEach(p => { yi[im.get(p.t)] = p.a; }); r2.forEach(p => { yc[im.get(p.t)] = p.a; }); extra.forEach(p => { yx[im.get(p.t)] = p.a; });
+            let ymax = 0; r1.forEach(p => { if (p.a > ymax) ymax = p.a; }); r2.forEach(p => { if (p.a > ymax) ymax = p.a; }); extra.forEach(p => { if (p.a > ymax) ymax = p.a; });
             const common = { cursor: { drag: { x: false, y: false } }, legend: { show: false } };
             cxFcPlot = new uPlot(Object.assign({}, common, {
                 width: plotFitWidth(el, 320), height: 210, padding: [10, 12, 0, 0],
@@ -20830,7 +21128,7 @@ function cxFieldCutDraw(f) {
 function cxRenderFieldCut(b) {
     const f = cx.fc || (cx.fc = {});
     if (f.running) {
-        const where = f.target === 'cruise' ? 'cruising speed' : (f.target === 'extra' ? 'the tiebreaker speed' : 'idle');
+        const where = f.target === 'run2' ? 'the second cruising speed' : (f.target === 'extra' ? 'the tiebreaker speed' : 'the first cruising speed');
         b.innerHTML = '<p style="color:#4a9eff;">Measuring the field decay at ' + where +
             ' — leave the throttle and other loads alone (about 25 seconds).</p>' +
             '<p id="fcPhase" style="font-size:13px;color:#ddd;margin-top:-2px;">' + (f.phase || 'Starting…') + '</p>';
@@ -20839,7 +21137,7 @@ function cxRenderFieldCut(b) {
     let body = '';
     if (f.err) body += '<div style="margin:10px 0;padding:8px 10px;background:#3a2222;border:1px solid #a55;border-radius:6px;color:#f0a500;">' + f.err + '</div>';
 
-    const haveIdle = f.idle && f.idle.ok, haveCruise = f.cruise && f.cruise.ok, haveExtra = f.extra && f.extra.ok;
+    const haveRun1 = f.run1 && f.run1.ok, haveRun2 = f.run2 && f.run2.ok, haveExtra = f.extra && f.extra.ok;
     const line = (lbl, r) => r ? ('<div>' + lbl + ': ' + (r.ok
         ? ('drains in <strong>' + Math.round(r.drainMs) + ' ms</strong> <span style="color:#8a8a8a;">(cut → 10%)</span>' +
            ' · τ ' + Math.round(r.tauMs) + ' ms' +
@@ -20849,44 +21147,44 @@ function cxRenderFieldCut(b) {
     // Agreement judged on the DRAIN time (the number that gets stored). Two runs at different
     // speeds measuring the same coil constant — agreement IS the physics check.
     let drainDiffPct = null;
-    if (haveIdle && haveCruise) {
-        const m = (f.idle.drainMs + f.cruise.drainMs) / 2;
-        drainDiffPct = Math.round(100 * Math.abs(f.idle.drainMs - f.cruise.drainMs) / Math.max(1, m));
+    if (haveRun1 && haveRun2) {
+        const m = (f.run1.drainMs + f.run2.drainMs) / 2;
+        drainDiffPct = Math.round(100 * Math.abs(f.run1.drainMs - f.run2.drainMs) / Math.max(1, m));
     }
-    if (f.idle || f.cruise || f.extra) {
+    if (f.run1 || f.run2 || f.extra) {
         body += '<div style="margin:10px 0;padding:8px 10px;background:#222;border-radius:6px;">' +
-            line('Idle', f.idle) + line('Cruise', f.cruise) + line('Tiebreaker', f.extra);
-        if (haveIdle && haveCruise) {
+            line('Cruise 1', f.run1) + line('Cruise 2', f.run2) + line('Tiebreaker', f.extra);
+        if (haveRun1 && haveRun2) {
             if (haveExtra) {
                 body += '<div style="margin-top:6px;color:#5a5;font-size:13px;">Using the median of the three runs — the outlier drops out on its own.</div>';
             } else if (drainDiffPct <= 20) {
-                body += '<div style="margin-top:6px;color:#5a5;font-size:13px;">Idle and cruise agree within ' + drainDiffPct +
+                body += '<div style="margin-top:6px;color:#5a5;font-size:13px;">The two cruising speeds agree within ' + drainDiffPct +
                     '% — the drain time is the coil’s own property, independent of engine speed, as physics predicts.</div>';
             } else {
-                body += '<div style="margin-top:6px;color:#f0a500;font-size:13px;">Idle and cruise differ by ' + drainDiffPct +
+                body += '<div style="margin-top:6px;color:#f0a500;font-size:13px;">The two runs differ by ' + drainDiffPct +
                     '% — more than expected for a fixed coil. Two runs can’t say which one is off: run a tiebreaker at any steady speed and the median of the three is used.</div>';
             }
             const comb = cxFcCombined(f);
             if (comb != null) {
                 body += '<div style="margin-top:6px;border-top:1px solid #333;padding-top:6px;">' +
                     (haveExtra ? 'Median' : 'Average') + ' drain <strong>' + Math.round(comb) +
-                    ' ms</strong> → applied <strong>' + Math.round(comb * 1.30) + ' ms</strong> <span style="color:#8a8a8a;">(with 30% cold-field margin)</span></div>';
+                    ' ms</strong> → applied <strong>' + Math.round(comb) + ' ms</strong> <span style="color:#8a8a8a;">(stored as measured)</span></div>';
             }
         }
         if (f.applied) body += '<div style="margin-top:4px;color:#5a5;">Applied ' + (f.appliedVal || '') + ' ms.</div>';
         body += '</div>' + cxFieldCutMarkup(f);
     }
 
-    if (!haveIdle) {
-        body += '<p style="font-size:15px;line-height:1.5;"><strong>Set the engine to idle</strong> with the alternator spinning, then press Run. ' +
+    if (!haveRun1) {
+        body += '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine to a typical cruising speed</strong> with the alternator charging, then press Run. ' +
             'The regulator ramps to its test current, holds a few seconds, drops the field to the same floor a real protection cut uses, and times how fast the output falls. ' +
             'Engine speed does not affect the measurement — just leave the throttle and other loads where they are for the ~25 s run.</p>' +
-            '<button onclick="cxFieldCutStart(\'idle\')" class="btn-primary btn-sm">Run (idle)</button>';
-    } else if (!haveCruise) {
-        body += '<p style="font-size:15px;line-height:1.5;"><strong>Now bring the engine to a steady cruising speed</strong> and press Run. ' +
-            'The result should match the idle run — that agreement is the point of running twice.</p>' +
-            '<button onclick="cxFieldCutStart(\'cruise\')" class="btn-primary btn-sm">Run (cruise)</button> ' +
-            '<button onclick="cxFieldCutStart(\'idle\')" class="btn-secondary btn-sm">Redo idle</button>';
+            '<button onclick="cxFieldCutStart(\'run1\')" class="btn-primary btn-sm">Run (cruise 1)</button>';
+    } else if (!haveRun2) {
+        body += '<p style="font-size:15px;line-height:1.5;"><strong>Now shift to a different steady cruising speed</strong> and press Run. ' +
+            'The result should match the first run — that agreement is the point of running twice.</p>' +
+            '<button onclick="cxFieldCutStart(\'run2\')" class="btn-primary btn-sm">Run (cruise 2)</button> ' +
+            '<button onclick="cxFieldCutStart(\'run1\')" class="btn-secondary btn-sm">Redo cruise 1</button>';
     } else {
         // Tiebreaker offered (not forced) when the two runs disagree and no third run exists yet —
         // median-of-three then replaces the mean, so the outlier is discarded without guessing.
@@ -20911,7 +21209,7 @@ function cxRenderFieldCut(b) {
         'style="width:120px;background:#161616;border:1px solid #383838;border-radius:6px;color:#ddd;padding:6px 8px;font-size:14px;"></div></details>';
 
     b.innerHTML = body;
-    if (f.idle || f.cruise) cxFieldCutDraw(f);
+    if (f.run1 || f.run2) cxFieldCutDraw(f);
 }
 
 // Full fit diagnostics → dashboard Console tab (appendConsoleLine, so they ride along in Download Logs / the
@@ -21055,12 +21353,13 @@ const CX_SWEEP_MAX_GAP  = 3;    // max consecutive uncommitted bins between anch
 const CX_SWEEP_HOT_FRAC = 0.7;  // a gap bordered by ≥ this × peak is a suspected-peak neighborhood → must fill
 function cxSweepConfidence(rows) {
     const bandLo = cxGame.binLo || CX_GAME_BIN_LO, hi = CX_GAME_BIN_HI, w = CX_GAME_BIN_W;
+    const noBatt = document.body.classList.contains('no-batt-current');   // no shunt → batt cells are INA noise; keep them out of coverage + worst-spot
     // Gate floor: the idle-median bin (bandLo+w). The bandLo bin sits below median idle by
     // construction, and idle is usually the hot bin — requiring bandLo bricks the done button on any
     // engine that can't dip 50 below its own idle. A commit there (either detector — agree-twice =
     // proven re-holdable) slides the gate floor down so the lowest reachable speed still counts.
     let commitLo = Infinity;
-    for (const p of rows) if ((p.altSt === 2 || p.battSt === 2) && p.rpm < commitLo) commitLo = p.rpm;
+    for (const p of rows) if ((p.altSt === 2 || (!noBatt && p.battSt === 2)) && p.rpm < commitLo) commitLo = p.rpm;
     const lo = Math.min(bandLo + w, Math.max(bandLo, commitLo));
     const total = Math.round((hi - lo) / w);
     const val = {};                         // committed alt value per band bin (absent = not committed)
@@ -21072,7 +21371,7 @@ function cxSweepConfidence(rows) {
             val[p.rpm] = p.alt; covered++;
             if (p.alt > maxV) { maxV = p.alt; maxRpm = p.rpm; }
         }
-        if (p.battSt === 2 && p.batt > maxV) { maxV = p.batt; maxRpm = p.rpm; }
+        if (!noBatt && p.battSt === 2 && p.batt > maxV) { maxV = p.batt; maxRpm = p.rpm; }
     }
     // Walk the band; each run of uncommitted bins (a gap) must be narrow AND not border a hot bin.
     // `want` collects every bin the gate is waiting on — the game renders those as priority targets.
@@ -21128,7 +21427,7 @@ function cxSweepConfidence(rows) {
     // run there) or replaces it (a transient, refuted). Never green while one is outstanding.
     let pMax = 0, pRpm = -1;
     for (const p of rows) if (p.rpm >= lo && p.rpm < hi) {
-        const pv = Math.max(p.altSt === 1 ? p.alt : 0, p.battSt === 1 ? p.batt : 0);
+        const pv = Math.max(p.altSt === 1 ? p.alt : 0, (!noBatt && p.battSt === 1) ? p.batt : 0);
         if (pv > pMax) { pMax = pv; pRpm = p.rpm; }
     }
     if (pMax > maxV && pRpm >= 0) {
@@ -21438,7 +21737,8 @@ function cxGameRipDraw() {
     const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
     if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
     const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
-    const rip = (cxGame.rip || []).filter(p => p.alt > 0 || p.batt > 0);
+    const noBatt = document.body.classList.contains('no-batt-current');   // no shunt → firmware batt ripple is INA noise, never plot it
+    const rip = (cxGame.rip || []).filter(p => p.alt > 0 || (!noBatt && p.batt > 0));
     g.font = '10px -apple-system, sans-serif';
     if (!rip.length) {
         g.fillStyle = '#555'; g.textAlign = 'center'; g.textBaseline = 'middle';
@@ -21447,7 +21747,7 @@ function cxGameRipDraw() {
     }
     const padL = 42, padR = 8, padT = 10, padB = 16;
     const xLo = 400, xHi = 2100;   // matches the game's default RPM span
-    const yMax = Math.max(0.5, ...rip.map(p => Math.max(p.alt, p.batt))) * 1.15;
+    const yMax = Math.max(0.5, ...rip.map(p => noBatt ? p.alt : Math.max(p.alt, p.batt))) * 1.15;
     const Xr = r => padL + (r - xLo) / (xHi - xLo) * (w - padL - padR);   // raw RPM → x
     const X = r => Xr(r + CX_GAME_BIN_W / 2);                            // bin lo → bin-center x
     const Y = v => (h - padB) - v / yMax * (h - padT - padB);
@@ -21471,7 +21771,7 @@ function cxGameRipDraw() {
         g.strokeStyle = '#242428'; g.beginPath(); g.moveTo(x, padT); g.lineTo(x, h - padB); g.stroke();
         g.fillText(r === 2000 ? '2000 RPM' : r, x, h - 1);
     }
-    for (const ser of [['alt', '#2ec4b6', 'altSt'], ['batt', '#f0a500', 'battSt']]) {
+    for (const ser of (noBatt ? [['alt', '#2ec4b6', 'altSt']] : [['alt', '#2ec4b6', 'altSt'], ['batt', '#f0a500', 'battSt']])) {
         const pts = rip.filter(p => p[ser[0]] > 0).sort((a, b) => a.rpm - b.rpm);
         if (!pts.length) continue;
         // Line + solid dots = confirmed (agree-twice) values ONLY. A pending single-window value
@@ -21493,7 +21793,7 @@ function cxGameRipDraw() {
     let worst = null, wv = 0;
     for (const p of rip) {
         if (p.altSt === 2 && p.alt > wv) { wv = p.alt; worst = p; }
-        if (p.battSt === 2 && p.batt > wv) { wv = p.batt; worst = p; }
+        if (!noBatt && p.battSt === 2 && p.batt > wv) { wv = p.batt; worst = p; }
     }
     if (worst) {
         const x = X(worst.rpm);
@@ -22133,7 +22433,7 @@ const COMMISSION_STEPS = [
     { name: 'Disturbances', desc: 'Map the worst over-current the field can actually react to.' },
     { name: 'Fault Threshold Autotuning', desc: 'Set the over-current trip points above that disturbance floor.' },
     { name: 'Voltage Control Autotuning', desc: 'Step the charge current and measure the battery-voltage step gain at the loop\'s own response timescale (read at 1/ω_c, flat baseline, with a settled-baseline gate so surface charge has relaxed first). Computes the voltage-loop Kp/Ki from that gain and your configured response time, then switches the CV gain source to Auto.' },
-    { name: 'Field Decay', desc: 'Cut the field and time the alternator-current decay (the de-energize time constant, τ = L/R) at idle and at cruise, then store the averaged value for the over-voltage field-drain timing.' },
+    { name: 'Field Decay', desc: 'Cut the field and time the alternator-current decay (the de-energize time constant, τ = L/R) at two typical cruising speeds, then store the averaged value for the over-voltage field-drain timing.' },
 ];
 let cxLastState = 0;   // remembered from the last CSV3 frame, for the clear/restart confirm text
 

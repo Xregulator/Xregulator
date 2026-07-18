@@ -313,10 +313,15 @@ bool fsRemove(const char *path) {
 #define NK_battMaxMode "battMaxMode"   // battery V/I plot sampling: 0=window mean, 1=max-magnitude
 #define NK_battTempDerateEn "battTmpDerEn"
 #define NK_battTempCoeff "battTmpCoeff"
-#define NK_SlopeBleedK "SlopeBleedK"
-#define NK_CvBrakeThreshVps "CvBrakeThrVps"
-#define NK_CvBrakeTauMs "CvBrakeTauMs"
-#define NK_CvBrakeArmV "CvBrakeArmV"
+// CV D term (2026-07-17). The four keys "SlopeBleedK"/"CvBrakeThrVps"/"CvBrakeTauMs"/"CvBrakeArmV"
+// are RETIRED orphans — the 2026-07-15 flashed device holds brake-semantics values under them.
+// NEVER reuse those strings: a fielded SlopeBleedK=50 read as VoltageKd would be a wrong gain.
+#define NK_VoltageKd "VoltageKd"
+#define NK_CvKdDeadbandVps "CvKdDeadband"
+#define NK_CvKdOneSided "CvKdOneSided"
+#define NK_CvKdArmV "CvKdArmV"
+#define NK_CvKdMaxTrimA "CvKdMaxTrimA"
+#define NK_CvKdVoltFiltTC "CvKdVoltFiltTC"
 #define NK_SolarWatts "SolarWatts"
 #define NK_StartupRiseRate "StartupRiseRate"
 #define NK_SwitchControlOverride "SwtchCntrlOvrrd"
@@ -326,7 +331,7 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineFreqStart "SysIDSineFStrt"
 #define NK_systemIDSineFreqEnd "SysIDSineFEnd"
 #define NK_sysidPlantTau "sysidPlantTau"
-#define NK_fieldDecayTau "fieldDecayTau"       // commissioned field drain time cut→10% (ms), 30% cold-margin baked in; key name is historical
+#define NK_fieldDecayTau "fieldDecayTau"       // commissioned field drain time command→10% (ms), stored as measured (cold margin removed 07-18); key name is historical
 #define NK_faCalGain "faCalGain"               // fast alt-current channel amps calibration: gain vs ADS1115 (field-decay test writes it)
 #define NK_faCalOffA "faCalOffA"               // fast alt-current channel amps calibration: offset (A)
 #define NK_systemIDSineCycles "SysIDSineCyc"
@@ -871,7 +876,6 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/SettleTimeBeforeCut.txt", NK_SettleTimeBeforeCut },
   { "/ShuntResistanceMicroOhm.txt", NK_ShuntResistanceMicroOhm },
   { "/ShutdownPhase2HoldMs.txt", NK_ShutdownPhase2HoldMs },
-  { "/SlopeBleedK.txt", NK_SlopeBleedK },
   { "/SolarWatts.txt", NK_SolarWatts },
   { "/StartupRiseRate.txt", NK_StartupRiseRate },
   { "/SwitchControlOverride.txt", NK_SwitchControlOverride },
@@ -3393,10 +3397,10 @@ bool buildConfigPayload() {
   // time_ms as decimal strings (uint64 dwell is beyond JS 53-bit integers). After a true power cut
   // the struct zeroes and the next snapshot reports lower values — edge fn overwrites as-is, accepted.
   offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
-    ",\"ov_telemetry\":{\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"brake\":%lu,\"bulk\":%.2f,\"k\":%.2f,"
+    ",\"ov_telemetry\":{\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"kd\":%lu,\"bulk\":%.2f,\"k\":%.2f,"
     "\"bins_fine\":%d,\"bins_coarse\":%d,\"events\":[",
     (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
-    (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.brakeEventCount,
+    (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.kdEventCount,
     BulkVoltage, (float)BATTERY_VOLTAGE / 12.0f,
     OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS);
   for (int i = 0; i < OV_HIST_BINS; i++)
@@ -4187,6 +4191,12 @@ volatile uint32_t resTestLastCmdMs = 0;       // deadman: browser refreshes this
 // test's high held current and slamming the soft OV (G2) the instant voltage control re-arms.
 volatile bool resTestReleasing = false;
 #define RES_TEST_DEADMAN_MS 8000UL            // > the browser's ~3 s keepalive; catches a closed/crashed wizard
+// Ripple-game scoring gate: no bin may fold until the measured current has held AT resTestTargetA for
+// RIP_SCORE_HOLD_MS. Without it the first invaders "die" while the field is still ramping up from the ~4%
+// rest floor, locking a bogus near-zero-current ripple into the idle bin (the exact spot resonance lives).
+// Set in the resTest control block (which owns setpointLimited/targetCurrent), read in faFiltRippleUpdate.
+#define RIP_SCORE_HOLD_MS 2000UL
+volatile bool ripScoreArmed = false;
 
 
 // Fold forensics (diagnostic ring, RAM-only): snapshots the window behind every ripTab fold event so
@@ -4335,7 +4345,9 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
     // real ripple/hunt crosses constantly. The test ring is exempt (a wizard hold must not starve; the
     // browser's median-of-8 is the robustness there).
     bool altFold  = tabValid && altSteady  && (altFiltCross  >= RIP_CROSS_MIN);
-    bool battFold = tabValid && battSteady && (battFiltCross >= RIP_CROSS_MIN);
+    // No shunt → Bcur is the raw INA228 input (noise when nothing is wired across it), and the battery
+    // over-current detector this map feeds is itself HAS_BATT_SHUNT-gated — never fold battery ripple.
+    bool battFold = HAS_BATT_SHUNT && tabValid && battSteady && (battFiltCross >= RIP_CROSS_MIN);
     // Throughput readouts: count windows that passed ALL of that detector's fold gates (game running or
     // not) — a frozen counter with green gate rows points at protection/starve.
     if (altFold)  g_ripAltAdmitCount++;
@@ -4344,7 +4356,7 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
     // pending candidate; a second that agrees (±33% or ±0.5 A) commits the AVERAGE of the pair and
     // freezes that detector's cell; a disagree replaces the pending (the monster regrows). Every event
     // is forensic-logged so an unsettled bin stays explainable.
-    if (ripGameFill && (altFold || battFold)) {
+    if (ripGameFill && ripScoreArmed && (altFold || battFold)) {   // ripScoreArmed: current held at target ≥2s — never fold at the rest floor
       RipTabCell *c = &ripTab.cell[rpmBin];
       uint16_t rpmU = (uint16_t)fminf(rpm + 0.5f, 65535.0f);
       int ampLo = (altMean >= FA_AMP_BIN_LO)

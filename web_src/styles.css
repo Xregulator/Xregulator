@@ -166,6 +166,21 @@ textarea {
   animation: none;
 }
 
+.field-status-idle {
+  color: #7f97a8 !important;
+  animation: none;
+}
+
+.field-status-fault {
+  color: #d9534f !important;
+  animation: field-heartbeat-fault 1.5s ease-in-out infinite;
+}
+
+@keyframes field-heartbeat-fault {
+  0%, 100% { text-shadow: 0 0 3px rgba(217, 83, 79, 0.3); }
+  50%      { text-shadow: 0 0 10px rgba(217, 83, 79, 0.75), 0 0 16px rgba(217, 83, 79, 0.35); }
+}
+
 .field-status-rampdown {
   color: #f0a500 !important;
   animation: field-heartbeat 2s ease-in-out infinite;
@@ -1339,26 +1354,65 @@ input[type="submit"]:hover {
    never hidden by minimizing. Metric text uses inherit so it follows the header's
    light/dark colour without a separate dark-mode rule. */
 #header-collapsed-strip { display: none; }
-.permanent-header.header-collapsed { padding: 8px 12px; gap: 0; }
+.permanent-header.header-collapsed { padding: 0; gap: 0; }
 .permanent-header.header-collapsed > *:not(#header-collapsed-strip):not(#protections-banner) { display: none; }
 .permanent-header.header-collapsed #header-collapsed-strip {
+  container-type: inline-size;   /* fields below reveal against THIS width */
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  cursor: pointer;
+  gap: 10px;
+  height: 40px;
+  padding: 0 14px;
+  overflow: hidden;
+  white-space: nowrap;
   font-size: 14px;
-  line-height: 1.2;
+  line-height: 1;
 }
-#header-collapsed-strip .hcs-status { font-weight: 700; color: var(--accent); }
-#header-collapsed-strip .hcs-metric { font-weight: 700; font-variant-numeric: tabular-nums; }
-#header-collapsed-strip .hcs-unit { font-weight: 400; opacity: 0.65; margin-left: 2px; }
-#header-collapsed-strip .hcs-dot {
-  width: 11px; height: 11px; border-radius: 50%;
-  background: #bbb; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
-}
-#header-collapsed-strip .hcs-dot.on { background: var(--accent); box-shadow: none; }
-#header-collapsed-strip .hcs-chevron { margin-left: auto; font-size: 16px; opacity: 0.6; }
+#header-collapsed-strip > span { flex: none; }
+#header-collapsed-strip .hcs-grow { flex: 1 1 auto; min-width: 0; }
+
+/* state word carries the colour: charging teal, idle slate, manual amber, off gray, fault red, test violet */
+#header-collapsed-strip .hcs-pill { font-weight: 800; letter-spacing: .4px; max-width: 46cqw; overflow: hidden; text-overflow: ellipsis; }
+#header-collapsed-strip .hcs-pill.st-charging { color: var(--accent); }
+#header-collapsed-strip .hcs-pill.st-idle     { color: #5f7d94; }
+#header-collapsed-strip .hcs-pill.st-manual   { color: #c9791f; }
+#header-collapsed-strip .hcs-pill.st-off      { color: #8a9097; }
+#header-collapsed-strip .hcs-pill.st-fault    { color: #d9534f; }
+#header-collapsed-strip .hcs-pill.st-test     { color: #a78bfa; }
+
+#header-collapsed-strip .hcs-m { display: inline-flex; align-items: baseline; font-weight: 700; font-variant-numeric: tabular-nums; }
+#header-collapsed-strip .hcs-m i { font-style: normal; font-weight: 400; opacity: .6; margin-left: 2px; font-size: .84em; }
+
+#header-collapsed-strip .hcs-gsep { display: inline-block; width: 1px; height: 20px; background: rgba(0, 161, 154, .32); margin: 0 3px; }
+#header-collapsed-strip .hcs-divider { display: inline-block; width: 1px; height: 18px; background: rgba(0, 161, 154, .15); }
+
+#header-collapsed-strip .hcs-toggle { width: 34px; height: 19px; border-radius: 999px; background: #bbb; position: relative; cursor: pointer; transition: background .15s; }
+#header-collapsed-strip .hcs-toggle.on { background: var(--accent); }
+#header-collapsed-strip .hcs-toggle .hcs-knob { position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: left .15s; }
+#header-collapsed-strip .hcs-toggle.on .hcs-knob { left: 17px; }
+
+/* margin-left buys extra space from the toggle; vertical padding gives a ~40px expand tap target without changing the line height */
+#header-collapsed-strip .hcs-chevron { font-size: 16px; opacity: .55; cursor: pointer; margin-left: 12px; padding: 11px 6px; margin-top: -11px; margin-bottom: -11px; }
+
+/* progressive reveal — State + Volts always; then Alt A → Temp → SOC → RPM(+Eng sep) → Batt A → Duty */
+#header-collapsed-strip .hcs-alt,
+#header-collapsed-strip .hcs-temp,
+#header-collapsed-strip .hcs-soc,
+#header-collapsed-strip .hcs-rpm,
+#header-collapsed-strip .hcs-batt,
+#header-collapsed-strip .hcs-duty,
+#header-collapsed-strip .hcs-eng { display: none; }
+@container (min-width: 335px) { #header-collapsed-strip .hcs-alt  { display: inline-flex; } }
+@container (min-width: 405px) { #header-collapsed-strip .hcs-temp { display: inline-flex; } }
+@container (min-width: 470px) { #header-collapsed-strip .hcs-soc  { display: inline-flex; } }
+@container (min-width: 540px) { #header-collapsed-strip .hcs-rpm  { display: inline-flex; }
+                                #header-collapsed-strip .hcs-eng  { display: inline-block; } }
+@container (min-width: 620px) { #header-collapsed-strip .hcs-batt { display: inline-flex; } }
+@container (min-width: 700px) { #header-collapsed-strip .hcs-duty { display: inline-flex; } }
+
+.dark-mode #header-collapsed-strip .hcs-gsep { background: rgba(120, 200, 196, .30); }
+.dark-mode #header-collapsed-strip .hcs-divider { background: rgba(120, 200, 196, .18); }
+.dark-mode #header-collapsed-strip .hcs-toggle { background: #555a60; }
 
 #header-collapse-bar {
   display: flex;
@@ -2414,6 +2468,17 @@ input:focus {
 .form-input:has(.seg-pill input[value="0"]:checked) .cap-0 { display: block; }
 .form-input:has(.seg-pill input[value="1"]:checked) .cap-1 { display: block; }
 .form-input:has(.seg-pill input[value="2"]:checked) .cap-2 { display: block; }
+
+/* CC/CV test-generator slew choice: caption stacks UNDER the segmented control instead of
+   beside it, and the control column is width-capped so the label keeps room to breathe. */
+.form-input.seg-pill-stack {
+  flex-direction: column;
+  align-items: stretch;
+  flex: 1 1 200px;
+  min-width: 0;
+  max-width: 240px;
+}
+.form-input.seg-pill-stack .seg-pill-caption { margin-top: 6px; }
 
 .seg-field { display: inline-flex; flex-direction: column; gap: 5px; }
 .seg-label {

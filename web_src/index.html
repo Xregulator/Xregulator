@@ -97,13 +97,32 @@
 
   <div class="permanent-header">
 
-    <!-- Minimized one-line status strip — shown only while .header-collapsed; values mirrored from the live header by syncHeaderStrip() -->
-    <div id="header-collapsed-strip" onclick="toggleHeaderCollapse()" title="Expand header">
-      <span id="hcs-status" class="hcs-status">—</span>
-      <span class="hcs-metric"><span id="hcs-volt">-</span><span class="hcs-unit">V</span></span>
-      <span class="hcs-metric req-batt-current"><span id="hcs-soc">-</span><span class="hcs-unit">%</span></span>
-      <span id="hcs-altdot" class="hcs-dot" title="Alternator enable"></span>
-      <span class="hcs-chevron">⌄</span>
+    <!-- Minimized status strip — one locked-height line, shown only while .header-collapsed.
+         Readouts are grouped Alternator │ Battery │ Engine and reveal in priority order as the
+         strip widens (see the @container rules in styles.css); it never wraps or grows taller.
+         Values, the state pill, and the toggle are mirrored from the live header by
+         syncHeaderStrip(). Only the chevron expands; the toggle is an isolated control that
+         drives the same Alternator-Enable path (stripAltToggle → handleAlternatorToggle). -->
+    <div id="header-collapsed-strip">
+      <!-- Alternator group -->
+      <span id="hcs-pill" class="hcs-pill">—</span>
+      <span class="hcs-m hcs-alt"><span id="hcs-alt">-</span><i>A</i></span>
+      <span class="hcs-m hcs-temp"><span id="hcs-temp">-</span><i>°F</i></span>
+      <span class="hcs-m hcs-duty"><span id="hcs-duty">-</span><i>% duty</i></span>
+      <span class="hcs-gsep"></span>
+      <!-- Battery group -->
+      <span class="hcs-m"><span id="hcs-volt">-</span><i>V</i></span>
+      <span class="hcs-m hcs-soc req-batt-current"><span id="hcs-soc">-</span><i>%</i></span>
+      <span class="hcs-m hcs-batt req-batt-current"><span id="hcs-batt">-</span><i>A</i></span>
+      <span class="hcs-gsep hcs-eng"></span>
+      <!-- Engine group -->
+      <span class="hcs-m hcs-rpm"><span id="hcs-rpm">-</span><i>rpm</i></span>
+      <span class="hcs-grow"></span>
+      <!-- Alternator On/Off — isolated control; stopPropagation keeps it from expanding -->
+      <span class="hcs-divider"></span>
+      <span id="hcs-toggle" class="hcs-toggle" title="Alternator On/Off" onclick="stripAltToggle(event)"><span class="hcs-knob"></span></span>
+      <!-- The only tap target that expands the header -->
+      <span class="hcs-chevron" title="Expand header" onclick="toggleHeaderCollapse()">⌄</span>
     </div>
 
     <!-- Brand row: wordmark left, field cluster right -->
@@ -277,7 +296,7 @@
                 <div class="form-row">
                   <div class="form-label">Displacement (lbs):</div>
                   <div class="form-input">
-                    <input name="BOAT_DISPLACEMENT_LBS" type="number" step="1" min="0" max="5000000">
+                    <input name="BOAT_DISPLACEMENT_LBS" type="number" step="1" min="1" max="5000000" required>
                   </div>
                 </div>
 
@@ -396,7 +415,7 @@
                 <div class="form-row">
                   <div class="form-label">Battery Make/Model:</div>
                   <div class="form-input">
-                    <input name="BATTERY_MAKE_MODEL" type="text" maxlength="50">
+                    <input name="BATTERY_MAKE_MODEL" type="text" maxlength="50" required>
                   </div>
                 </div>
 
@@ -1497,7 +1516,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Setpoint slew limiter (<span id="setpointSlewEnable_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for the current-setpoint slew in <strong>normal operation</strong>. <strong>On</strong> (default): the commanded current target ramps at the Setpoint Rise / Fall rates above instead of stepping, and the turn-on startup ramp and large-step gentling are active. <strong>Off:</strong> the target steps instantly (also drops the startup ramp and big-step gentling). Leave On for normal use. The manual square-wave test ignores this — its slew is set by the Test Limiters pill; commissioning / automated tests ignore it too.</span>
+                      <span class="tooltip-box">Master switch for the current-setpoint slew in <strong>normal operation</strong>. <strong>On</strong> (default): the commanded current target ramps at the Setpoint Rise / Fall rates above instead of stepping, and the turn-on startup ramp and large-step gentling are active. <strong>Off:</strong> the target steps instantly (also drops the startup ramp and big-step gentling). Leave On for normal use. The manual square-wave test ignores this — its slew is set by the slew mode in the Current Target Generator; commissioning / automated tests ignore it too.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -2140,10 +2159,6 @@
                   <span class="group-label">Group 4</span>
                   <span class="nick-label">Battery Limit</span>
                 </button>
-                <button type="button" data-filter="ab">
-                  <span class="group-label">Brake</span>
-                  <span class="nick-label">CV Approach</span>
-                </button>
               </div>
 
               <!-- ============ DETECTION ============ -->
@@ -2449,23 +2464,6 @@
                     <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 6 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
                   </article>
 
-                  <article class="protections-param req-batt-current" data-groups="g4">
-                    <div class="protections-name">
-                      <span class="protections-tag g4">G4</span>
-                      Battery Charge Current Limit (A) (<span id="BattCurrentLimitA_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The most charging current the battery is allowed to receive, in amps — set it to the battery bank's maximum acceptance (for lithium, the C-rate limit). This is a ceiling on the command, not a trip: the alternator command is capped at this limit plus the measured house-load draw, so loads are always covered and only the battery's share is limited. Requires the INA228 battery shunt as the Battery Current Source. 0 disables the limit.</span></span>
-                      <span class="sinfo" data-sinfo="BattCurrentLimitA" onclick="sinfoToggle(this)"></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="BattCurrentLimitA" type="number" step="5" min="0" max="500" />
-                        <span class="protections-unit">A</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
@@ -2495,6 +2493,23 @@
                       <div class="protections-edit-row">
                         <input name="IExcessRelFrac" type="number" step="5" min="10" max="90" />
                         <span class="protections-unit">%</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param req-batt-current" data-groups="g4">
+                    <div class="protections-name">
+                      <span class="protections-tag g4">G4</span>
+                      Battery Charge Current Limit (A) (<span id="BattCurrentLimitA_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The most charging current the battery is allowed to receive, in amps — set it to the battery bank's maximum acceptance (for lithium, the C-rate limit). This is a ceiling on the command, not a trip: the alternator command is capped at this limit plus the measured house-load draw, so loads are always covered and only the battery's share is limited. Requires the INA228 battery shunt as the Battery Current Source. 0 disables the limit.</span></span>
+                      <span class="sinfo" data-sinfo="BattCurrentLimitA" onclick="sinfoToggle(this)"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="BattCurrentLimitA" type="number" step="5" min="0" max="500" />
+                        <span class="protections-unit">A</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -2628,10 +2643,63 @@
                 <div class="protections-intro">
                   <p data-intro="cl">After the trip, the regulator enters a ramp-and-lockout — the field stays at 0 until the over-current condition has cleared. The recovery path used by the other protections (Recovery Seed Fraction, Seed Protect Window) is not used here.</p>
                   <!-- one shared paragraph for all four groups — data-intro is a space-separated list, matched like data-groups -->
-                  <p data-intro="g1 g2 g3 g4">When all protections have released, the voltage integrator is restored to <strong>pre-event value × Recovery Seed Fraction</strong>. <strong>Seed Protect Window</strong> protects the fresh seed from being immediately drained by a brief subsequent event. <strong>Fast Setpoint Rise Rate</strong> then accelerates the slewed current setpoint back up while battery voltage is comfortably below target, so the alternator crosses its deadband and starts producing current again quickly.</p>
+                  <p data-intro="g1 g2 g3 g4">When all protections have released, the voltage integrator is restored to <strong>pre-event value × Recovery Seed Fraction</strong>. <strong>Seed Protect Window</strong> protects the fresh seed from being immediately drained by a brief subsequent event. <strong>Fast Setpoint Rise Rate</strong> then accelerates the slewed current setpoint back up while battery voltage is comfortably below target, so the alternator crosses its deadband and starts producing current again quickly. With <strong>Recovery Pacing</strong> on, the setpoint is instead walked back on a fixed schedule — <strong>Recovery Time</strong> sets the duration and <strong>Recovery Error Cap</strong> bounds the voltage shortfall the loop may see — so the return takes about the same time at any target voltage (Load Dump excepted; it re-asserts on its own).</p>
                 </div>
 
                 <div class="protections-cards">
+
+                  <article class="protections-param" data-groups="g1 g2 g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span>
+                      Recovery Pacing — timed walk-back (<span id="cvRecovEnable_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">After an over-voltage or alternator over-current event ends, the regulator restores charging current on a fixed schedule (the recovery time below) instead of letting the size of the voltage dip set the pace. <strong>On:</strong> recovery takes about the same time at any target voltage — no long crawl back when the target sits near the battery's resting voltage, and no second trip from a too-violent return when it sits far above. <strong>Off:</strong> the plain PI walks itself back, so recovery pace scales with how far the voltage fell. Trip points themselves are not affected. Load Dump is excluded — it manages its own re-assertion.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="cvRecovEnable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('cvRecovEnable_checkbox', 'cvRecovEnable', 'cvRecovEnable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="cvRecovEnable" name="cvRecovEnable" type="number" value="" style="display:none;" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span>
+                      Recovery Time (s) (<span id="cvRecovSec_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long the regulator takes to restore charging current after a protection event ends, when Recovery Pacing is On. The current that was flowing before the event is re-applied gradually over this many seconds, at any target voltage and any battery size. Shorter = charging resumes sooner; longer = a gentler return with more settling margin.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="cvRecovSec" type="number" step="0.1" min="0.5" max="30" />
+                        <span class="protections-unit">s</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span>
+                      Recovery Error Cap (V) (<span id="cvRecovEmaxV_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">While recovery is in progress, the voltage loop is not allowed to see more than this much voltage shortfall, no matter how far the voltage actually fell when the field was cut. This keeps the return to target gentle enough that the rising voltage cannot re-trigger the predictive over-voltage protection. Entered per 12 V; scales automatically on 24 V and 48 V systems. Raise for a snappier return; lower if recovery ever re-trips protection.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="cvRecovEmaxV" type="number" step="0.01" min="0.05" max="2" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
 
                   <article class="protections-param" data-groups="g1 g2 g3 g4">
                     <div class="protections-name">
@@ -2719,95 +2787,13 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span>
                       Field Drain Time (ms) (<span id="fieldDecayTauMs_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long the alternator field coil takes to drain once the field is cut, measured from the cut until output falls to 10% of its pre-cut level, in milliseconds. Measured by the Field Decay commissioning step, which stores the combined idle/cruise result plus a 30% cold-coil margin; the number here is that final value. The over-voltage response holds a field cut at least this long before treating the coil as drained. Editing it overrides the stored value directly — no margin is re-applied.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long the alternator field coil takes to drain once the field is cut, measured from the moment the field is commanded off until output falls to 10% of its pre-cut level, in milliseconds. Measured by the Field Decay commissioning step, which stores the combined result of two cruising-speed runs as measured; the number here is that final value. The over-voltage response holds a field cut at least this long before treating the coil as drained. Editing it overrides the stored value directly.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
                         <input name="fieldDecayTauMs" type="number" step="1" min="5" max="900" />
                         <span class="protections-unit">ms</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                </div>
-              </section>
-
-              <!-- ============ APPROACH BRAKE (pre-protection) ============ -->
-              <section class="protections-phase" data-phase="brake">
-                <div class="protections-section-title">Approach Brake</div>
-
-                <div class="protections-intro">
-                  <p data-intro="ab">Not a protection — a helper that makes the protections above fire less often. While battery voltage climbs toward the charge target, a sustained fast rise means the voltage loop integrator is holding more current than the target will need (integrator windup): the bus overshoots and a protection cuts hard. The brake watches the sustained rise rate of the smoothed battery voltage and drains the integrator early, in proportion to how far the rise exceeds the threshold. It only ever removes current — a false trigger just means arriving at target slightly slower, which self-corrects; a miss leaves the hard protections to fire exactly as before. Gated by the CV Tuning Helpers switch (Tuning → Voltage) and held off while commissioning probe tests own the field.</p>
-                </div>
-
-                <div class="protections-cards">
-
-                  <article class="protections-param" data-groups="ab">
-                    <div class="protections-name">
-                      <span class="protections-tag ab">BR</span>
-                      Sustained Rise Threshold (V/s) (<span id="CvBrakeThreshVps_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sustained rise rate of the smoothed battery voltage above which the brake starts draining the voltage loop integrator. The rise rate is averaged over the Averaging Time Constant below, so belt ripple and resonance wobble (which rise and fall) cancel out — only a genuine one-directional climb counts. Lower catches gentler approaches but eats into the margin against slow-resonance false alarms; higher hands more of the events back to the hard protections. The live readout below shows the worst sustained rise seen in the last 10 seconds — this installation's own floor.</span></span>
-                      <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
-                      <span id="CvBrakeThreshVps_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak sustained rise: —</span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="CvBrakeThreshVps" type="number" step="0.05" min="0.1" max="4" />
-                        <span class="protections-unit">V/s</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="ab">
-                    <div class="protections-name">
-                      <span class="protections-tag ab">BR</span>
-                      Averaging Time Constant (ms) (<span id="CvBrakeTauMs_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long the voltage rise rate is averaged before comparing it to the threshold. Longer rejects ripple and slow resonance better but reacts later to a real sustained climb; shorter fires earlier at the cost of false-alarm margin. This filter and the threshold act as one setting — if you change one, re-check the other against a real approach.</span></span>
-                      <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="CvBrakeTauMs" type="number" step="25" min="50" max="1000" />
-                        <span class="protections-unit">ms</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="ab">
-                    <div class="protections-name">
-                      <span class="protections-tag ab">BR</span>
-                      Arm Window Below Target (V) (<span id="CvBrakeArmV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far below the active charge target the brake is allowed to act. Farther below than this, a fast rise is normal charging or recovery and the integrator needs every amp it can build — the brake stays out of the way. Inside the window (and above target), a sustained fast rise means imminent overshoot and the brake acts. Compares the smoothed voltage against the live stage target (bulk, absorption, float — whichever is active right now).</span></span>
-                      <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="CvBrakeArmV" type="number" step="0.1" min="0.2" max="3" />
-                        <span class="protections-unit">V</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="ab">
-                    <div class="protections-name">
-                      <span class="protections-tag ab">BR</span>
-                      Bleed Gain (A per V/s) (<span id="SlopeBleedK_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How aggressively the voltage loop integrator is drained once the sustained rise exceeds the threshold — amps per second removed for each V/s of excess rise. Higher arrests a fast approach harder. It can only remove current, never add it, so the failure mode of too-high is simply a slower final approach to target.</span></span>
-                      <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="SlopeBleedK" type="number" step="5" min="0" max="500" />
-                        <span class="protections-unit">A/(V/s)</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -3514,6 +3500,23 @@
                 </div>
 
                 <hr />
+
+                <!-- Test Note -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Test Note (max 50 chars):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Free-text label saved with the next committed record in the Square Wave Score Log. Set it before running the test; it is captured when the record commits.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="ccTuningNote" type="text" maxlength="50" placeholder="e.g. 80A cap, DRamp test" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Test (<span id="TuningMode_echo">?</span>):</span>
@@ -3529,23 +3532,16 @@
                 <!-- X-axis time window is set by the buttons above the plot (setPIDXTime);
                      Y axis min/max are edited on the plot itself (attachYAxisEdit owns yyMin/yyMax). -->
 
-              </details> <!-- END Current Target Generator -->
-
-              <details class="tuning-section">
-                <summary class="tuning-section-title">Test Limiters</summary>
-                <div style="font-size:0.88em; color:var(--text-muted); margin:8px 0;">
-                  How the manual current-control (CC) square-wave test slews. Affects the <strong>manual square-wave test only</strong> — every sine run (manual sine, sine sweep, commissioning System ID / Verify) bypasses the limiters automatically, and commissioning / automated tests apply their own built-in ramping regardless of this setting. Normal operation is unaffected.
-                </div>
 
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Slew during the manual CC test (<span id="testSlewMode_echo">?</span>):</span>
+                    <span>Slew during this test (<span id="testSlewMode_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                       <span class="tooltip-box"><strong>Off:</strong> setpoint and field step instantly — the sharpest edges for A/B study; over-voltage protections stay live. <strong>Default:</strong> factory-safe setpoint slew (30 A/s rise / 50 A/s fall), field left at its normal duty-ramp coupling-cap protection — a clean, repeatable test without touching your saved rates. <strong>Custom:</strong> your saved Setpoint Rise / Fall rates (Controller Parameters). Only the manual square test honors this; sine runs and commissioning / automated tests are unaffected.</span>
                     </span>
                   </div>
-                  <div class="form-input">
+                  <div class="form-input seg-pill-stack">
                     <div class="seg seg-pill">
                       <label>
                         <input type="radio" name="testSlewMode" value="0" onchange="setTestSlewMode(0)">
@@ -3567,7 +3563,10 @@
                     </div>
                   </div>
                 </div>
-              </details>
+
+              </details> <!-- END Current Target Generator -->
+
+
 
               <!-- Test Progress & Manual Commit -->
               <div id="tuningCommitSection" class="tuning-section" style="display:none;">
@@ -3627,6 +3626,7 @@
                         <th style="padding:3px 5px;" title="Bus voltage during the test">BusV</th>
                         <th style="padding:3px 5px;" title="Charge stage at commit">Stage</th>
                         <th style="padding:3px 5px;" title="Wall-clock date/time the run was committed (— if the clock was not set)">Date/Time</th>
+                        <th style="padding:3px 5px;" title="User note captured when the record was committed">Notes</th>
                       </tr>
                     </thead>
                     <tbody id="tuningLogBody"></tbody>
@@ -3936,6 +3936,15 @@
 
                 <!-- Live plot -->
                 <div class="plot-container" id="cv-tuning-plot" style="margin:8px 0;"></div>
+
+                <!-- P/I/D contribution plot — how each term builds the current setpoint (Icv) -->
+                <div style="margin:14px 0 2px; font-size:0.9em; font-weight:600; opacity:0.85;">
+                  Current setpoint (Icv) — P / I / D contributions
+                </div>
+                <div style="font-size:0.8em; opacity:0.65; margin-bottom:4px;">
+                  Shares the time window above. D removes current on a fast rise and (two-sided) adds it on a fast fall below target, so P&nbsp;+&nbsp;I&nbsp;&minus;&nbsp;D clamps to [0, ceiling] — the three need not sum exactly to Icv.
+                </div>
+                <div class="plot-container" id="cv-pid-plot" style="margin:2px 0;"></div>
               </details>
 
               <!-- Voltage Step Generator (collapsed) -->
@@ -4018,13 +4027,32 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Wave Period (sec) (<span id="cvWavePeriodSec_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Total period of one low+high cycle in seconds. Each half-period is this value ÷ 2. Use longer periods (60–120s) at higher time constants; shorter (30–45s) for faster loops. Minimum is 30s. Must be long enough for the voltage to fully settle in the high phase.</span>
+                      <span class="tooltip-box">Total period of one low+high cycle in seconds. Each half-period is this value ÷ 2. Use longer periods (60–120s) at higher time constants; shorter (30–45s) for faster loops. Minimum is 8s. Must be long enough for the voltage to fully settle in the high phase; below about 14s the steady-state peak-to-peak reading may show n/a because the high phase can't fit settling plus the 4s measurement window.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return warnCvPeriod(this)">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="cvWavePeriodSec" type="number" step="1" min="8" max="600" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+
+                <!-- Test Note -->
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Test Note (max 50 chars):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Free-text label saved with the next committed record in the CV Tuning Score Log. Set it before running the test; it is captured when the record commits.</span>
                     </span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="cvWavePeriodSec" type="number" step="5" min="30" max="600" />
+                      <input name="cvTuningNote" type="text" maxlength="50" placeholder="e.g. AGM, 30A load, Ki bump" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -4067,23 +4095,16 @@
                     </form>
                   </div>
                 </div>
-              </details> <!-- END Voltage Step Generator -->
-
-              <details class="tuning-section">
-                <summary class="tuning-section-title">Test Limiters</summary>
-                <div style="font-size:0.88em; color:var(--text-muted); margin:8px 0;">
-                  Slew behaviour for the manual CV square-wave test: the target-voltage slew mode (below), plus the rise-governor and field-duty switches for A/B study. These affect the <strong>manual CV square test only</strong> — commissioning / automated tests apply their own built-in ramping, and every setting's normal-operation master lives under Controller Parameters. The ramp rate values live under Controller Parameters too.
-                </div>
 
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Target-voltage slew during the manual CV test (<span id="cvTestSlewMode_echo">?</span>):</span>
+                    <span>Target-voltage slew during this test (<span id="cvTestSlewMode_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                       <span class="tooltip-box"><strong>Off:</strong> the charge target steps instantly — the sharpest voltage step to study the CV loop. Over-voltage protections stay live, and the field duty keeps its normal ramp (unlike the CC test, this does not strip the field-duty slew). <strong>Default:</strong> factory-safe target ramp (0.05 V/s, class-scaled) — a clean, repeatable test without touching your saved rates. <strong>Custom:</strong> your saved Target-voltage ramp up / down rates (Controller Parameters). Only the manual CV square test honors this; commissioning / automated tests are unaffected.</span>
                     </span>
                   </div>
-                  <div class="form-input">
+                  <div class="form-input seg-pill-stack">
                     <div class="seg seg-pill">
                       <label>
                         <input type="radio" name="cvTestSlewMode" value="0" onchange="setCvTestSlewMode(0)">
@@ -4106,109 +4127,9 @@
                   </div>
                 </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Rise governor / anti-windup limiter (<span id="cvRiseGovEnable_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for the inner anti-windup clamp on the voltage target (rise governor). <strong>On</strong> (default): on a target step UP, the value the voltage loop sees is held to what the current loop can actually support, so the integrator can't run ahead and overshoot. <strong>Off:</strong> the loop sees the full up-step at once — useful to see the un-clamped step response, but <strong>the integrator can wind up and trip over-voltage on a rising step</strong>, which ends the test. Falling steps are instant either way. The fast over-voltage backstop still fires and cuts the field, so this is safe to throw on the bench but expect aborted up-steps. Leave On in normal operation. Commissioning and other automated tests force the governor on regardless of this switch.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="cvRiseGovEnable_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('cvRiseGovEnable_checkbox', 'cvRiseGovEnable', 'cvRiseGovEnable')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">On</span>
-                      <input id="cvRiseGovEnable" name="cvRiseGovEnable" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
+              </details> <!-- END Voltage Step Generator -->
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Protection recovery pacing (<span id="cvRecovEnable_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">After an over-voltage or over-current protection event ends, the regulator restores charging current on a fixed schedule (the recovery time below) instead of letting the size of the voltage dip set the pace. <strong>On:</strong> recovery takes about the same time at any target voltage — no long crawl back when the target sits near the battery's resting voltage, and no second protection trip from a too-violent return when it sits far above. <strong>Off:</strong> recovery pace scales with how far the voltage fell when the field was cut. Protection trip points themselves are not affected by this switch.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="cvRecovEnable_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('cvRecovEnable_checkbox', 'cvRecovEnable', 'cvRecovEnable')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">On</span>
-                      <input id="cvRecovEnable" name="cvRecovEnable" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Protection recovery time (s) (<span id="cvRecovSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">How long the regulator takes to restore charging current after a protection event ends. The current that was flowing before the event is re-applied gradually over this many seconds, at any target voltage and any battery size. Shorter = charging resumes sooner; longer = a gentler return with more settling margin.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="cvRecovSec" type="number" step="0.1" min="0.5" max="30" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Protection recovery error cap (V) (<span id="cvRecovEmaxV_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">While recovery is in progress, the voltage loop is not allowed to see more than this much voltage shortfall, no matter how far the voltage actually fell when the field was cut. This keeps the return to target gentle enough that the rising voltage cannot re-trigger the predictive over-voltage protection. Entered per 12 V; scales automatically on 24 V and 48 V systems. Raise for a snappier return; lower if recovery ever re-trips protection.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="cvRecovEmaxV" type="number" step="0.01" min="0.05" max="2" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Field smoothing limiter (duty slew) (<span id="dutySlewEnable_cv_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for the rate limit on the <strong>field PWM output</strong> (duty slew, DutyRampRate) — the actuator-side limiter, not the setpoint. <strong>On</strong> (default): field demand can only change at DutyRampRate, which protects the coupling capacitor from harsh transitions. <strong>Off:</strong> duty steps instantly. This is a <strong>shared setting</strong>, linked with the same switch on the Current tab — changing it in either place changes both. It applies in normal operation and in the two square-wave tests (this tab's CV square, the Current tab's current square). Sine runs on the Current tab bypass duty slew automatically once their entry ramp settles — this switch has no effect there — and commissioning/automated tests ignore it entirely. Leave it On except during a deliberate test.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="dutySlewEnable_cv_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('dutySlewEnable_cv_checkbox', 'dutySlewEnable_cv', 'dutySlewEnable')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">On</span>
-                      <input id="dutySlewEnable_cv" name="dutySlewEnable" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-              </details>
 
               <!-- CV Commit Section -->
               <div id="cvTuningCommitSection" class="tuning-section" style="display:none;">
@@ -4260,7 +4181,7 @@
                         <th style="padding:3px 4px;">AwRec</th>
                         <th style="padding:3px 4px;" title="AwSeedProtectMs — anti-windup integrator seed protection time (ms)">AwSP</th>
                         <th style="padding:3px 4px;" title="ReseedFrac — fraction of seed restored on integrator reseed">RsF</th>
-                        <th style="padding:3px 4px;" title="SlopeBleedK — slope-aware integrator bleed gain A/(V/s)">KS</th>
+                        <th style="padding:3px 4px;" title="VoltageKd — CV D-term gain A/(V/s)">KD</th>
                         <th style="padding:3px 4px;" title="KHard — fastOV hard-clamp gain">KH</th>
                         <th style="padding:3px 4px;" title="IExcessFrac — iExcess detection threshold, % of command">IEx%</th>
                         <th style="padding:3px 4px;" title="IExcessTau — iExcess averaging time constant (ms)">IEτ</th>
@@ -4283,10 +4204,12 @@
                         <th style="padding:3px 4px;">CVT</th>
                         <th style="padding:3px 4px;" title="Charge stage at commit">Stage</th>
                         <th style="padding:3px 4px;" title="Wall-clock date/time the run was committed (— if the clock was not set)">Date/Time</th>
+                        <th style="padding:3px 4px;" title="Steady-state peak-to-peak of measured voltage at the high target: mean across HIGH steps of (max−min) over a 3s window opened 1s after settling. n/a if no step was long enough.">P2P (V)</th>
+                        <th style="padding:3px 4px;" title="User note captured when the record was committed">Notes</th>
                       </tr>
                     </thead>
                     <tbody id="cvTuningLogBody">
-                      <tr><td colspan="41" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
+                      <tr><td colspan="43" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -4422,6 +4345,118 @@
                 </div> <!-- end cvManualBlock -->
 
                 <hr />
+                <!-- ============ VOLTAGE D TERM (helper #2) ============ -->
+                <div class="param-subhead">Voltage D term (rate-of-rise damping)</div>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Voltage Loop Kd (<span id="VoltageKd_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Derivative gain for the voltage loop — how many amps to trim off the current setpoint per V/s that the smoothed battery voltage rises beyond the deadband. Recomputed every tick from the present rise rate and subtracted at the loop output, so it releases the instant the rise falls back and never accumulates in the integrator (no dumped charge on release). Damps the rate of rise on the approach to target, keeping the bus from overshooting into the hard protections — but unlike a protection it never cuts the field, so there is no torque step at the engine and no visible light dip. Higher damps a fast approach harder; too high slightly slows the final approach. Gated by the <strong>CV Tuning Helpers</strong> switch (Overshoot &amp; OV-recovery shaping, below). <strong>Voltage-normalized</strong> — the same value works on 12 / 24 / 48 V banks.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageKd" type="number" step="0.5" min="0" max="200" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Voltage for D term filter (ms) (<span id="CvKdVoltFiltTC_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Smoothing applied to the battery voltage <strong>before</strong> the D term measures its rate of rise — a dedicated filter, separate from the shared voltage smoothing filter, so tuning the D term’s noise floor never disturbs the charge-stage machine. Longer rejects belt ripple and sensor noise harder but adds lag to the rate signal (a fast rise is seen later); shorter reacts sooner at the cost of a noisier slope. This filters <strong>voltage</strong>; the deadband below rejects ripple on the resulting <strong>slope</strong> — independent tools. Set to <strong>0</strong> to feed the raw INA228 voltage. The “Voltage for D term” trace on the tuning plot is this filtered signal.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="CvKdVoltFiltTC" type="number" step="1" min="0" max="1000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Deadband (V/s) (<span id="CvKdDeadbandVps_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                      <span id="CvKdDeadbandVps_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak rise rate: —</span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The D term ignores any rise — or, below target, any fall — slower than this, acting only on the excess beyond it. Sized above belt ripple and resonance wobble (which swing the per-tick slope up and down around zero) so those cancel and only a genuine climb or drop counts. It also keeps belt ripple and resonance from rectifying into a steady trim on either side. Lower catches gentler approaches but eats into ripple margin; higher hands more of the events to the hard protections. The live readout below is the worst rise rate seen in the last 10 seconds — this installation's own floor.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="CvKdDeadbandVps" type="number" step="0.05" min="0" max="4" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Arm Window Below Target (V) (<span id="CvKdArmV_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far below the active charge target the D term is allowed to act. Farther below than this, a fast rise is normal charging or a recovery climb and the loop needs every amp — the D term stays out of the way. Inside the window a fast rise means imminent overshoot and it acts. Set to <strong>0</strong> to arm it always (whenever CV is active), like a textbook D term. Compares the smoothed voltage against the live stage target.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="CvKdArmV" type="number" step="0.1" min="0" max="3" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>One-Sided (<span id="CvKdOneSided_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box"><strong>On (one-sided)</strong>: the D term can only <strong>remove</strong> current — it brakes a fast rise (above <em>or</em> below target), silent on any fall. <strong>Off (two-sided)</strong>: it can also <strong>add</strong> current on a fast fall — but <em>only below target</em>. Even here it isn't symmetric: the remove side works everywhere, the add side only below target — so a bus decaying down from an overshoot is left alone (adding there would re-lift it and stretch the overshoot).</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="CvKdOneSided_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('CvKdOneSided_checkbox', 'CvKdOneSided', 'CvKdOneSided')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="CvKdOneSided" name="CvKdOneSided" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Max Back-Off (A) (<span id="CvKdMaxTrimA_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard ceiling on how many amps the D term may remove. The back-off ramps up with rise rate but never exceeds this, so a genuinely fast rise is softened rather than cut to the field-off torque step this softener exists to avoid. The back-off reaches this cap at a rise rate of Deadband + (this ÷ Kd) and holds flat above it. If a rise is fast enough to need more than this, that is the overvoltage protections' job, by design. <strong>Flat amps — voltage-independent</strong>, like every other current setting: the back-off needed to arrest an equivalent overshoot is the same amps on any bank, so a flat cap keeps the damper behaving the same on 12/24/48 V. It is a total-depth limit, not a rate limit — how fast the field is pulled back is bounded separately by the setpoint slew rate.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="CvKdMaxTrimA" type="number" step="1" min="0" max="200" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
                 <!-- Reset CV Integrator — utility, tied to the Kp/Ki above -->
                 <div style="margin:8px 0;">
                   <button onclick="resetVoltageLoop()" class="btn-secondary">Reset CV Integrator</button>
@@ -4515,7 +4550,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Target voltage slew limiter (<span id="vTgtRampEnable_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for the voltage-target slew in <strong>normal operation</strong>. <strong>On</strong> (default): the active charge target moves at the up / down rates above instead of stepping, so a stage transition or new setpoint glides. <strong>Off:</strong> the target changes instantly (old behaviour). The important one is the down rate — an instant target drop trips over-voltage and hard-cuts the field. Leave On for normal use. The manual CV test ignores this — its slew is set by the Test Limiters pill; commissioning / automated tests ignore it too. Protections and absolute backstops are independent of this and always instant.</span>
+                      <span class="tooltip-box">Master switch for the voltage-target slew in <strong>normal operation</strong>. <strong>On</strong> (default): the active charge target moves at the up / down rates above instead of stepping, so a stage transition or new setpoint glides. <strong>Off:</strong> the target changes instantly (old behaviour). The important one is the down rate — an instant target drop trips over-voltage and hard-cuts the field. Leave On for normal use. The manual CV test ignores this — its slew is set by the slew mode in the Voltage Step Generator; commissioning / automated tests ignore it too. Protections and absolute backstops are independent of this and always instant.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4529,6 +4564,52 @@
                       </label>
                       <span class="toggle-label">On</span>
                       <input id="vTgtRampEnable" name="vTgtRampEnable" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Rise governor / anti-windup limiter (<span id="cvRiseGovEnable_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Master switch for the inner anti-windup clamp on the voltage target (rise governor), active in <strong>normal operation</strong>. <strong>On</strong> (default): on a target step UP, the value the voltage loop sees is held to what the current loop can actually support, so the integrator can't run ahead and overshoot into an over-voltage trip. <strong>Off:</strong> the loop sees the full up-step at once — the un-clamped step response, but the integrator can wind up and trip over-voltage on a rising step. Falling steps are instant either way. The fast over-voltage backstop still fires and cuts the field regardless. Leave On for normal use; commissioning and automated tests force the governor on regardless of this switch.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="cvRiseGovEnable_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('cvRiseGovEnable_checkbox', 'cvRiseGovEnable', 'cvRiseGovEnable')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="cvRiseGovEnable" name="cvRiseGovEnable" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Field smoothing limiter (duty slew) (<span id="dutySlewEnable_cv_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Master switch for the rate limit on the <strong>field PWM output</strong> (duty slew, DutyRampRate) — the actuator-side limiter, not the setpoint. <strong>On</strong> (default): field demand can only change at DutyRampRate, which protects the coupling capacitor from harsh transitions. <strong>Off:</strong> duty steps instantly. This is a <strong>shared setting</strong> with the Current tab — changing it in either place changes both. It applies in normal operation and in the two square-wave tests; sine runs bypass duty slew automatically once their entry ramp settles, and commissioning / automated tests ignore it. Leave it On except during a deliberate test.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="dutySlewEnable_cv_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('dutySlewEnable_cv_checkbox', 'dutySlewEnable_cv', 'dutySlewEnable')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="dutySlewEnable_cv" name="dutySlewEnable" type="number" value="" style="display:none;" />
                     </form>
                   </div>
                 </div>
@@ -4567,7 +4648,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>CV Tuning Helpers (<span id="cvHelpersEnabled_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Master switch for two non-linear "helpers" that sit on top of the plain voltage PI: <strong>(1) asymmetric integrator unwind</strong> — when battery voltage goes above target the integrator drains 7× faster than it builds, and <strong>(2) the approach brake</strong> — drains the integrator early when the smoothed voltage is climbing toward target at a sustained fast rate (its knobs live in Setup → Alternator → Protections → Approach Brake). Both exist for one purpose only: they <strong>REDUCE OVERSHOOT</strong> and <strong>HELP SPEED OVERVOLTAGE RECOVERY</strong>. They never make the loop more aggressive, so leaving them ON is always at least as safe.<br><br>Turn them <strong>OFF</strong> while tuning Voltage Loop Kp/Ki: the loop becomes a clean symmetric PI, so its overshoot and settling behaviour reflect Kp/Ki directly and are far <strong>easier to understand</strong>. Once Kp/Ki are dialled in, turn them back ON to add the overshoot/OV-recovery polish. This does NOT touch the real overvoltage protections (hardware OV, fast OV, hard clamp) — those stay live regardless.</span>
+                      <span class="tooltip-box">Master switch for two non-linear "helpers" that sit on top of the plain voltage PI: <strong>(1) asymmetric integrator unwind</strong> — when battery voltage goes above target the integrator drains 7× faster than it builds, and <strong>(2) the voltage D term</strong> — trims the current setpoint when the smoothed voltage is rising fast toward target, damping the rate of rise (its knobs are the Voltage D term rows under Gain selection above). Both exist for one purpose only: they <strong>REDUCE OVERSHOOT</strong> and <strong>HELP SPEED OVERVOLTAGE RECOVERY</strong>. They never make the loop more aggressive, so leaving them ON is always at least as safe.<br><br>Turn them <strong>OFF</strong> while tuning Voltage Loop Kp/Ki: the loop becomes a clean symmetric PI, so its overshoot and settling behaviour reflect Kp/Ki directly and are far <strong>easier to understand</strong>. Once Kp/Ki are dialled in, turn them back ON to add the overshoot/OV-recovery polish. This does NOT touch the real overvoltage protections (hardware OV, fast OV, hard clamp) — those stay live regardless.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4585,7 +4666,6 @@
                   </div>
                 </div>
 
-                <!-- Approach-brake knobs (helper #2) live in Setup → Alternator → Protections → Approach Brake -->
 
               </details> <!-- END VTM Controller Parameters -->
 
@@ -10571,8 +10651,7 @@
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Long-Term Ring Flash Flush
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                     <span class="tooltip-box">Writes the 30-day plot ring to flash storage. Runs only with the alternator
-                      field off, on a 15-minute cycle, so its flash-erase stall can never disturb live charging. This is
-                      the periodic loop spike that used to be invisible in this table.</span>
+                      field off, on a 15-minute cycle, so its flash-erase stall can never disturb live charging.</span>
                   </span>
                 </div>
                 <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
@@ -11332,13 +11411,13 @@
           <span class="metric-value telemetry-value"><span id="iExcessCountID">?</span></span>
         </div>
         <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Approach-Brake Engagements
+          <span class="metric-label telemetry-label">Voltage D-Term Engagements
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: the CV approach brake engaged and drained the voltage loop integrator because the smoothed battery voltage was climbing toward target at a sustained fast rate. Consecutive brake ticks count as one engagement; a new one is counted after at least a second of quiet. This is a pre-protection save, not a trip — each engagement is an approach that would otherwise have run hotter into the overvoltage protections. Knobs: Setup → Alternator → Protections → Approach Brake.</span>
+              <span class="tooltip-box">Rising-edge count: the CV voltage D term trimmed the current setpoint because the smoothed battery voltage was rising fast toward target. Consecutive trim ticks count as one engagement; a new one is counted after at least a second of quiet. This is a pre-protection save, not a trip — each engagement is an approach that would otherwise have run hotter into the overvoltage protections. Knobs: Tuning → Voltage → Voltage D term.</span>
             </span>
-            <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
+            <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
           </span>
-          <span class="metric-value telemetry-value"><span id="cvBrakeCountID">?</span></span>
+          <span class="metric-value telemetry-value"><span id="cvKdCountID">?</span></span>
         </div>
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">INA228 OV Events
@@ -11913,13 +11992,13 @@
           </p>
 
           <div class="metric-row telemetry-row">
-            <span class="metric-label telemetry-label">Approach-Brake Engagements
+            <span class="metric-label telemetry-label">Voltage D-Term Engagements
               <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                <span class="tooltip-box">Times the CV approach brake drained the voltage loop integrator to soften a fast climb toward target — a pre-protection save, not a trip. If the brake is doing its job, this counter grows while the protection counts below grow more slowly.</span>
+                <span class="tooltip-box">Times the CV voltage D term trimmed the current setpoint to soften a fast climb toward target — a pre-protection save, not a trip. If the D term is doing its job, this counter grows while the protection counts below grow more slowly.</span>
               </span>
-              <span class="sinfo" data-sinfo="cvBrake" onclick="sinfoToggle(this)"></span>
+              <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
             </span>
-            <span class="metric-value telemetry-value"><span id="ovtBrakeCount">—</span></span>
+            <span class="metric-value telemetry-value"><span id="ovtKdCount">—</span></span>
           </div>
           <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
           <div class="metric-row telemetry-row">
