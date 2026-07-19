@@ -1610,6 +1610,23 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     CvKdDeadbandVps = settingRead(NK_CvKdDeadbandVps).toFloat();
   }
+  if (!settingExists(NK_CvKdDbSlope)) {
+    settingWrite(NK_CvKdDbSlope, String(CvKdDbSlope, 5).c_str());  // default 0 = flat line; measured per install at Step 5
+  } else {
+    CvKdDbSlope = settingRead(NK_CvKdDbSlope).toFloat();
+  }
+  if (!settingExists(NK_CvKdDbFloor)) {
+    CvKdDbFloor *= seedVScale;
+    settingWrite(NK_CvKdDbFloor, String(CvKdDbFloor, 3).c_str());
+  } else {
+    CvKdDbFloor = settingRead(NK_CvKdDbFloor).toFloat();
+  }
+  if (!settingExists(NK_CvKdDbCeil)) {
+    CvKdDbCeil *= seedVScale;
+    settingWrite(NK_CvKdDbCeil, String(CvKdDbCeil, 3).c_str());
+  } else {
+    CvKdDbCeil = settingRead(NK_CvKdDbCeil).toFloat();
+  }
   if (!settingExists(NK_VoltageKd)) {
     settingWrite(NK_VoltageKd, String(VoltageKd, 1).c_str());  // A/(V/s), 12V-equivalent — no seed scaling; runtime-normalized to VoltageKd_active like VoltageKp/Ki
   } else {
@@ -1634,6 +1651,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_CvKdSlopeCeil, String(CvKdSlopeCeil, 1).c_str());  // 12V-equiv, class-scaled at use — no seed scaling
   } else {
     CvKdSlopeCeil = settingRead(NK_CvKdSlopeCeil).toFloat();
+  }
+  if (!settingExists(NK_CvKdTd)) {
+    settingWrite(NK_CvKdTd, String(CvKdTd, 2).c_str());  // s — derivative time; Auto Kd = Td·Kp
+  } else {
+    CvKdTd = settingRead(NK_CvKdTd).toFloat();
   }
   // cvHelpersEnabled — master switch for the asymmetric KiDown unwind + the one-sided D term
   if (!settingExists(NK_cvHelpersEnabled)) {
@@ -1740,6 +1762,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     cvPlantKb = settingExists(NK_cvPlantKb) ? settingRead(NK_cvPlantKb).toFloat() : 0.0f;
   }
   if (settingExists(NK_ripFitAlt))  ripFitDecode(settingRead(NK_ripFitAlt),  ripFitAlt);   // measured ripple projection (§3.3); absent → nPts=0 → plot shows threshold only
+  if (settingExists(NK_slpFitAlt))  ripFitDecode(settingRead(NK_slpFitAlt),  slpFitAlt);   // measured voltage-slope projection (D-term deadband); same absent semantics
   // CommissionTempF — board temp stamped when the CV plant fit was applied; reference for the battery-
   // temp gain derate. No default write: absence = never commissioned = no derate (stays NaN).
   if (settingExists(NK_CommissionTempF)) {
@@ -2036,12 +2059,15 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   // as-is so the badge invites "Continue commissioning" rather than starting over. The Phase-0 origin
   // snapshot (NK_commissionSnap) is deliberately NOT touched here — it stays so a later explicit Abort
   // can still fully revert to the pre-commissioning tune.
-  // NOTE: a COMMITTED-but-partial device (e.g. commissioned, then Min% floor invalidated by an
-  // RPM-breakpoint change) is also state==1 but has NEITHER snapshot — it persists untouched and keeps
+  // NOTE: a COMMITTED-but-partial device (e.g. commissioned, then binned stages invalidated by a
+  // tach rescale) is also state==1 but has NEITHER snapshot — it persists untouched and keeps
   // nagging, which is correct.
   if (commissionState == 1 && settingExists(NK_commissionStepSnap)) {
     commissionRestoreScalars(NK_commissionStepSnap);  // undo just the interrupted step's scalar applies
     settingRemove(NK_commissionStepSnap);
+  }
+  if (settingExists(NK_cvStressLast)) {
+    strlcpy(cvsLastBlob, settingRead(NK_cvStressLast).c_str(), sizeof(cvsLastBlob));
   }
   if (!settingExists(NK_IExcessArmMarginV)) {
     IExcessArmMarginV *= seedVScale;

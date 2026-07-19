@@ -2852,15 +2852,20 @@ void recordINA228Interval(uint32_t now) {
   ina_over2x_at = inaAtOver2x;
 }
 
-void cacheGzFiles() {
-  cachedIndex = loadFileToRAM("/index.html.gz");
-  cachedCss = loadFileToRAM("/styles.css.gz");
-  cachedJs = loadFileToRAM("/script.js.gz");
-  cachedUplotCss = loadFileToRAM("/uPlot.min.css.gz");
-  cachedUplotJs = loadFileToRAM("/uPlot.iife.min.js.gz");
+// Web assets are brotli, named *.br, served Content-Encoding: br. Each load prefers
+// *.br but falls back to a legacy *.gz (real gzip): a device's as-shipped factory_fs
+// golden image is never rewritten and still holds *.gz, so this lets the brotli
+// firmware serve it on a prod_fs fallback. serveCachedAsset() sniffs the magic bytes
+// to set the right Content-Encoding for whichever one it loaded.
+void cacheWebAssets() {
+  cachedIndex    = loadFileToRAM(webFS.exists("/index.html.br") ? "/index.html.br" : "/index.html.gz");
+  cachedCss      = loadFileToRAM(webFS.exists("/styles.css.br") ? "/styles.css.br" : "/styles.css.gz");
+  cachedJs       = loadFileToRAM(webFS.exists("/script.js.br") ? "/script.js.br" : "/script.js.gz");
+  cachedUplotCss = loadFileToRAM(webFS.exists("/uPlot.min.css.br") ? "/uPlot.min.css.br" : "/uPlot.min.css.gz");
+  cachedUplotJs  = loadFileToRAM(webFS.exists("/uPlot.iife.min.js.br") ? "/uPlot.iife.min.js.br" : "/uPlot.iife.min.js.gz");
 }
-bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const String &contentType) {
-  CachedGzFile *cf = nullptr;
+bool serveCachedAsset(AsyncWebServerRequest *request, const String &path, const String &contentType) {
+  CachedAsset *cf = nullptr;
   if (path == "/index.html") cf = &cachedIndex;
   else if (path == "/styles.css") cf = &cachedCss;
   else if (path == "/script.js") cf = &cachedJs;
@@ -2878,7 +2883,10 @@ bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const Str
         memcpy(buffer, data + index, toSend);
         return toSend;
       });
-    resp->addHeader("Content-Encoding", "gzip");
+    // Pick encoding from the magic bytes, not the request path: brotli (*.br) or a
+    // legacy gzip (*.gz) golden-image asset. gzip starts 0x1F 0x8B.
+    const char *enc = (len >= 2 && data[0] == 0x1F && data[1] == 0x8B) ? "gzip" : "br";
+    resp->addHeader("Content-Encoding", enc);
     resp->addHeader("Cache-Control", "public, max-age=3600");
     request->send(resp);
     return true;
@@ -3557,7 +3565,7 @@ static float fieldCurveInvert(float targetA) {
 }
 
 // ============================================================
-// fieldCut_tick() — commissioning stage 8: field de-energize τ
+// fieldCut_tick() — commissioning stage 7: field de-energize τ
 //
 // Sequence: (1) RAMP — the normal AUTO path drives the REAL current PID to SystemIDStabilizeAmps
 // (the level commissioned by the field-curve step) through the fieldCutCcActive branch: manually
@@ -4429,9 +4437,9 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
 // SMALL SHARED HELPERS (prototypes live in Xregulator.ino).
 // ============================================================
 
-// Preload a gzipped web asset from LittleFS into PSRAM so the dashboard serves from RAM.
-CachedGzFile loadFileToRAM(const char *path) {
-  CachedGzFile result;
+// Preload a brotli-compressed web asset from LittleFS into PSRAM so the dashboard serves from RAM.
+CachedAsset loadFileToRAM(const char *path) {
+  CachedAsset result;
   File f = webFS.open(path, "r");
   if (!f) {
     Serial.printf("preload FAILED: %s\n", path);
@@ -4440,7 +4448,7 @@ CachedGzFile loadFileToRAM(const char *path) {
   result.size = f.size();
   // PSRAM only — no internal-heap fallback: ~300KB of web bundle on the internal
   // heap would destroy the contiguous block TLS handshakes need. On failure
-  // serveCachedGz() returns false and the file is served from flash instead.
+  // serveCachedAsset() returns false and the file is served from flash instead.
   result.data = (uint8_t *)ps_malloc(result.size);
   if (result.data) {
     f.read(result.data, result.size);

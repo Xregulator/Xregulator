@@ -966,7 +966,8 @@ input[type="submit"]:hover {
 }
 
 /* Battery-health DCIR test wizard — same dark-panel button treatment as the commissioning modal. */
-#bhw-modal-panel .btn-primary {
+#bhw-modal-panel .btn-primary,
+#cvs-modal-panel .btn-primary {
   background: linear-gradient(180deg, #14b8af 0%, #00908a 100%) !important;
   color: #fff !important;
   border-color: #16c2b8 !important;
@@ -974,21 +975,25 @@ input[type="submit"]:hover {
   white-space: normal;
   max-width: none;
 }
-#bhw-modal-panel .btn-primary:hover {
+#bhw-modal-panel .btn-primary:hover,
+#cvs-modal-panel .btn-primary:hover {
   background: linear-gradient(180deg, #18c4ba 0%, #00a39c 100%) !important;
 }
-#bhw-modal-panel .btn-primary:disabled {
+#bhw-modal-panel .btn-primary:disabled,
+#cvs-modal-panel .btn-primary:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
-#bhw-modal-panel .btn-secondary {
+#bhw-modal-panel .btn-secondary,
+#cvs-modal-panel .btn-secondary {
   background: rgba(255, 255, 255, 0.10);
   color: #e8e8e8;
   border: 1px solid rgba(255, 255, 255, 0.18);
   white-space: normal;
   max-width: none;
 }
-#bhw-modal-panel .btn-secondary:hover {
+#bhw-modal-panel .btn-secondary:hover,
+#cvs-modal-panel .btn-secondary:hover {
   background: rgba(255, 255, 255, 0.16);
 }
 
@@ -1379,6 +1384,17 @@ input[type="submit"]:hover {
 #header-collapsed-strip .hcs-pill.st-off      { color: #8a9097; }
 #header-collapsed-strip .hcs-pill.st-fault    { color: #d9534f; }
 #header-collapsed-strip .hcs-pill.st-test     { color: #a78bfa; }
+
+/* Locked-out CTA: always visible (no @container hide rule), so on the narrowest strip it wins space
+   over the readouts. Muted brick-red, not alarm-red — a passive monitor sees it persistently. */
+#header-collapsed-strip .hcs-unlock {
+  font-weight: 800; letter-spacing: .3px; cursor: pointer; color: #c0392b;
+  background: rgba(192, 57, 43, .12); border: 1px solid rgba(192, 57, 43, .35);
+  border-radius: 999px; padding: 4px 11px; line-height: 1;
+}
+.dark-mode #header-collapsed-strip .hcs-unlock {
+  color: #ff8a7a; background: rgba(255, 138, 122, .14); border-color: rgba(255, 138, 122, .4);
+}
 
 #header-collapsed-strip .hcs-m { display: inline-flex; align-items: baseline; font-weight: 700; font-variant-numeric: tabular-nums; }
 #header-collapsed-strip .hcs-m i { font-style: normal; font-weight: 400; opacity: .6; margin-left: 2px; font-size: .84em; }

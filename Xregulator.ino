@@ -139,14 +139,14 @@ struct UpdateInfo {
   size_t firmwareSize;
 };
 
-struct CachedGzFile {
+struct CachedAsset {
   uint8_t *data = nullptr;
   size_t size = 0;
 };
 
-CachedGzFile loadFileToRAM(const char *path);  // defined in 7_functions.ino (explicit prototype: returns a custom struct)
+CachedAsset loadFileToRAM(const char *path);  // defined in 7_functions.ino (explicit prototype: returns a custom struct)
 
-CachedGzFile cachedIndex, cachedCss, cachedJs, cachedUplotCss, cachedUplotJs;
+CachedAsset cachedIndex, cachedCss, cachedJs, cachedUplotCss, cachedUplotJs;
 
 // ============= HTTPS TASK SYSTEM =============
 int lastHttpResponseCode = 0;  // Track last HTTP response for failure handling
@@ -1141,7 +1141,7 @@ float kneeFitC         = 0.0f;                  // fitted slope C (% duty · RPM
 float kneeFitResidPct  = -1.0f;                 // worst-anchor fit residual (% duty), -1 = not fitted
 int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) of the worst residual
 
-// ── Field de-energize time-constant test (commissioning stage 8) ─────────────
+// ── Field de-energize time-constant test (commissioning stage 7) ─────────────
 // Ramps the REAL current loop to the commissioned stabilize level, freezes the duty for a settled
 // baseline, steps the field to MinDuty (the exact floor a real OV clamp drives to) and fits the
 // alternator-current decay for the field's electrical de-energize time constant (τ = L/R) — the
@@ -1205,10 +1205,11 @@ float faCalOffA = 0.0f;
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
-uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — current wizard phase (0=Prep…8=Field cut, 9=finished; moves backward on Back); drives the Commissioning tab checklist
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — current wizard phase (0=Prep…8=Stress test, 9=finished; moves backward on Back); drives the Commissioning tab checklist
 // Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
-// 0=Prep 1=Field curve 2=Min% floor 3=Plant fit 4=Verify 5=Disturbances 6=Thresholds 7=CV plant fit 8=Field cut. Drives
-// the per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0x1FF.
+// 0=Prep 1=Field curve 2=Plant fit 3=Verify 4=Disturbances 5=Thresholds 6=CV plant fit 7=Field cut
+// 8=Stress test. Drives the per-step ✓ marks and the default checkbox selection for partial re-runs.
+// COMMISSION_ALL_DONE = 0x1FF.
 uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
 // Per-stage "set by hand, not measured" bitmask (mirrors NK_commissionManualMask). Combined with the
 // done bit it distinguishes four states per stage: measured (done, !manual), hand-marked complete
@@ -3016,6 +3017,22 @@ float    cvpfDiMaxA = 40.0f;       // per-run current-step ceiling (A); raised o
 float    cvpfRpmAtFit = 0.0f;      // RPM at fit completion — feeds the re-run RPM advice
 float    cvpfCapHeadroomA = 0.0f;  // A — alternator cap-table headroom at fit time (g_I_cap − cvpfBaseA); how much bigger a step the table allows
 
+// ── CV stress test (commissioning stage 8 / standalone from Diag) ──
+// Throttle-snap acceptance test: a CC probe finds the idle-sustainable output, CV then holds
+// min(voltage at 80% of it, BulkVoltage), the operator snaps the throttle through the RPM band
+// where alternator output multiplies, and the watcher grades the recovery purely from the
+// existing protection counters — every protection stays fully armed and untouched.
+volatile bool cvStressActive = false;       // master flag (mutexes, idle-rest suppression)
+volatile bool cvStressCcActive = false;     // PROBE/SET/DIP phases drive the real current PID (branch in AdjustField)
+volatile bool cvStressOvActive = false;     // ENGAGE/ARMED: pin ChargingVoltageTargetReq to cvStressTargetV
+volatile bool cvStressFinishRequested = false;
+volatile bool cvStressAbortRequested = false;
+volatile uint8_t cvStressPhase = 0;         // 0 idle 1 PROBE 2 SET 3 DIP 4 ENGAGE 5 ARMED 6 DONE
+float cvStressCmdA = 10.0f;                 // CC command during PROBE/SET/DIP (read by the AdjustField branch)
+float cvStressTargetV = 13.0f;              // the stress CV target = min(V at 80% idle output, BulkVoltage)
+const char *cvStressAbortMsg = "";
+char cvsLastBlob[176] = "";                 // last persisted result CSV (NK_cvStressLast), cached for /cvstress.json
+
 // Explicit prototypes: String-return / String& functions don't survive auto-prototype ordering.
 void   bhSample(uint32_t nowMs);
 bool   bhStartTest();
@@ -3028,6 +3045,10 @@ void   cvpfAbort(const char *reason);
 void   cvpfProcess();
 void   cvpfServiceCompletion();
 bool   cvpf_tick(float &dutyOut, float measA, uint32_t nowMs);
+bool   cvStressStartTest();
+void   cvStressAbort(const char *reason);
+void   cvStress_tick(uint32_t nowMs);
+int    cvStressJsonBuild(char *buf, int cap);
 void   bhFlushCapNVS();
 void   bhInitSettings();
 String bhSerializeResults();
@@ -3394,6 +3415,11 @@ struct RipFit {
   uint8_t nPts;      // valid measured points (0 = no fit → plot shows threshold line only)
 };
 RipFit ripFitAlt  = {0};   // alternator (G3) detector — ADS1115 MeasuredAmps path
+// Same struct reused for the CV D-term deadband measurement: a0/a1 = b0/b1 of the worst-positive-
+// voltage-slope fit slope(I)=b0+b1·I (V/s of g_cvKdFiltV, the D term's own filtered signal), pkPt =
+// the 3 measured slope points. Captured in the same Step-5 sweep windows as ripFitAlt; reference for
+// the deadband card + wizard Set. Persisted under NK_slpFitAlt.
+RipFit slpFitAlt  = {0};
 
 // Persisted as one CSV string under NK_ripFitAlt (settings namespace, string).
 static String ripFitEncode(const RipFit &r) {
@@ -3420,11 +3446,13 @@ static void ripFitDecode(const String &s, RipFit &r) {
 }
 float   cvComputedKp = 30.0f;     // user-facing (12V-equivalent) gains the Auto path produced — dashboard display only
 float   cvComputedKi = 25.0f;
+float   cvComputedKd = 5.0f;      // Auto path's D gain = CvKdTd·cvComputedKp (12V-equiv); dashboard display only
 // CV auto-gain knobs (Tuning ▸ Voltage): Kp = cvAlpha/(cvPlantKa·vNorm), Ki = cvPiZero·Kp. α is
 // dimensionless (fraction of the deadbeat gain 1/K), so one α gives every chemistry the same character.
-float   cvAlpha      = 0.08f;     // matched pair with the ~0.6 s CVPF readout horizon — change only together
+float   cvAlpha      = 0.05f;     // fraction of deadbeat 1/K; coupled to the ~0.6 s CVPF horizon — retune together
 float   cvCrossover  = 0.20f;     // rad/s — retired ω_c input, inert; NVS key + CSV3 slot kept (never repurpose)
 float   cvPiZero     = 0.50f;     // rad/s — PI integral zero ρ; Ki = ρ·Kp
+float   CvKdTd       = 0.85f;     // s — derivative time; Auto-mode Kd = Td·Kp (D analog of ρ), so Kd inherits Kp's α/K plant anchor and scales per-install through the wizard
 // Battery-temperature gain derate. Board temp (ambientTemp, °F) is a PROXY for battery temp; as the
 // battery cools its internal resistance — which IS the CV plant gain K_dc — rises, so gains computed at
 // the commissioning temperature run too hot when it's colder (and sluggish when warmer). We counter-
@@ -3460,11 +3488,14 @@ volatile float VoltageKp = 8.5f;    // A/V — proportional gain (volatile: writ
 volatile float VoltageKi = 6.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi; from commissioning CV plant fit. Deferred cv_I anti-windup still open (see CV_Loop_Dev_Summary.md Future Work)
 // CV D term — trim is a position subtracted at the Icv output, never integrated into cv_I, so it
 // releases the tick the rise stops. Replaced the integrating slope bleed (over-dosed via ~0.6 s actuator lag).
-float VoltageKd = 10.0f;            // A/(V/s), 12V-EQUIVALENT (runtime-normalized like Kp/Ki — do NOT class-scale at seed); knee: trim hits CvKdMaxTrimA at slope = cap/Kd
-float CvKdDeadbandVps = 0.50f;      // V/s — hysteretic gate: D off below, FULL slope once past, re-arms at half; 99th pct of idle ripple slope, below ~0.4 belt ripple rectifies into a DC cut
+float VoltageKd = 5.0f;             // A/(V/s), 12V-EQUIVALENT (runtime-normalized like Kp/Ki — do NOT class-scale at seed); knee: trim hits CvKdMaxTrimA at slope = cap/Kd
+float CvKdDeadbandVps = 0.50f;      // V/s at zero amps — BASE of the deadband line clamp(floor, base + slope·I, ceil); hysteretic gate: D off below the line, FULL slope once past, re-arms at half; below ~0.4 (12V idle) belt ripple rectifies into a DC cut
+float CvKdDbSlope = 0.0f;           // V/s per A — deadband line slope vs the slew-limited command (ripple-driven slope noise grows with output, same physics as the G3 trip line); 0 = flat, the pre-measurement behavior; set from the Step-5 slope fit b1
+float CvKdDbFloor = 0.10f;          // V/s — lowest the evaluated deadband may go (guards the low-current extrapolation below the tested sweep span)
+float CvKdDbCeil  = 3.5f;           // V/s — highest the evaluated deadband may go; MUST stay below CvKdSlopeCeil: the gate compares cvDSlope already clamped to ±CvKdSlopeCeil, so a deadband at/above it could never be crossed and D would go dead at that current
 bool  CvKdOneSided = false;         // false = two-sided: also adds on a fast fall, ONLY below target (that gate is what makes two-sided safe)
-float CvKdArmV = 1.25f;             // V below target within which D acts (0 = always); keeps D off legitimate sag-recovery climbs
-float CvKdMaxTrimA = 50.0f;         // A — hard ceiling on the D back-off (no-field-cut guarantee); FLAT amps on every bank so the knee stays per-cell-equal
+float CvKdArmV = 0.4f;              // V below target within which D acts (0 = always); tight so D stays off the sag-recovery climb and only brakes the final approach to setpoint (1.25 armed 1.25V early and chopped the recovering field)
+float CvKdMaxTrimA = 500.0f;        // A — deliberately-inactive backstop on the D back-off; the real bound on D depth is CvKdSlopeCeil × Kd, this only bites at Kd far above the seeded range. FLAT amps
 float CvKdVoltFiltTC = 40.0f;       // ms — dedicated EMA on IBV feeding only the D slope (g_cvKdFiltV), separate from VoltageFilterTC; 0 = raw IBV
 float CvKdSlopeCeil = 4.0f;         // V/s (12 V-equiv, class-scaled ×V/12 at use) — max slope the D acts on; the real cap on D depth
 bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "helpers" (asymmetric 7× KiDown unwind + the one-sided D term). ON = both active (reduce overshoot / speed OV recovery). OFF = symmetric plain PI, easier to tune/understand. Does NOT touch real OV protections.
@@ -3802,11 +3833,12 @@ float defaultCapPowerValues[RPM_TABLE_SIZE] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 uint8_t capLimitMode = 0;  // 0 = use amp cap (rpmCapCurrentTable), 1 = use kW cap (rpmCapPowerTable)
 
 // ===== MINIMUM FIELD DUTY TABLE =====
-// Minimum PWM duty cycle (%) applied to the field at each RPM breakpoint.
-// Prevents the RPM signal from dropping out due to rapid stator signal changes. Higher values at low RPM because the alternator needs more field
-// excitation to produce useful output when spinning slowly.
-float rpmMinDutyTable[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
-float defaultMinDutyValues[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
+// Minimum PWM duty cycle (%) applied to the field at each RPM breakpoint. Always live:
+// getMinimumFieldForRPM interpolates this table and hard-floors the result with the scalar MinDuty,
+// so the flat 1% default behaves exactly like MinDuty alone until a cell is hand-raised (or the
+// Auto Min% learner rewrites it). A 0 cell means "no minimum field" (full shut-off allowed).
+float rpmMinDutyTable[RPM_TABLE_SIZE] = { 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0 };
+float defaultMinDutyValues[RPM_TABLE_SIZE] = { 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0 };
 
 // ===== AUTO MIN% LEARNING ("knee tracker") =====
 // Learns, per RPM bin, the field duty where output amps begin to build (the "knee") and parks
@@ -3820,13 +3852,12 @@ float defaultMinDutyValues[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0
 //   resistance, ~0.218 %/degF). Battery voltage is deliberately NOT used: its two effects on the
 //   knee (raising the rectifier threshold vs. strengthening the field for the same duty) cancel,
 //   leaving the duty-knee voltage-independent. Full spec: Working Markdown Docs/MinDuty_Knee_Learning.md.
-// Master gate for the whole per-RPM Min% floor system: the onset-floor table (rpmMinDutyTable), the
-// Auto Min% learner, and the commissioning "Min% floor" step. false = system OFF (2026-07-19): the
-// field floor collapses to the flat scalar MinDuty at every RPM (getMinimumFieldForRPM returns MinDuty),
-// the learner stays idle, the RPM-table Min% column mirrors MinDuty, and the wizard does not ask for the
-// Min% floor step (auto-satisfied at Prep). Endgame: promote to a persisted UI toggle above Learning
-// On/Off that also hides the menu and makes the step an on-demand run — see
-// Working Markdown Docs/MinPct_Floor_System_Disable.md.
+// Master toggle (NVS NK_minPctSystem) for the AUTOMATIC Min% machinery only: the Auto Min% learner
+// (kneeLearnObserve), its card in the UI, and the standalone on-demand Min% floor calibration
+// (startKneeSweep). It does NOT gate the floor itself — getMinimumFieldForRPM always interpolates
+// rpmMinDutyTable and hard-floors with the scalar MinDuty — and it has nothing to do with the
+// commissioning wizard (the calibration is not a wizard step). Default OFF.
+// See Working Markdown Docs/MinPct_Floor_System_Disable.md (filename historical).
 bool  minPctSystemEnabled = false;
 float kneeFloor[RPM_TABLE_SIZE]      = { 0 };      // learned floor (raw duty% @ kneeTempRefF); owns rpmMinDutyTable when enabled
 float kneeKnee[RPM_TABLE_SIZE]       = { 0 };      // detected knee (raw duty% @ kneeTempRefF) = floor + margin
@@ -3834,7 +3865,7 @@ bool  kneeFrozen[RPM_TABLE_SIZE]     = { false };  // true once the knee is foun
 float kneeLearnTempF[RPM_TABLE_SIZE] = { 0 };      // alternator case temp (degF) at freeze (diagnostic, not persisted)
 uint32_t kneeLastMs[RPM_TABLE_SIZE]  = { 0 };      // millis() of last freeze / re-arm (runtime only)
 // User knobs (NVS settings namespace, NK_* keys)
-bool  kneeLearnEnable = true;    // master: when true, learner owns + auto-writes rpmMinDutyTable
+bool  kneeLearnEnable = true;    // learner sub-toggle under minPctSystemEnabled: both on = learner owns + auto-writes rpmMinDutyTable
 float kneeMarginPct   = 5.0f;    // park floor this many duty-% below the knee
 float kneeOnsetA      = 0.8f;    // amps above the freshly-captured zero = "output building" (knee found)
 float kneeReArmA      = 2.0f;    // amps at a locked floor = knee dropped -> lower floor one margin step (deadband guard)
@@ -4312,7 +4343,7 @@ struct CvBinDLState {
 //   8     voltageKp       float     VoltageKp at download time
 //  12     voltageKi       float     VoltageKi at download time
 //  16     voltageInterval uint32    VoltageLoopInterval ms
-//  20     kdDeadband      float     CvKdDeadbandVps (V/s)
+//  20     kdDeadband      float     CvKdDeadbandVps (V/s) — the deadband line's BASE only (slope/floor/ceil not logged)
 //  24     kd              float     VoltageKd (A/(V/s))
 //  28     kdArmV          float     CvKdArmV (V)
 //  32     kdOneSided      float     CvKdOneSided (0/1, stored as float for header layout stability)

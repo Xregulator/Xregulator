@@ -2452,7 +2452,16 @@ void updateINA228OvervoltageThreshold() {
 }
 
 void checkWebFilesExist() {
-  const char *criticalFiles[] = {
+  // Accept the modern brotli name (*.br) or the legacy gzip name (*.gz) — a device's
+  // un-updatable factory_fs golden image still carries *.gz.
+  const char *brFiles[] = {
+    "/index.html.br",
+    "/styles.css.br",
+    "/script.js.br",
+    "/uPlot.min.css.br",
+    "/uPlot.iife.min.js.br"
+  };
+  const char *gzFiles[] = {
     "/index.html.gz",
     "/styles.css.gz",
     "/script.js.gz",
@@ -2470,11 +2479,13 @@ void checkWebFilesExist() {
   }
 
   for (int i = 0; i < 5; i++) {
-    if (!webFS.exists(criticalFiles[i])) {
-      Serial.printf("MISSING: %s\n", criticalFiles[i]);
+    const char *found = webFS.exists(brFiles[i]) ? brFiles[i]
+                      : webFS.exists(gzFiles[i]) ? gzFiles[i] : nullptr;
+    if (!found) {
+      Serial.printf("MISSING: %s (or .gz)\n", brFiles[i]);
       missingCount++;
     } else {
-      Serial.printf("Found: %s\n", criticalFiles[i]);
+      Serial.printf("Found: %s\n", found);
     }
   }
 
@@ -3483,49 +3494,43 @@ bool validateWebFile(const char *filename) {
   }
 
   size_t fileSize = file.size();
+  file.close();
   Serial.printf("File size: %d bytes\n", fileSize);
   Serial.flush();
 
-  if (fileSize < 18) {  // Minimum valid gzip file size
-    Serial.printf("ERROR: %s - FILE TOO SMALL (%d bytes, need at least 18)\n", filename, fileSize);
-    Serial.flush();
-    file.close();
-    return false;
-  }
+  // Brotli streams have no fixed magic-number signature (unlike gzip's 0x1F 0x8B),
+  // so on-device validation is a nonzero-size sanity check only. The real end-to-end
+  // integrity guarantee is the OTA SHA256 verified at download time.
+  bool valid = (fileSize >= 8);
 
-  // Check gzip magic bytes (0x1F 0x8B)
-  Serial.printf("Checking gzip magic bytes...\n");
-  Serial.flush();
-  uint8_t magic[2];
-  size_t bytesRead = file.read(magic, 2);
-  file.close();
-
-  bool validGzip = (bytesRead == 2 && magic[0] == 0x1F && magic[1] == 0x8B);
-
-  if (validGzip) {
-    Serial.printf("SUCCESS: %s - Valid gzip file (magic bytes 0x1F 0x8B confirmed) ✓\n", filename);
+  if (valid) {
+    Serial.printf("SUCCESS: %s - present (%d bytes) ✓\n", filename, fileSize);
   } else {
-    Serial.printf("FAILED: %s - Invalid gzip magic bytes (got 0x%02X 0x%02X, expected 0x1F 0x8B) ✗\n",
-                  filename, magic[0], magic[1]);
+    Serial.printf("FAILED: %s - missing or too small (%d bytes) ✗\n", filename, fileSize);
   }
   Serial.printf("=== VALIDATION COMPLETE: %s ===\n\n", filename);
   Serial.flush();
 
   esp_task_wdt_reset();  // Feed watchdog after file operations
 
-  return validGzip;
+  return valid;
 }
 
+// Validate whichever asset name exists — brotli *.br (prod_fs) or legacy gzip *.gz
+// (an un-updatable factory_fs golden image). validateWebFile() is a size check only.
+static bool validateWebAsset(const char *brName, const char *gzName) {
+  return validateWebFile(webFS.exists(brName) ? brName : gzName);
+}
 bool validateWebFilesystem() {
   Serial.println("\n--- Validating all web files ---");
   Serial.flush();
 
   bool result = true;
-  result = validateWebFile("/index.html.gz") && result;
-  result = validateWebFile("/styles.css.gz") && result;
-  result = validateWebFile("/script.js.gz") && result;
-  result = validateWebFile("/uPlot.min.css.gz") && result;
-  result = validateWebFile("/uPlot.iife.min.js.gz") && result;
+  result = validateWebAsset("/index.html.br", "/index.html.gz") && result;
+  result = validateWebAsset("/styles.css.br", "/styles.css.gz") && result;
+  result = validateWebAsset("/script.js.br", "/script.js.gz") && result;
+  result = validateWebAsset("/uPlot.min.css.br", "/uPlot.min.css.gz") && result;
+  result = validateWebAsset("/uPlot.iife.min.js.br", "/uPlot.iife.min.js.gz") && result;
 
   if (result) {
     Serial.println("--- All web files validated successfully ---");
@@ -3573,7 +3578,7 @@ bool ensureWebFS() {
         Serial.println("\n✓✓✓ SUCCESS: factory_fs validated and mounted ✓✓✓");
         Serial.flush();
         webMounted = true;
-        cacheGzFiles();
+        cacheWebAssets();
         esp_task_wdt_reset();
         return true;
       } else {
@@ -3605,7 +3610,7 @@ bool ensureWebFS() {
         Serial.println("\n✓✓✓ SUCCESS: prod_fs validated and mounted ✓✓✓");
         Serial.flush();
         webMounted = true;
-        cacheGzFiles();
+        cacheWebAssets();
         esp_task_wdt_reset();
         return true;
 
@@ -3643,7 +3648,7 @@ bool ensureWebFS() {
         Serial.println("\n✓✓✓ SUCCESS: factory_fs validated and mounted (fallback from prod_fs) ✓✓✓");
         Serial.flush();
         webMounted = true;
-        cacheGzFiles();
+        cacheWebAssets();
         esp_task_wdt_reset();
         return true;
 

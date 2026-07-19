@@ -1236,12 +1236,14 @@ if "cvDSlope_Vps" in df.columns:
     ax6c.plot(df["t_plot"], df["cvDSlope_Vps"],
               color="#00838f", lw=1.8, alpha=0.95,
               label="Rise rate — the gated signal (cvDSlope_Vps)")
+# Header carries only the line's BASE (CvKdDeadbandVps); the firmware evaluates base + CvKdDbSlope·I
+# clamped to floor/ceil at the live command, so the true gate rides at or above this line.
 if not np.isnan(_brk_thresh):
     ax6c.axhline(_brk_thresh, color="#f57c00", linewidth=1.2, linestyle="--",
-                 alpha=0.85, label=f"CvKdDeadbandVps ({_brk_thresh:.3g} V/s)")
+                 alpha=0.85, label=f"deadband base ({_brk_thresh:.3g} V/s; live gate = base + slope·I)")
     if _brk_onesided == 0:
         ax6c.axhline(-_brk_thresh, color="#f57c00", linewidth=1.0, linestyle=":",
-                     alpha=0.7, label="−deadband (two-sided mode)")
+                     alpha=0.7, label="−deadband base (two-sided mode)")
 ax6c.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
 ax6c.set_ylabel("Rise slope (V/s)")
 ax6c.set_xlabel(time_label, fontsize=11)

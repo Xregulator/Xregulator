@@ -298,6 +298,8 @@ bool fsRemove(const char *path) {
 #define NK_cvPlantKb "cvPlantKb"
 // Measured ripple projection (§3.3) — one CSV-encoded string: "a0,a1,rpm,i0,i1,i2,pk0,pk1,pk2,n"
 #define NK_ripFitAlt  "ripFitAlt"
+// Measured voltage-slope projection (CV D-term deadband) — same encoding, slope points in V/s
+#define NK_slpFitAlt  "slpFitAlt"
 // Measured-ripple capture admission gates (§10.8/§11) — own knobs, deliberately DECOUPLED from the
 // fa* anomaly-detector gates so tuning capture admission can't loosen detector arming.
 // NK "ripRpmMargin" is RETIRED — key abandoned in NVS, never reuse it for a different meaning.
@@ -323,7 +325,12 @@ bool fsRemove(const char *path) {
 #define NK_CvKdArmV "CvKdArmV"
 #define NK_CvKdMaxTrimA "CvKdMaxTrimA"
 #define NK_CvKdVoltFiltTC "CvKdVoltFiltTC"
+// Deadband line: deadband = clamp(CvKdDbFloor, CvKdDeadbandVps + CvKdDbSlope·I, CvKdDbCeil)
+#define NK_CvKdDbSlope "CvKdDbSlope"
+#define NK_CvKdDbFloor "CvKdDbFloor"
+#define NK_CvKdDbCeil "CvKdDbCeil"
 #define NK_CvKdSlopeCeil "CvKdSlopeCeil"
+#define NK_CvKdTd "CvKdTd"
 #define NK_SolarWatts "SolarWatts"
 #define NK_StartupRiseRate "StartupRiseRate"
 #define NK_SwitchControlOverride "SwtchCntrlOvrrd"
@@ -339,11 +346,12 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // current wizard phase (0=Prep…8=Field cut, 9=finished); moves backward on Back
+#define NK_commissionPhase "commissnPhase"    // current wizard phase (0=Prep…7=Field cut, 8=finished); moves backward on Back
 #define NK_commissionDoneMask "commissnDoneMsk" // per-stage completion bitmask (bit i = stage i done); 15-char max
 #define NK_commissionManualMask "commissnManMsk" // per-stage set-by-hand bitmask (skip / mark-done-manually)
 #define NK_commissionSnap "commissnSnap"      // Phase-0 origin snapshot (explicit-abort full revert): positional CSV of the settings the flow writes
 #define NK_commissionStepSnap "commissnStepSnp" // in-flight step snapshot: scalars as of the current step's entry — reboot undoes only that step
+#define NK_cvStressLast "cvStressLast"        // last CV stress-test result (positional CSV, ver-prefixed); diagnostic record, not a tune input
 #define NK_T0_C "T0_C"
 #define NK_TailCurrent "TailCurrent"
 #define NK_TailCurrent_A "TailCurrent_A"
@@ -473,6 +481,7 @@ bool fsRemove(const char *path) {
 #define NK_faAttenDownAmps "faAttenDnA"
 #define NK_faPeakMinA "faPeakMinA"
 // Auto Min% learning ("knee tracker") knobs (keys <= 15 chars)
+#define NK_minPctSystem    "minPctSystem"
 #define NK_kneeLearnEnable "kneeLearnEn"
 #define NK_kneeMarginPct   "kneeMarginPct"
 #define NK_kneeOnsetA      "kneeOnsetA"
@@ -570,7 +579,7 @@ void commissionSnapshotScalars(const char* key) {
 void commissionSnapshot() {
   commissionSnapshotScalars(NK_commissionSnap);
   // The Min% floor table + knee tracker don't fit the positional CSV (10 floats × 3 + bools), so they are
-  // backed up separately as "bk_*" blobs. Keeps an abort able to revert the Min% step too.
+  // backed up separately as "bk_*" blobs. Keeps an abort able to revert the Min% floor table too.
   commissionBackupMinPct();
 }
 
@@ -641,7 +650,7 @@ void commissionSetState(uint8_t st) {
   settingWrite(NK_commissionState, String((int)st).c_str());
 }
 
-// Persist the current wizard phase (0=Prep…8=Field cut, 9=finished; moves backward on Back). Drives
+// Persist the current wizard phase (0=Prep…7=Field cut, 8=finished; moves backward on Back). Drives
 // the Commissioning tab checklist so step progress survives a page reload / new client.
 void commissionSetPhase(uint8_t p) {
   commissionPhase = p;
@@ -649,31 +658,30 @@ void commissionSetPhase(uint8_t p) {
 }
 
 // ── Per-stage completion tracking ─────────────────────────────────────────────
-// commissionDoneMask carries one bit per stage (0=Prep, 1=Field curve … 7=CV plant fit, 8=Field cut). It is the
+// commissionDoneMask carries one bit per stage (0=Prep, 1=Field curve … 7=Field cut, 8=Stress test). It is the
 // source of truth for the per-step ✓ marks and for the default checkbox selection of a
 // partial re-run. commissionState (0/1/2) is the lifecycle badge and is DERIVED from the
 // mask wherever it is recomputed below.
 #define COMMISSION_STAGE_COUNT 9
-#define COMMISSION_ALL_DONE    0x1FF   // bits 0..8 set = every stage complete (8 = Field cut, appended)
+#define COMMISSION_ALL_DONE    0x1FF  // bits 0..8 set = every stage complete (8 = CV stress test, appended)
 
 // Downstream stages invalidated when an upstream stage is (re)completed — see the coupling
-// analysis: Field curve(1) feeds Plant fit(3) + Verify(4); Plant fit(3) feeds Verify(4);
-// Disturbances(5) feeds Thresholds(6). CV plant fit(7) measures the current→voltage plant, which
+// analysis: Field curve(1) feeds Plant fit(2) + Verify(3); Plant fit(2) feeds Verify(3);
+// Disturbances(4) feeds Thresholds(5). CV plant fit(6) measures the current→voltage plant, which
 // sits downstream of the whole inner current loop — so any current-loop retune (Field curve 1,
-// Plant fit 3, or Verify 4) makes the CV fit stale and clears bit 7. Min% floor(2) is independent
-// (nothing feeds it, it feeds nothing here); it runs 2nd after Field curve so the measured knee
-// floors every later current-control step. Tach alignment (RPMScalingFactor/PulleyRatio) is set on a
-// pre-wizard screen, not a stage — a later rescale invalidates the binned stages via
-// commissionClearRpmDependents. Prep requires the engine already warm because Min% floor sweeps to
-// max RPM this early. Re-doing an upstream stage clears its dependents' done bits; the wizard forces
-// them into the same run to be re-measured.
+// Plant fit 2, or Verify 3) makes the CV fit stale and clears bit 6. The Stress test(8) verdict
+// grades the tuned CV loop, so it goes stale with any retune upstream of it (1/2/3/6). Tach alignment
+// (RPMScalingFactor/PulleyRatio) is set on a pre-wizard screen, not a stage — a later rescale
+// invalidates the binned stages via commissionClearRpmDependents. Re-doing an upstream stage clears
+// its dependents' done bits; the wizard forces them into the same run to be re-measured.
 static uint16_t commissionDependentsMask(int stage) {
   switch (stage) {
-    case 1: return (1 << 3) | (1 << 4) | (1 << 7);  // Field curve → Plant fit, Verify, CV plant fit
-    case 3: return (1 << 4) | (1 << 7);             // Plant fit   → Verify, CV plant fit
-    case 4: return (1 << 7);                        // Verify      → CV plant fit
-    case 5: return (1 << 6);                        // Disturbances → Thresholds
-    default: return 0;                              // Min% floor(2) independent — no dependents
+    case 1: return (1 << 2) | (1 << 3) | (1 << 6) | (1 << 8);  // Field curve → Plant fit, Verify, CV plant fit, Stress test
+    case 2: return (1 << 3) | (1 << 6) | (1 << 8);             // Plant fit   → Verify, CV plant fit, Stress test
+    case 3: return (1 << 6) | (1 << 8);                        // Verify      → CV plant fit, Stress test
+    case 4: return (1 << 5);                                   // Disturbances → Thresholds
+    case 6: return (1 << 8);                                   // CV plant fit → Stress test (a re-fit re-gains the loop the verdict graded)
+    default: return 0;
   }
 }
 
@@ -731,9 +739,9 @@ void commissionMarkStage(int stage) {
   commissionWriteManualMask();
 }
 
-// Clear a single stage's done bit (e.g. RPM breakpoints changed → Min% floor must be redone),
-// plus anything downstream of it. A previously-COMMISSIONED device with a now-stale step is
-// demoted to IN_PROGRESS so the badge nags that a step needs re-running.
+// Clear a single stage's done bit plus anything downstream of it. A previously-COMMISSIONED
+// device with a now-stale step is demoted to IN_PROGRESS so the badge nags that a step needs
+// re-running. (Currently uncalled — kept as the single-stage counterpart of ClearRpmDependents.)
 void commissionClearStage(int stage) {
   if (stage < 0 || stage >= COMMISSION_STAGE_COUNT) return;
   uint16_t cleared = (1 << stage) | commissionDependentsMask(stage);
@@ -746,10 +754,11 @@ void commissionClearStage(int stage) {
 
 // A tach rescale (RPMScalingFactor/PulleyRatio change) moves the engine-RPM axis every binned stage
 // was measured against, so all of them must be re-run. Hangs off the SETTING change, wherever it comes
-// from (pre-wizard alignment screen or normal Settings). Clears every RPM-binned wizard stage; Prep(0)
-// and Field cut(8) are exempt — the field de-energize τ is RPM-independent (L/R), so a rescale can't stale it.
+// from (pre-wizard alignment screen or normal Settings). Clears every RPM-binned wizard stage; Prep(0),
+// Field cut(7), and Stress test(8) are exempt — the field de-energize τ is RPM-independent (L/R), and the
+// stress verdict grades recovery behavior, which a display-axis rescale can't stale.
 void commissionClearRpmDependents() {
-  uint16_t rpmBits = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7);
+  uint16_t rpmBits = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6);
   commissionDoneMask &= ~rpmBits;
   commissionWriteDoneMask();
   commissionManualMask &= ~rpmBits;
@@ -4150,6 +4159,18 @@ static bool filtRippleArmed = false;   // false until the first sample seeds the
 static uint16_t altFiltCross = 0, battFiltCross = 0;
 static bool altAboveAdm = false, battAboveAdm = false;   // sign of (measurement − baseline) last sample
 
+// CV D-term deadband capture (CV_Dterm_Deadband_Commissioning_Spec): worst positive slope of the D
+// term's own filtered voltage per §11 window, for the bcurRtest ring. g_cvKdFiltV is refreshed by the
+// same INA fast-read block that calls faFiltRippleUpdate, so the exact signal the D term differentiates
+// is fresh here; the slope is the control path's own sliding backward-diff (~VoltageLoopInterval span,
+// 6_functions.ino kdBuf) so the measured noise floor and the runtime cvDSlope are the same quantity.
+// Min-of-halves like the pk-pk estimator: a one-shot rise inflates one half only; real ripple recurs.
+#define KDSLP_BUF_N 64
+static uint32_t kdSlpT[KDSLP_BUF_N];
+static float kdSlpV[KDSLP_BUF_N];
+static uint8_t kdSlpN = 0, kdSlpHead = 0;
+static float slpH1Max = 0.0f, slpH2Max = 0.0f;   // worst positive g_cvKdFiltV slope per half-window (V/s)
+
 // Reset the window accumulators — fresh window baselined at the running EMAs (the caller reseeds the
 // EMAs themselves first on arm/stall; a normal window rollover keeps them running).
 static void filtRippleWinReset(float rpm, uint32_t now) {
@@ -4168,6 +4189,7 @@ static void filtRippleWinReset(float rpm, uint32_t now) {
   altFiltCross = battFiltCross = 0;
   altAboveAdm  = (altFiltEma  >= altAdmEma);
   battAboveAdm = (battFiltEma >= battAdmEma);
+  slpH1Max = slpH2Max = 0.0f;
 }
 
 // Active 3-current resonance test (COMMISSIONING_SPEC §3.2): when armed, log each completed window's
@@ -4178,7 +4200,9 @@ static void filtRippleWinReset(float rpm, uint32_t now) {
 // what the detector trips on. This keeps MULTIPLE samples so a slope can be fit. RAM-only (ephemeral
 // test), cleared on arm. Ring appends only while bcurRtestActive; the FaCell fill runs always.
 #define BCUR_RTEST_CAP 64
-struct BcurRtestPt { uint16_t rpm; uint16_t iX100; uint16_t pkpkX100; uint16_t iAltX100; uint16_t altPkpkX100; };
+// slopeVpsX1000: worst positive slope of g_cvKdFiltV over the window (V/s, min-of-halves) — the CV
+// D-term deadband measurement. 0 = slope ring hadn't spanned a full diff window yet (browser skips).
+struct BcurRtestPt { uint16_t rpm; uint16_t iX100; uint16_t pkpkX100; uint16_t iAltX100; uint16_t altPkpkX100; uint16_t slopeVpsX1000; };
 BcurRtestPt bcurRtest[BCUR_RTEST_CAP];
 volatile bool bcurRtestActive = false;
 volatile uint16_t bcurRtestCount = 0;  // appends stop at CAP; browser stops well before
@@ -4243,6 +4267,7 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
     altAdmEma = macur; battAdmEma = bcur;
     filtRippleLastMs = now;
     filtRippleWinReset(rpm, now);
+    kdSlpN = 0; kdSlpHead = 0;   // stale voltage samples across a gap would fake a slope
     filtRippleArmed = true;
     return;
   }
@@ -4252,6 +4277,7 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
     altFiltEma = macur; battFiltEma = bcur;
     altAdmEma = macur; battAdmEma = bcur;
     filtRippleWinReset(rpm, now);
+    kdSlpN = 0; kdSlpHead = 0;
     return;
   }
   float tauSec = IExcessTau * 0.001f;
@@ -4263,6 +4289,31 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
   battAdmEma += admAlpha * (bcur  - battAdmEma);
   { bool a = (altFiltEma  >= altAdmEma);  if (a != altAboveAdm)  { altFiltCross++;  altAboveAdm  = a; }   // crossings tally — fold gate + forensics (see decl)
     bool b = (battFiltEma >= battAdmEma); if (b != battAboveAdm) { battFiltCross++; battAboveAdm = b; } }
+  // D-term deadband capture: the control path's sliding backward-diff of g_cvKdFiltV (same window
+  // clamp, same full-ring fallback as the kdBuf block in 6_functions.ino), folded as a per-half
+  // worst-positive below. No slope until the ring spans one window — mirrors "no cvDSlope until
+  // one interval" at CV entry.
+  float kdSlpNow = 0.0f; bool kdSlpOk = false;
+  kdSlpT[kdSlpHead] = now;
+  kdSlpV[kdSlpHead] = g_cvKdFiltV;
+  kdSlpHead = (uint8_t)((kdSlpHead + 1) % KDSLP_BUF_N);
+  if (kdSlpN < KDSLP_BUF_N) kdSlpN++;
+  {
+    uint32_t effWindowMs = (uint32_t)constrain((int)VoltageLoopInterval, 20, 200);
+    float vOld = 0.0f; uint32_t oldAge = 0; bool spanned = false;
+    float vOldest = 0.0f; uint32_t oldestAge = 0;
+    for (uint8_t i = 0; i < kdSlpN; i++) {
+      uint8_t idx = (uint8_t)((kdSlpHead + KDSLP_BUF_N - 1 - i) % KDSLP_BUF_N);   // newest → oldest
+      uint32_t age = now - kdSlpT[idx];
+      vOldest = kdSlpV[idx]; oldestAge = age;
+      if (age >= effWindowMs) { vOld = kdSlpV[idx]; oldAge = age; spanned = true; break; }
+    }
+    if (!spanned && kdSlpN >= KDSLP_BUF_N && oldestAge > 0) { vOld = vOldest; oldAge = oldestAge; spanned = true; }
+    if (spanned && oldAge > 0) {
+      kdSlpNow = (g_cvKdFiltV - vOld) / ((float)oldAge / 1000.0f);
+      kdSlpOk = true;
+    }
+  }
   if (altFiltEma  < altFiltWinMin)  altFiltWinMin  = altFiltEma;
   if (altFiltEma  > altFiltWinMax)  altFiltWinMax  = altFiltEma;
   if (battFiltEma < battFiltWinMin) battFiltWinMin = battFiltEma;
@@ -4275,12 +4326,14 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
     if (battFiltEma < battFiltH1Min) battFiltH1Min = battFiltEma;
     if (battFiltEma > battFiltH1Max) battFiltH1Max = battFiltEma;
     altFiltH1Sum += altFiltEma; battFiltH1Sum += battFiltEma; rpmH1Sum += rpm; filtRippleH1N++;
+    if (kdSlpOk && kdSlpNow > slpH1Max) slpH1Max = kdSlpNow;
   } else {
     if (altFiltEma  < altFiltH2Min)  altFiltH2Min  = altFiltEma;
     if (altFiltEma  > altFiltH2Max)  altFiltH2Max  = altFiltEma;
     if (battFiltEma < battFiltH2Min) battFiltH2Min = battFiltEma;
     if (battFiltEma > battFiltH2Max) battFiltH2Max = battFiltEma;
     altFiltH2Sum += altFiltEma; battFiltH2Sum += battFiltEma; rpmH2Sum += rpm; filtRippleH2N++;
+    if (kdSlpOk && kdSlpNow > slpH2Max) slpH2Max = kdSlpNow;
   }
   if (setpointLimited < cmdWinMin) cmdWinMin = setpointLimited;
   if (setpointLimited > cmdWinMax) cmdWinMax = setpointLimited;
@@ -4413,6 +4466,8 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
       p.pkpkX100 = battV;
       p.iAltX100 = (uint16_t)fminf(fabsf(altMean) * 100.0f + 0.5f, 65535.0f); // operating alternator current
       p.altPkpkX100 = altV;
+      // Worst positive voltage slope, min-of-halves (0 if either half never spanned a diff window)
+      p.slopeVpsX1000 = (uint16_t)fminf(fmaxf(fminf(slpH1Max, slpH2Max), 0.0f) * 1000.0f + 0.5f, 65535.0f);
       bcurRtestCount++;
     }
     filtRippleWinReset(rpm, now);

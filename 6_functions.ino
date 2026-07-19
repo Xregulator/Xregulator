@@ -144,7 +144,7 @@ void recomputeCvGains() {
   float vNorm = 12.0f / (float)BATTERY_VOLTAGE;     // 1, 0.5, 0.25 for 12/24/48 V
   cvPlantK = cvPlantKa;                             // the ~0.6 s stiffness anchor; the √t-tail (cvPlantKb) is retired
   bool plantValid = (cvPlantK > 1e-6f);
-  float kpNorm, kiNorm;                             // 12V-equivalent gains (what the user sees)
+  float kpNorm, kiNorm, kdNorm;                     // 12V-equivalent gains (what the user sees)
   if (cvGainMode == 1 && plantValid) {
     // AUTO: Kp = α/K anchored to the ~0.6 s stiffness — the timescale the loop reacts on
     float Knorm = cvPlantK * vNorm;                 // V per 12V-equivalent, per A
@@ -153,20 +153,24 @@ void recomputeCvGains() {
     // Safety bounds — a bad fit must never produce dangerous gains.
     kpNorm = clamp_f(kpNorm, 2.0f, 120.0f);
     kiNorm = clamp_f(kiNorm, 1.0f, 80.0f);
+    // D = Td·Kp (off the CLAMPED Kp): a fixed derivative time makes Kd track Kp, so it inherits the α/K
+    // plant anchor and auto-scales per-install. Ceiling guards a pathological fit (soft plant → huge Kp).
+    kdNorm = clamp_f(CvKdTd * kpNorm, 0.0f, 40.0f);
   } else {
     // MANUAL, or AUTO with no valid fit yet → use the typed / conservative gains.
     kpNorm = VoltageKp;
     kiNorm = VoltageKi;
+    kdNorm = VoltageKd;                             // Manual keeps the typed Kd (bench override)
   }
   cvComputedKp = kpNorm;                            // expose for the dashboard — BASE design gain (no temp derate)
   cvComputedKi = kiNorm;
+  cvComputedKd = kdNorm;
   cvTempDerateScale = computeCvTempScale();         // battery-temp correction (1.0 unless commissioned + enabled)
   VoltageKp_active = kpNorm * vNorm * cvTempDerateScale;   // pack-space gains the loop uses with raw pack-volt error
   VoltageKi_active = kiNorm * vNorm * cvTempDerateScale;
-  // D gain normalizes identically to P/I: user types a 12V-equivalent VoltageKd, the loop uses this
-  // pack-space value. Same ×vNorm×derate pipeline, so one Kd number works on 12/24/48 V and the D term
-  // tracks the battery-temp derate with the rest of the loop.
-  VoltageKd_active = VoltageKd * vNorm * cvTempDerateScale;
+  // D gain normalizes identically to P/I (×vNorm×derate), so one number works on 12/24/48 V and tracks the
+  // battery-temp derate. In Auto it is the plant-anchored Td·Kp; in Manual it is the typed VoltageKd.
+  VoltageKd_active = kdNorm * vNorm * cvTempDerateScale;
 }
 
 // recomputeCcGains — CC (output-current) analog of recomputeCvGains. PidKp/Ki/Kd are 12V-equivalent;
@@ -247,6 +251,9 @@ void applyNominalVoltageChange(int oldV, int newV) {
     FastSetpointRiseHeadroomV *= ratio;
     CvKdArmV                  *= ratio;
     CvKdDeadbandVps           *= ratio;  // V/s — rise rate scales with class (48V bus rises ~4× faster per-cell)
+    CvKdDbSlope               *= ratio;  // V/s per A — deadband line slope, same V-domain scaling as the base
+    CvKdDbFloor               *= ratio;
+    CvKdDbCeil                *= ratio;
     vTgtRampUp                *= ratio;  // V/s
     vTgtRampDn                *= ratio;  // V/s
     capSettleRateMv10         *= ratio;  // mV/10min rest-settle gate
@@ -298,6 +305,9 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_FastSetpointRiseHeadroomV, String(FastSetpointRiseHeadroomV, 2).c_str());
     settingWrite(NK_CvKdArmV, String(CvKdArmV, 2).c_str());
     settingWrite(NK_CvKdDeadbandVps, String(CvKdDeadbandVps, 3).c_str());
+    settingWrite(NK_CvKdDbSlope, String(CvKdDbSlope, 5).c_str());
+    settingWrite(NK_CvKdDbFloor, String(CvKdDbFloor, 3).c_str());
+    settingWrite(NK_CvKdDbCeil, String(CvKdDbCeil, 3).c_str());
     settingWrite(NK_vTgtRampUp, String(vTgtRampUp, 3).c_str());
     settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
     settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str());
@@ -1945,7 +1955,7 @@ void AdjustFieldLearnMode() {
   // go inert so a stray user setting can't ruin a commissioning/health measurement (each test carries
   // its own built-in slew behavior). NOT bare TuningMode/CVTuningMode — those are the manual study tabs
   // where the toggles are meant to be live.
-  g_autoTestActive = (commissionState == 1) || batteryHealthTestActive || resTestActive || cvPlantFitActive || (systemIDActive != 0) || (fieldCutActive != 0);
+  g_autoTestActive = (commissionState == 1) || batteryHealthTestActive || resTestActive || cvPlantFitActive || (systemIDActive != 0) || (fieldCutActive != 0) || cvStressActive;
 
   // ========== DETERMINE GOVERNOR MODE ==========
   govMode = GOV_NORMAL_SLEW;
@@ -2162,7 +2172,7 @@ void AdjustFieldLearnMode() {
   // (mutually exclusive with SystemID via the start-handler mutex). OR it in so the snapshot,
   // override, and restore logic below cover it too.
   sysIDRunning = fieldCurve_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
-  // Field de-energize τ test (commissioning stage 8) — mutually exclusive with the others via the
+  // Field de-energize τ test (commissioning stage 7) — mutually exclusive with the others via the
   // start-handler mutex. Its RAMP phase returns false and drives the real current PID through the
   // fieldCutCcActive branch below; hold/cut/ease own duty here (cut level is MinDuty, the real
   // OV-clamp floor, so the effectiveMinDuty=0 bypass below is moot but harmless).
@@ -2170,6 +2180,10 @@ void AdjustFieldLearnMode() {
   // CV plant-fit pulse train (Step 9) — same mutex family. SETTLE/PILOT/HOLD return false (the
   // cvpfCcActive branch below drives the current PID); the abrupt PULSES/RELEASE own duty here.
   sysIDRunning = cvpf_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
+  // CV stress test (commissioning stage 8) — same mutex family but NEVER owns duty: PROBE/SET/DIP
+  // drive the current PID via the cvStressCcActive branch, ENGAGE/ARMED run the normal CV loop with
+  // only the voltage target pinned (cvStressOvActive). Runs here so its command is fresh this tick.
+  cvStress_tick(tick.nowMs);
 
   bool sysIDJustStarted = !prevSysIDRunning && sysIDRunning;
   bool sysIDJustCompleted = prevSysIDRunning && !sysIDRunning;
@@ -2372,7 +2386,7 @@ void AdjustFieldLearnMode() {
         if (resTestReleasing && setpointLimited <= 2.0f) { resTestActive = false; resTestReleasing = false; }
 
       } else if (fieldCutCcActive) {
-        // Field-decay ramp/settle (commissioning stage 8): drive the REAL current loop to
+        // Field-decay ramp/settle (commissioning stage 7): drive the REAL current loop to
         // fieldCutCmdA (= the commissioned SystemIDStabilizeAmps), manually slewed at the fixed
         // conservative test rate — same shape as resTest. voltageControlActive=false suppresses the
         // target-relative OV layers (G1/G2) so the level can hold; fast-OV/INA228/hard-OC stay live.
@@ -2396,6 +2410,23 @@ void AdjustFieldLearnMode() {
         setpointCommand = cvpfCmdA;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                        CVPF_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
+        voltageControlActive = false;
+        ctrlLimiter = 0;
+        targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
+                                                                                       : g_pidI_filtered;
+        pidInput = (double)targetCurrent;
+        pidSetpoint = (double)setpointLimited;
+        pidError = setpointLimited - targetCurrent;
+        currentPID.Compute();
+
+      } else if (cvStressCcActive) {
+        // CV stress test PROBE/SET/DIP: drive the real current loop to cvStressCmdA (set by
+        // cvStress_tick, already run this tick). voltageControlActive=false suppresses the
+        // target-relative G1/G2 while the probe finds the idle ceiling; fast-OV/INA228/hard-OC stay
+        // live. ENGAGE hands back to the normal CV path below (cvStressCcActive drops first).
+        setpointCommand = cvStressCmdA;
+        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                       TEST_ENTRY_RATE_A, SetpointFallRate, actualDtSec);
         voltageControlActive = false;
         ctrlLimiter = 0;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
@@ -3194,6 +3225,12 @@ void AdjustFieldLearnMode() {
           }
         }
 
+        // CV stress test ENGAGE/ARMED: pin the commanded target to the measured stress point — always
+        // ≤ the stage target by construction (min(V80, BulkVoltage)). No wind-down needed on release:
+        // clearing the flag lets Req return to the stage value, an UPWARD move the vTgtRampUp slew
+        // governs (the dangerous direction, a drop from above, cannot occur here).
+        if (cvStressOvActive && voltageControlActive) ChargingVoltageTargetReq = cvStressTargetV;
+
         // ── Voltage-target slew (bidirectional) — outer layer; master switch vTgtRampEnable ──
         // The commanded target lives in ChargingVoltageTargetReq (set THIS tick by stage logic /
         // TargetVoltageMode / MaintainMode above, and by updateChargingStage()). We rate-limit the REAL
@@ -3455,10 +3492,14 @@ void AdjustFieldLearnMode() {
               // Deadband is a hysteretic gate, not a subtraction: full slope once clearly past it,
               // re-arm at half so ripple flickering across the edge can't jab the field. Latches track
               // the slope every tick — outside the arm gate too — so a re-arm never acts on stale state.
-              if (cvDSlope >  CvKdDeadbandVps)             kdOutUp = true;
-              else if (cvDSlope <  0.5f * CvKdDeadbandVps) kdOutUp = false;
-              if (cvDSlope < -CvKdDeadbandVps)             kdOutDn = true;
-              else if (cvDSlope > -0.5f * CvKdDeadbandVps) kdOutDn = false;
+              // The deadband itself is a LINE in operating current (ripple-driven slope noise grows with
+              // output, mirroring the G3 trip line), evaluated at the slew-limited command — slow by
+              // construction, so a genuine transient can't drag the threshold up while the D should fire.
+              float kdDb = clamp_f(CvKdDeadbandVps + CvKdDbSlope * setpointLimited, CvKdDbFloor, CvKdDbCeil);
+              if (cvDSlope >  kdDb)             kdOutUp = true;
+              else if (cvDSlope <  0.5f * kdDb) kdOutUp = false;
+              if (cvDSlope < -kdDb)             kdOutDn = true;
+              else if (cvDSlope > -0.5f * kdDb) kdOutDn = false;
               // Held off while any step/probe test owns the field (a mid-probe trim corrupts plant fits)
               // and under cvHelpersEnabled so OFF gives clean symmetric PI for tuning.
               bool fitProbeActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
@@ -4971,7 +5012,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // counting below. Only while charging is enabled: a shutdown (toggle/key-off/BMS/weather) has
   // nothing to recover, and deferring the cuts just keeps the field energized where its PWM fakes
   // tach readings (phantom RPM in datalogs).
-  // Field-cut test (commissioning stage 8) deliberately drops the field to MinDuty to time the
+  // Field-cut test (commissioning stage 7) deliberately drops the field to MinDuty to time the
   // current decay; the abrupt cut corrupts the LM2907 pickup — it spikes HIGH, false-zeros, then
   // ramps back through garbage low-nonzero values for ~4.6 s while the front end re-biases. RPM
   // plays no role in the measurement, so mask BOTH RPM gates for ANY reading (not just exact zero —
@@ -5043,7 +5084,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     // path fall through and consume it on the same tick.
     bool anyTestActive = (fieldCurveActive != 0) || (systemIDActive != 0) || (fieldCutActive != 0) ||
                          fieldCurveRequested || systemIDRequested || fieldCutRequested ||
-                         resTestActive || batteryHealthTestActive || cvPlantFitActive ||
+                         resTestActive || batteryHealthTestActive || cvPlantFitActive || cvStressActive ||
                          TuningMode || CVTuningMode || faCommissionGate;
     tick.commissioningResting = (commissionState == 1) && dialogAlive && !anyTestActive;
   }
@@ -5554,27 +5595,27 @@ void updateCurrentRPMTableIndex(float rpm) {
 
 // One-liner lookups — all boundary logic lives in findRPMSegment/interpolateRPMTable
 float getMinimumFieldForRPM(float rpm) {
-  // Per-RPM Min% floor system disabled: the floor is the flat scalar MinDuty at every RPM, so it tracks
-  // the "Min Field %" box directly. Restore the table lookup below by re-enabling minPctSystemEnabled.
-  if (!minPctSystemEnabled) return MinDuty;
   float floorV = interpolateRPMTable(rpm, rpmMinDutyTable);
   // A zero floor means "no minimum field" (above the commissioned RPM ceiling, or bin 0): keep it a
   // hard zero. Never let a temp correction lift it off zero, or the field could be forced on past the
   // ceiling where it must be able to shut fully off.
   if (floorV <= 0.0f) return 0.0f;
-  // Copper temp correction — only while the learner owns the table (off = literal hand-entered Min%).
+  // Copper temp correction — only while the learner machinery owns the table (master system toggle +
+  // learner sub-toggle both on); otherwise the floor is the literal hand-entered value.
   // Only the RESISTIVE part of the knee scales with field-winding resistance (~0.218 %/degF); the
   // constant brush/rectifier threshold (kneeFitA) does NOT. Stored floors are referenced to
   // kneeTempRefF; shift the resistive part (knee − kneeFitA) to the live case temp. knee = floor+margin.
   // (kneeFitA = 0 when no commissioning fit exists → falls back to scaling the whole knee, as before.)
-  if (kneeLearnEnable && kneeTempComp && !isnan(AlternatorTemperatureF)) {
+  if (minPctSystemEnabled && kneeLearnEnable && kneeTempComp && !isnan(AlternatorTemperatureF)) {
     float knee = floorV + kneeMarginPct;
     float resistive = knee - kneeFitA; if (resistive < 0) resistive = 0;
     floorV -= resistive * 0.00218f * (kneeTempRefF - AlternatorTemperatureF);
     if (floorV < 0) floorV = 0;
     if (floorV > kneeMaxFloorPct) floorV = kneeMaxFloorPct;
   }
-  return floorV;
+  // The scalar "Min Field %" hard-floors every non-zero table value (a cell can raise the floor,
+  // never pull it below MinDuty). The zero sentinel above is the one exception.
+  return fmaxf(floorV, MinDuty);
 }
 float getCapCurrentForRPM(float rpm) {
   return interpolateRPMTable(rpm, rpmCapCurrentTable);
@@ -5597,7 +5638,7 @@ static bool kneeStateDirty = false;
 // Stored floors are RAW duty @ kneeTempRefF; getMinimumFieldForRPM does the live temp correction.
 void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk) {
-  if (!minPctSystemEnabled) return;   // Min% floor system disabled — learner idle
+  if (!minPctSystemEnabled) return;   // Automatic Min% system off — learner idle
   static uint32_t lastMs = 0, steadySince = 0, lastStepMs = 0;
   static float fRpm = 0, fTemp = 0, fDuty = 0;
   static bool fInit = false;
@@ -5852,7 +5893,7 @@ void saveKneeLearnState() {
 
 // ── Min%-floor snapshot for the commissioning ABORT path ──────────────────────
 // The pre-commissioning tune snapshot (commissionSnapshot) covers gains/filters/thresholds but
-// NOT the Min% floor table, which the Min% step rewrites. These three back up / restore / clear
+// NOT the Min% floor table, which the standalone Min% floor calibration rewrites. These three back up / restore / clear
 // the persistent Min% state (minDutyTable + the knee tracker: floor, knee, frozen) as parallel
 // "bk_*" blobs in the "learning" namespace so an abort (or a reboot mid-run) reverts Min% too.
 // kneeLearnTempF is diagnostic-only and never persisted, so it is not backed up.
@@ -5924,7 +5965,7 @@ void commissionClearMinPctBackup() {
 void rpmAxisWipeExecute() {
   kneeLearnResetDefaults();       // Min% floor table + knee-learner state
   commissionClearMinPctBackup();  // its NVS backup snapshot
-  commissionClearRpmDependents(); // every RPM-binned commissioning stage (all but Prep)
+  commissionClearRpmDependents(); // every RPM-binned commissioning stage (all but Prep + Field cut)
   systemIDLogClearAll();          // step-test ring (records are RPM-stamped)
   resetMotorFrontOnly();          // motoring front only; sail front kept
   pendingResetAlternatorHealth = true;  // best-ever front + engine-hour trend + baseline
@@ -5952,10 +5993,12 @@ void kneeLearnService(bool fieldOff) {
 }
 
 // Reset learned state: every bin back to 0% and unlocked, so learning restarts from scratch.
+// The live table is only zeroed while the learner machinery owns it (master system toggle + learner
+// sub-toggle both on) — with the system off, a hand-entered table survives the knee-state wipe.
 void kneeLearnResetDefaults() {
   for (int i = 0; i < RPM_TABLE_SIZE; i++) {
     kneeFloor[i] = 0; kneeKnee[i] = 0; kneeFrozen[i] = false; kneeLearnTempF[i] = 0; kneeLastMs[i] = 0;
-    if (kneeLearnEnable) rpmMinDutyTable[i] = 0;
+    if (minPctSystemEnabled && kneeLearnEnable) rpmMinDutyTable[i] = 0;
   }
   kneeFitA = 0.0f; kneeFitC = 0.0f;   // no commissioning fit any more → live correction reverts to whole-knee
   saveKneeLearnState();
@@ -5964,6 +6007,8 @@ void kneeLearnResetDefaults() {
 // Boot init: load knobs (settings namespace, create defaults if absent) + learned state blobs.
 // Call AFTER loadLearningTableFromNVS() so rpmMinDutyTable is already populated.
 void kneeLearnInit() {
+  if (!settingExists(NK_minPctSystem)) settingWrite(NK_minPctSystem, minPctSystemEnabled ? "1" : "0");
+  else minPctSystemEnabled = (settingRead(NK_minPctSystem).toInt() != 0);
   if (!settingExists(NK_kneeLearnEnable)) settingWrite(NK_kneeLearnEnable, kneeLearnEnable ? "1" : "0");
   else kneeLearnEnable = (settingRead(NK_kneeLearnEnable).toInt() != 0);
   if (!settingExists(NK_kneeTempComp)) settingWrite(NK_kneeTempComp, kneeTempComp ? "1" : "0");
@@ -6005,24 +6050,21 @@ void kneeLearnInit() {
   if (!haveState)
     for (int i = 0; i < RPM_TABLE_SIZE; i++) { kneeFloor[i] = 0; kneeKnee[i] = 0; kneeFrozen[i] = false; kneeLearnTempF[i] = 0; }
 
-  // If learning is enabled, the floor owns the table from boot (bin 0 always 0%).
-  if (kneeLearnEnable)
+  // While the learner machinery owns the table (master system toggle + learner sub-toggle both on),
+  // the floor owns the table from boot (bin 0 always 0%). System off = hand-entered table stands.
+  if (minPctSystemEnabled && kneeLearnEnable)
     for (int i = 0; i < RPM_TABLE_SIZE; i++) {
       float f = (i == 0) ? 0.0f : kneeFloor[i];
       if (f < 0) f = 0; if (f > kneeMaxFloorPct) f = kneeMaxFloorPct;
       rpmMinDutyTable[i] = f;
     }
-  // System disabled: mirror the RPM-table Min% column to the flat scalar MinDuty so the displayed
-  // per-speed floors match what getMinimumFieldForRPM actually returns. Runs last (MinDuty + table are
-  // loaded by now); re-enabling the system hands the column back to the learner/wizard.
-  if (!minPctSystemEnabled)
-    for (int i = 0; i < RPM_TABLE_SIZE; i++) rpmMinDutyTable[i] = MinDuty;
 }
 
 // Build the /kneeLearnState JSON (knobs + live status + per-bin learned state).
 String kneeLearnStateJson() {
   String j = "{";
-  j += "\"enable\":";        j += (kneeLearnEnable ? 1 : 0);
+  j += "\"sysEnable\":";     j += (minPctSystemEnabled ? 1 : 0);
+  j += ",\"enable\":";       j += (kneeLearnEnable ? 1 : 0);
   j += ",\"marginPct\":";    j += String(kneeMarginPct, 2);
   j += ",\"onsetA\":";       j += String(kneeOnsetA, 2);
   j += ",\"reArmA\":";       j += String(kneeReArmA, 2);

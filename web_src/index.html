@@ -104,6 +104,10 @@
          syncHeaderStrip(). Only the chevron expands; the toggle is an isolated control that
          drives the same Alternator-Enable path (stripAltToggle → handleAlternatorToggle). -->
     <div id="header-collapsed-strip">
+      <!-- Only path back to the password field while collapsed: the whole settings-access tier is
+           display:none under .header-collapsed, so a locked+minimized session is otherwise a dead end.
+           Shown by syncHeaderStrip only while currentAdminPassword is empty. -->
+      <span id="hcs-unlock" class="hcs-unlock" style="display:none;" title="Expand the header and enter the settings password" onclick="stripExpandToUnlock(event)">Tap to unlock</span>
       <!-- Alternator group -->
       <span id="hcs-pill" class="hcs-pill">—</span>
       <span class="hcs-m hcs-alt"><span id="hcs-alt">-</span><i>A</i></span>
@@ -767,10 +771,11 @@
                                   rise. In <b>Amps</b> mode, this is calculated for reference only.</span></span></th>
                             <th>Min<br>(%) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
                                   class="tooltip-box">Lowest field duty cycle (%) the regulator will hold at this engine
-                                  speed, even when the controls want less. The commissioning step initially fills this
-                                  column, and it self-maintains automatically (Learning). Stored values are referenced to
-                                  a 150&deg;F winding temperature and adjusted to the live alternator temperature each
-                                  tick. Turn off Learning below to edit values by hand.</span></span>
+                                  speed, even when the controls want less. Always applied, and never below the flat
+                                  Min Field % setting; a 0 cell means no floor at that speed. Editable by hand at any
+                                  time. With Automatic Min% Learning on (card below), the learner fills and maintains
+                                  this column and adjusts values to the live alternator temperature each
+                                  tick.</span></span>
                               <span id="minduty-managed-hint" class="learning-info-label"
                                     style="display:none; font-weight:400;">auto</span></th>
                           </tr>
@@ -1048,6 +1053,33 @@
                       <hr />
                       <div class="form-row">
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Automatic Min% System (<span id="minPctSystemEnabled_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master
+                                  switch for the automatic machinery: the learner below and the Min% floor calibration.
+                                  Off = both are parked and this card collapses. The per-RPM Min (%) column keeps working
+                                  either way — it is always applied (never below your Min Field %) and stays editable by
+                                  hand.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <span class="toggle-label">Off</span>
+                            <label class="switch">
+                              <input id="minPctSystemEnabled_checkbox" type="checkbox"
+                                onchange="document.getElementById('minPctSystemEnabled').value = this.checked ? '1' : '0'; this.form.submit(); submitMessage();" />
+                              <span class="slider round"></span>
+                            </label>
+                            <span class="toggle-label">On</span>
+                            <input id="minPctSystemEnabled" name="minPctSystemEnabled" type="number" value="" style="display:none;" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <div id="minpct-system-body" style="display:none;">
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
                           <span>Learning (<span id="kneeLearnEnable_echo">?</span>):
                             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master
                                   switch. On = the regulator owns and auto-fills the Min (%) column. Off = the column is
@@ -1300,9 +1332,14 @@
                         <div id="knee-status-live" class="learning-info-label" style="margin-top:6px;">Status: —</div>
                       </div>
 
+                      <div id="minpct-cal-hint" style="display:none; margin-top:10px; font-size:12px; color:#c77d1a;">
+                        No calibration data yet — run the Min% floor calibration to measure the per-RPM onset floors.
+                      </div>
                       <div class="btn-row" style="margin-top:10px;">
+                        <button type="button" class="btn-primary btn-sm" onclick="openMinPctCalModal()">Run Min% Floor Calibration</button>
                         <button type="button" class="btn-danger-ghost btn-sm" onclick="resetKneeLearn()">Reset Learned Floors</button>
                       </div>
+                      </div><!-- end minpct-system-body -->
                     </div>
                     <!-- ===== end Automatic Min% Learning ===== -->
 
@@ -2354,7 +2391,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Safety Margin — amps above ripple (<span id="IExcessSafetyMargin_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps the over-current trip line sits above the measured alternator ripple. Larger means fewer nuisance trips but less sensitivity to a genuine over-current. Applying it sets the trip line parallel to the ripple this alternator produces (Slope and CV base below are set for you). Requires a ripple measurement from Commissioning ▸ Step 6.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps the over-current trip line sits above the measured alternator ripple. Larger means fewer nuisance trips but less sensitivity to a genuine over-current. Applying it sets the trip line parallel to the ripple this alternator produces (Slope and CV base below are set for you). Requires a ripple measurement from Commissioning ▸ Step 5.</span></span>
                     </div>
                     <div class="protections-edit-row">
                       <input name="IExcessSafetyMargin" id="protMarginInput" type="number" step="1" min="0" max="25" />
@@ -2461,7 +2498,7 @@
                     </div>
                     <canvas id="rippleThreshPlotAlt" style="display:block; width:100%; height:220px; background:#161616; border-radius:6px;"></canvas>
                     <div id="rippleVerdictAlt" style="font-size:12px; color:#bbb; margin-top:6px; line-height:1.5;"></div>
-                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 6 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
+                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 5 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
                   </article>
 
                   <article class="protections-param" data-groups="g3">
@@ -4348,19 +4385,34 @@
                 <!-- ============ VOLTAGE D TERM (helper #2) ============ -->
                 <div class="param-subhead">Voltage D term (rate-of-rise damping)</div>
 
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Kd (<span id="VoltageKd_echo">?</span>)
-                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
-                    </span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Derivative gain for the voltage loop — how many amps to trim off the current setpoint per V/s that the smoothed battery voltage rises beyond the deadband. Recomputed every tick from the present rise rate and subtracted at the loop output, so it releases the instant the rise falls back and never accumulates in the integrator (no dumped charge on release). Damps the rate of rise on the approach to target, keeping the bus from overshooting into the hard protections — but unlike a protection it never cuts the field, so there is no torque step at the engine and no visible light dip. Higher damps a fast approach harder; too high slightly slows the final approach. Gated by the <strong>CV Tuning Helpers</strong> switch (Overshoot &amp; OV-recovery shaping, below). <strong>Voltage-normalized</strong> — the same value works on 12 / 24 / 48 V banks.</span></span>
+                <!-- Kd gain mirrors Kp/Ki: auto-derived (Kd = Td x Kp off the commissioned Kp) in Auto,
+                     typed only in Manual — same cvGainMode gate as cvAutoBlock/cvManualBlock. ONLY the
+                     gain follows the mode; the shaping params below (deadband/arm/one-sided/max back-off/
+                     slope ceiling/filter) are not auto-derived and stay visible in both modes. -->
+                <div id="cvKdAutoBlock" style="display:none;">
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between; font-size:0.9em; opacity:0.85; line-height:1.5;">
+                      <span>Damping strength (Kd) is set automatically from the voltage loop's proportional gain (Kp) &mdash; Kd = Td &times; Kp &mdash; so it scales with the same battery measurement that sets Kp. Switch <strong>CV Gain Source</strong> to Manual to set it yourself. The value in use is on the <strong>Active gains</strong> line above.</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">With CV Gain Source = Auto, the voltage loop's derivative gain (Kd) is tied to its proportional gain (Kp) by a fixed derivative time (Td): <strong>Kd = Td × Kp</strong>. Because Kp is derived from the battery stiffness measured at commissioning, Kd inherits the same plant anchor and scales per install with no separate tuning. Set CV Gain Source to Manual to enter Kd directly.</span></span>
+                    </div>
                   </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageKd" type="number" step="0.5" min="0" max="200" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
+                </div>
+
+                <div id="cvKdManualBlock">
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Voltage Loop Kd (<span id="VoltageKd_echo">?</span>)
+                        <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                      </span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Derivative gain for the voltage loop — how many amps to trim off the current setpoint per V/s that the smoothed battery voltage rises beyond the deadband. Recomputed every tick from the present rise rate and subtracted at the loop output, so it releases the instant the rise falls back and never accumulates in the integrator (no dumped charge on release). Damps the rate of rise on the approach to target, keeping the bus from overshooting into the hard protections — but unlike a protection it never cuts the field, so there is no torque step at the engine and no visible light dip. Higher damps a fast approach harder; too high slightly slows the final approach. Gated by the <strong>CV Tuning Helpers</strong> switch (Overshoot &amp; OV-recovery shaping, below). <strong>Voltage-normalized</strong> — the same value works on 12 / 24 / 48 V banks.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="VoltageKd" type="number" step="0.5" min="0" max="200" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
                   </div>
                 </div>
 
@@ -4384,11 +4436,11 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Deadband (V/s) (<span id="CvKdDeadbandVps_echo">?</span>)
+                    <span>Deadband base — V/s at zero amps (<span id="CvKdDeadbandVps_echo">?</span>)
                       <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
                       <span id="CvKdDeadbandVps_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak rise rate: —</span>
                     </span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The on/off gate for the D term: it ignores any rise — or, below target, any fall — slower than this. Once the rate clearly passes it, the D term acts on the <strong>full</strong> rate (not just the excess beyond the gate), so a genuine transient gets full strength immediately; it then stays engaged until the rate falls back below half this value, so ripple flickering across the edge cannot rapidly toggle it. Sized above belt ripple and resonance wobble (which swing the per-tick slope up and down around zero) so those cancel and only a genuine climb or drop counts. Lower catches gentler approaches but eats into ripple margin; higher hands more of the events to the hard protections. The live readout below is the worst rise rate seen in the last 10 seconds — this installation's own floor.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Where the D term's on/off gate starts at zero amps — its intercept. The gate is a <strong>line</strong> that rises with the commanded current (Slope below), bounded by the Floor and Ceiling: ripple shakes the voltage faster at higher output, exactly like the over-current trip line. The damper ignores any rise — or, below target, any fall — slower than the line's value at the present command; once the rate clearly passes it, the D term acts on the <strong>full</strong> rate, and stays engaged until the rate falls back below half, so ripple flickering across the edge cannot rapidly toggle it. Lower catches gentler approaches but eats into ripple margin; higher hands more of the events to the hard protections. Commissioning measures this installation's own ripple rise rate (Step 5 current check) and sets base and slope in the Thresholds step; the Safety Margin below re-applies them from that measurement. Only valid for the D-term voltage filter above — change that filter and re-measure. The live readout below is the worst rise rate seen in the last 10 seconds.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4397,6 +4449,87 @@
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Deadband slope — V/s per amp (<span id="CvKdDbSlope_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How fast the deadband line rises with the commanded current. Commissioning sets it to the measured rise-rate slope so the gate stays parallel to the ripple this alternator actually produces — full sensitivity at low current without nuisance engagements at high current. Zero makes the deadband flat (the plain single-number behaviour). Evaluated against the slew-limited current command, so a sudden transient cannot drag the gate up while the damper should be firing.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="CvKdDbSlope" type="number" step="0.0005" min="0" max="0.05" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Deadband floor — minimum V/s (<span id="CvKdDbFloor_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the evaluated deadband may ever be, in volts per second. Below the three tested currents the line is a projection, not data, and ripple measurements scatter run to run — a gate that dips too low would let belt ripple engage the damper as a steady field trim, the exact failure the deadband exists to prevent. This floor keeps the low-current end honest.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="CvKdDbFloor" type="number" step="0.05" min="0" max="2" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Deadband ceiling — maximum V/s (<span id="CvKdDbCeil_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The largest the evaluated deadband may ever be, in volts per second. On a very large command the sloped line could grow until a genuine fast rise slips under the gate and the damper never acts — this ceiling caps it.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="CvKdDbCeil" type="number" step="0.1" min="0.5" max="4" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Safety Margin — V/s above measured ripple slope (<span id="CvKdSlopeMargin_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the deadband line sits above the measured ripple rise line, in volts per second. Larger means fewer nuisance engagements of the damper (D term) but a later reaction to a genuine fast rise — the over-voltage protections remain the fast defense. Applying it sets the line parallel to the ripple this installation produces (Deadband base and slope above are set for you). Requires the voltage-slope measurement from Commissioning ▸ Step 5.</span></span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <input id="cvKdMarginInput" type="number" step="0.05" min="0" max="2" />
+                    <button onclick="cvKdApplyMargin()" class="btn-primary" type="button">Set</button>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row" style="display:block;">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Ripple slope vs. deadband
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The deadband line your settings above produce (base + slope·current, floored and capped) drawn against the ripple-driven voltage rise rate measured at three currents during commissioning. Any current where the measured rise crosses above the deadband is shaded red — the damper (D term) would engage on ordinary ripple there. The deadband line redraws as you edit the fields above; the measured line is fixed commissioning data. Nothing here changes automatically.</span></span>
+                    </span>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:6px; margin:6px 0 4px; font-size:11px; color:#888;">
+                    X-axis max
+                    <input id="slopeXmaxAlt" type="number" step="10" min="20" max="400" style="width:70px;" oninput="renderSlopeDeadbandPlot()" />
+                    <span>A</span>
+                  </div>
+                  <canvas id="slopeDeadbandPlot" style="display:block; width:100%; height:200px; background:#161616; border-radius:6px;"></canvas>
+                  <div id="slopeDeadbandVerdict" style="font-size:12px; color:#bbb; margin-top:6px; line-height:1.5;"></div>
+                  <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Slope measurement is from <strong>Commissioning ▸ Step 5 (Disturbances) ▸ current check</strong> and is only valid for the D-term voltage filter it was measured with — change that filter and re-run the step.</div>
                 </div>
 
                 <hr />
@@ -4450,7 +4583,7 @@
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="CvKdMaxTrimA" type="number" step="1" min="0" max="200" />
+                      <input name="CvKdMaxTrimA" type="number" step="1" min="0" max="1000" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -5081,15 +5214,13 @@
                   want to override what it found.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  The wizard walks eight steps, each writing real settings on Apply:
+                  The wizard walks nine steps, each writing real settings on Apply:
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   &bull; <strong>Prep</strong> — snapshots your current settings and checks preconditions (engine
                   running, headroom, a valid battery shunt) so a run can be reviewed or reverted.<br>
                   &bull; <strong>Field curve</strong> — ramps field duty open-loop and maps duty&rarr;output current,
                   finding the saturation knee.<br>
-                  &bull; <strong>Min% floor</strong> — finds the field level where each RPM range first starts making
-                  current, and fills the RPM table's Min(%) column.<br>
                   &bull; <strong>Current Control Autotuning</strong> — a sine sweep on field duty measures the inner current loop's
                   plant (time constant and gain) and proposes its PID gains and filter constants (also on the Plant
                   Delay tab).<br>
@@ -5104,7 +5235,12 @@
                   adjust the margin or the individual values by hand if you like.<br>
                   &bull; <strong>Voltage Control Autotuning</strong> — commands one bounded current pulse through the tuned inner
                   loop and measures how battery voltage responds to the current step (the finite-horizon gain K20),
-                  then computes the voltage-loop gains from your chosen response time.
+                  then computes the voltage-loop gains from your chosen response time.<br>
+                  &bull; <strong>Field Decay</strong> — cuts the field and times the alternator-current decay (the
+                  de-energize time constant), used by the over-voltage response's field-drain timing.<br>
+                  &bull; <strong>Stress Test</strong> — loads the voltage loop to its limit at idle, then you snap the
+                  throttle to about half max RPM; the protection response and recovery are graded, with corrective
+                  actions offered on a poor result. Writes nothing — a pure acceptance check.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   Every step is advisory — it proposes, and nothing changes until you press Apply. You can re-run a
@@ -12070,6 +12206,19 @@
       </details>
 
       <details class="diag-section">
+        <summary class="diag-section-title">CV Stress Test (throttle snap)</summary>
+        <div class="settings-card">
+          <div style="max-width:560px;margin:0 auto;font-size:13px;line-height:1.55;">
+            <p style="margin:0 0 8px 0;">Grades how the regulator recovers from the worst transient the vessel can
+              produce: the voltage loop is loaded to its limit at engine idle, you snap the throttle to about half
+              max RPM, and the recovery is scored — protection event count, lockout escalation, recovery time,
+              overshoot, and post-recovery stability. All protections stay fully active; the test only observes.
+              Also the final commissioning wizard step — run it here any time after a tuning change.</p>
+            <button type="button" class="btn-primary" onclick="cvsOpen()">Run Stress Test</button>
+          </div>
+        </div>
+      </details>
+      <details class="diag-section">
         <summary class="diag-section-title">About this Alternator Diag Page</summary>
         <div class="settings-card">
           <div style="max-width:560px;margin:0 auto;font-size:13px;color:#555;line-height:1.55;">
@@ -13363,7 +13512,7 @@
         <div id="commission-steps" style="display:flex; flex-wrap:wrap; gap:4px 8px; margin-bottom:14px; font-size:11px; color:#777;"></div>
         <!-- Permanent RPM sparkline — lives ABOVE the per-phase #commission-body so the
              body's innerHTML re-render each phase never wipes it. Fed off CSV1 (cxRpmSparkOnCsv1).
-             Hidden while the Step-7 sweep game owns the screen (cxGameStart/cxGameStop) — the game
+             Hidden while the Disturbances sweep game owns the screen (cxGameStart/cxGameStop) — the game
              draws the same trace + live RPM itself. -->
         <div id="cx-rpm-strip" style="margin-bottom:14px; padding:8px 10px; background:#222; border-radius:6px;">
           <div style="display:flex; align-items:center; justify-content:space-between; font-size:11px; color:#888; margin-bottom:4px;">
@@ -13380,6 +13529,20 @@
     </div>
   </div><!-- END commission-modal-overlay -->
 
+  <!-- Standalone Min% floor calibration — same shell/styling as the commissioning modal.
+       Launched from the Automatic Min% Learning card (master system toggle ON); body re-rendered by mfcRender(). -->
+  <div id="minpct-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
+    <div id="minpct-modal-panel" style="pointer-events:auto; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); overflow-y:auto;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Min% Floor Calibration</span>
+        <button onclick="closeMinPctCalModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
+      </div>
+      <div style="padding:20px;">
+        <div id="minpct-body" style="font-size:0.92em; line-height:1.5; color:#ddd;"></div>
+      </div>
+    </div>
+  </div><!-- END minpct-modal-overlay -->
+
   <!-- Battery-health DCIR test wizard — same shell/styling as the commissioning modal.
        A single dynamic body (#bhw-body) is re-rendered per pane by bhwRender(): precheck → running → result. -->
   <div id="bhw-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
@@ -13393,6 +13556,20 @@
       </div>
     </div>
   </div><!-- END bhw-modal-overlay -->
+
+  <!-- CV stress-test wizard (standalone from Diag) — same shell/styling as the commissioning modal.
+       A single dynamic body (#cvs-body) is re-rendered per pane by cvsRenderD(): pre → run → done. -->
+  <div id="cvs-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
+    <div id="cvs-modal-panel" style="pointer-events:auto; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); overflow-y:auto;">
+      <div id="cvs-drag-handle" style="cursor:move; padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">CV Stress Test</span>
+        <button onclick="cvsClose()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
+      </div>
+      <div style="padding:20px;">
+        <div id="cvs-body" style="font-size:0.92em; line-height:1.5; color:#ddd;"></div>
+      </div>
+    </div>
+  </div><!-- END cvs-modal-overlay -->
 
   <!-- Config-import diff preview: every setting the incoming file would change, current → new,
        each row checkbox-selectable (all checked by default; only checked rows are applied),

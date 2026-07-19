@@ -744,11 +744,15 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "battTempCoeff", NK_battTempCoeff, 1 },
   { "VoltageKd", NK_VoltageKd, 1 },
   { "CvKdDeadbandVps", NK_CvKdDeadbandVps, 1 },
+  { "CvKdDbSlope", NK_CvKdDbSlope, 1 },
+  { "CvKdDbFloor", NK_CvKdDbFloor, 1 },
+  { "CvKdDbCeil", NK_CvKdDbCeil, 1 },
   { "CvKdOneSided", NK_CvKdOneSided, 1 },
   { "CvKdArmV", NK_CvKdArmV, 1 },
   { "CvKdMaxTrimA", NK_CvKdMaxTrimA, 1 },
   { "CvKdVoltFiltTC", NK_CvKdVoltFiltTC, 1 },
   { "CvKdSlopeCeil", NK_CvKdSlopeCeil, 1 },
+  { "CvKdTd", NK_CvKdTd, 1 },
   { "TdPred", NK_TdPred, 1 },
   { "KHard", NK_KHard, 1 },
   { "OvGroup1Enable", NK_OvGroup1Enable, 1 },
@@ -804,6 +808,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "MaxPenaltyDuration", NK_MaxPenaltyDuration, 1 },
   { "MaxPenaltyPercent", NK_MaxPenaltyPercent, 1 },
   { "SafeOperationThreshold", NK_SafeOperationThreshold, 1 },
+  { "minPctSystemEnabled", NK_minPctSystem, 1 },
   { "kneeLearnEnable", NK_kneeLearnEnable, 1 },
   { "kneeMarginPct", NK_kneeMarginPct, 1 },
   { "kneeMaxFloorPct", NK_kneeMaxFloorPct, 1 },
@@ -927,6 +932,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "systemIDPlantTauMs", NK_sysidPlantTau, 1 },
   { "fieldDecayTauMs", NK_fieldDecayTau, 1 },
   { "ripFitAlt", NK_ripFitAlt, 1 },
+  { "slpFitAlt", NK_slpFitAlt, 1 },
   { "imu_zero", NK_imu_zero, 1 },
 };
 static const size_t CONFIG_MANIFEST_COUNT = sizeof(CONFIG_MANIFEST)/sizeof(CONFIG_MANIFEST[0]);
@@ -1004,6 +1010,7 @@ String manifestConfigObject() {
   first = false;
   j += "\"cvComputedKp\":"; cfgAppendJsonStr(j, String(cvComputedKp, 2));
   j += ",\"cvComputedKi\":"; cfgAppendJsonStr(j, String(cvComputedKi, 2));
+  j += ",\"cvComputedKd\":"; cfgAppendJsonStr(j, String(cvComputedKd, 2));
   j += "}";
   return j;
 }
@@ -1142,9 +1149,9 @@ static bool cfgCsvToInt(const String &s, int *out, int n) {
 }
 
 // Apply the "tables" section: user-editable RPM tables into the "learning" namespace.
-// A changed rpmPoints set invalidates the knee tracker + Min% commissioning stage the
-// same way a manual breakpoint edit does (3_functions.ino handler) — reset BEFORE the
-// imported minDutyTable blob lands so the two stay consistent with the source file.
+// A changed rpmPoints set invalidates the knee tracker the same way a manual breakpoint
+// edit does (3_functions.ino handler) — reset BEFORE the imported minDutyTable blob lands
+// so the two stay consistent with the source file.
 // Live arrays reload at the end (import normally reboots; this covers noReboot=1).
 static int applyImportTables(const char *body) {
   const char *tbl = strstr(body, "\"tables\"");
@@ -1155,7 +1162,7 @@ static int applyImportTables(const char *body) {
   if (havePts) {
     bool moved = false;
     for (int i = 0; i < RPM_TABLE_SIZE; i++) if (pts[i] != rpmTableRPMPoints[i]) moved = true;
-    if (moved) { kneeLearnResetDefaults(); commissionClearStage(2); }
+    if (moved) kneeLearnResetDefaults();
   }
   int applied = 0;
   nvs_handle_t h;
@@ -1266,7 +1273,7 @@ bool bhStartTest() {
   if (!bhSamples || !bhResults){ bhAbortReason = "buffers unallocated";      return false; }
   if (RPM < 100)               { bhAbortReason = "engine not running";       return false; }
   if (sysMode != SYS_MODE_AUTO){ bhAbortReason = "must be in AUTO mode";     return false; }   // generator only runs in the AUTO control path
-  if (TuningMode || CVTuningMode || systemIDActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || resTestActive) { bhAbortReason = "another test active"; return false; }
+  if (TuningMode || CVTuningMode || systemIDActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || resTestActive || cvStressActive) { bhAbortReason = "another test active"; return false; }
   if (BatteryCurrentSource != 0 || !HAS_BATT_SHUNT){ bhAbortReason = "needs INA228 battery shunt"; return false; }
   if (bhNumEdges < 3) bhNumEdges = 3;
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
@@ -1651,7 +1658,7 @@ bool cvpfStartTest(float diMaxReq) {
   if (!cvpfBuf)                 { cvpfAbortMsg = "buffer unallocated";     return false; }
   if (RPM < 100)                { cvpfAbortMsg = "engine not running";     return false; }
   if (sysMode != SYS_MODE_AUTO) { cvpfAbortMsg = "must be in AUTO mode";   return false; }
-  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive) {
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvStressActive) {
     cvpfAbortMsg = "another test active"; return false;
   }
   cvpfBufCount = 0; cvpfSampleLastMs = 0;
@@ -1691,6 +1698,299 @@ void cvpfServiceCompletion() {
   uint32_t budget = CVPF_SETTLE_TIMEOUT_MS + CVPF_T_PILOT_MS + 2 * CVPF_HOLD_TIMEOUT_MS
                     + 9 * CVPF_PULSE_SEG_MS + 8000;
   if (millis() - cvpfTestStartMs > budget) cvpfAbort("timed out (engine stopped or left AUTO?)");
+}
+
+// ════════════════════════ CV STRESS TEST (commissioning stage 8 / standalone Diag) ════════════════════════
+// Formalizes the manual bench check: load the loop hard at idle, then have the operator snap the throttle
+// through the RPM band where alternator output multiplies — the worst legitimate transient the vessel can
+// produce. Phases: PROBE (CC ramp until the alternator saturates or the bus reaches BulkVoltage) → SET
+// (hold 80% of that, read the settled voltage V80) → DIP (sag below the target so CV re-enters from
+// below — the resTest-exit lesson: releasing at/above target trips G2 on the mode edge) → ENGAGE (CV at
+// min(V80, BulkVoltage), settle) → ARMED (operator snaps throttle; watcher counts protection events off
+// the existing counters and times the recovery) → DONE (grade). Protections are never gated or softened;
+// a NO-TRIP run is a result in itself (loop rode through), reported with the measured RPM slew as context.
+static const float    CVS_PROBE_RATE_A     = 8.0f;    // A/s command ramp during the idle-capability probe
+static const float    CVS_PROBE_CEIL_A     = 250.0f;  // insanity backstop — saturation detection stops first
+static const uint32_t CVS_PROBE_TIMEOUT_MS = 40000;
+static const uint32_t CVS_LAG_CONFIRM_MS   = 1500;    // command-vs-measured gap sustained this long = saturated
+static const uint32_t CVS_SET_HOLD_MS      = 4000;
+static const uint32_t CVS_DIP_TIMEOUT_MS   = 4000;
+static const uint32_t CVS_ENGAGE_TIMEOUT_MS = 25000;  // arm anyway on timeout (advisory, never block)
+static const uint32_t CVS_SETTLE_MS        = 3000;    // sustained in-band dwell = settled / recovered
+static const uint32_t CVS_P2P_EVAL_MS      = 3000;    // post-recovery stability window (mirrors CV_P2P_EVAL_MS)
+static const uint32_t CVS_WATCH_MAX_MS     = 120000;  // auto-finish backstop
+static const uint32_t CVS_POLL_DEADMAN_MS  = 20000;   // no /cvstress.json poll while active = browser gone
+
+// Module state (all consumed within one core; result fields read by the JSON builder)
+static uint32_t cvsPhaseStartMs = 0, cvsTestStartMs = 0, cvsLastEndMs = 0;
+static volatile uint32_t cvsLastPollMs = 0;
+static uint32_t cvsLastTickMs = 0;
+static float    cvsAmpsEma = 0.0f, cvsVEma = 0.0f;
+static uint32_t cvsLagSinceMs = 0;
+static float    cvsImaxA = 0.0f, cvsI80A = 0.0f, cvsV80 = 0.0f;
+static bool     cvsEngageTimedOut = false;
+static uint32_t cvsBandSinceMs = 0;
+static uint32_t cvsRpmLowSinceMs = 0;
+// watch-window baselines + trackers
+static uint32_t cvsClamp0 = 0, cvsHard0 = 0, cvsIx0 = 0, cvsSw0 = 0, cvsClampPrev = 0;
+static float    cvsBattStartA = 0.0f, cvsPeakV = 0.0f, cvsMinV = 0.0f;
+static float    cvsRpmMax = 0.0f, cvsRpmSlewMax = 0.0f, cvsRpmPrev = 0.0f;
+static uint32_t cvsRpmPrevMs = 0;
+static uint16_t cvsTrips = 0, cvsIxTrips = 0, cvsHardCuts = 0;
+static uint32_t cvsMaxLockoutMs = 0;
+static uint32_t cvsFirstTripMs = 0;
+static bool     cvsReboundArmed = false, cvsRecovered = false, cvsP2pDone = false;
+static float    cvsOvershootV = 0.0f, cvsP2pMin = 0.0f, cvsP2pMax = 0.0f, cvsP2pV = -1.0f;
+static uint32_t cvsRecoveryMs = 0, cvsP2pT0 = 0;
+// grade: 0 pass, 1 marginal, 2 fail, 3 n/a
+static uint8_t  cvsOutcome = 0;   // 0 none yet, 1 rode-through (no trip), 2 graded on trips
+static uint8_t  cvsGTrips = 3, cvsGLadder = 3, cvsGRecovery = 3, cvsGOvershoot = 3, cvsGP2p = 3, cvsGOverall = 3;
+static bool     cvsReady = false, cvsOk = false, cvsAborted = false;
+
+bool cvStressStartTest() {
+  if (cvStressActive)           { cvStressAbortMsg = "already running";      return false; }
+  if (RPM < 100)                { cvStressAbortMsg = "engine not running";   return false; }
+  if (sysMode != SYS_MODE_AUTO) { cvStressAbortMsg = "must be in AUTO mode"; return false; }
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvPlantFitActive) {
+    cvStressAbortMsg = "another test active"; return false;
+  }
+  if (millis() - cvsLastEndMs < 2000UL) { cvStressAbortMsg = "cooling down — retry in a moment"; return false; }
+  cvStressPhase = 1;
+  cvsPhaseStartMs = cvsTestStartMs = cvsLastTickMs = millis();
+  cvsLastPollMs = 0;
+  cvStressCmdA = fmaxf(5.0f, MeasuredAmps);
+  cvsAmpsEma = MeasuredAmps; cvsVEma = IBV;
+  cvsLagSinceMs = 0; cvsRpmLowSinceMs = 0; cvsBandSinceMs = 0;
+  cvsImaxA = cvsI80A = cvsV80 = 0.0f;
+  cvsEngageTimedOut = false;
+  cvsTrips = cvsIxTrips = cvsHardCuts = 0;
+  cvsMaxLockoutMs = 0; cvsFirstTripMs = 0;
+  cvsReboundArmed = cvsRecovered = cvsP2pDone = false;
+  cvsOvershootV = 0.0f; cvsP2pV = -1.0f; cvsRecoveryMs = 0;
+  cvsPeakV = cvsMinV = IBV; cvsRpmMax = RPM; cvsRpmSlewMax = 0.0f;
+  cvsOutcome = 0;
+  cvsGTrips = cvsGLadder = cvsGRecovery = cvsGOvershoot = cvsGP2p = cvsGOverall = 3;
+  cvsReady = cvsOk = cvsAborted = false;
+  cvStressAbortMsg = "";
+  cvStressFinishRequested = cvStressAbortRequested = false;
+  cvStressCcActive = true;
+  cvStressOvActive = false;
+  cvStressActive = true;
+  queueConsoleMessage("CV stress test: started (probe idle capability -> hold 80% -> arm for throttle snap)");
+  return true;
+}
+
+void cvStressAbort(const char *reason) {
+  cvStressActive = false; cvStressCcActive = false; cvStressOvActive = false;
+  cvsReady = true; cvsOk = false; cvsAborted = true;
+  cvStressAbortMsg = reason;
+  cvsLastEndMs = millis();
+  queueConsoleMessageF("CV stress test: aborted — %s", reason);
+}
+
+// Serialize + persist the graded result so the wizard card and Diag survive a reload/reboot.
+static void cvStressPersistResult() {
+  snprintf(cvsLastBlob, sizeof(cvsLastBlob),
+           "1,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+           (int)cvsOutcome, (int)cvsGOverall, (int)cvsGTrips, (int)cvsGLadder, (int)cvsGRecovery,
+           (int)cvsGOvershoot, (int)cvsGP2p, (unsigned long)cvsRecoveryMs, (unsigned long)cvsMaxLockoutMs,
+           (int)cvsTrips, (int)cvsIxTrips, (int)cvsHardCuts,
+           (int)lroundf(cvsOvershootV * 100.0f), (int)lroundf(cvsP2pV * 100.0f),
+           (int)lroundf(cvsPeakV * 100.0f), (int)lroundf(cvsMinV * 100.0f),
+           (int)lroundf(cvsRpmSlewMax), (int)lroundf(cvsRpmMax),
+           (int)lroundf(cvsBattStartA * 10.0f), (int)lroundf(cvStressTargetV * 100.0f));
+  settingWrite(NK_cvStressLast, cvsLastBlob);
+}
+
+static void cvStressGrade() {
+  float k = (float)BATTERY_VOLTAGE / 12.0f;
+  if (cvsTrips == 0) {
+    // Rode through the snap with no protection event — a result in itself; slew/peak give the context.
+    cvsOutcome = 1;
+    cvsGTrips = cvsGLadder = cvsGRecovery = cvsGOvershoot = cvsGP2p = 3;
+    cvsGOverall = 0;
+  } else {
+    cvsOutcome = 2;
+    cvsGTrips = (cvsTrips <= 1) ? 0 : (cvsTrips == 2) ? 1 : 2;
+    cvsGLadder = (cvsMaxLockoutMs > 500) ? 2 : 0;   // any escalation past the 500 ms base rung = cycling
+    cvsGRecovery = !cvsRecovered ? 2 : (cvsRecoveryMs <= 5000) ? 0 : (cvsRecoveryMs <= 10000) ? 1 : 2;
+    cvsGOvershoot = (cvsOvershootV <= 0.30f * k) ? 0 : (cvsOvershootV <= 0.50f * k) ? 1 : 2;
+    cvsGP2p = !cvsP2pDone ? 3 : (cvsP2pV <= 0.15f * k) ? 0 : (cvsP2pV <= 0.30f * k) ? 1 : 2;
+    uint8_t worst = 0;
+    uint8_t gs[5] = { cvsGTrips, cvsGLadder, cvsGRecovery, cvsGOvershoot, cvsGP2p };
+    for (int i = 0; i < 5; i++) if (gs[i] != 3 && gs[i] > worst) worst = gs[i];
+    cvsGOverall = worst;
+  }
+  cvsReady = true; cvsOk = true;
+  queueConsoleMessageF("CV stress test: %s — trips=%d (iX %d, hard cut %d) lockout=%lums recov=%lums overshoot=%.2fV p2p=%.2fV rpmSlew=%.0f/s",
+                       cvsOutcome == 1 ? "rode through (no protection event)" : (cvsGOverall == 0 ? "PASS" : cvsGOverall == 1 ? "MARGINAL" : "FAIL"),
+                       (int)cvsTrips, (int)cvsIxTrips, (int)cvsHardCuts, (unsigned long)cvsMaxLockoutMs,
+                       (unsigned long)cvsRecoveryMs, cvsOvershootV, cvsP2pV, cvsRpmSlewMax);
+}
+
+// Called every AdjustField pass (before the mode branches, alongside the other test tick machines).
+// Never owns duty: PROBE/SET/DIP drive the real current PID via the cvStressCcActive branch; ENGAGE/ARMED
+// run the normal CV loop with only ChargingVoltageTargetReq pinned (cvStressOvActive).
+void cvStress_tick(uint32_t nowMs) {
+  if (!cvStressActive) return;
+  float dtSec = (nowMs - cvsLastTickMs) * 0.001f;
+  if (dtSec < 0.0f || dtSec > 1.0f) dtSec = 0.0f;
+  cvsLastTickMs = nowMs;
+  uint32_t elapsed = nowMs - cvsPhaseStartMs;
+  float k = (float)BATTERY_VOLTAGE / 12.0f;
+
+  if (cvStressAbortRequested) { cvStressAbortRequested = false; cvStressAbort("cancelled by user"); return; }
+  if (sysMode != SYS_MODE_AUTO) { cvStressAbort("left AUTO mode"); return; }
+  if (cvsLastPollMs != 0 && (uint32_t)(nowMs - cvsLastPollMs) > CVS_POLL_DEADMAN_MS) {
+    cvStressAbort("browser connection lost"); return;
+  }
+  // Engine-stall guard: a stall fires the zero-cut protection, which would contaminate the trip
+  // counts with a non-CV event — abort instead of grading it. Suppressed inside the same grace
+  // window the tick builder uses (a hard cut collapses the LM2907 pickup to a ~4.6 s false zero,
+  // which is exactly when the ARMED watcher is busiest).
+  bool protGrace = (g_lastProtClampMs != 0) && ((uint32_t)(nowMs - g_lastProtClampMs) < PROT_RPM_GRACE_MS + 2000UL);
+  if (RPM < 80.0f && !protGrace) { if (cvsRpmLowSinceMs == 0) cvsRpmLowSinceMs = nowMs; } else cvsRpmLowSinceMs = 0;
+  if (cvsRpmLowSinceMs != 0 && (uint32_t)(nowMs - cvsRpmLowSinceMs) > 1500UL) { cvStressAbort("engine stopped"); return; }
+  if (nowMs - cvsTestStartMs > CVS_PROBE_TIMEOUT_MS + CVS_SET_HOLD_MS + CVS_DIP_TIMEOUT_MS + CVS_ENGAGE_TIMEOUT_MS + CVS_WATCH_MAX_MS + 15000UL) {
+    cvStressAbort("timed out"); return;
+  }
+
+  switch (cvStressPhase) {
+    case 1: {  // PROBE — CC command ramps until the alternator can't follow or the bus reaches Bulk
+      cvsAmpsEma += 0.08f * (MeasuredAmps - cvsAmpsEma);
+      cvStressCmdA = fminf(cvStressCmdA + CVS_PROBE_RATE_A * dtSec, CVS_PROBE_CEIL_A);
+      float lagA = setpointLimited - cvsAmpsEma;   // vs the slewed command actually driven
+      bool lagging = (cvStressCmdA > 15.0f) && (lagA > fmaxf(6.0f, 0.12f * cvsAmpsEma));
+      if (lagging) { if (cvsLagSinceMs == 0) cvsLagSinceMs = nowMs; } else cvsLagSinceMs = 0;
+      bool saturated = cvsLagSinceMs != 0 && (uint32_t)(nowMs - cvsLagSinceMs) >= CVS_LAG_CONFIRM_MS;
+      bool vCapped = IBV >= BulkVoltage - 0.05f * k;
+      if (saturated || vCapped || cvStressCmdA >= CVS_PROBE_CEIL_A || elapsed >= CVS_PROBE_TIMEOUT_MS) {
+        cvsImaxA = cvsAmpsEma;
+        if (cvsImaxA < 6.0f) {
+          cvStressAbort(vCapped ? "battery too full — the bus reached the bulk target at almost no current; draw the bank down with some loads, then re-run"
+                                : "alternator output too low at idle to run the test");
+          return;
+        }
+        cvsI80A = fmaxf(5.0f, 0.8f * cvsImaxA);
+        cvStressCmdA = cvsI80A;
+        cvsVEma = IBV;
+        cvStressPhase = 2; cvsPhaseStartMs = nowMs;
+        queueConsoleMessageF("CV stress test: idle capability %.0f A (%s) -> holding %.0f A", cvsImaxA,
+                             vCapped ? "voltage-capped at Bulk" : "saturation", cvsI80A);
+      }
+      break; }
+    case 2: {  // SET — hold 80%, read the settled voltage the bank sits at under that current
+      cvsVEma += 0.05f * (IBV - cvsVEma);
+      // Stiff/full bank: the hold drives voltage past bulk toward the hard cut. Conclude early —
+      // the target is bulk-capped in that case anyway, so nothing more is learned by climbing.
+      bool overBulk = IBV >= BulkVoltage + 0.10f * k;
+      if (elapsed >= CVS_SET_HOLD_MS || (overBulk && elapsed >= 1000UL)) {
+        cvsV80 = cvsVEma;
+        cvStressTargetV = clamp_f(fminf(cvsV80, BulkVoltage), 10.5f * k, BulkVoltage);
+        cvStressCmdA = fmaxf(3.0f, 0.5f * cvsI80A);
+        cvStressPhase = 3; cvsPhaseStartMs = nowMs;
+        queueConsoleMessageF("CV stress test: V@80%% = %.2f V -> stress target %.2f V", cvsV80, cvStressTargetV);
+      }
+      break; }
+    case 3: {  // DIP — sag below the target so CV re-enters from below (no G2 edge trip on release)
+      if (IBV <= cvStressTargetV - 0.08f * k || elapsed >= CVS_DIP_TIMEOUT_MS) {
+        cvStressCcActive = false;   // hand back to the normal CV path; bumpless seeds fire on CV entry
+        cvStressOvActive = true;    // ChargingVoltageTargetReq pinned to cvStressTargetV from this tick
+        cvStressPhase = 4; cvsPhaseStartMs = nowMs; cvsBandSinceMs = 0;
+      }
+      break; }
+    case 4: {  // ENGAGE — wait for CV to settle in-band at the stress target
+      bool inBand = fabsf(IBV - cvStressTargetV) <= CV_SETTLE_V_THRESH * k;
+      if (inBand) { if (cvsBandSinceMs == 0) cvsBandSinceMs = nowMs; } else cvsBandSinceMs = 0;
+      bool settled = cvsBandSinceMs != 0 && (uint32_t)(nowMs - cvsBandSinceMs) >= CVS_SETTLE_MS;
+      if (elapsed >= CVS_ENGAGE_TIMEOUT_MS && !settled) { cvsEngageTimedOut = true; settled = true; }  // arm anyway, flagged
+      if (settled) {
+        cvsClamp0 = cvsClampPrev = g_fastOvClampCount;
+        cvsHard0 = g_fastOvHardCount; cvsIx0 = g_iExcessCount; cvsSw0 = g_ovTel.swHardCutCount;
+        cvsBattStartA = Bcur;
+        cvsPeakV = cvsMinV = IBV;
+        cvsRpmMax = cvsRpmPrev = RPM; cvsRpmPrevMs = nowMs;
+        cvsBandSinceMs = 0;
+        cvStressPhase = 5; cvsPhaseStartMs = nowMs;
+        queueConsoleMessage("CV stress test: ARMED — snap the throttle to ~half max RPM, then back to idle");
+      }
+      break; }
+    case 5: {  // ARMED — the watch window; every protection live, the watcher only observes
+      if (IBV > cvsPeakV) cvsPeakV = IBV;
+      if (RPM > cvsRpmMax) cvsRpmMax = RPM;
+      // Stimulus slew — skipped through the post-cut tach false-zero (grace window): the 0→real
+      // re-bias jump would otherwise register as a huge fake positive slew. The real ramp happens
+      // BEFORE the trip, so nothing of interest is lost.
+      if ((uint32_t)(nowMs - cvsRpmPrevMs) >= 100UL) {
+        if (!protGrace && RPM > 100.0f && cvsRpmPrev > 100.0f) {
+          float slew = (RPM - cvsRpmPrev) / ((nowMs - cvsRpmPrevMs) * 0.001f);
+          if (slew > cvsRpmSlewMax) cvsRpmSlewMax = slew;
+        }
+        cvsRpmPrev = RPM; cvsRpmPrevMs = nowMs;
+      }
+      uint32_t clampNow = g_fastOvClampCount;
+      if (clampNow != cvsClampPrev) {   // one or more protection rising edges since last tick
+        cvsTrips = (uint16_t)fminf(65535.0f, (float)(clampNow - cvsClamp0));
+        cvsClampPrev = clampNow;
+        if (cvsFirstTripMs == 0) cvsFirstTripMs = nowMs;
+        cvsRecovered = false; cvsP2pDone = false; cvsP2pV = -1.0f;
+        cvsBandSinceMs = 0; cvsReboundArmed = false;
+      }
+      cvsIxTrips = (uint16_t)(g_iExcessCount - cvsIx0);
+      cvsHardCuts = (uint16_t)(g_ovTel.swHardCutCount - cvsSw0);
+      if (fieldCollapseTime != 0 && activeCollapseDelay > cvsMaxLockoutMs) cvsMaxLockoutMs = activeCollapseDelay;
+      if (cvsFirstTripMs != 0) {
+        if (IBV < cvsMinV) cvsMinV = IBV;
+        if (!cvsReboundArmed && IBV < cvStressTargetV - 0.05f * k) cvsReboundArmed = true;
+        if (cvsReboundArmed && IBV - cvStressTargetV > cvsOvershootV) cvsOvershootV = IBV - cvStressTargetV;
+        bool inBand = fabsf(IBV - cvStressTargetV) <= CV_SETTLE_V_THRESH * k;
+        if (inBand) { if (cvsBandSinceMs == 0) cvsBandSinceMs = nowMs; } else if (!cvsRecovered) cvsBandSinceMs = 0;
+        if (!cvsRecovered && cvsBandSinceMs != 0 && (uint32_t)(nowMs - cvsBandSinceMs) >= CVS_SETTLE_MS) {
+          cvsRecovered = true;
+          cvsRecoveryMs = cvsBandSinceMs - cvsFirstTripMs;
+          cvsP2pT0 = nowMs; cvsP2pMin = cvsP2pMax = IBV;
+        }
+        if (cvsRecovered && !cvsP2pDone) {
+          if (IBV < cvsP2pMin) cvsP2pMin = IBV;
+          if (IBV > cvsP2pMax) cvsP2pMax = IBV;
+          if ((uint32_t)(nowMs - cvsP2pT0) >= CVS_P2P_EVAL_MS) { cvsP2pV = cvsP2pMax - cvsP2pMin; cvsP2pDone = true; }
+        }
+      }
+      if (cvStressFinishRequested || elapsed >= CVS_WATCH_MAX_MS) {
+        cvStressFinishRequested = false;
+        cvStressGrade();
+        cvStressPersistResult();
+        cvStressOvActive = false;   // target glides back up to the stage value under vTgtRampUp
+        cvStressActive = false;
+        cvStressPhase = 6;
+        cvsLastEndMs = nowMs;
+      }
+      break; }
+    default: break;
+  }
+}
+
+// /cvstress.json builder — also stamps the poll deadman.
+int cvStressJsonBuild(char *buf, int cap) {
+  cvsLastPollMs = millis();
+  return snprintf(buf, cap,
+                  "{\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"aborted\":%d,\"abort\":\"%s\","
+                  "\"targetV\":%.2f,\"imaxA\":%.1f,\"i80A\":%.1f,\"engTO\":%d,"
+                  "\"trips\":%d,\"ix\":%d,\"hardCuts\":%d,\"lockMs\":%lu,"
+                  "\"peakV\":%.2f,\"minV\":%.2f,\"rpmMax\":%.0f,\"rpmSlew\":%.0f,\"battA\":%.1f,"
+                  "\"outcome\":%d,\"overall\":%d,\"gTrips\":%d,\"gLadder\":%d,\"gRecov\":%d,\"gOver\":%d,\"gP2p\":%d,"
+                  "\"recovMs\":%lu,\"overV\":%.2f,\"p2pV\":%.2f,"
+                  "\"tune\":{\"gainMode\":%d,\"alpha\":%.3f,\"td\":%.2f,\"kp\":%.2f,\"ki\":%.2f,\"kd\":%.1f,\"recovEn\":%d},"
+                  "\"last\":\"%s\"}",
+                  cvStressActive ? 1 : 0, (int)cvStressPhase, cvsReady ? 1 : 0, cvsOk ? 1 : 0, cvsAborted ? 1 : 0, cvStressAbortMsg,
+                  cvStressTargetV, cvsImaxA, cvsI80A, cvsEngageTimedOut ? 1 : 0,
+                  (int)cvsTrips, (int)cvsIxTrips, (int)cvsHardCuts, (unsigned long)cvsMaxLockoutMs,
+                  cvsPeakV, cvsMinV, cvsRpmMax, cvsRpmSlewMax, cvsBattStartA,
+                  (int)cvsOutcome, (int)cvsGOverall, (int)cvsGTrips, (int)cvsGLadder, (int)cvsGRecovery,
+                  (int)cvsGOvershoot, (int)cvsGP2p,
+                  (unsigned long)cvsRecoveryMs, cvsOvershootV, cvsP2pV,
+                  (int)cvGainMode, cvAlpha, CvKdTd, VoltageKp, VoltageKi, VoltageKd, (int)cvRecovEnable,
+                  cvsLastBlob);
 }
 
 // ── Capacity tracker (OCV-anchored) — see Xregulator.ino cap globals + dev doc ──

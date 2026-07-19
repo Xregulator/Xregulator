@@ -950,7 +950,7 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=Thresholds, 7=CV plant fit, 8=finished
+  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=CV plant fit, 7=Field cut, 8=finished
   CSV3_commissionDoneMask,      // per-stage completion bitmask (bit i = stage i done)
   CSV3_cvHelpersEnabled,        // master switch: asymmetric KiDown unwind + slope-aware integrator bleed (1=on)
   CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
@@ -993,6 +993,11 @@ enum Csv3Index {
   CSV3_CvKdMaxTrimA,           // CV D-term back-off ceiling (A ×10); caps kdTrim so a fast rise saturates instead of flooring the field
   CSV3_cvAlpha,                // CV auto-gain aggressiveness α (fraction of the deadbeat-ohmic gain); ×1000
   CSV3_CvKdSlopeCeil,          // CV D-term slope ceiling (V/s 12V-equiv ×10) — max slope the D acts on, class-scaled at use
+  CSV3_cvComputedKd,           // Auto-computed D gain Kd = CvKdTd·cvComputedKp (12V-equiv); ×100
+  CSV3_minPctSystemEnabled,    // Automatic Min% system master toggle (1=learner+calibration available); floor table is always live
+  CSV3_CvKdDbSlope,            // CV D-term deadband line slope (V/s per A ×10000)
+  CSV3_CvKdDbFloor,            // CV D-term deadband line floor (V/s ×100)
+  CSV3_CvKdDbCeil,             // CV D-term deadband line ceiling (V/s ×100)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1127,11 +1132,11 @@ void setupWiFi() {
     setupAccessPoint();
     currentMode = MODE_AP;
     CloudFeatures = 0;
-    if (webFS.exists("/index.html.gz")) {
+    if (webFS.exists("/index.html.br") || webFS.exists("/index.html.gz")) {
       Serial.println("Serving full alternator interface in AP mode");
       setupServer();
     } else {
-      Serial.println("No index.html.gz found - serving basic landing page");
+      Serial.println("No index.html.br/.gz found - serving basic landing page");
       setupCaptivePortalLanding();
     }
     return;
@@ -2330,7 +2335,7 @@ void setupServer() {
   // Active 3-current resonance test points: (rpm, operating current, pk-pk) per window since arm. Small
   // (≤BCUR_RTEST_CAP rows) → plain non-chunked response. Browser fits ripple = a0 + a1·I from these.
   server.on("/bcurrtest.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String out = "rpm,iA,pkpkA,iAltA,pkpkAltA\n";  // iA/pkpkA = battery (INA); iAltA/pkpkAltA = alternator (ADS)
+    String out = "rpm,iA,pkpkA,iAltA,pkpkAltA,slopeVps\n";  // iA/pkpkA = battery (INA); iAltA/pkpkAltA = alternator (ADS); slopeVps = worst positive g_cvKdFiltV slope (D-term deadband)
     uint16_t n = bcurRtestCount; if (n > BCUR_RTEST_CAP) n = BCUR_RTEST_CAP;
     for (uint16_t i = 0; i < n; i++) {
       out += String(bcurRtest[i].rpm);
@@ -2342,6 +2347,8 @@ void setupServer() {
       out += String(bcurRtest[i].iAltX100 / 100.0f, 2);
       out += ',';
       out += String(bcurRtest[i].altPkpkX100 / 100.0f, 2);
+      out += ',';
+      out += String(bcurRtest[i].slopeVpsX1000 / 1000.0f, 3);
       out += '\n';
     }
     AsyncWebServerResponse *response = request->beginResponse(200, "text/csv", out);
@@ -2352,6 +2359,7 @@ void setupServer() {
   // ── Measured ripple projection (§3.3/§4) — the stored per-detector fit for the Protections plot ──
   // ripple(I)=a0+a1·I plus the 3 measured (I, pk-pk) points and the RPM the test ran at. n=0 → no test
   // yet (plot shows the threshold line only). Read on the Protections tab and by the Step-6 review.
+  // "slp" = the same record shape for the CV D-term deadband: worst-positive voltage slope (V/s) vs I.
   server.on("/ripfit", HTTP_GET, [](AsyncWebServerRequest *request) {
     auto j = [](const RipFit &r) {
       String s = "{\"a0\":" + String(r.a0, 4) + ",\"a1\":" + String(r.a1, 5)
@@ -2362,7 +2370,7 @@ void setupServer() {
       s += "]}";
       return s;
     };
-    request->send(200, "application/json", "{\"alt\":" + j(ripFitAlt) + "}");
+    request->send(200, "application/json", "{\"alt\":" + j(ripFitAlt) + ",\"slp\":" + j(slpFitAlt) + "}");
   });
 
   // ── Alternator (charging-system) health v2 — schema + curve + records + trend exports ──
@@ -2699,7 +2707,7 @@ void setupServer() {
     memcpy(state.header + 8,  &kp,        4);
     memcpy(state.header + 12, &ki,        4);
     memcpy(state.header + 16, &interval,  4);
-    memcpy(state.header + 20, &kdDeadband, 4);  // CvKdDeadbandVps (V/s)
+    memcpy(state.header + 20, &kdDeadband, 4);  // CvKdDeadbandVps (V/s) — line BASE only; slope/floor/ceil live in CSV3/config
     memcpy(state.header + 24, &kd,         4);  // VoltageKd (A/(V/s))
     memcpy(state.header + 28, &kdArmV,     4);  // CvKdArmV (V)
     memcpy(state.header + 32, &kdOneSided, 4);  // CvKdOneSided (0/1)
@@ -3211,7 +3219,8 @@ void setupServer() {
                                  : batteryHealthTestActive ? "Battery health test"
                                  : resTestActive ? "Resonance current-check"
                                  : (fieldCurveActive != 0) ? "Field curve"
-                                 : (fieldCutActive != 0) ? "Field cut" : nullptr;
+                                 : (fieldCutActive != 0) ? "Field cut"
+                                 : cvStressActive ? "CV stress test" : nullptr;
       if (sysMode == SYS_MODE_MANUAL) {
         queueConsoleMessage("SystemID: start blocked — not allowed in manual mode (duty is fixed; test cannot drive the field)");
       } else if (!sysidModeOK) {
@@ -3247,6 +3256,20 @@ void setupServer() {
       if (cvpfState == 1) cvpfAbort("cancelled by user");
     }
 
+    // ── CV stress test (commissioning stage 8 / standalone from Diag) ──
+    if (request->hasParam("cvStressStart")) {
+      foundParameter = true;
+      if (!cvStressStartTest()) queueConsoleMessageF("CV stress test: cannot start — %s", cvStressAbortMsg);
+    }
+    if (request->hasParam("cvStressFinish")) {
+      foundParameter = true;
+      if (cvStressActive) cvStressFinishRequested = true;   // consumed (and graded) in cvStress_tick
+    }
+    if (request->hasParam("cvStressCancel")) {
+      foundParameter = true;
+      if (cvStressActive) cvStressAbortRequested = true;
+    }
+
     // ── Auto-commissioning: field-% curve (Phase 1a) ────────────────────────
     if (request->hasParam("startFieldCurve")) {
       foundParameter = true;
@@ -3257,7 +3280,8 @@ void setupServer() {
                          : batteryHealthTestActive ? "Battery health test"
                          : resTestActive ? "Resonance current-check"
                          : (fieldCurveActive != 0) ? "Field curve"
-                         : (fieldCutActive != 0) ? "Field cut" : nullptr;
+                         : (fieldCutActive != 0) ? "Field cut"
+                         : cvStressActive ? "CV stress test" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Field curve: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
@@ -3279,7 +3303,7 @@ void setupServer() {
       queueConsoleMessage("Field curve: abort requested via web UI");
     }
 
-    // ── Auto-commissioning: field de-energize τ (stage 8) ───────────────────
+    // ── Auto-commissioning: field de-energize τ (stage 7) ───────────────────
     if (request->hasParam("fieldCutStart")) {
       foundParameter = true;
       const char *busy = (systemIDActive != 0) ? "Plant Delay test"
@@ -3289,7 +3313,8 @@ void setupServer() {
                          : batteryHealthTestActive ? "Battery health test"
                          : resTestActive ? "Resonance current-check"
                          : (fieldCurveActive != 0) ? "Field curve"
-                         : (fieldCutActive != 0) ? "Field cut" : nullptr;
+                         : (fieldCutActive != 0) ? "Field cut"
+                         : cvStressActive ? "CV stress test" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Field cut: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
@@ -3310,7 +3335,7 @@ void setupServer() {
       queueConsoleMessage("Field cut: abort requested via web UI");
     }
 
-    // ── Min% onset-knee sweep (commissioning) ───────────────────────────────
+    // ── Min% onset-knee sweep (standalone calibration) ──────────────────────
     // Reuses the field-curve ramp in onset-stop mode (stops at first current). Each completed
     // sweep is committed as an anchor; applyKneeCurve fits the Min% column across the anchors.
     if (request->hasParam("startKneeSweep")) {
@@ -3322,9 +3347,10 @@ void setupServer() {
                          : batteryHealthTestActive ? "Battery health test"
                          : resTestActive ? "Resonance current-check"
                          : (fieldCurveActive != 0) ? "Field curve"
-                         : (fieldCutActive != 0) ? "Field cut" : nullptr;
+                         : (fieldCutActive != 0) ? "Field cut"
+                         : cvStressActive ? "CV stress test" : nullptr;
       if (!minPctSystemEnabled) {
-        queueConsoleMessage("Min% floor: system disabled — the field floor is the flat Min Field %.");
+        queueConsoleMessage("Automatic Min% learning is off — enable it to run the Min% floor calibration; the field floor is using the manual RPM table.");
       } else if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Min% knee: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
@@ -3434,18 +3460,15 @@ void setupServer() {
       commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
       commissionSetPhase(0);        // back to Prep (the wizard writes the phase on every step entry)
       commissionMarkStage(0);       // Prep complete: snapshot taken, preconditions checked
-      // Min% floor step (2) is disabled: the floor is the flat scalar MinDuty, nothing to measure — auto-satisfy
-      // its done bit so COMMISSIONED is reachable without it. Re-enabling the system restores it as a real step.
-      if (!minPctSystemEnabled) commissionMarkStage(2);
-      // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (step 3) starts the sweeps clean if it is run.
-      // (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable floors,
-      // which are left intact so a partial re-run that skips Min% keeps its learned floors.)
+      // Wipe the live onset-knee FIT SCRATCH so a later standalone Min% floor calibration starts its
+      // sweeps clean. (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable
+      // floors, which are left intact.)
       kneeAnchorN = 0;
       kneeFitResidPct = -1.0f; kneeFitWorstIdx = -1; kneeFitA = 0.0f; kneeFitC = 0.0f;
       settingsDirty = true;         // push the CSV3 state echo promptly
       queueConsoleMessage("Commissioning: started — settings snapshotted");
     }
-    // Mark one wizard stage complete (i = 0=Prep…8=Field Decay). Sets its done bit and clears
+    // Mark one wizard stage complete (i = 0=Prep…7=Field Decay). Sets its done bit and clears
     // any downstream stage it feeds (coupling: see commissionDependentsMask). Drives the ✓ marks.
     if (request->hasParam("commissionStageDone")) {
       foundParameter = true;
@@ -3667,11 +3690,27 @@ void setupServer() {
       settingWrite(NK_faPeakMinA, String(faPeakMinA, 2).c_str());
     }
     // ---- Auto Min% learning ("knee tracker") knobs ----
+    // Master system toggle: gates the learner + its card + the standalone Min% floor calibration.
+    // The floor TABLE stays live either way (getMinimumFieldForRPM always interpolates it).
+    if (request->hasParam("minPctSystemEnabled")) {
+      foundParameter = true;
+      minPctSystemEnabled = (request->getParam("minPctSystemEnabled")->value().toInt() != 0);
+      settingWrite(NK_minPctSystem, minPctSystemEnabled ? "1" : "0");
+      if (minPctSystemEnabled && kneeLearnEnable) {
+        // Learner machinery comes alive — take ownership of the Min% column from the learned floors.
+        for (int i = 0; i < RPM_TABLE_SIZE; i++) {
+          float f = (i == 0) ? 0.0f : kneeFloor[i];
+          if (f < 0) f = 0; if (f > kneeMaxFloorPct) f = kneeMaxFloorPct;
+          rpmMinDutyTable[i] = f;
+        }
+      }
+      queueConsoleMessageF("Automatic Min%% learning system %s", minPctSystemEnabled ? "enabled" : "disabled");
+    }
     if (request->hasParam("kneeLearnEnable")) {
       foundParameter = true;
       kneeLearnEnable = (request->getParam("kneeLearnEnable")->value().toInt() != 0);
       settingWrite(NK_kneeLearnEnable, kneeLearnEnable ? "1" : "0");
-      if (kneeLearnEnable) {
+      if (minPctSystemEnabled && kneeLearnEnable) {
         // Take ownership of the Min% column immediately from the learned floors (bin 0 always 0%).
         for (int i = 0; i < RPM_TABLE_SIZE; i++) {
           float f = (i == 0) ? 0.0f : kneeFloor[i];
@@ -4036,9 +4075,6 @@ void setupServer() {
       if (pidInitialized) {
         currentPID.SetOutputLimits(MinDuty, MaxDuty);
       }
-      // Min% floor system disabled: keep the RPM-table Min% column tracking the scalar (set 2% -> all bins 2%).
-      if (!minPctSystemEnabled)
-        for (int i = 0; i < RPM_TABLE_SIZE; i++) rpmMinDutyTable[i] = MinDuty;
       queueConsoleMessageF("Min Duty updated to: %.2f%%", MinDuty);
     }
     if (request->hasParam("LimpHome")) {
@@ -5083,13 +5119,11 @@ void setupServer() {
       }
 
       // An RPM breakpoint moved → every learned Min% floor is now keyed to the wrong RPM
-      // (the per-RPM onset-knee fit spans all bins). Wipe the knee tracker entirely and flag the
-      // Min% floor commissioning step (index 2) for re-run, so the floors are re-measured at the
-      // new breakpoints instead of silently re-applied at shifted RPMs.
+      // (the per-RPM onset-knee fit spans all bins). Wipe the knee tracker entirely so the floors are
+      // re-measured at the new breakpoints instead of silently re-applied at shifted RPMs.
       if (rpmPointChanged) {
         kneeLearnResetDefaults();   // zero floors/knees, unfreeze, drop rpmMinDutyTable to 0
-        commissionClearStage(2);    // Min% floor stage now stale (demotes a commissioned device to in-progress)
-        queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor step");
+        queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor calibration");
       }
 
       pendingSaveUserTableEdits = true;  // deferred to Core 1 to avoid SSE gap
@@ -5417,12 +5451,21 @@ void setupServer() {
       ripFitDecode(request->getParam("ripFitAlt")->value(), ripFitAlt);
       settingWrite(NK_ripFitAlt, ripFitEncode(ripFitAlt).c_str());
     }
+    // Measured voltage-slope projection (CV D-term deadband): same record shape, slope points in V/s.
+    // Reference for the deadband card + wizard Set — never moves CvKdDeadbandVps by itself.
+    if (request->hasParam("slpFitAlt")) {
+      foundParameter = true;
+      ripFitDecode(request->getParam("slpFitAlt")->value(), slpFitAlt);
+      settingWrite(NK_slpFitAlt, ripFitEncode(slpFitAlt).c_str());
+    }
     // Resonance current-check (§3.2): arm/disarm field-commanding, and set the commanded level. Disarm
     // also zeroes the target so the loop slews back toward the normal AUTO setpoint gently.
     if (request->hasParam("resTest")) {
       foundParameter = true;
       bool arm = (request->getParam("resTest")->value().toInt() != 0);
-      if (arm) { resTestActive = true; resTestReleasing = false; }
+      if (arm && cvStressActive) {
+        queueConsoleMessage("Resonance current-check: start blocked — CV stress test is active");
+      } else if (arm) { resTestActive = true; resTestReleasing = false; }
       // Release = DEFERRED: keep the field under test-control (OV still suppressed) and let the loop wind the
       // current down to ~0 first; it drops resTestActive itself once the field is down (6_functions.ino), so
       // CV re-enters at low voltage and slews up from below rather than slamming G2 on the transition edge.
@@ -5442,7 +5485,28 @@ void setupServer() {
       inputMessage = request->getParam("CvKdDeadbandVps")->value();
       CvKdDeadbandVps = inputMessage.toFloat();
       settingWrite(NK_CvKdDeadbandVps, String(CvKdDeadbandVps, 3).c_str());
-      queueConsoleMessageF("CV D-term deadband: %.3f V/s", CvKdDeadbandVps);
+      queueConsoleMessageF("CV D-term deadband base: %.3f V/s", CvKdDeadbandVps);
+    }
+    if (request->hasParam("CvKdDbSlope")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvKdDbSlope")->value();
+      CvKdDbSlope = inputMessage.toFloat();
+      settingWrite(NK_CvKdDbSlope, String(CvKdDbSlope, 5).c_str());
+      queueConsoleMessageF("CV D-term deadband slope: %.5f V/s per A", CvKdDbSlope);
+    }
+    if (request->hasParam("CvKdDbFloor")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvKdDbFloor")->value();
+      CvKdDbFloor = inputMessage.toFloat();
+      settingWrite(NK_CvKdDbFloor, String(CvKdDbFloor, 3).c_str());
+      queueConsoleMessageF("CV D-term deadband floor: %.3f V/s", CvKdDbFloor);
+    }
+    if (request->hasParam("CvKdDbCeil")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvKdDbCeil")->value();
+      CvKdDbCeil = inputMessage.toFloat();
+      settingWrite(NK_CvKdDbCeil, String(CvKdDbCeil, 3).c_str());
+      queueConsoleMessageF("CV D-term deadband ceiling: %.3f V/s", CvKdDbCeil);
     }
     if (request->hasParam("CvKdOneSided")) {
       foundParameter = true;
@@ -5493,6 +5557,14 @@ void setupServer() {
       CvKdSlopeCeil = clamp_f(inputMessage.toFloat(), 1.0f, 12.0f);
       settingWrite(NK_CvKdSlopeCeil, String(CvKdSlopeCeil, 1).c_str());
       queueConsoleMessageF("CV D-term slope ceiling: %.1f V/s", CvKdSlopeCeil);
+    }
+    if (request->hasParam("CvKdTd")) {  // CV D derivative time — Auto-mode Kd = Td·Kp
+      foundParameter = true;
+      inputMessage = request->getParam("CvKdTd")->value();
+      CvKdTd = clamp_f(inputMessage.toFloat(), 0.0f, 3.0f);
+      settingWrite(NK_CvKdTd, String(CvKdTd, 2).c_str());
+      recomputeCvGains();  // Td feeds the auto Kd
+      queueConsoleMessageF("CV D-term time Td: %.2f s (Auto Kd = Td x Kp)", CvKdTd);
     }
     if (request->hasParam("TempPIDKp")) {
       foundParameter = true;
@@ -6287,27 +6359,27 @@ void setupServer() {
 
   // Explicit routes for all static web assets — served directly, never hit onNotFound
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!serveCachedGz(request, "/index.html", "text/html"))
+    if (!serveCachedAsset(request, "/index.html", "text/html"))
       request->send(webFS, "/index.html", "text/html");
   });
   server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!serveCachedGz(request, "/index.html", "text/html"))
+    if (!serveCachedAsset(request, "/index.html", "text/html"))
       request->send(webFS, "/index.html", "text/html");
   });
   server.on("/styles.css", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!serveCachedGz(request, "/styles.css", "text/css"))
+    if (!serveCachedAsset(request, "/styles.css", "text/css"))
       request->send(webFS, "/styles.css", "text/css");
   });
   server.on("/uPlot.min.css", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!serveCachedGz(request, "/uPlot.min.css", "text/css"))
+    if (!serveCachedAsset(request, "/uPlot.min.css", "text/css"))
       request->send(webFS, "/uPlot.min.css", "text/css");
   });
   server.on("/uPlot.iife.min.js", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!serveCachedGz(request, "/uPlot.iife.min.js", "application/javascript"))
+    if (!serveCachedAsset(request, "/uPlot.iife.min.js", "application/javascript"))
       request->send(webFS, "/uPlot.iife.min.js", "application/javascript");
   });
   server.on("/script.js", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!serveCachedGz(request, "/script.js", "application/javascript"))
+    if (!serveCachedAsset(request, "/script.js", "application/javascript"))
       request->send(webFS, "/script.js", "application/javascript");
   });
   server.onNotFound([](AsyncWebServerRequest *request) {
@@ -6942,7 +7014,7 @@ void setupServer() {
     request->send(200, "application/json", buf);
   });
 
-  // Field de-energize τ test (commissioning stage 8): filtered decay trace + fitted τ / 90→10 fall
+  // Field de-energize τ test (commissioning stage 7): filtered decay trace + fitted τ / 90→10 fall
   // time. pts.t is ms relative to the detected cut edge (small negative lead-in shows the plateau).
   // The wizard polls this, plots idle vs cruise, and checks the two τ agree (speed-independence).
   // "aborted" reported independently of "active" (same rationale as /fieldcurve.json).
@@ -6981,6 +7053,15 @@ void setupServer() {
              cvpfK * 1000.0f, cvpfKa * 1000.0f, cvpfKb * 1000.0f, cvpfDV * 1000.0f, cvpfDI, cvpfSNR, cvpfHorizonS,
              cvpfKp, cvpfKi, cvpfStepA, cvpfCapHeadroomA, cvpfRpmAtFit, cvpfDiMaxA, (int)cvpfWarn, cvpfAbortMsg);
     request->send(200, "application/json", buf);
+  });
+
+  // CV stress-test status + result (wizard stage 8 and the Diag standalone modal poll this; the
+  // poll itself stamps the browser-alive deadman inside cvStressJsonBuild).
+  server.on("/cvstress.json", HTTP_GET, [](AsyncWebServerRequest *request) {
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(1024), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    cvStressJsonBuild(bufPtr.get(), 1024);
+    request->send(200, "application/json", bufPtr.get());
   });
 
   // CV plant-fit raw trace (offline audit) — chunked so a full buffer never lands in internal RAM.
@@ -8524,7 +8605,7 @@ void SendWifiData() {
   // PRIORITY 5: CSVData3 — sent immediately when settingsDirty (event-driven), or every 60s fallback
   if (!sentSomething && (settingsDirty || now - lastpayload3send >= 60000) && events.count() > 0) {
     static char *payload3 = nullptr;
-    static const size_t PAYLOAD3_SIZE = 3000;  // (342 fields + 1) × 7 = 2401; rounded up to 3000 for wide-field headroom
+    static const size_t PAYLOAD3_SIZE = 3000;  // ~7 chars per field ≈ 2.3k at the current 324 fields; 3000 leaves wide-field headroom (overflow is caught below, not truncated silently)
     if (!payload3) {
       payload3 = (char *)ps_malloc(PAYLOAD3_SIZE);  // allocated to PSRAM
       if (!payload3) {
@@ -8563,7 +8644,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8883,7 +8964,12 @@ void SendWifiData() {
                                (int)commissionManualMask,
                                SafeInt(CvKdMaxTrimA, 10),
                                SafeInt(cvAlpha, 1000),
-                               SafeInt(CvKdSlopeCeil, 10));
+                               SafeInt(CvKdSlopeCeil, 10),
+                               SafeInt(cvComputedKd, 100),
+                               (int)minPctSystemEnabled,
+                               SafeInt(CvKdDbSlope, 10000),
+                               SafeInt(CvKdDbFloor, 100),
+                               SafeInt(CvKdDbCeil, 100));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;
