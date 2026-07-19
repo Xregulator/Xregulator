@@ -748,6 +748,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "CvKdArmV", NK_CvKdArmV, 1 },
   { "CvKdMaxTrimA", NK_CvKdMaxTrimA, 1 },
   { "CvKdVoltFiltTC", NK_CvKdVoltFiltTC, 1 },
+  { "CvKdSlopeCeil", NK_CvKdSlopeCeil, 1 },
   { "TdPred", NK_TdPred, 1 },
   { "KHard", NK_KHard, 1 },
   { "OvGroup1Enable", NK_OvGroup1Enable, 1 },
@@ -1378,8 +1379,8 @@ static const uint32_t CVPF_T_PILOT_MS  = 3000;
 static const uint32_t CVPF_INBAND_MS   = 1000;         // measured-current dwell inside the band that counts as settled
 static const uint32_t CVPF_HOLD_TIMEOUT_MS = 10000;
 static const uint32_t CVPF_PULSE_SEG_MS = 2000;
-static const uint32_t CVPF_EDGE_V0_MS = 150;           // ΔV readout window after an edge: past the field coil's ~65 ms
-static const uint32_t CVPF_EDGE_V1_MS = 250;           //   rise, before the √t soak grows — the ~200 ms ohmic read
+static const uint32_t CVPF_EDGE_V0_MS = 550;           // ΔV readout ~600 ms after the edge — the timescale the CV loop
+static const uint32_t CVPF_EDGE_V1_MS = 650;           //   reacts on; matched pair with cvAlpha. Inside the 2 s pulse hold
 static const float    CVPF_DI_MAX_DEFAULT = 40.0f;     // baseline current-step ceiling; cvpfDiMaxA overrides per-run on a weak-signal re-run
 static const float    CVPF_DI_MAX_CEIL    = 100.0f;    // absolute backstop for the operator-boosted step (cap-table clamp usually binds first)
 static const float    CVPF_CAP_MARGIN_A   = 5.0f;      // keep the commanded step this far under the live cap-table ceiling (g_I_cap)
@@ -1640,7 +1641,7 @@ void cvpfProcess() {
   cvpfRpmAtFit = RPM;
   cvpfCapHeadroomA = fmaxf(0.0f, g_I_cap - cvpfBaseA);   // how much bigger a step the alternator table allows at this RPM
   cvpfOk = true; cvpfState = 2;
-  queueConsoleMessageF("CV plant-fit: ohmic K=%.1f mV/A (median of %d/%d edges) dV=%.0f mV dI=%.2f A SNR=%.0f -> Kp %.1f Ki %.1f warn=%d (%luus)",
+  queueConsoleMessageF("CV plant-fit: K=%.1f mV/A (median of %d/%d edges) dV=%.0f mV dI=%.2f A SNR=%.0f -> Kp %.1f Ki %.1f warn=%d (%luus)",
                        cvpfKa * 1000.0f, nK, (int)cvpfEdgeCount, cvpfDV * 1000.0f, cvpfDI, cvpfSNR, cvpfKp, cvpfKi, (int)cvpfWarn,
                        (unsigned long)(micros() - tP));
 }
@@ -1666,12 +1667,12 @@ bool cvpfStartTest(float diMaxReq) {
   cvpfEdgeCount = 0;
   cvpfPreSetpoint = setpointLimited;
   cvpfAmpsEma = MeasuredAmps; cvpfInBandMs = 0; cvpfSeg = -1;
-  cvpfHorizonS = (CVPF_EDGE_V0_MS + CVPF_EDGE_V1_MS) / 2000.0f;   // the ~0.2 s edge readout (display only)
+  cvpfHorizonS = (CVPF_EDGE_V0_MS + CVPF_EDGE_V1_MS) / 2000.0f;   // the ~0.6 s edge readout (display only)
   cvpfReady = false; cvpfOk = false; cvpfWarn = 0; cvpfAbortMsg = "";
   cvpfK = cvpfDV = cvpfDI = cvpfSNR = 0.0f; cvpfKp = cvpfKi = 0.0f;
   cvpfCcActive = true;
   cvPlantFitActive = true;
-  queueConsoleMessage("CV plant-fit: started (settle -> size -> practice run -> 4 abrupt duty pulses, ~0.2s ohmic read)");
+  queueConsoleMessage("CV plant-fit: started (settle -> size -> practice run -> 4 abrupt duty pulses, ~0.6s stiffness read)");
   return true;
 }
 

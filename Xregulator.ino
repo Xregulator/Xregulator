@@ -1374,7 +1374,7 @@ const int MAX_SAFE_FREQUENCY = 25000;  // Below core loss and EMI concerns
 // duty to it across the open-loop paths (manual/limp/fault) too on >12V banks. The user-visible Max
 // Field box IS the cap; set it to 99 for full duty. A duty-RATIO proxy (no field-current sensor).
 float MaxDuty = 99.0;
-float MinDuty = 1.0;       //33 works on my boat to make sure RPM is always present, may need to make funciton of RPM?? Later
+float MinDuty = 1.0;       // field-duty floor: inner-PID outMin + soft-clamp decay floor. Compile-time default only — overwritten from NVS (voltage-scaled) at boot; per-RPM onset floor lives in rpmMinDutyTable.
 int ManualDutyTarget = 4;  // example manual override value
 int InvertAltAmps = 0;     // change sign of alternator amp reading
 int InvertBattAmps = 0;    // change sign of battery amp reading
@@ -2981,9 +2981,8 @@ uint32_t capLastUpdateEpoch = 0;
 float    capLastPct         = NAN;    // most recent capacity % (display)
 
 // ── CV plant-fit — ohmic-anchor pulse train (spec: CV_Gain_Ohmic_Anchor_Redesign_Spec.md) ──
-// Measures the fast (~200 ms) ohmic stiffness — chemistry-stable, unlike a multi-second chord (mostly √t
-// soak, 2-3× spread across chemistries). Abrupt direct-duty pulses because the inner current PID (~200 ms)
-// is as slow as the window being probed. Fit = per-edge settled ΔV/ΔI, median of 8 edges → cvPlantKa.
+// Abrupt duty pulses; fit = per-edge settled ΔV/ΔI at ~0.6 s (the timescale the CV loop reacts on),
+// median of 8 edges → cvPlantKa.
 struct CvPlantFitSample { uint32_t tMs; float v; float iAlt; float iBat; };  // 16 B; v=IBV iAlt=MeasuredAmps iBat=Bcur
 CvPlantFitSample *cvpfBuf = nullptr;
 int      cvpfBufCap   = 0;
@@ -2994,8 +2993,8 @@ volatile uint8_t cvpfState = 0;           // 0 IDLE, 1 RUNNING, 2 DONE-OK, 3 ABO
 volatile uint8_t cvpfPhase = 0;           // 0 SETTLE, 1 PILOT/SIZE, 2 HOLD (practice run), 3 PULSES, 4 RELEASE (UI progress)
 volatile bool cvpfReady = false;          // a run finished (ok or not) — poller shows result
 volatile bool cvpfOk    = false;          // fit produced a usable gain
-float    cvpfK        = 0.0f;             // V/A — measured fast ohmic stiffness (= Ka; flat curve)
-float    cvpfKa       = 0.0f;             // V/A — median settled ΔV/ΔI over the pulse edges (the ohmic anchor)
+float    cvpfK        = 0.0f;             // V/A — measured ~0.6 s stiffness (= Ka; flat curve)
+float    cvpfKa       = 0.0f;             // V/A — median settled ΔV/ΔI over the pulse edges (the stiffness anchor)
 float    cvpfKb       = 0.0f;             // V/A/√s — retired √t tail; always 0 now (kept for JSON/Apply compat)
 float    cvpfDV       = 0.0f;             // V — median per-edge ΔV
 float    cvpfDI       = 0.0f;             // A — median per-edge settled current step (alt or battery)
@@ -3377,7 +3376,7 @@ uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) —
                                   // device runs the seeded manual gains; 1 = AUTO (ohmic-anchored, Kp = α/K).
                                   // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply (cxCVPlantApply).
 // cvLambdaMult's old CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged.
-// cvPlantKa = measured fast (~200 ms) ohmic stiffness (V/A at the pack), the AUTO anchor (Kp = α/Ka).
+// cvPlantKa = measured ~0.6 s stiffness (V/A at the pack, ohmic + early soak), the AUTO anchor (Kp = α/Ka).
 // Pre-commission default deliberately HIGH: bigger Ka → smaller Kp → gentle until a real measurement lands.
 float   cvPlantKa    = 0.0216f;
 float   cvPlantKb    = 0.0f;      // retired √t tail — always 0; NVS key kept so old exports/POSTs still parse
@@ -3423,7 +3422,7 @@ float   cvComputedKp = 30.0f;     // user-facing (12V-equivalent) gains the Auto
 float   cvComputedKi = 25.0f;
 // CV auto-gain knobs (Tuning ▸ Voltage): Kp = cvAlpha/(cvPlantKa·vNorm), Ki = cvPiZero·Kp. α is
 // dimensionless (fraction of the deadbeat gain 1/K), so one α gives every chemistry the same character.
-float   cvAlpha      = 0.15f;
+float   cvAlpha      = 0.08f;     // matched pair with the ~0.6 s CVPF readout horizon — change only together
 float   cvCrossover  = 0.20f;     // rad/s — retired ω_c input, inert; NVS key + CSV3 slot kept (never repurpose)
 float   cvPiZero     = 0.50f;     // rad/s — PI integral zero ρ; Ki = ρ·Kp
 // Battery-temperature gain derate. Board temp (ambientTemp, °F) is a PROXY for battery temp; as the
@@ -3459,18 +3458,15 @@ volatile float VoltageKi_active = 6.0f;  // DERIVED pack-space Ki the loop uses.
 volatile float VoltageKd_active = 10.0f; // DERIVED pack-space D gain the loop uses (VoltageKd × 12/BATTERY_VOLTAGE × temp derate). Set by recomputeCvGains(), same pipeline as Kp/Ki.
 volatile float VoltageKp = 8.5f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID); from commissioning CV plant fit (K20=32.2 mV/A, 12 V-equiv)
 volatile float VoltageKi = 6.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi; from commissioning CV plant fit. Deferred cv_I anti-windup still open (see CV_Loop_Dev_Summary.md Future Work)
-// CV D term — one-sided, deadbanded derivative on measurement. Subtracted at the Icv output, never
-// from cv_I: the trim is a position recomputed each tick, so it releases the tick the rise stops and
-// leaves the integrator intact. Replaced the integrating slope bleed 2026-07-17, which drained cv_I
-// cumulatively and could not see its own effect through the ~0.6 s actuator lag — it over-dosed 60%
-// and cut current 48 A -> 7.3 A (cvlog_20260715_1409). Bounded by CvKdMaxTrimA so a fast rise saturates
-// the back-off instead of flooring the field. Design + evidence: CV_Approach_Brake_Brainstorm.md.
-float VoltageKd = 10.0f;            // A/(V/s) — D gain, 12V-EQUIVALENT: normalized to VoltageKd_active (×12/Vbatt×derate) at runtime exactly like VoltageKp/Ki, so one number works on 12/24/48 V (do NOT class-scale this at seed). With the cap, Kd only sets the knee: trim hits CvKdMaxTrimA at slope = deadband + cap/Kd (0.50 + 50/10 = 5.5 V/s per cell, on all banks — cap flat + Kd÷V + deadband×V make the knee per-cell-equal), then holds flat. Deliberately low so the back-off is PROPORTIONAL across the real-event band (2–5 V/s) rather than bang-bang at the cap; raise toward ~18 to reach the cap on a hard blip. Cross-checked on cvlog_20260717_1822 (blip 3.28 V/s); Kd alone is not the safety limit — CvKdMaxTrimA is
-float CvKdDeadbandVps = 0.50f;      // V/s — D acts only on rise faster than this. Sits at the 99th pct of settled idle raw-slope ripple (measured 0.50 V/s, cvlog_20260715_1409); below ~0.4 it half-wave-rectifies belt ripple into a DC cut. NOT independent of CvKdOneSided
-bool  CvKdOneSided = false;         // false (default) = TWO-SIDED, quadrant-gated: removes current on a fast rise, and adds current on a fast fall ONLY while below target — that below-target gate is what makes two-sided safe, damping the undershoot ring without the old symmetric-D failure (its lagging window ADDED current at the above-target overshoot crossing and re-lifted the bus). true = remove-only (the earlier default), an A/B fallback
-float CvKdArmV = 1.25f;             // V below live target within which the D term acts; 0 = always on whenever CV is active. Not cosmetic: a sag recovery climbs at 0.5–1.2 V/s, above the deadband, so an always-on D term brakes legitimate recoveries
-float CvKdMaxTrimA = 50.0f;         // A — hard ceiling on the D-term back-off. THIS is the no-field-cut guarantee: an uncapped Kd would command a huge removal and floor the field (the exact torque-step the softener must not cause). Raised 20→50 (2026-07-17): at 20 A the D term saturated on every real event (blip 3.28 V/s × Kd10 = 33 A clamped to 20) and still overshot +0.87 V (cvlog_20260717_1822); 50 A gives the fast-rise brake the authority to drain field before G2, while a cut this size only lands during an RPM surge that already has torque headroom. FLAT amps, voltage-independent (like every amp setting): a per-cell-equivalent overshoot needs the SAME back-off amps on every bank (Kd÷V cancels the ×V slope), so a flat cap keeps the knee per-cell-equal — a ÷V cap would clip the 48 V response to ¼ and make the damper bang-bang. NVH is a torque-RATE issue already bounded by the setpoint slew, not the cap depth; a specific rig can lower this knob
-float CvKdVoltFiltTC = 103.0f;      // ms — dedicated EMA on IBV feeding ONLY the D term's slope (g_cvKdFiltV), so tuning the D-term noise floor never disturbs the shared VoltageFilterTC (stage machine). Default = VoltageFilterTC so behavior is unchanged from the pre-split build. This is a filter on VOLTAGE (before the derivative); NOT the old CvBrakeTauMs, which filtered the SLOPE (after) and was deleted for lagging past the crest
+// CV D term — trim is a position subtracted at the Icv output, never integrated into cv_I, so it
+// releases the tick the rise stops. Replaced the integrating slope bleed (over-dosed via ~0.6 s actuator lag).
+float VoltageKd = 10.0f;            // A/(V/s), 12V-EQUIVALENT (runtime-normalized like Kp/Ki — do NOT class-scale at seed); knee: trim hits CvKdMaxTrimA at slope = cap/Kd
+float CvKdDeadbandVps = 0.50f;      // V/s — hysteretic gate: D off below, FULL slope once past, re-arms at half; 99th pct of idle ripple slope, below ~0.4 belt ripple rectifies into a DC cut
+bool  CvKdOneSided = false;         // false = two-sided: also adds on a fast fall, ONLY below target (that gate is what makes two-sided safe)
+float CvKdArmV = 1.25f;             // V below target within which D acts (0 = always); keeps D off legitimate sag-recovery climbs
+float CvKdMaxTrimA = 50.0f;         // A — hard ceiling on the D back-off (no-field-cut guarantee); FLAT amps on every bank so the knee stays per-cell-equal
+float CvKdVoltFiltTC = 40.0f;       // ms — dedicated EMA on IBV feeding only the D slope (g_cvKdFiltV), separate from VoltageFilterTC; 0 = raw IBV
+float CvKdSlopeCeil = 4.0f;         // V/s (12 V-equiv, class-scaled ×V/12 at use) — max slope the D acts on; the real cap on D depth
 bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "helpers" (asymmetric 7× KiDown unwind + the one-sided D term). ON = both active (reduce overshoot / speed OV recovery). OFF = symmetric plain PI, easier to tune/understand. Does NOT touch real OV protections.
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 // --- FastOV supervisor ---
@@ -3500,7 +3496,7 @@ float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (scale-aware).
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
 float IExcessArmMarginV = 0.100f; // V below target at which iExcess voltage gate opens. Sized to block recovery double-fires (belt-resonance peaks mid-recovery) while keeping real catches (which fire at/above target)
-float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any protection recovery
+float ReseedFrac = 0.75f;  // shared: fraction of pre-event cv_I to seed on any protection recovery
 // --- Anti-windup ---
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
 float AwRecoverRate = 0.1f;      // HARDCODED, not user-adjustable. cv_I_aw_cap recovery rate (fraction of MaxTableValue/s) after fastOV clears. Only exercised on cold CV re-entry (MANUAL→AUTO, idle→bulk, post-shutdown). CSV3 slot CSV3_reserved_AwRecoverRate held for future use.
@@ -3824,6 +3820,14 @@ float defaultMinDutyValues[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0
 //   resistance, ~0.218 %/degF). Battery voltage is deliberately NOT used: its two effects on the
 //   knee (raising the rectifier threshold vs. strengthening the field for the same duty) cancel,
 //   leaving the duty-knee voltage-independent. Full spec: Working Markdown Docs/MinDuty_Knee_Learning.md.
+// Master gate for the whole per-RPM Min% floor system: the onset-floor table (rpmMinDutyTable), the
+// Auto Min% learner, and the commissioning "Min% floor" step. false = system OFF (2026-07-19): the
+// field floor collapses to the flat scalar MinDuty at every RPM (getMinimumFieldForRPM returns MinDuty),
+// the learner stays idle, the RPM-table Min% column mirrors MinDuty, and the wizard does not ask for the
+// Min% floor step (auto-satisfied at Prep). Endgame: promote to a persisted UI toggle above Learning
+// On/Off that also hides the menu and makes the step an on-demand run — see
+// Working Markdown Docs/MinPct_Floor_System_Disable.md.
+bool  minPctSystemEnabled = false;
 float kneeFloor[RPM_TABLE_SIZE]      = { 0 };      // learned floor (raw duty% @ kneeTempRefF); owns rpmMinDutyTable when enabled
 float kneeKnee[RPM_TABLE_SIZE]       = { 0 };      // detected knee (raw duty% @ kneeTempRefF) = floor + margin
 bool  kneeFrozen[RPM_TABLE_SIZE]     = { false };  // true once the knee is found and the floor is locked

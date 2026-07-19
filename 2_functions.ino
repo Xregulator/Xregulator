@@ -323,6 +323,7 @@ bool fsRemove(const char *path) {
 #define NK_CvKdArmV "CvKdArmV"
 #define NK_CvKdMaxTrimA "CvKdMaxTrimA"
 #define NK_CvKdVoltFiltTC "CvKdVoltFiltTC"
+#define NK_CvKdSlopeCeil "CvKdSlopeCeil"
 #define NK_SolarWatts "SolarWatts"
 #define NK_StartupRiseRate "StartupRiseRate"
 #define NK_SwitchControlOverride "SwtchCntrlOvrrd"
@@ -4476,7 +4477,7 @@ static float faAmpsEma = 0.0f, faRpmEma = 0.0f;
 static bool faEmaSeeded = false;
 static float faWinRpmEmaMin, faWinRpmEmaMax;
 static float faWinAmpsEmaMin, faWinAmpsEmaMax;
-static float faWinDAmpMin, faWinDAmpMax;  // decimated-stream extremes → broadband pk-pk
+static float faWinDAmpH1Min, faWinDAmpH1Max, faWinDAmpH2Min, faWinDAmpH2Max;  // per-half decimated extremes → min-of-halves pk-pk (a one-shot lands in one half and is rejected)
 static double faWinAmpsSum = 0.0;
 static bool faWinProtection = false;
 static unsigned long faWinStartMs = 0;
@@ -4680,8 +4681,8 @@ static void faWinReset() {
   faDetFilling = (!faDetBusy && faDetWin != NULL);
   faWinRailed = false;
   faWinProtection = false;
-  faWinRpmEmaMin = faWinAmpsEmaMin = faWinDAmpMin = 1e9f;
-  faWinRpmEmaMax = faWinAmpsEmaMax = faWinDAmpMax = -1e9f;
+  faWinRpmEmaMin = faWinAmpsEmaMin = faWinDAmpH1Min = faWinDAmpH2Min = 1e9f;
+  faWinRpmEmaMax = faWinAmpsEmaMax = faWinDAmpH1Max = faWinDAmpH2Max = -1e9f;
   faWinAmpsSum = 0.0;
   faWinStartMs = millis();
   // (No spectral state to clear — the FFT reads faToneBuf[0..faDecimWinN-1] fresh each window.)
@@ -4826,7 +4827,12 @@ static void faWindowFinalize() {
         int cellIdx = rpmBinLo * FA_AMP_BINS + ampBin;
         FaCell *c = &faMatrix[cellIdx];
         float apvK = faAmpsPerVolt() * 0.001f;
-        float pkpkA = (faWinDAmpMax > faWinDAmpMin) ? (faWinDAmpMax - faWinDAmpMin) * apvK : 0.0f;
+        // Min-of-halves broadband pk-pk: keep the SMALLER of the two half-windows' extremes. A one-shot
+        // transient inflates only one half, so the min stays honest; real ripple (period ≤ quarter-window)
+        // recurs in both. Feeds the map cell AND the worst-ripple hold, so both reject single spikes.
+        float pkH1 = faWinDAmpH1Max - faWinDAmpH1Min;
+        float pkH2 = faWinDAmpH2Max - faWinDAmpH2Min;
+        float pkpkA = (pkH1 >= 0.0f && pkH2 >= 0.0f) ? fminf(pkH1, pkH2) * apvK : 0.0f;
         // pk-pk recent-averaged like the peaks (consistency for drift comparison): windows
         // here is the pre-increment count, so windows+1 is this window's ordinal, capped at N
         float pkMean = c->pkpkAX100 / 100.0f;
@@ -4919,8 +4925,13 @@ static void faProcessDecimated(int16_t dmv) {
   if (faRpmEma > faWinRpmEmaMax) faWinRpmEmaMax = faRpmEma;
   if (faAmpsEma < faWinAmpsEmaMin) faWinAmpsEmaMin = faAmpsEma;
   if (faAmpsEma > faWinAmpsEmaMax) faWinAmpsEmaMax = faAmpsEma;
-  if ((float)dmv < faWinDAmpMin) faWinDAmpMin = (float)dmv;
-  if ((float)dmv > faWinDAmpMax) faWinDAmpMax = (float)dmv;
+  if (faDecimWinN * 2 < FA_WIN_DECIM_N) {   // first vs second half by sample index (crystal-timed, pre-increment)
+    if ((float)dmv < faWinDAmpH1Min) faWinDAmpH1Min = (float)dmv;
+    if ((float)dmv > faWinDAmpH1Max) faWinDAmpH1Max = (float)dmv;
+  } else {
+    if ((float)dmv < faWinDAmpH2Min) faWinDAmpH2Min = (float)dmv;
+    if ((float)dmv > faWinDAmpH2Max) faWinDAmpH2Max = (float)dmv;
+  }
   faWinAmpsSum += ampsNow;
   if (g_loadDumpActive || alarmLatch) faWinProtection = true;  // "no protection active" gate leg
   // Buffer the raw decimated current for this window's flat-top FFT; the window MEAN (not the

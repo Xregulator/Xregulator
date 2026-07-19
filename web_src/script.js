@@ -2547,6 +2547,7 @@ const CSV3_FIELDS = [
     "commissionManualMask",          // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
     "CvKdMaxTrimA",                  // CV D-term back-off ceiling (A ×10)
     "cvAlpha",                       // CV auto-gain aggressiveness α (fraction of deadbeat-ohmic gain); ×1000
+    "CvKdSlopeCeil",                 // CV D-term slope ceiling (V/s 12V-equiv ×10)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5714,6 +5715,7 @@ function updateAllEchosOptimized(data) {
         { key: 'CvKdArmV',              id: 'CvKdArmV_echo',                  transform: v => (v / 100).toFixed(2) },
         { key: 'CvKdMaxTrimA',          id: 'CvKdMaxTrimA_echo',              transform: v => (v / 10).toFixed(1) },
         { key: 'CvKdVoltFiltTC',        id: 'CvKdVoltFiltTC_echo',            transform: v => Math.round(v) },
+        { key: 'CvKdSlopeCeil',         id: 'CvKdSlopeCeil_echo',             transform: v => (v / 10).toFixed(1) },
         { key: 'StartupRiseRate',       id: 'StartupRiseRate_echo',           transform: v => (v / 100).toFixed(2) },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'systemIDTestType',      id: 'systemIDTestType_echo',      transform: v => v == 1 ? 'Sine sweep' : 'Step' },
@@ -6285,7 +6287,7 @@ const BATTDEF_FW_DEFAULT = {
     capSocLowMax: 20, capMinSpan: 70, capRestFloor: 30, capSettleRate: 2.0, bhStepLowA: 30, bhStepDeltaA: 30,
     CvKdDeadbandVps: 0.50, CvKdArmV: 1.25,
     vTgtRampUp: 0.15, vTgtRampDn: 0.15,
-    cvAlpha: 0.15, cvPiZero: 0.5
+    cvAlpha: 0.08, cvPiZero: 0.5
 };
 // Stored NVS string → UI units (everything else is stored in UI units already)
 const BATTDEF_FROM_STORED = {
@@ -6434,7 +6436,7 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
 
     // α/ρ are dimensionless and chemistry-independent (the ohmic anchor carries the per-install
     // variation); proposed so devices tuned under the old crossover rule pick up the current defaults.
-    rows.push({ param: 'cvAlpha', label: 'Voltage Loop Aggressiveness (α)', value: 0.15 });
+    rows.push({ param: 'cvAlpha', label: 'Voltage Loop Aggressiveness (α)', value: 0.08 });
     rows.push({ param: 'cvPiZero', label: 'Voltage Loop Ki/Kp Ratio (ρ)', value: 0.5 });
     return { rows, useFloat };
 }
@@ -11106,7 +11108,7 @@ function gotoRpmTableHighlightFirstAmps() {
 function updateCvGainModeUI(data) {
     if (data.cvGainMode === undefined) return;
     if (data.cvPiZero !== undefined) CV_PI_ZERO = (parseFloat(data.cvPiZero) || 50) / 100;
-    if (data.cvAlpha  !== undefined) CV_ALPHA   = (parseFloat(data.cvAlpha)  || 150) / 1000;
+    if (data.cvAlpha  !== undefined) CV_ALPHA   = (parseFloat(data.cvAlpha)  || 80) / 1000;
     const auto = (parseInt(data.cvGainMode, 10) === 1);
     const autoBlk = document.getElementById('cvAutoBlock');
     const manBlk  = document.getElementById('cvManualBlock');
@@ -11128,7 +11130,7 @@ function updateCvGainModeUI(data) {
             : '<strong>Active gains:</strong> &mdash;';
     }
     // measured ohmic stiffness + computed gains (ohmic-anchor rule): Kp = α/K, Ki = ρ·Kp (12V-equiv space).
-    const K   = (parseFloat(data.cvPlantK) || 0) / 10000;   // V/A — fast (~0.2 s) ohmic stiffness
+    const K   = (parseFloat(data.cvPlantK) || 0) / 10000;   // V/A — ~0.6 s stiffness (ohmic + early soak)
     const valid = (K > 1e-6);
     const sysV  = window._nominalStored || 12;
     const Knorm = K * (12 / sysV);
@@ -11137,7 +11139,7 @@ function updateCvGainModeUI(data) {
     const Kp = g.Kp, Ki = g.Ki;
     const status = document.getElementById('cvFitStatus');
     if (status) status.innerHTML = valid
-        ? `<strong>From commissioning:</strong> battery stiffness ${(K * 1000).toFixed(1)} mV/A (fast ~0.2 s response) &rarr; Kp ${Kp.toFixed(1)} / Ki ${Ki.toFixed(1)} (12 V-equiv)`
+        ? `<strong>From commissioning:</strong> battery stiffness ${(K * 1000).toFixed(1)} mV/A (~0.6 s response) &rarr; Kp ${Kp.toFixed(1)} / Ki ${Ki.toFixed(1)} (12 V-equiv)`
         : 'No fit yet — run the Voltage Control Autotuning step in commissioning. Auto uses safe defaults until then.';
     previewCvAlpha();
     renderBattTempDerate();
@@ -15323,7 +15325,7 @@ const SINFO = {
         ['Signal', 'rate of rise of the smoothed battery voltage — the per-tick slope of the Voltage-sensor-filtered signal; logged as cvDSlope_Vps in the CV log'],
         ['Source', S_INA_V + ', through the Voltage sensor smoothing filter (Tuning → Plant Delay)'],
         ['Compared to', svv('CvKdDeadbandVps_echo', 'V/s') + ' deadband, armed only within ' + svv('CvKdArmV_echo', 'V') + ' below ' + svTargetV()],
-        ['Action', 'trims the current setpoint by ' + svv('VoltageKd_echo', 'A') + ' per V/s beyond the deadband, recomputed each tick and released the instant the slope falls back — removes current on a fast rise, and (two-sided) adds current on a fast fall while below target to damp undershoot'],
+        ['Action', 'once the rate clears the deadband (an on/off gate with hysteresis — re-arms at half), trims the current setpoint by ' + svv('VoltageKd_echo', 'A') + ' per V/s of the FULL rate, recomputed each tick and released when the rate falls back — removes current on a fast rise, and (two-sided) adds current on a fast fall while below target to damp undershoot'],
         ['Capped at', svv('CvKdMaxTrimA_echo', 'A') + ' — the back-off saturates here so a fast rise never floors the field (that torque step is a real protection\'s job, not the softener\'s)'],
     ],
     // ── Live Data ▸ Diag: Overvoltage History (lifetime counters) ──
@@ -19493,6 +19495,10 @@ function computeActionableDisturbance() {
 // slowly changes engine speed when prompted — the regulator drives the field.
 // ============================================================================
 const CX_PHASES = ['Prep', 'Field curve', 'Min% floor', 'Current Control Autotuning', 'Verify Current Control', 'Disturbances', 'Fault Threshold Autotuning', 'Voltage Control Autotuning', 'Field Decay'];
+// Steps the wizard never asks for. Min% floor (2) is disabled — the field floor is the flat scalar Min
+// Field %, and the firmware auto-satisfies this step's done-bit at Prep. Kept in the array (not renumbered)
+// so the endgame can restore it as an on-demand step. Nav skips any disabled step; its checkbox is locked.
+const CX_DISABLED_STEPS = new Set([2]);
 let cx = null;             // orchestrator state object; persists across panel close (in-session resume)
 let cxPollTimer = null;
 let cxHeartbeatTimer = null;   // pings commissionHeartbeat while the modal is open (firmware idle-rest hold)
@@ -19508,7 +19514,7 @@ function cxFieldArm() { return ++cxFieldEpoch; }
 // cxPlan[i] = run stage i in the next/active wizard pass (0=Prep … 7=CV plant fit). Prep (0) is
 // ALWAYS run (it snapshots the tune for safe revert + checks preconditions), so it stays true and
 // its checkbox is disabled. The wizard navigation skips any stage left false.
-let cxPlan = [true, true, true, true, true, true, true, true, true];
+let cxPlan = [true, true, false, true, true, true, true, true, true];   // idx 2 (Min% floor) disabled — see CX_DISABLED_STEPS
 // Coupling: (re)running a stage invalidates the downstream stages it feeds, so selecting one
 // force-selects them. Field curve(1) → Plant fit(3)+Verify(4)+CV plant fit(7); Plant fit(3) →
 // Verify(4)+CV plant fit(7); Verify(4) → CV plant fit(7); Disturbances(5) → Thresholds(6).
@@ -19552,11 +19558,12 @@ function cxApplyDeps() {
 function cxDefaultPlanFromMask(mask) {
     const ALL = (1 << CX_PHASES.length) - 1;   // 0x1FF for 9 stages
     const allDone = (mask & ALL) === ALL;
-    for (let i = 0; i < CX_PHASES.length; i++) cxPlan[i] = (i === 0) ? true : (allDone ? true : !(mask & (1 << i)));
+    for (let i = 0; i < CX_PHASES.length; i++) cxPlan[i] = (i === 0) ? true : CX_DISABLED_STEPS.has(i) ? false : (allDone ? true : !(mask & (1 << i)));
     cxApplyDeps();
 }
 // Checkbox handlers (Commissioning tab). Prep can't be unchecked; selecting a step pulls in deps.
 function cxToggleStage(i, on) {
+    if (CX_DISABLED_STEPS.has(i)) return;   // disabled step — not selectable
     cxPlanUserSet = true;
     cxPlan[i] = on || i === 0;
     if (cxPlan[i]) cxApplyDeps();
@@ -19816,7 +19823,7 @@ function cxFinePrint(phase) {
     case 4: return 'Closed-loop check: drives the target current as a sine from slow to fast and measures overshoot (peak gain ≤ 1.15, or it rings toward over-voltage) and speed (bandwidth, want ≥ 5× the voltage loop’s speed, derived from the CV gain settings), on alternator current. It sweeps past the speed the loop can follow on purpose — the response getting small and ragged at the top end is how the bandwidth is found, not a bad reading. Eyeball the raw sweep on the Current Control plot before accepting.';
     case 5: return 'Records the low-frequency disturbance at each engine speed into a map; you can stop as soon as the worst-ripple speed is pinned down and no unswept gap could hide a bigger peak — no need to cover every speed. During the sweep the wizard holds the alternator at a <strong>fixed test current</strong> (25% of your RPM/Amps table max) and captures the <strong>measured filtered ripple</strong> (the same IExcessTau-averaged signal each over-current detector trips on) per RPM bin, for both the alternator and battery detectors — a value only commits when two readings at that speed agree, so a throttle transient can\'t poison the table. The optional current-check then commands 3 current levels at the worst-ripple RPM and fits ripple = a0 + a1·I per detector. This produces the <strong>measured-ripple projection</strong> only — it never sets a threshold. Review it against your settings in the next step and on the Protections ripple plots.';
     case 6: return 'Sets the over-current trip line from the ripple measured in Step 6. The trip line is <code>Slope·current + CV base</code>, floored and capped: Slope is set to the measured ripple slope and CV base to ripple-at-idle + the Safety Margin, so the line runs parallel to the ripple that margin above it. The CC (current-limited) line runs the same slope, the CC offset above CV. Any current where the ripple would cross the line is shaded red. These are the exact G3 settings on Settings ▸ Alternator ▸ Protections — editing here writes them live. No fit yet (Step 6 skipped) → set them by hand.';
-    case 7: return 'Measures how stiff the battery is — how many millivolts it moves per amp — at the <strong>voltage loop\'s own fast (~0.2 s) reaction timescale</strong>, the number that is stable across battery chemistries (a multi-second reading is mostly slow diffusion "soak" and swings 2–3× between lithium, AGM and flooded banks). The wizard settles at a baseline current, sizes a safe test step (auto-reduced if the bank nears its over-voltage ceiling), runs a practice hold through the current loop to learn the two field settings, then fires <strong>4 abrupt field pulses</strong> and reads the settled voltage change 150–250 ms after each edge against the settled current change — median over the 8 edges, so a disturbed edge is thrown out instead of biasing the result. Measured at the battery shunt, or at the alternator sensor when no shunt is fitted (with loads held steady the two are equal). The gains follow as <strong>Kp = α ÷ stiffness</strong>, <strong>Ki = ρ × Kp</strong>, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
+    case 7: return 'Measures how stiff the battery is — how many millivolts it moves per amp — at the <strong>voltage loop\'s own (~0.6 s) reaction timescale</strong>, so the loop\'s stability margin comes out the same on any battery (a multi-second reading is mostly slow diffusion "soak" and swings 2–3× between lithium, AGM and flooded banks). The wizard settles at a baseline current, sizes a safe test step (auto-reduced if the bank nears its over-voltage ceiling), runs a practice hold through the current loop to learn the two field settings, then fires <strong>4 abrupt field pulses</strong> and reads the settled voltage change 550–650 ms after each edge against the settled current change — median over the 8 edges, so a disturbed edge is thrown out instead of biasing the result. Measured at the battery shunt, or at the alternator sensor when no shunt is fitted (with loads held steady the two are equal). The gains follow as <strong>Kp = α ÷ stiffness</strong>, <strong>Ki = ρ × Kp</strong>, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
     case 8: return 'Measures how long the field takes to drain once cut: the current loop ramps to the commissioned test level, the duty is frozen 5 s for a settled baseline, then the field steps to the exact floor a real over-voltage cut drives to (Min Duty) and holds 10 s while the full decay is recorded on the 20 kHz current channel (calibrated against the precision sensor over matched multi-second windows during the same run). The stored number is the measured time from the moment the field is commanded off until output falls to 10% of its pre-cut level — read directly off the trace, no model, stored as measured; the fitted time constant (τ = L/R, from a straight-line fit of the log of the mid-decay) is reported alongside as a cross-check (drain ≈ 2.3τ for a clean coil). Engine speed cannot affect a coil constant — two different cruising speeds are run to prove that (idle is skipped: belt and tach ripple at low RPM contaminate the trace), with a median-of-three tiebreaker if they disagree — and the tach gates are suspended during the run (the cut corrupts the tach signal briefly). The over-voltage response holds a field cut at least the stored time before treating the coil as drained. Field at the cut floor cannot over-volt, so the test is inherently safe.';
     default: return '';
   }
@@ -20572,16 +20579,20 @@ function cxDrawBode(pts) {
             // a full decade past a ~15 Hz sweep would blank most of the plot.
             const decLo = Math.pow(10, Math.floor(Math.log10(f0)));
             const hiTick = [1, 2, 3, 5, 10, 20, 30, 50, 100].find(v => v >= fN) || fN * 1.15;
+            // Standard log minor ticks: 1..9 in every decade the range spans. Their bunching toward each
+            // decade is the log-axis tell — no hand-picked subset needed.
+            const logTicks = [];
+            for (let e = -2; e <= 3; e++) for (let k = 1; k <= 9; k++) logTicks.push(k * Math.pow(10, e));
+            const isDecade = v => Math.abs(Math.log10(v) - Math.round(Math.log10(v))) < 1e-6;
             const mkXScale = () => ({ distr: 3, range: () => [decLo, hiTick] });
             const mkXAxis = (label) => ({ scale: 'x', grid: { show: true, stroke: '#333' }, stroke: '#8a8a8a', font: '11px sans-serif',
                 label: label, labelSize: label ? 24 : undefined, labelFont: '600 11px sans-serif',
-                splits: (u, ax, mn, mx) => [0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5, 10, 20, 50].filter(v => v >= mn && v <= mx),
-                // log axis (distr:3): grid lines are drawn for every split, but the default filter labels only the
-                // decades (1, 10) — too sparse to read a bandwidth off. Label a curated half-decade subset instead;
-                // it stays legible down to 320px mobile width because only 0.1/0.3/1/3/10 ever fall in the swept range.
-                filter: (u, s) => s.map(v => ([0.1, 0.3, 1, 3, 10, 30, 100].indexOf(v) >= 0 ? v : null)),
-                // don't .toFixed() a null (a filtered-out tick) — that throws inside draw → blank canvas
-                values: (u, s) => s.map(v => v == null ? null : (v >= 1 ? String(Math.round(v)) : String(+v.toFixed(1)))) });
+                splits: (u, ax, mn, mx) => logTicks.filter(v => v >= mn * 0.999 && v <= mx * 1.001),
+                // gridlines at every minor tick; labels only on the decades (0.1/1/10) so the numbers stay
+                // uncluttered and legible down to 320px mobile width.
+                filter: (u, s) => s.map(v => isDecade(v) ? v : null),
+                // don't format a null (a filtered-out tick) — that throws inside draw → blank canvas
+                values: (u, s) => s.map(v => v == null ? null : (v >= 1 ? String(Math.round(v)) : String(+v.toPrecision(1)))) });
             const common = { cursor: { drag: { x: false, y: false } }, legend: { show: false } };
 
             // uPlot draws one uniform grid stroke for every split, so major and minor lines look identical.
@@ -20799,16 +20810,16 @@ function cvFitOnCsv1(data) {
 // CV gain mirrors of the device settings cvAlpha/cvPiZero — refreshed from the CSV3 echo in
 // updateCvGainModeUI() so previews match what the device will apply.
 let CV_PI_ZERO     = 0.50;   // ρ, rad/s — PI integral zero; Ki = ρ·Kp
-let CV_ALPHA       = 0.15;   // α — aggressiveness, fraction of the deadbeat-ohmic gain
+let CV_ALPHA       = 0.08;   // α — aggressiveness, fraction of the deadbeat-ohmic gain
 // Same math as firmware recomputeCvGains(): Kp = α/Knorm, Ki = ρ·Kp from the un-clamped Kp, then clamp.
 function cvGainsFromKnorm(Knorm, alpha, rho) {
-    alpha = alpha || 0.15; rho = rho || 0.50;
+    alpha = alpha || 0.08; rho = rho || 0.50;
     const Kp = alpha / Knorm;
     return { Kp: Math.min(120, Math.max(2, Kp)), Ki: Math.min(80, Math.max(1, rho * Kp)) };
 }
 // CV-loop crossover implied by the live gains: with P≈K and C=Kp(1+ρ/s), |CP|=1 lands at ω≈α·ρ (the plant
 // cancels); ×2 covers the diffusion lift of |P| at low frequency. Used by the CC-verify separation gate.
-function cvLoopOmega() { return 2 * (CV_ALPHA || 0.15) * (CV_PI_ZERO || 0.5); }
+function cvLoopOmega() { return 2 * (CV_ALPHA || 0.08) * (CV_PI_ZERO || 0.5); }
 
 // Weak-signal remedy panel (big/stiff bank absorbed the test) — offers a stronger, cap-table-bounded re-run,
 // tells the operator the RPM to run, and spells out the cost of keeping the rough reading.
@@ -20847,7 +20858,7 @@ function cxRenderCVPlant(b) {
                 ? '<br><span style="color:#f0a500;">Heads up (you can still Apply):<br>• ' + f.warns.join('<br>• ') + '</span>'
                 : (f.remedy ? '' : '<br>Data is valid.');
             body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
-                'Measured battery stiffness <strong>' + (f.K20 * 1000).toFixed(1) + ' mV/A</strong> at the loop\'s fast (~0.2 s) reaction timescale. ' +
+                'Measured battery stiffness <strong>' + (f.K20 * 1000).toFixed(1) + ' mV/A</strong> at the loop\'s (~0.6 s) reaction timescale. ' +
                 'Proposed <strong>Kp ' + f.Kp.toFixed(1) + '</strong>, <strong>Ki ' + f.Ki.toFixed(1) + '</strong> (12 V-equiv).' +
                 concerns +
                 (cx.cvApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>' +
@@ -21210,7 +21221,7 @@ function cxCVFitLog(f, m) {
     if (!f || !f.ok) {
         L.push('CVfit: no usable result — ' + (f ? f.reason : 'no fit'));
     } else {
-        L.push('CVfit: ohmic K = ' + (f.K20 * 1000).toFixed(1) + ' mV/A (settled ΔV/ΔI at ~' + (f.horizonS != null ? f.horizonS.toFixed(1) : '0.2') + 's, median over pulse edges)  Kp ' + f.Kp.toFixed(1) + '  Ki ' + f.Ki.toFixed(1) + ' (12V-equiv)');
+        L.push('CVfit: K = ' + (f.K20 * 1000).toFixed(1) + ' mV/A (settled ΔV/ΔI at ~' + (f.horizonS != null ? f.horizonS.toFixed(1) : '0.6') + 's, median over pulse edges)  Kp ' + f.Kp.toFixed(1) + '  Ki ' + f.Ki.toFixed(1) + ' (12V-equiv)');
         L.push('CVfit: ΔV ' + (f.achievedDV * 1000).toFixed(0) + ' mV  ΔI ' + (f.dIalt != null ? f.dIalt.toFixed(1) : '?') + ' A  SNR ' + (f.snr != null ? f.snr.toFixed(0) : '?') + '×');
         const wl = f.warnsLog || f.warns; if (wl && wl.length) L.push('CVfit: advisories — ' + wl.join(' | '));
     }
@@ -21806,7 +21817,7 @@ function cxGameRipDraw() {
 //   undefined→'checking'→ 'none' (no ripple, silent) | 'idle' (Ready) → 'leveling' (3 commanded steps)
 //   → 'done' (fit) | 'failed'. REQUIRES the matching firmware (resTest/bcurRtest) flashed.
 const CX_RT_BAND = 150;    // ± RPM considered "in range" (green)
-const CX_RT_MIN_WINS = 5;  // captured ring windows (~2 s each) required before Record unlocks — counts real admissions off /bcurrtest.csv, not a blind timer
+const CX_RT_MIN_WINS = 3;  // captured ring windows (~2 s each) required before Record unlocks — counts real admissions off /bcurrtest.csv, not a blind timer. 3 = min for a median-of-3 fit point (rejects one outlier); each level's point is a median so more windows only tighten the mean, they aren't needed for correctness
 function cxRtestPanel() {
     if (cx.rtestState === undefined) { cx.rtestState = 'checking'; cxRtestInit(); return '<div style="margin:10px 0;color:#4a9eff;">Checking for resonance…</div>'; }
     if (cx.rtestState === 'checking') return '<div style="margin:10px 0;color:#4a9eff;">Checking for resonance…</div>';
@@ -22472,8 +22483,11 @@ function renderCommissionStatus(state, phase, mask, manual) {
             // "Current" = the step the wizard is on. Done always wins, so a finished current step shows ✓.
             const current = (state === 1) && (i === phase) && (phase < COMMISSION_STEPS.length) && !done;
             const prep = (i === 0);
-            const cbAttrs = (cxPlan[i] ? 'checked ' : '') + (prep ? 'disabled ' : '');
-            const cbTitle = prep ? 'Prep always runs (snapshot + preconditions)' : 'Run this step in the next commissioning pass';
+            const locked = prep || CX_DISABLED_STEPS.has(i);
+            const cbAttrs = (cxPlan[i] ? 'checked ' : '') + (locked ? 'disabled ' : '');
+            const cbTitle = prep ? 'Prep always runs (snapshot + preconditions)'
+                          : CX_DISABLED_STEPS.has(i) ? 'Not part of setup — the field floor uses your Min Field % value'
+                          : 'Run this step in the next commissioning pass';
             // Status badge sits at the RIGHT of the row (not between the checkbox and the name) so a
             // completed step is unmistakable next to the run checkboxes. Big bold ✓ DONE when complete;
             // ▶ RUNNING while the wizard is open on this step, ▶ RESUME when paused (modal closed); ○ otherwise.

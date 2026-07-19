@@ -4244,7 +4244,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>CV Gain Source (<span id="cvGainMode_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto</strong> computes them from the battery stiffness measured by the Voltage Control Autotuning step — the fast (~0.2 s) voltage-per-amp response, which is stable across battery chemistries — via <strong>Kp = α ÷ stiffness</strong>, <strong>Ki = ρ × Kp</strong>, where α (Aggressiveness) and ρ (Ki/Kp ratio) are the two knobs below. <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto</strong> computes them from the battery stiffness measured by the Voltage Control Autotuning step — the ~0.6 s voltage-per-amp response, measured at the timescale the voltage loop actually reacts on — via <strong>Kp = α ÷ stiffness</strong>, <strong>Ki = ρ × Kp</strong>, where α (Aggressiveness) and ρ (Ki/Kp ratio) are the two knobs below. <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4276,7 +4276,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between; font-size:0.9em; opacity:0.85; line-height:1.5;">
                       <span id="cvFitStatus">No fit yet — run the Voltage Control Autotuning step in commissioning. Auto uses safe defaults until then.</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">What the Voltage Control Autotuning step measured at commissioning: the battery's fast (~0.2 s) voltage-per-amp stiffness, from which Auto derives Kp = α ÷ stiffness, Ki = ρ × Kp. These are the <strong>base design gains at the commissioning temperature</strong> — before any temperature correction. Auto runs these (temperature-corrected) as the <strong>Active gains</strong> above. Re-run the Voltage Control Autotuning step to update the stiffness.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">What the Voltage Control Autotuning step measured at commissioning: the battery's ~0.6 s voltage-per-amp stiffness, from which Auto derives Kp = α ÷ stiffness, Ki = ρ × Kp. These are the <strong>base design gains at the commissioning temperature</strong> — before any temperature correction. Auto runs these (temperature-corrected) as the <strong>Active gains</strong> above. Re-run the Voltage Control Autotuning step to update the stiffness.</span></span>
                     </div>
                   </div>
 
@@ -4284,7 +4284,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                       <span>CV Aggressiveness (α) (<span id="cvAlpha_echo">?</span>):<span id="cvAlphaPreview" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">&nbsp;</span></span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">With CV Gain Source = Auto, how strongly the voltage loop corrects, as a fraction of the theoretical one-shot ("deadbeat") correction: <strong>Kp = α ÷ measured battery stiffness</strong>, with the stiffness measured at the loop's own fast (~0.2 s) reaction timescale by Voltage Control Autotuning. That fast stiffness is stable across battery chemistries, so the same α gives every bank the same character — lower is gentler and more damped, higher corrects harder at the cost of overshoot risk. Response time is an outcome of this setting (typically a few seconds), not a separate input. Calculated from the stored measurement, so no re-commission is needed after adjustment.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">With CV Gain Source = Auto, how strongly the voltage loop corrects, as a fraction of the theoretical one-shot ("deadbeat") correction: <strong>Kp = α ÷ measured battery stiffness</strong>, with the stiffness measured at the loop's own (~0.6 s) reaction timescale by Voltage Control Autotuning. Measuring at that timescale keeps the loop's stability margin battery-independent, so the same α gives every bank the same character — lower is gentler and more damped, higher corrects harder at the cost of overshoot risk. Response time is an outcome of this setting (typically a few seconds), not a separate input. Calculated from the stored measurement, so no re-commission is needed after adjustment.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4388,7 +4388,7 @@
                       <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
                       <span id="CvKdDeadbandVps_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak rise rate: —</span>
                     </span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The D term ignores any rise — or, below target, any fall — slower than this, acting only on the excess beyond it. Sized above belt ripple and resonance wobble (which swing the per-tick slope up and down around zero) so those cancel and only a genuine climb or drop counts. It also keeps belt ripple and resonance from rectifying into a steady trim on either side. Lower catches gentler approaches but eats into ripple margin; higher hands more of the events to the hard protections. The live readout below is the worst rise rate seen in the last 10 seconds — this installation's own floor.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The on/off gate for the D term: it ignores any rise — or, below target, any fall — slower than this. Once the rate clearly passes it, the D term acts on the <strong>full</strong> rate (not just the excess beyond the gate), so a genuine transient gets full strength immediately; it then stays engaged until the rate falls back below half this value, so ripple flickering across the edge cannot rapidly toggle it. Sized above belt ripple and resonance wobble (which swing the per-tick slope up and down around zero) so those cancel and only a genuine climb or drop counts. Lower catches gentler approaches but eats into ripple margin; higher hands more of the events to the hard protections. The live readout below is the worst rise rate seen in the last 10 seconds — this installation's own floor.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4445,12 +4445,29 @@
                     <span>Max Back-Off (A) (<span id="CvKdMaxTrimA_echo">?</span>)
                       <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
                     </span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard ceiling on how many amps the D term may remove. The back-off ramps up with rise rate but never exceeds this, so a genuinely fast rise is softened rather than cut to the field-off torque step this softener exists to avoid. The back-off reaches this cap at a rise rate of Deadband + (this ÷ Kd) and holds flat above it. If a rise is fast enough to need more than this, that is the overvoltage protections' job, by design. <strong>Flat amps — voltage-independent</strong>, like every other current setting: the back-off needed to arrest an equivalent overshoot is the same amps on any bank, so a flat cap keeps the damper behaving the same on 12/24/48 V. It is a total-depth limit, not a rate limit — how fast the field is pulled back is bounded separately by the setpoint slew rate.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard ceiling on how many amps the D term may remove. The back-off ramps up with rise rate but never exceeds this, so a genuinely fast rise is softened rather than cut to the field-off torque step this softener exists to avoid. The back-off reaches this cap at a rise rate of (this ÷ Kd) and holds flat above it. If a rise is fast enough to need more than this, that is the overvoltage protections' job, by design. <strong>Flat amps — voltage-independent</strong>, like every other current setting: the back-off needed to arrest an equivalent overshoot is the same amps on any bank, so a flat cap keeps the damper behaving the same on 12/24/48 V. It is a total-depth limit, not a rate limit — how fast the field is pulled back is bounded separately by the setpoint slew rate.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="CvKdMaxTrimA" type="number" step="1" min="0" max="200" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Slope Ceiling (V/s) (<span id="CvKdSlopeCeil_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The fastest voltage rise the back-off reacts to — anything faster is treated as this rate, so together with Kd this sets the deepest back-off a rise can command. Raising it lets the D term pull more current on very fast rises before the overvoltage protections take over; too high makes it twitchy. Entered as a 12 V value and scaled automatically on 24 / 48 V banks.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="CvKdSlopeCeil" type="number" step="0.5" min="1" max="12" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>

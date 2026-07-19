@@ -142,12 +142,11 @@ float computeCvTempScale() {
 // the final multiplier in BOTH modes (the plant shifts with temperature however the gains were chosen).
 void recomputeCvGains() {
   float vNorm = 12.0f / (float)BATTERY_VOLTAGE;     // 1, 0.5, 0.25 for 12/24/48 V
-  cvPlantK = cvPlantKa;                             // the ~200 ms ohmic anchor; the √t-tail (cvPlantKb) is retired
+  cvPlantK = cvPlantKa;                             // the ~0.6 s stiffness anchor; the √t-tail (cvPlantKb) is retired
   bool plantValid = (cvPlantK > 1e-6f);
   float kpNorm, kiNorm;                             // 12V-equivalent gains (what the user sees)
   if (cvGainMode == 1 && plantValid) {
-    // AUTO: Kp = α/K anchored to the ~200 ms ohmic stiffness (chemistry-stable; a multi-second chord is
-    // mostly √t soak and swings 2-3× across chemistries). Response time is an outcome, not an input.
+    // AUTO: Kp = α/K anchored to the ~0.6 s stiffness — the timescale the loop reacts on
     float Knorm = cvPlantK * vNorm;                 // V per 12V-equivalent, per A
     kpNorm = cvAlpha / Knorm;
     kiNorm = cvPiZero * kpNorm;                     // Ki = ρ · Kp (from the UN-clamped Kp, then clamp both)
@@ -2893,7 +2892,7 @@ void AdjustFieldLearnMode() {
 
               if (!iExBulkActive && mExcessEmaBulk > E) {
                 cv_I_aw_cap = cv_I;         // cap bumpless tracker ceiling to pre-event level
-                g_iExcessCount++;           // shared iExcess trip counter (Group 3 alternator + Group 4 battery)
+                g_iExcessCount++;           // shared iExcess trip counter — CV + Bulk detectors, both alternator-current (no battery-domain detector feeds it)
                 currentPID.ResetIntegratorTo(0.0);
                 queueConsoleMessageF("iExcess (bulk) #%lu: excess=%.1fA over %.1fA ceiling — inner PID integrator reset",
                                      (unsigned long)g_iExcessCount, mExcessEmaBulk, i_ceiling_pre_ov);
@@ -3409,23 +3408,19 @@ void AdjustFieldLearnMode() {
         if (voltageControlActive) {
           bool cvLoopFired = enteringCV || ((currentMillis - lastVoltageLoopMs) >= VoltageLoopInterval);
 
-          // ===== CV D term — sliding-window derivative, recomputed EVERY output-current tick =====
-          // The slope is a backward difference over a ~VoltageLoopInterval window, but the window slides
-          // off a ring of g_cvKdFiltV samples every tick instead of stepping only at the 100 ms PI fire.
-          // Same window = same noise floor; refreshing every tick cuts the damper's detection latency from
-          // up to one PI interval to one output tick — the phase lag a D term exists to remove. kdTrim is a
-          // POSITION (VoltageKd_active × slope excess, one-sided, capped) held in g_cvKdTrimLive and
-          // subtracted at the Icv output; it never integrates into cv_I. Runs BEFORE the PI block so that
-          // block's anti-windup and the recovery starve-exit both read this tick's fresh slope/trim.
-          // VoltageKd_active is the normalized D gain (×12/Vbatt×derate, like Kp/Ki); the flat CvKdMaxTrimA
-          // keeps the saturation knee per-cell-equal on 12/24/48 V.
+          // ===== CV D term — sliding-window derivative, recomputed every output tick =====
+          // kdTrim is a POSITION (VoltageKd_active × full slope, deadband-latch gated, capped), subtracted
+          // at the Icv output, never integrated into cv_I. Runs BEFORE the PI block so its anti-windup and
+          // the recovery starve-exit read this tick's fresh slope/trim.
           {
             static const uint8_t KDBUF_N = 64;         // spans a 100 ms window down to ~1.5 ms/tick
             static uint32_t kdBufT[KDBUF_N];
             static float    kdBufV[KDBUF_N];
             static uint8_t  kdBufN = 0, kdBufHead = 0;
+            static bool kdOutUp = false, kdOutDn = false;   // deadband-latch state
             if (enteringCV) {
               kdBufN = 0; kdBufHead = 0;
+              kdOutUp = false; kdOutDn = false;
               cvDSlope = 0.0f; g_cvKdTrimLive = 0.0f; g_kdTrimThisTick = 0.0f;  // no stale slope/trim across a CV re-entry
             }
             kdBufT[kdBufHead] = currentMillis;
@@ -3453,10 +3448,17 @@ void AdjustFieldLearnMode() {
               // CV entry) still holds cvDSlope at 0 until a real window exists.
               if (!spanned && kdBufN >= KDBUF_N && oldestAge > 0) { vOld = vOldest; oldAge = oldestAge; spanned = true; }
               if (spanned && oldAge > 0) {
-                float slopeCeil = 4.0f * ((float)BATTERY_VOLTAGE / 12.0f);  // 48 V slopes reach ~4× the 12 V ceiling
+                float slopeCeil = CvKdSlopeCeil * ((float)BATTERY_VOLTAGE / 12.0f);  // stored 12 V-equiv, scaled ×V/12
                 cvDSlope = constrain((g_cvKdFiltV - vOld) / ((float)oldAge / 1000.0f), -slopeCeil, slopeCeil);
                 rollUpdate(ROLL_CVSLOPE, cvDSlope);   // D-term deadband-tuning readout (10 s peak raw rise)
               }
+              // Deadband is a hysteretic gate, not a subtraction: full slope once clearly past it,
+              // re-arm at half so ripple flickering across the edge can't jab the field. Latches track
+              // the slope every tick — outside the arm gate too — so a re-arm never acts on stale state.
+              if (cvDSlope >  CvKdDeadbandVps)             kdOutUp = true;
+              else if (cvDSlope <  0.5f * CvKdDeadbandVps) kdOutUp = false;
+              if (cvDSlope < -CvKdDeadbandVps)             kdOutDn = true;
+              else if (cvDSlope > -0.5f * CvKdDeadbandVps) kdOutDn = false;
               // Held off while any step/probe test owns the field (a mid-probe trim corrupts plant fits)
               // and under cvHelpersEnabled so OFF gives clean symmetric PI for tuning.
               bool fitProbeActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
@@ -3464,13 +3466,13 @@ void AdjustFieldLearnMode() {
               if (cvHelpersEnabled && !fitProbeActive
                   && (CvKdArmV <= 0.0f || (voltageTargetSlewed - g_cvKdFiltV) < CvKdArmV)) {
                 float slopeExcess = 0.0f;
-                if (cvDSlope > CvKdDeadbandVps) {
-                  slopeExcess = cvDSlope - CvKdDeadbandVps;              // fast rise → remove current
-                } else if (!CvKdOneSided && cvDSlope < -CvKdDeadbandVps
+                if (kdOutUp && cvDSlope > 0.0f) {
+                  slopeExcess = cvDSlope;                                // brake: full slope
+                } else if (!CvKdOneSided && kdOutDn && cvDSlope < 0.0f
                            && (voltageTargetSlewed - g_cvKdFiltV) > 0.0f) {
                   // two-sided add: only when BELOW target — damps the undershoot ring without
                   // re-lifting an above-target overshoot (the old symmetric-D failure was adding here)
-                  slopeExcess = cvDSlope + CvKdDeadbandVps;
+                  slopeExcess = cvDSlope;                                // boost (below target only): full slope
                 }
                 kdTrim = clamp_f(VoltageKd_active * slopeExcess, -CvKdMaxTrimA, CvKdMaxTrimA);  // flat cap → per-cell-equal knee
               }
@@ -5552,6 +5554,9 @@ void updateCurrentRPMTableIndex(float rpm) {
 
 // One-liner lookups — all boundary logic lives in findRPMSegment/interpolateRPMTable
 float getMinimumFieldForRPM(float rpm) {
+  // Per-RPM Min% floor system disabled: the floor is the flat scalar MinDuty at every RPM, so it tracks
+  // the "Min Field %" box directly. Restore the table lookup below by re-enabling minPctSystemEnabled.
+  if (!minPctSystemEnabled) return MinDuty;
   float floorV = interpolateRPMTable(rpm, rpmMinDutyTable);
   // A zero floor means "no minimum field" (above the commissioned RPM ceiling, or bin 0): keep it a
   // hard zero. Never let a temp correction lift it off zero, or the field could be forced on past the
@@ -5592,6 +5597,7 @@ static bool kneeStateDirty = false;
 // Stored floors are RAW duty @ kneeTempRefF; getMinimumFieldForRPM does the live temp correction.
 void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk) {
+  if (!minPctSystemEnabled) return;   // Min% floor system disabled — learner idle
   static uint32_t lastMs = 0, steadySince = 0, lastStepMs = 0;
   static float fRpm = 0, fTemp = 0, fDuty = 0;
   static bool fInit = false;
@@ -6006,6 +6012,11 @@ void kneeLearnInit() {
       if (f < 0) f = 0; if (f > kneeMaxFloorPct) f = kneeMaxFloorPct;
       rpmMinDutyTable[i] = f;
     }
+  // System disabled: mirror the RPM-table Min% column to the flat scalar MinDuty so the displayed
+  // per-speed floors match what getMinimumFieldForRPM actually returns. Runs last (MinDuty + table are
+  // loaded by now); re-enabling the system hands the column back to the learner/wizard.
+  if (!minPctSystemEnabled)
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) rpmMinDutyTable[i] = MinDuty;
 }
 
 // Build the /kneeLearnState JSON (knobs + live status + per-bin learned state).

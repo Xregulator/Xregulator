@@ -992,6 +992,7 @@ enum Csv3Index {
   CSV3_commissionManualMask,   // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
   CSV3_CvKdMaxTrimA,           // CV D-term back-off ceiling (A ×10); caps kdTrim so a fast rise saturates instead of flooring the field
   CSV3_cvAlpha,                // CV auto-gain aggressiveness α (fraction of the deadbeat-ohmic gain); ×1000
+  CSV3_CvKdSlopeCeil,          // CV D-term slope ceiling (V/s 12V-equiv ×10) — max slope the D acts on, class-scaled at use
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -3322,7 +3323,9 @@ void setupServer() {
                          : resTestActive ? "Resonance current-check"
                          : (fieldCurveActive != 0) ? "Field curve"
                          : (fieldCutActive != 0) ? "Field cut" : nullptr;
-      if (sysMode != SYS_MODE_AUTO) {
+      if (!minPctSystemEnabled) {
+        queueConsoleMessage("Min% floor: system disabled — the field floor is the flat Min Field %.");
+      } else if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Min% knee: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
         queueConsoleMessageF("Min%% knee: start blocked — %s is active", busy);
@@ -3431,6 +3434,9 @@ void setupServer() {
       commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
       commissionSetPhase(0);        // back to Prep (the wizard writes the phase on every step entry)
       commissionMarkStage(0);       // Prep complete: snapshot taken, preconditions checked
+      // Min% floor step (2) is disabled: the floor is the flat scalar MinDuty, nothing to measure — auto-satisfy
+      // its done bit so COMMISSIONED is reachable without it. Re-enabling the system restores it as a real step.
+      if (!minPctSystemEnabled) commissionMarkStage(2);
       // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (step 3) starts the sweeps clean if it is run.
       // (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable floors,
       // which are left intact so a partial re-run that skips Min% keeps its learned floors.)
@@ -4030,6 +4036,9 @@ void setupServer() {
       if (pidInitialized) {
         currentPID.SetOutputLimits(MinDuty, MaxDuty);
       }
+      // Min% floor system disabled: keep the RPM-table Min% column tracking the scalar (set 2% -> all bins 2%).
+      if (!minPctSystemEnabled)
+        for (int i = 0; i < RPM_TABLE_SIZE; i++) rpmMinDutyTable[i] = MinDuty;
       queueConsoleMessageF("Min Duty updated to: %.2f%%", MinDuty);
     }
     if (request->hasParam("LimpHome")) {
@@ -4866,7 +4875,7 @@ void setupServer() {
       if (testProtectionsEnabled) {
         queueConsoleMessage("PROTECTIONS ENABLED — all protection layers restored");
       } else {
-        queueConsoleMessage("PROTECTIONS DISABLED for tuning — G1/G2/G3 bypassed; fast OV (AlternatorHardShutdownV), G4, INA228, and hardware OC remain active");
+        queueConsoleMessage("PROTECTIONS DISABLED for tuning — G1/G2 over-voltage + G3 iExcess over-current bypassed; fast-OV hard-cut (AlternatorHardShutdownV), G4 load-dump/battery-current limit, INA228, and hardware OC remain active");
       }
     }
     if (request->hasParam("TuningMode")) {
@@ -5256,7 +5265,7 @@ void setupServer() {
       recomputeCvGains();
       queueConsoleMessageF("CV gain mode: %s", cvGainMode ? "AUTO (lambda-based)" : "MANUAL");
     }
-    if (request->hasParam("cvAlpha")) {  // CV auto-gain aggressiveness α — Kp = α / measured ohmic K
+    if (request->hasParam("cvAlpha")) {  // CV auto-gain aggressiveness α — Kp = α / measured stiffness K
       foundParameter = true;
       cvAlpha = clamp_f(request->getParam("cvAlpha")->value().toFloat(), 0.02f, 0.50f);
       settingWrite(NK_cvAlpha, String(cvAlpha, 3).c_str());
@@ -5477,6 +5486,13 @@ void setupServer() {
       CvKdMaxTrimA = fmaxf(0.0f, inputMessage.toFloat());
       settingWrite(NK_CvKdMaxTrimA, String(CvKdMaxTrimA, 1).c_str());
       queueConsoleMessageF("CV D-term max back-off: %.1f A", CvKdMaxTrimA);
+    }
+    if (request->hasParam("CvKdSlopeCeil")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvKdSlopeCeil")->value();
+      CvKdSlopeCeil = clamp_f(inputMessage.toFloat(), 1.0f, 12.0f);
+      settingWrite(NK_CvKdSlopeCeil, String(CvKdSlopeCeil, 1).c_str());
+      queueConsoleMessageF("CV D-term slope ceiling: %.1f V/s", CvKdSlopeCeil);
     }
     if (request->hasParam("TempPIDKp")) {
       foundParameter = true;
@@ -8547,7 +8563,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8866,7 +8882,8 @@ void SendWifiData() {
                                SafeInt(fieldDecayTauMs),
                                (int)commissionManualMask,
                                SafeInt(CvKdMaxTrimA, 10),
-                               SafeInt(cvAlpha, 1000));
+                               SafeInt(cvAlpha, 1000),
+                               SafeInt(CvKdSlopeCeil, 10));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

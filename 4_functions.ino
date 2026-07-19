@@ -1630,6 +1630,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     CvKdMaxTrimA = settingRead(NK_CvKdMaxTrimA).toFloat();
   }
+  if (!settingExists(NK_CvKdSlopeCeil)) {
+    settingWrite(NK_CvKdSlopeCeil, String(CvKdSlopeCeil, 1).c_str());  // 12V-equiv, class-scaled at use — no seed scaling
+  } else {
+    CvKdSlopeCeil = settingRead(NK_CvKdSlopeCeil).toFloat();
+  }
   // cvHelpersEnabled — master switch for the asymmetric KiDown unwind + the one-sided D term
   if (!settingExists(NK_cvHelpersEnabled)) {
     settingWrite(NK_cvHelpersEnabled, String((int)cvHelpersEnabled).c_str());
