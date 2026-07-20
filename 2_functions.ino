@@ -291,6 +291,9 @@ bool fsRemove(const char *path) {
 #define NK_cvRecovEnable "cvRecovEn"
 #define NK_cvRecovSec "cvRecovSec"
 #define NK_cvRecovEmaxV "cvRecovEmaxV"
+#define NK_cvRecovBoostEnable "cvRcvBoostEn"
+#define NK_cvRecovBoostMax "cvRcvBoostMax"
+#define NK_cvRecovBoostErrV "cvRcvBoostErrV"
 #define NK_dutySlewEnable "dutySlewEn"
 #define NK_testSlewMode "testSlewMode"
 #define NK_cvTestSlewMode "cvTestSlewMode"
@@ -340,13 +343,17 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineFreqStart "SysIDSineFStrt"
 #define NK_systemIDSineFreqEnd "SysIDSineFEnd"
 #define NK_sysidPlantTau "sysidPlantTau"
-#define NK_fieldDecayTau "fieldDecayTau"       // commissioned field drain time command→10% (ms), stored as measured (cold margin removed 07-18); key name is historical
+#define NK_fieldDecayTau "fieldDecayTau"       // commissioned field drain time command→10% (ms) — worst-case (longest) endpoint of the drain-vs-RPM line, or the flat value; key name is historical
+#define NK_fdDrainLoMs "fdDrainLoMs"           // drain-vs-RPM line: drain (ms) at NK_fdDrainRpmLo (wizard-fitted, shifted to sit at/above every measured point)
+#define NK_fdDrainHiMs "fdDrainHiMs"           // drain-vs-RPM line: drain (ms) at NK_fdDrainRpmHi
+#define NK_fdDrainRpmLo "fdDrainRpmLo"         // drain-vs-RPM line: lowest tested RPM; lookup clamps here, never extrapolates
+#define NK_fdDrainRpmHi "fdDrainRpmHi"         // drain-vs-RPM line: highest tested RPM; rpmHi<=rpmLo or a zero endpoint = no line (flat)
 #define NK_faCalGain "faCalGain"               // fast alt-current channel amps calibration: gain vs ADS1115 (field-decay test writes it)
 #define NK_faCalOffA "faCalOffA"               // fast alt-current channel amps calibration: offset (A)
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // current wizard phase (0=Prep…7=Field cut, 8=finished); moves backward on Back
+#define NK_commissionPhase "commissnPhase"    // current wizard phase (0=Prep…8=Stress test, 9=finished); moves backward on Back
 #define NK_commissionDoneMask "commissnDoneMsk" // per-stage completion bitmask (bit i = stage i done); 15-char max
 #define NK_commissionManualMask "commissnManMsk" // per-stage set-by-hand bitmask (skip / mark-done-manually)
 #define NK_commissionSnap "commissnSnap"      // Phase-0 origin snapshot (explicit-abort full revert): positional CSV of the settings the flow writes
@@ -481,7 +488,7 @@ bool fsRemove(const char *path) {
 #define NK_faAttenDownAmps "faAttenDnA"
 #define NK_faPeakMinA "faPeakMinA"
 // Auto Min% learning ("knee tracker") knobs (keys <= 15 chars)
-#define NK_minPctSystem    "minPctSystem"
+// NK "minPctSystem" is RETIRED (master-toggle experiment, 2026-07-19 only) — key abandoned in NVS, never reuse it.
 #define NK_kneeLearnEnable "kneeLearnEn"
 #define NK_kneeMarginPct   "kneeMarginPct"
 #define NK_kneeOnsetA      "kneeOnsetA"
@@ -650,7 +657,7 @@ void commissionSetState(uint8_t st) {
   settingWrite(NK_commissionState, String((int)st).c_str());
 }
 
-// Persist the current wizard phase (0=Prep…7=Field cut, 8=finished; moves backward on Back). Drives
+// Persist the current wizard phase (0=Prep…8=Stress test, 9=finished; moves backward on Back). Drives
 // the Commissioning tab checklist so step progress survives a page reload / new client.
 void commissionSetPhase(uint8_t p) {
   commissionPhase = p;
@@ -658,22 +665,24 @@ void commissionSetPhase(uint8_t p) {
 }
 
 // ── Per-stage completion tracking ─────────────────────────────────────────────
-// commissionDoneMask carries one bit per stage (0=Prep, 1=Field curve … 7=Field cut, 8=Stress test). It is the
-// source of truth for the per-step ✓ marks and for the default checkbox selection of a
-// partial re-run. commissionState (0/1/2) is the lifecycle badge and is DERIVED from the
-// mask wherever it is recomputed below.
+// commissionDoneMask carries one bit per stage (0=Prep, 1=Field curve … 7=Min% floor + Field decay,
+// 8=Stress test). It is the source of truth for the per-step ✓ marks and for the default checkbox
+// selection of a partial re-run. commissionState (0/1/2) is the lifecycle badge and is DERIVED from
+// the mask wherever it is recomputed below.
 #define COMMISSION_STAGE_COUNT 9
-#define COMMISSION_ALL_DONE    0x1FF  // bits 0..8 set = every stage complete (8 = CV stress test, appended)
+#define COMMISSION_ALL_DONE    0x1FF  // bits 0..8 set = every stage complete (7 = Min% floor + Field decay, 8 = CV stress test)
 
 // Downstream stages invalidated when an upstream stage is (re)completed — see the coupling
 // analysis: Field curve(1) feeds Plant fit(2) + Verify(3); Plant fit(2) feeds Verify(3);
 // Disturbances(4) feeds Thresholds(5). CV plant fit(6) measures the current→voltage plant, which
 // sits downstream of the whole inner current loop — so any current-loop retune (Field curve 1,
 // Plant fit 2, or Verify 3) makes the CV fit stale and clears bit 6. The Stress test(8) verdict
-// grades the tuned CV loop, so it goes stale with any retune upstream of it (1/2/3/6). Tach alignment
-// (RPMScalingFactor/PulleyRatio) is set on a pre-wizard screen, not a stage — a later rescale
-// invalidates the binned stages via commissionClearRpmDependents. Re-doing an upstream stage clears
-// its dependents' done bits; the wizard forces them into the same run to be re-measured.
+// grades the tuned CV loop, so it goes stale with any retune upstream of it (1/2/3/6). Min% floor +
+// Field decay(7) is independent — nothing feeds it, it feeds nothing; it runs late so the engine is
+// warm for the max-RPM hold. Tach alignment (RPMScalingFactor/PulleyRatio) is set on a pre-wizard
+// screen, not a stage — a later rescale invalidates the binned stages via
+// commissionClearRpmDependents. Re-doing an upstream stage clears its dependents' done bits; the
+// wizard forces them into the same run to be re-measured.
 static uint16_t commissionDependentsMask(int stage) {
   switch (stage) {
     case 1: return (1 << 2) | (1 << 3) | (1 << 6) | (1 << 8);  // Field curve → Plant fit, Verify, CV plant fit, Stress test
@@ -741,7 +750,7 @@ void commissionMarkStage(int stage) {
 
 // Clear a single stage's done bit plus anything downstream of it. A previously-COMMISSIONED
 // device with a now-stale step is demoted to IN_PROGRESS so the badge nags that a step needs
-// re-running. (Currently uncalled — kept as the single-stage counterpart of ClearRpmDependents.)
+// re-running. (Called when an RPM-breakpoint change stales the Min% floor + Field decay stage, 7.)
 void commissionClearStage(int stage) {
   if (stage < 0 || stage >= COMMISSION_STAGE_COUNT) return;
   uint16_t cleared = (1 << stage) | commissionDependentsMask(stage);
@@ -754,11 +763,12 @@ void commissionClearStage(int stage) {
 
 // A tach rescale (RPMScalingFactor/PulleyRatio change) moves the engine-RPM axis every binned stage
 // was measured against, so all of them must be re-run. Hangs off the SETTING change, wherever it comes
-// from (pre-wizard alignment screen or normal Settings). Clears every RPM-binned wizard stage; Prep(0),
-// Field cut(7), and Stress test(8) are exempt — the field de-energize τ is RPM-independent (L/R), and the
-// stress verdict grades recovery behavior, which a display-axis rescale can't stale.
+// from (pre-wizard alignment screen or normal Settings). Clears every RPM-binned wizard stage; only
+// Prep(0) and Stress test(8) are exempt — the stress verdict grades recovery behavior, which a
+// display-axis rescale can't stale. Min% floor + Field decay(7) IS binned (per-RPM onset anchors AND
+// the drain-vs-RPM line endpoints), so it clears.
 void commissionClearRpmDependents() {
-  uint16_t rpmBits = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6);
+  uint16_t rpmBits = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7);
   commissionDoneMask &= ~rpmBits;
   commissionWriteDoneMask();
   commissionManualMask &= ~rpmBits;

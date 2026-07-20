@@ -1004,6 +1004,26 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     } else {
       fieldDecayTauMs = (uint16_t)settingRead(NK_fieldDecayTau).toInt();
     }
+    if (!settingExists(NK_fdDrainLoMs)) {
+      settingWrite(NK_fdDrainLoMs, String(fdDrainLoMs).c_str());
+    } else {
+      fdDrainLoMs = (uint16_t)settingRead(NK_fdDrainLoMs).toInt();
+    }
+    if (!settingExists(NK_fdDrainHiMs)) {
+      settingWrite(NK_fdDrainHiMs, String(fdDrainHiMs).c_str());
+    } else {
+      fdDrainHiMs = (uint16_t)settingRead(NK_fdDrainHiMs).toInt();
+    }
+    if (!settingExists(NK_fdDrainRpmLo)) {
+      settingWrite(NK_fdDrainRpmLo, String(fdDrainRpmLo).c_str());
+    } else {
+      fdDrainRpmLo = (uint16_t)settingRead(NK_fdDrainRpmLo).toInt();
+    }
+    if (!settingExists(NK_fdDrainRpmHi)) {
+      settingWrite(NK_fdDrainRpmHi, String(fdDrainRpmHi).c_str());
+    } else {
+      fdDrainRpmHi = (uint16_t)settingRead(NK_fdDrainRpmHi).toInt();
+    }
     if (!settingExists(NK_faCalGain)) {
       settingWrite(NK_faCalGain, String(faCalGain, 4).c_str());
     } else {
@@ -1738,6 +1758,21 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_cvRecovEmaxV, String(cvRecovEmaxV, 3).c_str());
   } else {
     cvRecovEmaxV = settingRead(NK_cvRecovEmaxV).toFloat();
+  }
+  if (!settingExists(NK_cvRecovBoostEnable)) {
+    settingWrite(NK_cvRecovBoostEnable, String((int)cvRecovBoostEnable).c_str());
+  } else {
+    cvRecovBoostEnable = (uint8_t)settingRead(NK_cvRecovBoostEnable).toInt();
+  }
+  if (!settingExists(NK_cvRecovBoostMax)) {
+    settingWrite(NK_cvRecovBoostMax, String(cvRecovBoostMax, 2).c_str());
+  } else {
+    cvRecovBoostMax = settingRead(NK_cvRecovBoostMax).toFloat();
+  }
+  if (!settingExists(NK_cvRecovBoostErrV)) {
+    settingWrite(NK_cvRecovBoostErrV, String(cvRecovBoostErrV, 3).c_str());
+  } else {
+    cvRecovBoostErrV = settingRead(NK_cvRecovBoostErrV).toFloat();
   }
   if (!settingExists(NK_dutySlewEnable)) {
     settingWrite(NK_dutySlewEnable, String((int)dutySlewEnable).c_str());

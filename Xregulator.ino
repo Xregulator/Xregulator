@@ -1141,14 +1141,15 @@ float kneeFitC         = 0.0f;                  // fitted slope C (% duty · RPM
 float kneeFitResidPct  = -1.0f;                 // worst-anchor fit residual (% duty), -1 = not fitted
 int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) of the worst residual
 
-// ── Field de-energize time-constant test (commissioning stage 7) ─────────────
+// ── Field de-energize time-constant test (runs inside commissioning stage 7) ──
 // Ramps the REAL current loop to the commissioned stabilize level, freezes the duty for a settled
 // baseline, steps the field to MinDuty (the exact floor a real OV clamp drives to) and fits the
 // alternator-current decay for the field's electrical de-energize time constant (τ = L/R) — the
 // time the OV protection's field drain physically takes. Decay is captured on the 20 kSPS fast
 // alt-current channel when present (ADS CH1 fallback), calibrated against the ADS reading at the
-// high (hold) and low (tail) points of this very test. RPM/voltage-independent in a fixed install;
-// run at idle + cruise and averaged only to PROVE the speed-independence, not because τ differs.
+// high (hold) and low (tail) points of this very test. The observed drain time IS RPM-dependent
+// (bench 07-20: at lower RPM the output collapses below cut-in sooner), so the wizard runs one cut
+// per Min%-floor speed (max/mid/idle) and fits drain-vs-RPM as a line (see fdDrain* below).
 // Ramp phase runs through the normal AUTO path (fieldCutCcActive branch, real currentPID);
 // hold/cut/ease phases share the SystemID duty-override + bumpless-resume path (OR'd into sysIDRunning).
 #define FIELDCUT_BUF_SIZE   256      // ADS fallback decay samples (~10-30 ms CH1 cadence, PSRAM)
@@ -1159,7 +1160,7 @@ int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) 
 #define FIELDCUT_SNAP_MS    400UL    // grab the 500 ms fast-channel ring this long after the cut → window spans ~[cut-100, cut+400] ms even with drain lag
 #define FIELDCUT_EASE_MS    1500.0f  // ease duty back to the pre-test operating point on exit — gentle re-engagement can't trip a protection
 #define FIELDCUT_MIN_BASE_A 5.0f     // baseline-above-floor must clear this or there is no decay to fit
-#define FIELDCUT_RPM_GRACE_MS 6000UL // keep masking the RPM gates this long after a run: the cut starves the LM2907 pickup, which spikes/false-zeros/ramps garbage for ~4.6 s while its front end re-biases (see reference_lm2907_frontend_final). RPM plays no role in the measurement.
+#define FIELDCUT_RPM_GRACE_MS 6000UL // keep masking the RPM gates this long after a run: the cut starves the LM2907 pickup, which spikes/false-zeros/ramps garbage for ~4.6 s while its front end re-biases (see reference_lm2907_frontend_final). The RPM reported per run (fieldCutRpm) is latched during the HOLD, before the cut corrupts the tach.
 #define FIELDCUT_FAST_N     10000    // one full fast-channel ring copy (500 ms @ 20 kSPS), int16 mV
 #define FIELDCUT_PLOT_N     220      // decimated decay points served to the wizard plot
 struct FieldCutSample { uint32_t tMs; float amps; };
@@ -1173,10 +1174,11 @@ bool  fieldCutCcActive = false;                    // ramp/settle phase: the nor
 float fieldCutCmdA = 0.0f;                         // ramp-phase current target (= SystemIDStabilizeAmps at start)
 bool  fieldCutResultsReady = false;
 bool  fieldCutOk = false;                          // true = a usable τ was fit this run
-float fieldCutTauMs   = -1.0f;                     // fitted decay τ this run (ms), -1 = none — QA metric (idle/cruise agreement), NOT the stored value
+float fieldCutTauMs   = -1.0f;                     // fitted decay τ this run (ms), -1 = none — QA cross-check, NOT the stored value
 float fieldCutFallMs  = -1.0f;                     // measured 90%→10% fall time (ms), -1 = none
-float fieldCutDrainMs = -1.0f;                     // measured command→10%-of-baseline drain time (ms) — model-free; THIS is what Apply stores in fieldDecayTauMs (as measured — 30% cold margin removed 07-18)
-float fieldCutBaseA   = 0.0f;                      // steady output averaged over the frozen-duty hold (A)
+float fieldCutDrainMs = -1.0f;                     // measured command→10%-of-baseline drain time (ms) — model-free; the wizard fits drain-vs-RPM across the per-speed runs and stores the line (fdDrain*)
+float fieldCutBaseA   = 0.0f;                      // steady output averaged over the frozen-duty hold (A) — the pre-cut amps reported per run
+float fieldCutRpm     = 0.0f;                      // engine RPM averaged over the same hold tail — latched BEFORE the cut (the cut corrupts the tach ~4.6 s); the x-value of this run's drain point
 float fieldCutFloorA  = 0.0f;                      // residual output at MinDuty, averaged over the tail (A) — the decay asymptote
 float fieldCutResidPct = -1.0f;                    // log-fit RMS residual as % (quality; lower is better)
 uint8_t fieldCutSrc = 0;                           // decay data source this run: 1 = 20 kSPS fast channel, 0 = ADS fallback
@@ -1189,11 +1191,22 @@ int    fcPlotN = 0;
 uint32_t fieldCutLastEndMs = 0;                    // cooldown guard
 char  fieldCutAbortMsg[48] = {0};                  // human reason text on a failed/aborted run
 // Commissioned field DRAIN time (ms): the measured command→10%-of-output time (≈ dead-time + 2.3 L/R
-// time constants), stored AS MEASURED by the Field-cut wizard step — the 30% cold-field margin was
-// removed 07-18 (testing without). The OV field-drain release consumes this value directly.
+// time constants). Since 07-20 the wizard measures one drain per Min%-floor speed and stores the
+// fitted drain-vs-RPM LINE as two endpoints (fdDrain* below); this scalar is kept as the WORST-CASE
+// (longest) endpoint — the value used when RPM is unknown and by the 3× post-protection backstops.
+// A manual edit of this setting flattens the line (endpoints cleared) and applies everywhere.
 // Name kept for NVS/CSV3 continuity (key `fieldDecayTau`, CSV3 slot 314) — nothing fielded ever stored
 // the old 1τ semantics. Safe placeholder default until the step is run.
 uint16_t fieldDecayTauMs = 60;
+// Drain-vs-RPM line, stored as its two TESTED endpoints (parallel-shifted in the wizard so the line
+// sits at/above every measured point). Lookup interpolates between them and CLAMPS outside the tested
+// range — never extrapolates (an underestimate releases the OV clamp with the field still hot).
+// Degenerate (rpmHi<=rpmLo or a zero endpoint) → flat fieldDecayTauMs. See fdDrainMsAtRpm().
+uint16_t fdDrainLoMs  = 0;   // drain (ms) at fdDrainRpmLo
+uint16_t fdDrainHiMs  = 0;   // drain (ms) at fdDrainRpmHi
+uint16_t fdDrainRpmLo = 0;   // lowest tested RPM (idle point)
+uint16_t fdDrainRpmHi = 0;   // highest tested RPM (max-working point)
+float fdDrainMsAtRpm(float rpm);
 // Fast alt-current channel amps calibration (NVS): ampsCal = faCalGain × nominal + faCalOffA. The ESP32
 // ADC path has poor absolute accuracy; the field-decay test two-points it against the ADS1115 reading
 // (hold ≈30 A, tail ≈0 A) each run. Defaults = uncalibrated pass-through.
@@ -1207,9 +1220,9 @@ float faCalOffA = 0.0f;
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
 uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — current wizard phase (0=Prep…8=Stress test, 9=finished; moves backward on Back); drives the Commissioning tab checklist
 // Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
-// 0=Prep 1=Field curve 2=Plant fit 3=Verify 4=Disturbances 5=Thresholds 6=CV plant fit 7=Field cut
-// 8=Stress test. Drives the per-step ✓ marks and the default checkbox selection for partial re-runs.
-// COMMISSION_ALL_DONE = 0x1FF.
+// 0=Prep 1=Field curve 2=Plant fit 3=Verify 4=Disturbances 5=Thresholds 6=CV plant fit
+// 7=Min% floor + Field decay 8=Stress test. Drives the per-step ✓ marks and the default checkbox
+// selection for partial re-runs. COMMISSION_ALL_DONE = 0x1FF.
 uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
 // Per-stage "set by hand, not measured" bitmask (mirrors NK_commissionManualMask). Combined with the
 // done bit it distinguishes four states per stage: measured (done, !manual), hand-marked complete
@@ -1335,6 +1348,7 @@ uint32_t AbsorptionTimeoutMs = 2700000UL;   //
 uint32_t absorptionCompleteTime = 30000UL;  // tail current hold before float
 uint32_t absorptionTailTimer = 0;
 uint32_t bulkVoltageHoldMs = 250;  // time at bulk voltage before entering absorption
+volatile bool restartChargeCycleRequested = false;  // web /get?RestartChargeCycle=1 sets it; consumed at the top of updateChargingStage() (control-loop task) so the stage flags are only mutated from one task
 
 float FieldAdjustmentInterval = 50;  // The regulator field output is updated once every this many milliseconds
 float TemperatureLimitF = 175;       // measured at the case probe; internal/metal temps run roughly +40 to +50 °F above this depending on sensor installation. Strategy rationale: docs Charging Strategy page
@@ -2442,12 +2456,13 @@ uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not c
 uint32_t g_lastProtClampMs = 0;      // millis() of the most recent tick any protection clamp was active
 // Field-drain early release. g_ovClampRiseMs stamps the FIRST tick of a clamp episode (rising
 // edge) — distinct from g_lastProtClampMs, which restamps every clamped tick. Once a clamp has held
-// for fieldDecayTauMs (the measured command→10%-of-output drain time, stored as measured — no cold
-// margin), the coil current sustaining the excess has bled out, so the G2/iExcess hold latches are
-// released without waiting for the lagged filtered-voltage return (iExcess additionally waits for its
-// excess EMA to fall back under the fire line — see the site gates). OR'd with the natural release, so
-// it can only ever SHORTEN a cut; Load Dump is untouched (it re-asserts every tick, no hold latch).
+// for the commissioned drain time at this speed (fdDrainMsAtRpm at g_ovClampRpm — the measured
+// command→10%-of-output time), the coil current sustaining the excess has bled out, so the G2/iExcess
+// hold latches are released without waiting for the lagged filtered-voltage return (iExcess additionally
+// waits for its excess EMA to fall back under the fire line — see the site gates). OR'd with the natural
+// release, so it can only ever SHORTEN a cut; Load Dump is untouched (re-asserts every tick, no hold latch).
 uint32_t g_ovClampRiseMs = 0;
+float g_ovClampRpm = -1.0f;          // RPM latched at the same rising edge — the cut corrupts the tach (~4.6 s false-zero), so live RPM during a clamp is garbage; <=0 → worst-case drain
 uint32_t g_tauReleaseCount = 0;      // episodes where the tau timer elapsed against an OV/iExcess-owned clamp
 int bmsLogic = 0;                     // if BMS is asked to turn the alternator on and off
 int bmsLogicLevelOff = 0;             // set to 0 if the BMS gives a low signal (<3V?) when no charging is desired
@@ -3018,20 +3033,17 @@ float    cvpfRpmAtFit = 0.0f;      // RPM at fit completion — feeds the re-run
 float    cvpfCapHeadroomA = 0.0f;  // A — alternator cap-table headroom at fit time (g_I_cap − cvpfBaseA); how much bigger a step the table allows
 
 // ── CV stress test (commissioning stage 8 / standalone from Diag) ──
-// Throttle-snap acceptance test: a CC probe finds the idle-sustainable output, CV then holds
-// min(voltage at 80% of it, BulkVoltage), the operator snaps the throttle through the RPM band
-// where alternator output multiplies, and the watcher grades the recovery purely from the
-// existing protection counters — every protection stays fully armed and untouched.
+// Throttle-snap acceptance test: with the regulator running NORMALLY at idle (command = RPM
+// table with Lo/Hi and thermal derates — nothing overridden), the operator snaps the throttle
+// through the RPM band where alternator output multiplies, and the watcher grades the recovery
+// purely from the existing protection counters — every protection stays fully armed and untouched.
 volatile bool cvStressActive = false;       // master flag (mutexes, idle-rest suppression)
-volatile bool cvStressCcActive = false;     // PROBE/SET/DIP phases drive the real current PID (branch in AdjustField)
-volatile bool cvStressOvActive = false;     // ENGAGE/ARMED: pin ChargingVoltageTargetReq to cvStressTargetV
-volatile bool cvStressFinishRequested = false;
 volatile bool cvStressAbortRequested = false;
-volatile uint8_t cvStressPhase = 0;         // 0 idle 1 PROBE 2 SET 3 DIP 4 ENGAGE 5 ARMED 6 DONE
-float cvStressCmdA = 10.0f;                 // CC command during PROBE/SET/DIP (read by the AdjustField branch)
-float cvStressTargetV = 13.0f;              // the stress CV target = min(V at 80% idle output, BulkVoltage)
+volatile bool cvStressForceCV = false;      // phases 2-3: AdjustField forces CV at cvStressTargetV (TargetVoltageMode-style)
+volatile uint8_t cvStressPhase = 0;         // 0 idle 1 STAB_IDLE 2 STAB_CV 3 ARMED 4 DONE
+float cvStressTargetV = 0.0f;               // achievable CV target the test computes (idle avg − 0.20 V), driven while forced
 const char *cvStressAbortMsg = "";
-char cvsLastBlob[176] = "";                 // last persisted result CSV (NK_cvStressLast), cached for /cvstress.json
+char cvsLastBlob[224] = "";                 // last persisted result CSV (NK_cvStressLast, ver-2), cached for /cvstress.json
 
 // Explicit prototypes: String-return / String& functions don't survive auto-prototype ordering.
 void   bhSample(uint32_t nowMs);
@@ -3489,12 +3501,12 @@ volatile float VoltageKi = 6.0f;    // A/(V·s) — integral gain; above-target 
 // CV D term — trim is a position subtracted at the Icv output, never integrated into cv_I, so it
 // releases the tick the rise stops. Replaced the integrating slope bleed (over-dosed via ~0.6 s actuator lag).
 float VoltageKd = 5.0f;             // A/(V/s), 12V-EQUIVALENT (runtime-normalized like Kp/Ki — do NOT class-scale at seed); knee: trim hits CvKdMaxTrimA at slope = cap/Kd
-float CvKdDeadbandVps = 0.50f;      // V/s at zero amps — BASE of the deadband line clamp(floor, base + slope·I, ceil); hysteretic gate: D off below the line, FULL slope once past, re-arms at half; below ~0.4 (12V idle) belt ripple rectifies into a DC cut
+float CvKdDeadbandVps = 0.4f;       // V/s at zero amps — BASE of the deadband line clamp(CvKdDbFloor, base + slope·I, CvKdDbCeil); hysteretic gate: D off below the line, FULL slope once past, re-arms at half. This is a SAFETY MARGIN, not a threshold: commissioning's Step-5 ripple fit measures the real threshold and overwrites base + CvKdDbSlope, placing the line this margin above measured ripple. 0.4×class here is the pre-commissioning fallback ONLY (uncommissioned / skipped-fit device), where CvKdDbFloor (0.10) is the hard runtime minimum
 float CvKdDbSlope = 0.0f;           // V/s per A — deadband line slope vs the slew-limited command (ripple-driven slope noise grows with output, same physics as the G3 trip line); 0 = flat, the pre-measurement behavior; set from the Step-5 slope fit b1
 float CvKdDbFloor = 0.10f;          // V/s — lowest the evaluated deadband may go (guards the low-current extrapolation below the tested sweep span)
 float CvKdDbCeil  = 3.5f;           // V/s — highest the evaluated deadband may go; MUST stay below CvKdSlopeCeil: the gate compares cvDSlope already clamped to ±CvKdSlopeCeil, so a deadband at/above it could never be crossed and D would go dead at that current
 bool  CvKdOneSided = false;         // false = two-sided: also adds on a fast fall, ONLY below target (that gate is what makes two-sided safe)
-float CvKdArmV = 0.4f;              // V below target within which D acts (0 = always); tight so D stays off the sag-recovery climb and only brakes the final approach to setpoint (1.25 armed 1.25V early and chopped the recovering field)
+float CvKdArmV = 0.5f;              // V below target within which D acts (0 = always); tight so D stays off the sag-recovery climb and only brakes the final approach to setpoint (1.25 armed 1.25V early and chopped the recovering field)
 float CvKdMaxTrimA = 500.0f;        // A — deliberately-inactive backstop on the D back-off; the real bound on D depth is CvKdSlopeCeil × Kd, this only bites at Kd far above the seeded range. FLAT amps
 float CvKdVoltFiltTC = 40.0f;       // ms — dedicated EMA on IBV feeding only the D slope (g_cvKdFiltV), separate from VoltageFilterTC; 0 = raw IBV
 float CvKdSlopeCeil = 4.0f;         // V/s (12 V-equiv, class-scaled ×V/12 at use) — max slope the D acts on; the real cap on D depth
@@ -3717,6 +3729,16 @@ uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise
 uint8_t cvRecovEnable = 0;   // master switch for the post-protection CV recovery window (timed cv_I re-injection + error cap). DEFAULT OFF (2026-07-18): the timed window masks CV gain problems; recovery is left to the bare loop so gains must be tuned to survive a step. 1 = timed re-injection + error cap; 0 = plain PI walks itself back (pace scales with post-cut error)
 float cvRecovSec = 2.5f;     // recovery time target (s): cv_I ramps from its ReseedFrac seed back to the pre-event value over this span, at any target voltage / chemistry / bank size
 float cvRecovEmaxV = 0.25f;  // recovery error cap (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use): max positive error the CV PI sees during recovery, so P+I drive can't scale with the post-cut collapse
+// Error-scheduled CV P-boost: whenever the bus is below target in CV — NOT gated to protection
+// events; post-protection recovery is the motivating case, but CV-entry climbs and load dips get
+// it too — the proportional term is scaled up to command transient overcurrent that climbs out of
+// the voltage hole faster than the Ki-limited crawl, then tapers to 1× at target so it self-disarms
+// before it can re-fire an OV. Only the P term is scaled — cv_I and the D trim are untouched.
+// Independent of cvRecovEnable (works with the timed window off). The bare loop's peak recovery
+// current sits ~5% above the pre-trip hold, so without this the post-cut return is integrator-paced.
+uint8_t cvRecovBoostEnable = 1;   // master switch for the recovery P-boost. DEFAULT ON — bench-untested; turn off if a faster climb re-trips OV on the approach
+float   cvRecovBoostMax    = 3.0f;  // P-gain multiplier at ≥ cvRecovBoostErrV of shortfall; 1.0 = no boost, taper is linear from 1× at target. Clamp [1,8]
+float   cvRecovBoostErrV   = 1.5f;  // shortfall (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use) at which the boost reaches cvRecovBoostMax. Clamp [0.1,5]
 bool    g_autoTestActive  = false;  // set per control-loop tick: an automated/guided test owns the limiters now (commissioning / battery-health DCIR / resonance / system-ID). While true the four user limiter toggles above are inert so a stray user setting can't corrupt a measurement; each test's own built-in slew behavior governs.
 const float TEST_ENTRY_RATE_A = 8.0f;  // A/s — FIXED, conservative ramp rate for an automated test's transition up from the rest floor and back down (NOT the user's SetpointRiseRate/FallRate, which a user could set aggressively). Used by DCIR, the resonance check, and the TuningMode entry ramp so a test never slams the field coming on/off. Current-domain, so no bus-voltage scaling.
 const float CVPF_ENTRY_RATE_A = 50.0f; // A/s — cvpf current-PID phase setpoint rate; the measured edges are direct-duty, so this only paces the practice run
@@ -3818,8 +3840,8 @@ int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 300, 600, 1100, 1500, 2000, 2650, 
 // mode or PID output. Exists to protect the belt, shaft, and mounting hardware
 // from mechanical overload at any RPM. The target table above cannot push current
 // above this ceiling. Factory reset restores defaultCapCurrentValues.
-float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 0, 70, 70, 70, 70, 70, 70, 70, 70, 70 };
-float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 0, 70, 70, 70, 70, 70, 70, 70, 70, 70 };
+float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
+float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
 // Low charge-rate factory default, as a fraction of the Normal cap table. Seeds capTableLo
 // and is the fallback whenever that blob is missing; a user-edited Low table overrides it.
 #define LOW_MODE_CAP_FRACTION 0.5f
@@ -3852,20 +3874,13 @@ float defaultMinDutyValues[RPM_TABLE_SIZE] = { 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0
 //   resistance, ~0.218 %/degF). Battery voltage is deliberately NOT used: its two effects on the
 //   knee (raising the rectifier threshold vs. strengthening the field for the same duty) cancel,
 //   leaving the duty-knee voltage-independent. Full spec: Working Markdown Docs/MinDuty_Knee_Learning.md.
-// Master toggle (NVS NK_minPctSystem) for the AUTOMATIC Min% machinery only: the Auto Min% learner
-// (kneeLearnObserve), its card in the UI, and the standalone on-demand Min% floor calibration
-// (startKneeSweep). It does NOT gate the floor itself — getMinimumFieldForRPM always interpolates
-// rpmMinDutyTable and hard-floors with the scalar MinDuty — and it has nothing to do with the
-// commissioning wizard (the calibration is not a wizard step). Default OFF.
-// See Working Markdown Docs/MinPct_Floor_System_Disable.md (filename historical).
-bool  minPctSystemEnabled = false;
 float kneeFloor[RPM_TABLE_SIZE]      = { 0 };      // learned floor (raw duty% @ kneeTempRefF); owns rpmMinDutyTable when enabled
 float kneeKnee[RPM_TABLE_SIZE]       = { 0 };      // detected knee (raw duty% @ kneeTempRefF) = floor + margin
 bool  kneeFrozen[RPM_TABLE_SIZE]     = { false };  // true once the knee is found and the floor is locked
 float kneeLearnTempF[RPM_TABLE_SIZE] = { 0 };      // alternator case temp (degF) at freeze (diagnostic, not persisted)
 uint32_t kneeLastMs[RPM_TABLE_SIZE]  = { 0 };      // millis() of last freeze / re-arm (runtime only)
 // User knobs (NVS settings namespace, NK_* keys)
-bool  kneeLearnEnable = true;    // learner sub-toggle under minPctSystemEnabled: both on = learner owns + auto-writes rpmMinDutyTable
+bool  kneeLearnEnable = true;    // master switch: on = learner owns + auto-writes rpmMinDutyTable; off = column is hand-editable. Does NOT gate the floor itself or the commissioning Min% floor step (stage 7).
 float kneeMarginPct   = 5.0f;    // park floor this many duty-% below the knee
 float kneeOnsetA      = 0.8f;    // amps above the freshly-captured zero = "output building" (knee found)
 float kneeReArmA      = 2.0f;    // amps at a locked floor = knee dropped -> lower floor one margin step (deadband guard)
@@ -4043,8 +4058,8 @@ float thermalPenaltyAmps = 0.0f;    // temperature loop output: amps subtracted 
 //                    END LEARNING MODE GLOBAL VARIABLES
 //=============================================================================
 // ===== THERMAL LOG (PSRAM circular buffer) =====
-#define THERMAL_LOG_SIZE 7200  // covers 2 hours at 1 Hz
-#define THERMAL_LOG_INTERVAL_MS 1000
+#define THERMAL_LOG_SIZE 3600  // covers 2 hours at 0.5 Hz (halved from 7200/1Hz to reclaim ~183 KB PSRAM for cvLog)
+#define THERMAL_LOG_INTERVAL_MS 2000
 
 volatile bool thermalLogPaused = false;
 volatile uint32_t thermalLogPausedAtMs = 0;
@@ -5425,6 +5440,12 @@ void setup() {
   pidLog_init();
   cvLog_init();
   tuningScore_init();
+  // Post-allocation PSRAM baseline: largest contiguous block matters as much as total —
+  // cvLog's 333 KB is one heap_caps_malloc, so total-free can look fine while it can't fit.
+  Serial.printf("PSRAM after setup: %u KB free / %u KB total, largest block %u KB\n",
+                (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+                (unsigned)(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024),
+                (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
   Serial.println("=== SETUP COMPLETE ===");
 }
 

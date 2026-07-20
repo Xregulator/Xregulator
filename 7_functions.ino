@@ -2852,17 +2852,15 @@ void recordINA228Interval(uint32_t now) {
   ina_over2x_at = inaAtOver2x;
 }
 
-// Web assets are brotli, named *.br, served Content-Encoding: br. Each load prefers
-// *.br but falls back to a legacy *.gz (real gzip): a device's as-shipped factory_fs
-// golden image is never rewritten and still holds *.gz, so this lets the brotli
-// firmware serve it on a prod_fs fallback. serveCachedAsset() sniffs the magic bytes
-// to set the right Content-Encoding for whichever one it loaded.
+// Web assets are gzip, named *.gz, served Content-Encoding: gzip. NEVER brotli —
+// Chrome/Firefox/Android WebView reject brotli over plain HTTP (ERR_CONTENT_DECODING_FAILED)
+// and the LAN UI is plain-HTTP.
 void cacheWebAssets() {
-  cachedIndex    = loadFileToRAM(webFS.exists("/index.html.br") ? "/index.html.br" : "/index.html.gz");
-  cachedCss      = loadFileToRAM(webFS.exists("/styles.css.br") ? "/styles.css.br" : "/styles.css.gz");
-  cachedJs       = loadFileToRAM(webFS.exists("/script.js.br") ? "/script.js.br" : "/script.js.gz");
-  cachedUplotCss = loadFileToRAM(webFS.exists("/uPlot.min.css.br") ? "/uPlot.min.css.br" : "/uPlot.min.css.gz");
-  cachedUplotJs  = loadFileToRAM(webFS.exists("/uPlot.iife.min.js.br") ? "/uPlot.iife.min.js.br" : "/uPlot.iife.min.js.gz");
+  cachedIndex    = loadFileToRAM("/index.html.gz");
+  cachedCss      = loadFileToRAM("/styles.css.gz");
+  cachedJs       = loadFileToRAM("/script.js.gz");
+  cachedUplotCss = loadFileToRAM("/uPlot.min.css.gz");
+  cachedUplotJs  = loadFileToRAM("/uPlot.iife.min.js.gz");
 }
 bool serveCachedAsset(AsyncWebServerRequest *request, const String &path, const String &contentType) {
   CachedAsset *cf = nullptr;
@@ -2883,10 +2881,7 @@ bool serveCachedAsset(AsyncWebServerRequest *request, const String &path, const 
         memcpy(buffer, data + index, toSend);
         return toSend;
       });
-    // Pick encoding from the magic bytes, not the request path: brotli (*.br) or a
-    // legacy gzip (*.gz) golden-image asset. gzip starts 0x1F 0x8B.
-    const char *enc = (len >= 2 && data[0] == 0x1F && data[1] == 0x8B) ? "gzip" : "br";
-    resp->addHeader("Content-Encoding", enc);
+    resp->addHeader("Content-Encoding", "gzip");
     resp->addHeader("Cache-Control", "public, max-age=3600");
     request->send(resp);
     return true;
@@ -3579,10 +3574,12 @@ static float fieldCurveInvert(float targetA) {
 // point. (4) PROCESS — two-point calibrate the fast channel against the ADS, boxcar+zero-phase-EMA
 // filter, log-linear fit of ln(I − floor) for τ, direct 90→10% fall time. Results publish HERE, so
 // a late abort can't discard a finished measurement. (5) EASE back to the pre-test duty.
-// One run per trigger; the wizard runs idle + cruise only to PROVE τ is speed-independent.
-// Field-at-MinDuty is the SAFE direction. RPM plays NO role in the measurement — the cut corrupts
+// One run per trigger; the wizard fires one run per Min%-floor speed (max/mid/idle) because the
+// drain time IS RPM-dependent (bench 07-20), and fits drain-vs-RPM as a line across the runs.
+// fieldCutRpm (this run's x-value) averages over the hold tail, BEFORE the cut — the cut corrupts
 // the LM2907 tach signal (spike/false-zero/garbage ramp for ~4.6 s), so BOTH RPM gates are masked
 // for the whole test + FIELDCUT_RPM_GRACE_MS tail (fieldCutRpmGrace in the tick builder).
+// Field-at-MinDuty is the SAFE direction.
 // ============================================================
 
 static float fcMeanMv(const int16_t *b, int n) {
@@ -3769,8 +3766,8 @@ static void fieldCutProcess(float faHighMv, float faLowMv) {
 
   if (fieldCutOk) {
     fieldCutAbortMsg[0] = '\0';   // a failed fast fit may have latched a reason before the fallback succeeded
-    queueConsoleMessageF("Field-cut: drain(cut->10%%)=%.0f ms, tau=%.0f ms, 90-10 fall=%.0f ms (base %.1f A, floor %.1f A, resid %.0f%%, %s)",
-                         fieldCutDrainMs, fieldCutTauMs, fieldCutFallMs, fieldCutBaseA, fieldCutFloorA, fieldCutResidPct,
+    queueConsoleMessageF("Field-cut: drain(cut->10%%)=%.0f ms @ %.0f RPM, tau=%.0f ms, 90-10 fall=%.0f ms (base %.1f A, floor %.1f A, resid %.0f%%, %s)",
+                         fieldCutDrainMs, fieldCutRpm, fieldCutTauMs, fieldCutFallMs, fieldCutBaseA, fieldCutFloorA, fieldCutResidPct,
                          fieldCutSrc ? "20k channel" : "ADS");
   }
 }
@@ -3784,6 +3781,7 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static float    ampsEma = 0.0f;        // settle detector input
   static uint32_t arriveMs = 0, inBandSinceMs = 0;
   static double   adsHoldSum = 0.0;  static uint32_t adsHoldN = 0;   // hold-tail baseline (high cal ref)
+  static double   rpmHoldSum = 0.0;  static uint32_t rpmHoldN = 0;   // hold-tail RPM (pre-cut — the cut corrupts the tach)
   static double   adsTailSum = 0.0;  static uint32_t adsTailN = 0;   // cut-tail floor (low cal ref)
   // Calibration points are averaged over MATCHED multi-second windows on both sensors — four
   // spaced 500 ms ring grabs (~2 s of 20 kSPS data) against the ADS mean over the same span, all
@@ -3829,10 +3827,11 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     fcPreSetpoint = setpointLimited;
     fieldCutCmdA = constrain(SystemIDStabilizeAmps, 10.0f, 100.0f);
     fieldCutCount = 0; fcFastCount = 0; fcPlotN = 0;
-    adsHoldSum = 0.0; adsHoldN = 0; adsTailSum = 0.0; adsTailN = 0;
+    adsHoldSum = 0.0; adsHoldN = 0; rpmHoldSum = 0.0; rpmHoldN = 0; adsTailSum = 0.0; adsTailN = 0;
     faHiSum = 0.0; faLoSum = 0.0; faHiN = 0; faLoN = 0; holdGrabs = 0; tailGrabs = 0; snapped = false;
     ampsEma = ampsRaw; arriveMs = 0; inBandSinceMs = 0;
     fieldCutTauMs = -1.0f; fieldCutFallMs = -1.0f; fieldCutDrainMs = -1.0f; fieldCutBaseA = 0.0f; fieldCutFloorA = 0.0f;
+    fieldCutRpm = 0.0f;
     fieldCutResidPct = -1.0f; fieldCutSrc = 0;
     fieldCutResultsReady = false; fieldCutOk = false; fieldCutAbortMsg[0] = '\0';
     fieldCutActive = 1; fieldCutPhase = 0;
@@ -3897,7 +3896,10 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   if (phase == 2) {
     dutyOut = freezeDuty; fieldCutPhase = 1;
     uint32_t el = nowMs - phaseStartMs;
-    if (el >= FIELDCUT_HOLD_MS - 2500UL) { adsHoldSum += ampsRaw; adsHoldN++; }
+    if (el >= FIELDCUT_HOLD_MS - 2500UL) {
+      adsHoldSum += ampsRaw; adsHoldN++;
+      if (RPM > 0.0f) { rpmHoldSum += RPM; rpmHoldN++; }
+    }
     if (holdGrabs < 4 && el >= 2500UL + 800UL * holdGrabs) {
       int n = faGrabRecent(fcScratch, FIELDCUT_FAST_N);
       if (n >= 2000) { faHiSum += fcMeanMv(fcScratch, n); faHiN++; }
@@ -3905,6 +3907,7 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     }
     if (el >= FIELDCUT_HOLD_MS) {
       fieldCutBaseA = (adsHoldN > 0) ? (float)(adsHoldSum / adsHoldN) : ampsRaw;
+      fieldCutRpm = (rpmHoldN > 0) ? (float)(rpmHoldSum / rpmHoldN) : 0.0f;
       phase = 3; phaseStartMs = nowMs;
     }
     return true;
@@ -4437,7 +4440,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
 // SMALL SHARED HELPERS (prototypes live in Xregulator.ino).
 // ============================================================
 
-// Preload a brotli-compressed web asset from LittleFS into PSRAM so the dashboard serves from RAM.
+// Preload a gzip-compressed web asset from LittleFS into PSRAM so the dashboard serves from RAM.
 CachedAsset loadFileToRAM(const char *path) {
   CachedAsset result;
   File f = webFS.open(path, "r");

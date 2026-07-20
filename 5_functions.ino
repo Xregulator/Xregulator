@@ -2452,15 +2452,6 @@ void updateINA228OvervoltageThreshold() {
 }
 
 void checkWebFilesExist() {
-  // Accept the modern brotli name (*.br) or the legacy gzip name (*.gz) — a device's
-  // un-updatable factory_fs golden image still carries *.gz.
-  const char *brFiles[] = {
-    "/index.html.br",
-    "/styles.css.br",
-    "/script.js.br",
-    "/uPlot.min.css.br",
-    "/uPlot.iife.min.js.br"
-  };
   const char *gzFiles[] = {
     "/index.html.gz",
     "/styles.css.gz",
@@ -2479,13 +2470,11 @@ void checkWebFilesExist() {
   }
 
   for (int i = 0; i < 5; i++) {
-    const char *found = webFS.exists(brFiles[i]) ? brFiles[i]
-                      : webFS.exists(gzFiles[i]) ? gzFiles[i] : nullptr;
-    if (!found) {
-      Serial.printf("MISSING: %s (or .gz)\n", brFiles[i]);
+    if (!webFS.exists(gzFiles[i])) {
+      Serial.printf("MISSING: %s\n", gzFiles[i]);
       missingCount++;
     } else {
-      Serial.printf("Found: %s\n", found);
+      Serial.printf("Found: %s\n", gzFiles[i]);
     }
   }
 
@@ -3498,9 +3487,8 @@ bool validateWebFile(const char *filename) {
   Serial.printf("File size: %d bytes\n", fileSize);
   Serial.flush();
 
-  // Brotli streams have no fixed magic-number signature (unlike gzip's 0x1F 0x8B),
-  // so on-device validation is a nonzero-size sanity check only. The real end-to-end
-  // integrity guarantee is the OTA SHA256 verified at download time.
+  // Size sanity check only — the real end-to-end integrity guarantee is the OTA SHA256
+  // verified at download time.
   bool valid = (fileSize >= 8);
 
   if (valid) {
@@ -3516,21 +3504,16 @@ bool validateWebFile(const char *filename) {
   return valid;
 }
 
-// Validate whichever asset name exists — brotli *.br (prod_fs) or legacy gzip *.gz
-// (an un-updatable factory_fs golden image). validateWebFile() is a size check only.
-static bool validateWebAsset(const char *brName, const char *gzName) {
-  return validateWebFile(webFS.exists(brName) ? brName : gzName);
-}
 bool validateWebFilesystem() {
   Serial.println("\n--- Validating all web files ---");
   Serial.flush();
 
   bool result = true;
-  result = validateWebAsset("/index.html.br", "/index.html.gz") && result;
-  result = validateWebAsset("/styles.css.br", "/styles.css.gz") && result;
-  result = validateWebAsset("/script.js.br", "/script.js.gz") && result;
-  result = validateWebAsset("/uPlot.min.css.br", "/uPlot.min.css.gz") && result;
-  result = validateWebAsset("/uPlot.iife.min.js.br", "/uPlot.iife.min.js.gz") && result;
+  result = validateWebFile("/index.html.gz") && result;
+  result = validateWebFile("/styles.css.gz") && result;
+  result = validateWebFile("/script.js.gz") && result;
+  result = validateWebFile("/uPlot.min.css.gz") && result;
+  result = validateWebFile("/uPlot.iife.min.js.gz") && result;
 
   if (result) {
     Serial.println("--- All web files validated successfully ---");

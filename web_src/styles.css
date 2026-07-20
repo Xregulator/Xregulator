@@ -1052,7 +1052,23 @@ input[type="submit"]:hover {
   }
   /* Pin the header so minimize/close stay reachable while the sheet body scrolls. */
   #sysid-drag-handle { cursor: default; border-radius: 18px 18px 0 0 !important; position: sticky; top: 0; z-index: 1; }
+
+  /* Commissioning & CV-stress panels get the sysid bottom-sheet treatment on a phone: pinned to
+     the bottom edge, header stuck at the top of the scroll so the ✕ is always in reach. */
+  #commission-modal-panel, #cvs-modal-panel {
+    top: auto !important; bottom: 0 !important; left: 0 !important; right: 0 !important;
+    width: auto !important; max-width: none !important;
+    max-height: 88vh !important;
+    border-radius: 18px 18px 0 0 !important;
+    border-bottom: none !important;
+    box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.5) !important;
+    transform: none !important;
+  }
 }
+
+/* Header bar stays pinned while the single-scroll panel body slides under it, so the ✕ is reachable
+   at any scroll position (the header bg is opaque #252525, so content passes cleanly beneath). */
+#commission-drag-handle, #cvs-drag-handle { position: sticky; top: 0; z-index: 1; }
 
 /* Danger (red) */
 .btn-danger {
@@ -1087,6 +1103,13 @@ input[type="submit"]:hover {
   padding: 4px 10px !important;
   font-size: 12px !important;
   border-radius: 6px !important;
+}
+
+/* Restart-charge-cycle button reads as inert when no auto charge stage is live (the .btn-secondary
+   tonal colors are fixed, so the browser default :disabled would barely dim it). */
+#restart-charge-cycle-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .btn-row {

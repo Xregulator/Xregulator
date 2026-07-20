@@ -44,6 +44,19 @@ float interpolateRPMTable(float rpm, const float *table);
 // RPM-dependent table lookups (all delegate to interpolateRPMTable)
 float getMinimumFieldForRPM(float rpm);
 float getCapCurrentForRPM(float rpm);
+
+// Commissioned field drain time at an engine speed: linear between the two tested endpoints,
+// CLAMPED to the tested range — an extrapolated underestimate would release the OV clamp with the
+// field still hot. No line commissioned (rpmHi<=rpmLo or a zero endpoint) or RPM unknown (<=0) →
+// fieldDecayTauMs, the stored worst-case (longest) endpoint.
+float fdDrainMsAtRpm(float rpm) {
+  if (fdDrainRpmHi <= fdDrainRpmLo || fdDrainLoMs == 0 || fdDrainHiMs == 0 || !(rpm > 0.0f))
+    return (float)fieldDecayTauMs;
+  if (rpm <= (float)fdDrainRpmLo) return (float)fdDrainLoMs;
+  if (rpm >= (float)fdDrainRpmHi) return (float)fdDrainHiMs;
+  float f = (rpm - (float)fdDrainRpmLo) / (float)(fdDrainRpmHi - fdDrainRpmLo);
+  return (float)fdDrainLoMs + f * ((float)fdDrainHiMs - (float)fdDrainLoMs);
+}
 // Auto Min% learning ("knee tracker") — observer + persistence (defined lower in this file)
 void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk);
@@ -1473,6 +1486,20 @@ void thermalAccuracyScore_tick(uint32_t nowMs, float dtSec) {
   }
 }
 
+// Recovery P-boost multiplier — error-scheduled CV proportional authority. Returns 1× at/above
+// target (shortfall≤0) and ramps linearly to cvRecovBoostMax at cvRecovBoostErrV (×class) of
+// shortfall. Not gated to protection events — any below-target error is boosted; the payoff case
+// is climbing out of a post-protection voltage hole, self-disarming to 1× at target before it can
+// re-fire the OV that tripped. Fed the loop's live error, so if the recovery window's error cap is
+// engaged the boost shrinks with it. Scales only the P term; cv_I and the D trim are untouched.
+static inline float cvRecovBoostMult(float shortfallV) {
+  if (!cvRecovBoostEnable || shortfallV <= 0.0f) return 1.0f;
+  float span = cvRecovBoostErrV * ((float)BATTERY_VOLTAGE / 12.0f);
+  float frac = (span > 0.01f) ? (shortfallV / span) : 1.0f;
+  if (frac > 1.0f) frac = 1.0f;
+  return 1.0f + (cvRecovBoostMax - 1.0f) * frac;
+}
+
 void AdjustFieldLearnMode() {
 
   // ========== TIMING ==========
@@ -1481,7 +1508,7 @@ void AdjustFieldLearnMode() {
   uint32_t aflT0 = micros();  // section profiler entry mark (see aflWorstSecUs globals)
 
   // Runs FIRST (above every early-return below) so temperature history accumulates in all modes.
-  // Internal 1 Hz throttle. Control-side fields freeze when their owners aren't ticking.
+  // Internal 0.5 Hz throttle. Control-side fields freeze when their owners aren't ticking.
   thermalLog_tick(currentMillis);
   uint32_t aflM0 = micros();  // end of section 0: thermal log
 
@@ -1660,29 +1687,33 @@ void AdjustFieldLearnMode() {
   // and FastSetpointRiseHeadroomV vs ChargingVoltageTarget.
   static uint32_t postProtectRiseStartMs = 0;
 
-  // Field-drain early release: once a clamp episode has held for fieldDecayTauMs — the MEASURED
-  // command→10%-of-output drain time (~dead-time + 2.3 L/R time constants; stored as measured, no cold
-  // margin as of 07-18) — the field coil driving the excess has bled out,
-  // so the hold latches below release early instead of waiting out their lagged filtered signals
-  // (G2 immediately; iExcess once its excess EMA is back under the fire line — see the site gates).
-  // OR'd with each latch's natural release — can only shorten a cut, never lengthen it. Reason-blind
-  // by construction: it clears only the OV/iExcess hold latches, so a Load-Dump-owned clamp (no hold
-  // latch, re-asserts every tick) is unaffected.
-  bool tauReleaseNow = g_fastOvClampActive && g_ovClampRiseMs != 0 && fieldDecayTauMs > 0
-                       && (uint32_t)(currentMillis - g_ovClampRiseMs) >= (uint32_t)fieldDecayTauMs;
-  // Count/announce once per episode, and only when a latch-bearing layer owns the clamp: Load Dump
-  // re-asserts every tick (no hold latch) and G1 is predictive (no hold latch), so the timer elapsing
-  // against either clears nothing. Episode-latched rather than edge-detected — the committed reason
-  // can flicker (Load-Dump tiers vote per-sample), and an edge-detect would re-announce per flicker.
+  // Field-drain early release: once a clamp episode has held for the commissioned drain time — the
+  // MEASURED command→10%-of-output time (~dead-time + 2.3 L/R time constants), evaluated at the RPM
+  // latched when the episode began (drain is RPM-dependent; live RPM is tach-corrupted once the field
+  // cuts) — the field coil driving the excess has bled out, so the iExcess hold latch releases early
+  // instead of waiting out its lagged excess EMA (once that EMA is back under the fire line — see the
+  // site gates). G2 no longer uses this: it is armed only while the bus is rising and self-releases
+  // the instant the slope goes non-positive, so it never has a stale hold to drain. OR'd with
+  // iExcess's natural release — can only shorten a cut, never lengthen it. A Load-Dump-owned clamp
+  // (no hold latch, re-asserts every tick) is unaffected.
+  float tauHoldMs = fdDrainMsAtRpm(g_ovClampRpm);
+  bool tauReleaseNow = g_fastOvClampActive && g_ovClampRiseMs != 0 && tauHoldMs > 0.0f
+                       && (float)(uint32_t)(currentMillis - g_ovClampRiseMs) >= tauHoldMs;
+  // Count/announce once per episode, and only when the iExcess hold latch owns the clamp: Load Dump
+  // re-asserts every tick (no hold latch), G1 is predictive (no hold latch), and G2 is rising-gated
+  // (self-releasing), so the timer elapsing against any of them clears nothing. Episode-latched rather
+  // than edge-detected — the committed reason can flicker (Load-Dump tiers vote per-sample), and an
+  // edge-detect would re-announce per flicker.
   bool tauReleaseOwned = tauReleaseNow && g_fastOvCapReason != CAP_REASON_LOADDUMP
-                         && g_fastOvCapReason != CAP_REASON_KHARD_G1;
+                         && g_fastOvCapReason != CAP_REASON_KHARD_G1
+                         && g_fastOvCapReason != CAP_REASON_KHARD_G2;
   static bool tauAnnounced = false;
   if (tauReleaseOwned && !tauAnnounced) {
     tauAnnounced = true;
     g_tauReleaseCount++;
-    queueConsoleMessageF("Fast-OV tau-release #%lu: clamp held %lums >= tau %ums — releasing G2/iExcess holds as they cool",
+    queueConsoleMessageF("Fast-OV tau-release #%lu: clamp held %lums >= drain %.0fms @ %.0f RPM — releasing iExcess hold as it cools",
                          (unsigned long)g_tauReleaseCount,
-                         (unsigned long)(currentMillis - g_ovClampRiseMs), (unsigned)fieldDecayTauMs);
+                         (unsigned long)(currentMillis - g_ovClampRiseMs), tauHoldMs, g_ovClampRpm);
   }
   if (!tauReleaseNow) tauAnnounced = false;  // episode over — re-arm for the next one
 
@@ -1723,13 +1754,6 @@ void AdjustFieldLearnMode() {
     g_ovIbvFilt = ibvFilt;
 
     if (voltageControlActive) {  // Groups 1/2 target-relative; gated only on voltageControlActive
-      // dvdtRelease: once the filtered bus stops rising mid-clamp, force-release even above the
-      // re-fire line. Fires at the voltage PEAK, so on an RPM-ramp event the field is still near its
-      // holding level and G2 can re-fire (accepted aggression); the absolute AlternatorHardShutdownV /
-      // INA228 cuts still backstop a real runaway. Filtered dvdt (not raw) so belt ripple can't fake
-      // the zero-crossing. Gated on g_fastOvClampActive so it never blocks the FIRST fire.
-      bool dvdtRelease = g_fastOvClampActive && (dvdt <= 0.0f);
-      if (tauReleaseNow || dvdtRelease) ovActive = false;  // field bled >= tau OR bus stopped rising: drop the G2 hysteresis hold
       const float TD_PRED = TdPred;
       const float V_HARD = ChargingVoltageTarget + OvPredMarginV;
       // Arm-proximity window scales with class: at 48V dV/dt is ~4× so a fixed 0.06V window
@@ -1744,9 +1768,9 @@ void AdjustFieldLearnMode() {
       // DCIR test is running (batteryHealthTestActive — a current step test that must not be
       // fought by the soft layers at any SoC), G1 and G2 are inhibited from firing so the test
       // can characterise the plant/battery without protection layers fighting the input. The
-      // fast-OV ceiling (priority 1.5) and the INA228 hardware ALERT stay live regardless. The
-      // release condition below is not gated — if ovActive was already set before the bypass
-      // engaged, it can still de-assert cleanly.
+      // fast-OV ceiling (priority 1.5) and the INA228 hardware ALERT stay live regardless. G2's arm
+      // state (ovActive) is recomputed every tick from g2SoftNow, which carries these same gates, so
+      // engaging the bypass drops the clamp on the same tick — no stranded latch to de-assert.
       if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && IBV > ChargingVoltageTarget - PRED_GUARD) {
         if (OvGroup1Enable && Vpred > V_HARD) {
           float hardCap = fmaxf(0.0f, setpointLimited - KHard * (Vpred - V_HARD));
@@ -1764,36 +1788,23 @@ void AdjustFieldLearnMode() {
       if (g2SoftNow && !g2SoftPrev) g_ovTel.softExceedCount++;
       g2SoftPrev = g2SoftNow;
 
-      if (g2SoftNow && !dvdtRelease) {  // dvdtRelease suppresses the re-fire so the peak-detect release actually lets go
+      // Group 2 measured-OV: armed ONLY while the filtered bus is above the re-fire line
+      // (target + OvMeasMarginV) AND still rising (filtered dvdt > 0). A falling bus above the line
+      // is a receding danger — the field is already cut and the bus drops on its own, so re-clamping
+      // it only flickers the field tick-by-tick and compounds the protection reseed. Every real event
+      // crosses the line while rising, so the first fire is never missed; a persistent overdrive
+      // re-arms on each fresh rise (sawtooth just over the line); the absolute AlternatorHardShutdownV
+      // and INA228 hardware cut backstop a runaway regardless of slope. Replaces the old hysteresis
+      // hold + dvdt/tau early-release, which held the clamp across the falling band and re-fired every
+      // tick as the bus decayed through it. Filtered dvdt (not raw) so belt ripple can't fake the sign.
+      // cv_I reseed is the unified falling-edge reseed in the bumpless tracker block.
+      ovActive = (g2SoftNow && dvdt > 0.0f);
+      if (ovActive) {
         float ovExcess = ibvFilt - (ChargingVoltageTarget + OvMeasMarginV);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
         if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; capReasonTick = CAP_REASON_KHARD_G2; }
         fastOvClampActive = true;
-        ovActive = true;
         g_fastOvHardActive = true;
-      }
-      // Hysteresis-band hold: keep the Group 2 clamp continuous while ovActive is latched
-      // but the filtered level has dipped below the firing threshold (between target+OvMeasMarginV
-      // and target). Without this, fastOvClampActive drops in the band, setpointLimited recovers at
-      // SetpointRiseRate, voltage rises, Group 2 re-fires — producing on/off flicker.
-      // Softer reference (ibvFilt - target) so the cap relaxes linearly as voltage falls toward
-      // the release point. No g_fastOvHardActive — this is the soft hold, not a fresh fire.
-      else if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && ovActive && ibvFilt > ChargingVoltageTarget) {
-        float ovExcessSoft = ibvFilt - ChargingVoltageTarget;
-        float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcessSoft);
-        if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; capReasonTick = CAP_REASON_KHARD_G2; }
-        fastOvClampActive = true;
-      }
-
-      // Group 1/2 release condition: filtered level back at/under target AND, only while Group 1
-      // is enabled, prediction safe — a disabled G1 must not be able to prolong a clamp via Vpred.
-      // cv_I reseed itself is handled by the unified falling-edge reseed in the
-      // bumpless tracker block — fires only when ALL protection paths (G1/2, iExcess,
-      // LoadDump) have cleared, using the single preEventCvI snapshot.
-      if (ovActive
-          && (ibvFilt <= ChargingVoltageTarget)
-          && (!OvGroup1Enable || Vpred <= V_HARD)) {
-        ovActive = false;
       }
     } else {
       ovActive = false;  // !voltageControlActive (idle only — MaintainMode sets voltageControlActive=true)
@@ -2177,12 +2188,12 @@ void AdjustFieldLearnMode() {
   // fieldCutCcActive branch below; hold/cut/ease own duty here (cut level is MinDuty, the real
   // OV-clamp floor, so the effectiveMinDuty=0 bypass below is moot but harmless).
   sysIDRunning = fieldCut_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
-  // CV plant-fit pulse train (Step 9) — same mutex family. SETTLE/PILOT/HOLD return false (the
+  // CV plant-fit pulse train (Step 7 of the wizard display) — same mutex family. SETTLE/PILOT/HOLD return false (the
   // cvpfCcActive branch below drives the current PID); the abrupt PULSES/RELEASE own duty here.
   sysIDRunning = cvpf_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
-  // CV stress test (commissioning stage 8) — same mutex family but NEVER owns duty: PROBE/SET/DIP
-  // drive the current PID via the cvStressCcActive branch, ENGAGE/ARMED run the normal CV loop with
-  // only the voltage target pinned (cvStressOvActive). Runs here so its command is fresh this tick.
+  // CV stress test (commissioning stage 8) — same mutex family but a PURE OBSERVER: the normal
+  // loop runs exactly as fielded (table/Lo/thermal command chain untouched) and this tick only
+  // confirms tracking, counts protection events, and grades the recovery.
   cvStress_tick(tick.nowMs);
 
   bool sysIDJustStarted = !prevSysIDRunning && sysIDRunning;
@@ -2410,23 +2421,6 @@ void AdjustFieldLearnMode() {
         setpointCommand = cvpfCmdA;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                        CVPF_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
-        voltageControlActive = false;
-        ctrlLimiter = 0;
-        targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
-                                                                                       : g_pidI_filtered;
-        pidInput = (double)targetCurrent;
-        pidSetpoint = (double)setpointLimited;
-        pidError = setpointLimited - targetCurrent;
-        currentPID.Compute();
-
-      } else if (cvStressCcActive) {
-        // CV stress test PROBE/SET/DIP: drive the real current loop to cvStressCmdA (set by
-        // cvStress_tick, already run this tick). voltageControlActive=false suppresses the
-        // target-relative G1/G2 while the probe finds the idle ceiling; fast-OV/INA228/hard-OC stay
-        // live. ENGAGE hands back to the normal CV path below (cvStressCcActive drops first).
-        setpointCommand = cvStressCmdA;
-        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                       TEST_ENTRY_RATE_A, SetpointFallRate, actualDtSec);
         voltageControlActive = false;
         ctrlLimiter = 0;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
@@ -2769,7 +2763,7 @@ void AdjustFieldLearnMode() {
             // clamp, then HOLD past release until the wind-down excess has decayed back inside the normal
             // band (self-clearing, no fixed timer), bounded by a safety cap so a genuinely sustained
             // over-current is never muted forever (the voltage backstops own that case regardless).
-            const uint32_t kPostProtMismatchMaxMs = (uint32_t)fmaxf(150.0f, 3.0f * (float)fieldDecayTauMs);  // 3× the commissioned field-drain time (stored as measured, no cold margin), floored 150ms; backstop only — normal release is the decay test
+            const uint32_t kPostProtMismatchMaxMs = (uint32_t)fmaxf(150.0f, 3.0f * (float)fieldDecayTauMs);  // 3× the commissioned worst-case field-drain time (longest endpoint of the drain-vs-RPM line), floored 150ms; backstop only — normal release is the decay test
             bool clampOwned = fastOvClampActive || iExcessActive || modeCapGlideSuppress;  // include iExcess's OWN clamp so the guard arms after an iExcess-only cut, not just a voltage-OV cut
             if (clampOwned) {
               postProtMismatch = true;
@@ -2893,7 +2887,7 @@ void AdjustFieldLearnMode() {
             // release until the excess decays back inside the band (self-clearing, no fixed timer),
             // bounded by a safety cap so a genuinely sustained over-current still fires (the voltage
             // backstops own that interim regardless).
-            const uint32_t kPostProtMismatchMaxMs = (uint32_t)fmaxf(150.0f, 3.0f * (float)fieldDecayTauMs);  // 3× the commissioned field-decay τ, floored 150ms; backstop only — normal release is the decay test
+            const uint32_t kPostProtMismatchMaxMs = (uint32_t)fmaxf(150.0f, 3.0f * (float)fieldDecayTauMs);  // 3× the commissioned worst-case field-drain time (longest endpoint of the drain-vs-RPM line), floored 150ms; backstop only — normal release is the decay test
             bool clampOwnedBulk = fastOvClampActive || iExBulkActive || modeCapGlideSuppress;  // include bulk iExcess's OWN clamp so the guard arms after a bulk-iExcess-only cut
             if (clampOwnedBulk) {
               postProtMismatchBulk = true;
@@ -3098,6 +3092,13 @@ void AdjustFieldLearnMode() {
             queueConsoleMessage("MaintainMode: active, targeting 0 net battery amps");
           }
         }
+        // CV stress test (commissioning stage 8 / Diag): force CV at the achievable target it computed —
+        // same hook as TargetVoltageMode — so the throttle snap can push the bus over a REACHABLE setpoint.
+        // All current/thermal/OV limits stay fully active; the test only pins the voltage target.
+        if (cvStressForceCV) {
+          voltageControlActive = true;
+          ChargingVoltageTargetReq = cvStressTargetV;
+        }
         // Detect CV entry so the voltage loop fires immediately on the first CV tick.
         // (lastVoltageControlActive is declared above the AUTO/MANUAL branches so the
         // MANUAL branch also resets it — see voltageControlActive=false in MANUAL below.)
@@ -3224,12 +3225,6 @@ void AdjustFieldLearnMode() {
                                                               : cvBaseTarget;   // slew below applies if vTgtRampEnable (study on/off)
           }
         }
-
-        // CV stress test ENGAGE/ARMED: pin the commanded target to the measured stress point — always
-        // ≤ the stage target by construction (min(V80, BulkVoltage)). No wind-down needed on release:
-        // clearing the flag lets Req return to the stage value, an UPWARD move the vTgtRampUp slew
-        // governs (the dangerous direction, a drop from above, cannot occur here).
-        if (cvStressOvActive && voltageControlActive) ChargingVoltageTargetReq = cvStressTargetV;
 
         // ── Voltage-target slew (bidirectional) — outer layer; master switch vTgtRampEnable ──
         // The commanded target lives in ChargingVoltageTargetReq (set THIS tick by stage logic /
@@ -3375,6 +3370,12 @@ void AdjustFieldLearnMode() {
           if (fastOvClampActive && !g_fastOvClampActive) {
             g_fastOvClampCount++;
             g_ovClampRiseMs = currentMillis;  // stamp the episode start for the field-decay-tau early release
+            // Latch pre-cut RPM for the drain-vs-RPM lookup — unless this episode starts inside the
+            // prior cut's tach-corruption window (LM2907 false-zero/garbage ramp ~4.6 s): a garbage
+            // low read would look up a too-short drain and release with the field still hot. -1 = worst case.
+            bool tachSuspect = (g_lastProtClampMs != 0)
+                               && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS + 2000UL);
+            g_ovClampRpm = tachSuspect ? -1.0f : RPM;
             recovActive = false;  // a new fire cancels the recovery ramp; the mid-ramp cv_I becomes the next reseed base (de-escalation ratchet)
           }
           g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
@@ -3604,7 +3605,7 @@ void AdjustFieldLearnMode() {
             // this block only consumes them. cvDSlope also feeds the recovery starve-exit below.
 
             if (!enteringCV) {
-              float p = VoltageKp_active * e;
+              float p = VoltageKp_active * cvRecovBoostMult(e) * e;  // recovery P-boost scales the proportional term while below target
               float unsat = p + cv_I;
               Icv = clamp_f(unsat, icvLo, icvHi);
 
@@ -3644,7 +3645,7 @@ void AdjustFieldLearnMode() {
                 cv_I = fmaxf(cv_I, fminf(recovCvSeed + (recovCvGoal - recovCvSeed) * frac, icvHi));
               }
 
-              Icv = clamp_f(VoltageKp_active * e + cv_I - g_cvKdTrimLive, icvLo, icvHi);
+              Icv = clamp_f(VoltageKp_active * cvRecovBoostMult(e) * e + cv_I - g_cvKdTrimLive, icvLo, icvHi);
             }
           }
 
@@ -3676,8 +3677,9 @@ void AdjustFieldLearnMode() {
           float icvHi_tick = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
           if (recovActive) icvHi_tick = fminf(icvHi_tick, recovCvGoal);    // same pre-trip-current ceiling as the PI path
           if (!enteringCV) {
-            g_cvPTerm = VoltageKp_active * e_now;  // P contribution to Icv, live (CSV1 P/I/D plot)
-            Icv = clamp_f(VoltageKp_active * e_now + cv_I - g_cvKdTrimLive, 0.0f, icvHi_tick);
+            float boost_now = cvRecovBoostMult(e_now);  // recovery P-boost; 1× at/above target
+            g_cvPTerm = VoltageKp_active * boost_now * e_now;  // P contribution to Icv, live (CSV1 P/I/D plot) — reflects the boost
+            Icv = clamp_f(VoltageKp_active * boost_now * e_now + cv_I - g_cvKdTrimLive, 0.0f, icvHi_tick);
           }
         }
 
@@ -4221,6 +4223,30 @@ void updateChargingStage() {
     inAbsorptionStage = false;
     bulkVoltageHoldTimer = 0;
     rebulkTimer = 0;
+  }
+
+  // User "Restart charge cycle" button: force the machine back to Bulk (CC) and re-run the whole
+  // bulk→absorption→float cycle, re-arming the tail-current and absorption timers. Same reset
+  // enter_sys_auto() does on AUTO entry. Consumed here (control-loop task) rather than in the async
+  // web handler so the stage flags are only ever written from one task. Only honored while an auto
+  // charge stage owns the field: in Manual/Target-V/Maintain the flags don't drive output, and during
+  // commissioning it would fight the wizard — those cases drop the request. If the pack is already full
+  // it climbs straight back to the target and the tail/overshoot logic returns it to float/idle in
+  // seconds; the request does NOT fix a broken tail exit (steady load / no shunt) — it re-sticks there.
+  if (restartChargeCycleRequested) {
+    restartChargeCycleRequested = false;
+    if (fieldActiveStatus == 1 && TargetVoltageMode == 0 && MaintainMode == 0 && !commissioningOwnsBattery) {
+      inBulkStage = true;
+      inAbsorptionStage = false;
+      inIdleStage = false;
+      bulkVoltageHoldTimer = 0;
+      absorptionTailTimer = 0;
+      rebulkTimer = 0;
+      floatStartTime = now;
+      queueConsoleMessageF("Stage: RESTART→BULK (user request) | battV=%.2fV bulkTarget=%.2fV", v, BulkVoltage);
+    } else {
+      queueConsoleMessage("Restart charge cycle ignored: no auto charge stage active");
+    }
   }
 
   // Two-sided hysteresis: timer arms when V reaches BulkVoltage − ENTER, resets only when V falls below BulkVoltage − EXIT. Prevents 30–50 mV idle noise (12V-bank figure) from resetting the hold timer — scaled ×V/12 so the band tracks the ~proportionally larger idle noise on 24/48V banks (BulkVoltage is class-scaled).
@@ -5440,6 +5466,25 @@ void saveUserTableEdits() {
   }
 }
 
+// Persist both charge-rate cap tables (Low + High) plus the shared RPM breakpoints in one commit,
+// from the pre-commissioning Charge Rate Limits web handler. Kept separate from saveUserTableEdits
+// (which writes only the active mode) so the wizard seeds both without a live mode toggle. Written
+// synchronously in the request so a following HiLow mode switch reads fresh blobs (no NVS race).
+void saveBothCapTables(const float *hiA, const float *hiW, const float *loA, const float *loW) {
+  nvs_handle_t nvs_handle;
+  if (nvs_open("learning", NVS_READWRITE, &nvs_handle) != ESP_OK) {
+    queueConsoleMessage("Learning: both-cap save failed to open NVS");
+    return;
+  }
+  nvs_set_blob(nvs_handle, "rpmPoints", rpmTableRPMPoints, sizeof(rpmTableRPMPoints));
+  nvs_set_blob(nvs_handle, "capTable", hiA, RPM_TABLE_SIZE * sizeof(float));
+  nvs_set_blob(nvs_handle, "capPowerTable", hiW, RPM_TABLE_SIZE * sizeof(float));
+  nvs_set_blob(nvs_handle, "capTableLo", loA, RPM_TABLE_SIZE * sizeof(float));
+  nvs_set_blob(nvs_handle, "capPowerTableLo", loW, RPM_TABLE_SIZE * sizeof(float));
+  nvs_commit(nvs_handle);
+  nvs_close(nvs_handle);
+}
+
 // Immediate save of historical data (no throttle)
 // Called by clearOverheatHistoryAction() (user-initiated, off the control loop) and
 // overheatHistFlush() (field-off settle) — never directly from a field-on control tick.
@@ -5606,7 +5651,7 @@ float getMinimumFieldForRPM(float rpm) {
   // constant brush/rectifier threshold (kneeFitA) does NOT. Stored floors are referenced to
   // kneeTempRefF; shift the resistive part (knee − kneeFitA) to the live case temp. knee = floor+margin.
   // (kneeFitA = 0 when no commissioning fit exists → falls back to scaling the whole knee, as before.)
-  if (minPctSystemEnabled && kneeLearnEnable && kneeTempComp && !isnan(AlternatorTemperatureF)) {
+  if (kneeLearnEnable && kneeTempComp && !isnan(AlternatorTemperatureF)) {
     float knee = floorV + kneeMarginPct;
     float resistive = knee - kneeFitA; if (resistive < 0) resistive = 0;
     floorV -= resistive * 0.00218f * (kneeTempRefF - AlternatorTemperatureF);
@@ -5638,7 +5683,7 @@ static bool kneeStateDirty = false;
 // Stored floors are RAW duty @ kneeTempRefF; getMinimumFieldForRPM does the live temp correction.
 void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk) {
-  if (!minPctSystemEnabled) return;   // Automatic Min% system off — learner idle
+  if (!kneeLearnEnable) return;   // Automatic Min% learning off — learner idle
   static uint32_t lastMs = 0, steadySince = 0, lastStepMs = 0;
   static float fRpm = 0, fTemp = 0, fDuty = 0;
   static bool fInit = false;
@@ -5893,7 +5938,7 @@ void saveKneeLearnState() {
 
 // ── Min%-floor snapshot for the commissioning ABORT path ──────────────────────
 // The pre-commissioning tune snapshot (commissionSnapshot) covers gains/filters/thresholds but
-// NOT the Min% floor table, which the standalone Min% floor calibration rewrites. These three back up / restore / clear
+// NOT the Min% floor table, which the wizard's Min% floor step (stage 7) rewrites. These three back up / restore / clear
 // the persistent Min% state (minDutyTable + the knee tracker: floor, knee, frozen) as parallel
 // "bk_*" blobs in the "learning" namespace so an abort (or a reboot mid-run) reverts Min% too.
 // kneeLearnTempF is diagnostic-only and never persisted, so it is not backed up.
@@ -5993,12 +6038,12 @@ void kneeLearnService(bool fieldOff) {
 }
 
 // Reset learned state: every bin back to 0% and unlocked, so learning restarts from scratch.
-// The live table is only zeroed while the learner machinery owns it (master system toggle + learner
-// sub-toggle both on) — with the system off, a hand-entered table survives the knee-state wipe.
+// The live table is only zeroed while the learner owns it (learning on) — with learning off, a
+// hand-entered table survives the knee-state wipe.
 void kneeLearnResetDefaults() {
   for (int i = 0; i < RPM_TABLE_SIZE; i++) {
     kneeFloor[i] = 0; kneeKnee[i] = 0; kneeFrozen[i] = false; kneeLearnTempF[i] = 0; kneeLastMs[i] = 0;
-    if (minPctSystemEnabled && kneeLearnEnable) rpmMinDutyTable[i] = 0;
+    if (kneeLearnEnable) rpmMinDutyTable[i] = 0;
   }
   kneeFitA = 0.0f; kneeFitC = 0.0f;   // no commissioning fit any more → live correction reverts to whole-knee
   saveKneeLearnState();
@@ -6007,8 +6052,6 @@ void kneeLearnResetDefaults() {
 // Boot init: load knobs (settings namespace, create defaults if absent) + learned state blobs.
 // Call AFTER loadLearningTableFromNVS() so rpmMinDutyTable is already populated.
 void kneeLearnInit() {
-  if (!settingExists(NK_minPctSystem)) settingWrite(NK_minPctSystem, minPctSystemEnabled ? "1" : "0");
-  else minPctSystemEnabled = (settingRead(NK_minPctSystem).toInt() != 0);
   if (!settingExists(NK_kneeLearnEnable)) settingWrite(NK_kneeLearnEnable, kneeLearnEnable ? "1" : "0");
   else kneeLearnEnable = (settingRead(NK_kneeLearnEnable).toInt() != 0);
   if (!settingExists(NK_kneeTempComp)) settingWrite(NK_kneeTempComp, kneeTempComp ? "1" : "0");
@@ -6050,9 +6093,9 @@ void kneeLearnInit() {
   if (!haveState)
     for (int i = 0; i < RPM_TABLE_SIZE; i++) { kneeFloor[i] = 0; kneeKnee[i] = 0; kneeFrozen[i] = false; kneeLearnTempF[i] = 0; }
 
-  // While the learner machinery owns the table (master system toggle + learner sub-toggle both on),
-  // the floor owns the table from boot (bin 0 always 0%). System off = hand-entered table stands.
-  if (minPctSystemEnabled && kneeLearnEnable)
+  // While learning owns the table, the floor owns it from boot (bin 0 always 0%).
+  // Learning off = hand-entered table stands.
+  if (kneeLearnEnable)
     for (int i = 0; i < RPM_TABLE_SIZE; i++) {
       float f = (i == 0) ? 0.0f : kneeFloor[i];
       if (f < 0) f = 0; if (f > kneeMaxFloorPct) f = kneeMaxFloorPct;
@@ -6063,8 +6106,7 @@ void kneeLearnInit() {
 // Build the /kneeLearnState JSON (knobs + live status + per-bin learned state).
 String kneeLearnStateJson() {
   String j = "{";
-  j += "\"sysEnable\":";     j += (minPctSystemEnabled ? 1 : 0);
-  j += ",\"enable\":";       j += (kneeLearnEnable ? 1 : 0);
+  j += "\"enable\":";        j += (kneeLearnEnable ? 1 : 0);
   j += ",\"marginPct\":";    j += String(kneeMarginPct, 2);
   j += ",\"onsetA\":";       j += String(kneeOnsetA, 2);
   j += ",\"reArmA\":";       j += String(kneeReArmA, 2);

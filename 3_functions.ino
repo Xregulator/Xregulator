@@ -950,7 +950,7 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=CV plant fit, 7=Field cut, 8=finished
+  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…8=Stress test, 9=finished
   CSV3_commissionDoneMask,      // per-stage completion bitmask (bit i = stage i done)
   CSV3_cvHelpersEnabled,        // master switch: asymmetric KiDown unwind + slope-aware integrator bleed (1=on)
   CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
@@ -988,16 +988,22 @@ enum Csv3Index {
   CSV3_testSlewMode,           // manual CC square-wave test slew mode (0=off, 1=default rates, 2=custom)
   CSV3_cvTestSlewMode,         // manual CV square-wave test slew mode (0=off, 1=default rates, 2=custom)
   CSV3_CvKdOneSided,           // CV D-term mode: 1=one-sided (removes current only), 0=symmetric
-  CSV3_fieldDecayTauMs,        // commissioned field drain time, command→10% of output (ms); stored as measured (cold margin removed 07-18)
+  CSV3_fieldDecayTauMs,        // commissioned field drain time, command→10% of output (ms); worst-case (longest) endpoint of the drain-vs-RPM line, or the flat value
   CSV3_commissionManualMask,   // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
   CSV3_CvKdMaxTrimA,           // CV D-term back-off ceiling (A ×10); caps kdTrim so a fast rise saturates instead of flooring the field
   CSV3_cvAlpha,                // CV auto-gain aggressiveness α (fraction of the deadbeat-ohmic gain); ×1000
   CSV3_CvKdSlopeCeil,          // CV D-term slope ceiling (V/s 12V-equiv ×10) — max slope the D acts on, class-scaled at use
   CSV3_cvComputedKd,           // Auto-computed D gain Kd = CvKdTd·cvComputedKp (12V-equiv); ×100
-  CSV3_minPctSystemEnabled,    // Automatic Min% system master toggle (1=learner+calibration available); floor table is always live
   CSV3_CvKdDbSlope,            // CV D-term deadband line slope (V/s per A ×10000)
   CSV3_CvKdDbFloor,            // CV D-term deadband line floor (V/s ×100)
   CSV3_CvKdDbCeil,             // CV D-term deadband line ceiling (V/s ×100)
+  CSV3_cvRecovBoostEnable,     // post-protection recovery P-boost master switch (0/1)
+  CSV3_cvRecovBoostMax,        // recovery P-boost max multiplier at full shortfall; ×100
+  CSV3_cvRecovBoostErrV,       // recovery P-boost full-boost shortfall (V per 12V block); ×1000
+  CSV3_fdDrainLoMs,            // drain-vs-RPM line: drain (ms) at fdDrainRpmLo; 0 = no line (flat fieldDecayTauMs)
+  CSV3_fdDrainHiMs,            // drain-vs-RPM line: drain (ms) at fdDrainRpmHi
+  CSV3_fdDrainRpmLo,           // drain-vs-RPM line: lowest tested RPM (lookup clamps here)
+  CSV3_fdDrainRpmHi,           // drain-vs-RPM line: highest tested RPM (lookup clamps here)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1132,11 +1138,11 @@ void setupWiFi() {
     setupAccessPoint();
     currentMode = MODE_AP;
     CloudFeatures = 0;
-    if (webFS.exists("/index.html.br") || webFS.exists("/index.html.gz")) {
+    if (webFS.exists("/index.html.gz")) {
       Serial.println("Serving full alternator interface in AP mode");
       setupServer();
     } else {
-      Serial.println("No index.html.br/.gz found - serving basic landing page");
+      Serial.println("No index.html.gz found - serving basic landing page");
       setupCaptivePortalLanding();
     }
     return;
@@ -3186,15 +3192,43 @@ void setupServer() {
       settingWrite(NK_sysidPlantTau, String(systemIDPlantTauMs).c_str());
     }
     if (request->hasParam("fieldDecayTauMs")) {
-      // Commissioned field de-energize time (ms) — the Field-cut step's Apply-Average writes the averaged
-      // measurement as-is (30% cold margin removed 07-18); a manual override writes the typed value
-      // directly. Clamped to a sane physical band. Consumed by the OV field-drain release timing.
+      // Commissioned field drain time (ms) — worst-case value used when RPM is unknown and by the 3×
+      // post-protection backstops. Writing it FLATTENS the drain-vs-RPM line (endpoints cleared), so a
+      // manual override applies at every speed; the wizard Apply sends the endpoint params in the SAME
+      // request (handled below, after this flatten) to commission a line. Clamped to a sane physical band.
       foundParameter = true;
       inputMessage = request->getParam("fieldDecayTauMs")->value();
       int v = inputMessage.toInt();
       if (v < 5) v = 5; else if (v > 900) v = 900;
       fieldDecayTauMs = (uint16_t)v;
       settingWrite(NK_fieldDecayTau, String(fieldDecayTauMs).c_str());
+      fdDrainLoMs = 0; fdDrainHiMs = 0; fdDrainRpmLo = 0; fdDrainRpmHi = 0;
+      settingWrite(NK_fdDrainLoMs, "0"); settingWrite(NK_fdDrainHiMs, "0");
+      settingWrite(NK_fdDrainRpmLo, "0"); settingWrite(NK_fdDrainRpmHi, "0");
+    }
+    if (request->hasParam("fdDrainLoMs")) {
+      foundParameter = true;
+      int v = request->getParam("fdDrainLoMs")->value().toInt();
+      fdDrainLoMs = (uint16_t)constrain(v, 0, 900);
+      settingWrite(NK_fdDrainLoMs, String(fdDrainLoMs).c_str());
+    }
+    if (request->hasParam("fdDrainHiMs")) {
+      foundParameter = true;
+      int v = request->getParam("fdDrainHiMs")->value().toInt();
+      fdDrainHiMs = (uint16_t)constrain(v, 0, 900);
+      settingWrite(NK_fdDrainHiMs, String(fdDrainHiMs).c_str());
+    }
+    if (request->hasParam("fdDrainRpmLo")) {
+      foundParameter = true;
+      int v = request->getParam("fdDrainRpmLo")->value().toInt();
+      fdDrainRpmLo = (uint16_t)constrain(v, 0, 10000);
+      settingWrite(NK_fdDrainRpmLo, String(fdDrainRpmLo).c_str());
+    }
+    if (request->hasParam("fdDrainRpmHi")) {
+      foundParameter = true;
+      int v = request->getParam("fdDrainRpmHi")->value().toInt();
+      fdDrainRpmHi = (uint16_t)constrain(v, 0, 10000);
+      settingWrite(NK_fdDrainRpmHi, String(fdDrainRpmHi).c_str());
     }
     if (request->hasParam("systemIDSineCycles")) {
       foundParameter = true;
@@ -3245,7 +3279,7 @@ void setupServer() {
       queueConsoleMessage("SystemID: abort requested via web UI");
     }
 
-    // ── CV plant fit (firmware voltage-loop identification, commissioning Step 9) ──
+    // ── CV plant fit (firmware voltage-loop identification, commissioning Step 7) ──
     if (request->hasParam("cvPlantFitStart")) {
       foundParameter = true;
       float diMaxReq = request->hasParam("diMax") ? request->getParam("diMax")->value().toFloat() : 0.0f;
@@ -3260,10 +3294,6 @@ void setupServer() {
     if (request->hasParam("cvStressStart")) {
       foundParameter = true;
       if (!cvStressStartTest()) queueConsoleMessageF("CV stress test: cannot start — %s", cvStressAbortMsg);
-    }
-    if (request->hasParam("cvStressFinish")) {
-      foundParameter = true;
-      if (cvStressActive) cvStressFinishRequested = true;   // consumed (and graded) in cvStress_tick
     }
     if (request->hasParam("cvStressCancel")) {
       foundParameter = true;
@@ -3303,7 +3333,7 @@ void setupServer() {
       queueConsoleMessage("Field curve: abort requested via web UI");
     }
 
-    // ── Auto-commissioning: field de-energize τ (stage 7) ───────────────────
+    // ── Auto-commissioning: field de-energize drain run (fires per speed inside stage 7) ──
     if (request->hasParam("fieldCutStart")) {
       foundParameter = true;
       const char *busy = (systemIDActive != 0) ? "Plant Delay test"
@@ -3335,9 +3365,11 @@ void setupServer() {
       queueConsoleMessage("Field cut: abort requested via web UI");
     }
 
-    // ── Min% onset-knee sweep (standalone calibration) ──────────────────────
+    // ── Min% onset-knee sweep (commissioning stage 7) ───────────────────────
     // Reuses the field-curve ramp in onset-stop mode (stops at first current). Each completed
     // sweep is committed as an anchor; applyKneeCurve fits the Min% column across the anchors.
+    // Deliberately NOT gated on kneeLearnEnable: the floor table it fills is always live (max
+    // with the scalar MinDuty) — the learning toggle gates only the background learner.
     if (request->hasParam("startKneeSweep")) {
       foundParameter = true;
       const char *busy = (systemIDActive != 0) ? "Plant Delay test"
@@ -3349,9 +3381,7 @@ void setupServer() {
                          : (fieldCurveActive != 0) ? "Field curve"
                          : (fieldCutActive != 0) ? "Field cut"
                          : cvStressActive ? "CV stress test" : nullptr;
-      if (!minPctSystemEnabled) {
-        queueConsoleMessage("Automatic Min% learning is off — enable it to run the Min% floor calibration; the field floor is using the manual RPM table.");
-      } else if (sysMode != SYS_MODE_AUTO) {
+      if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Min% knee: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
         queueConsoleMessageF("Min%% knee: start blocked — %s is active", busy);
@@ -3460,7 +3490,7 @@ void setupServer() {
       commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
       commissionSetPhase(0);        // back to Prep (the wizard writes the phase on every step entry)
       commissionMarkStage(0);       // Prep complete: snapshot taken, preconditions checked
-      // Wipe the live onset-knee FIT SCRATCH so a later standalone Min% floor calibration starts its
+      // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (stage 7) starts its
       // sweeps clean. (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable
       // floors, which are left intact.)
       kneeAnchorN = 0;
@@ -3468,7 +3498,7 @@ void setupServer() {
       settingsDirty = true;         // push the CSV3 state echo promptly
       queueConsoleMessage("Commissioning: started — settings snapshotted");
     }
-    // Mark one wizard stage complete (i = 0=Prep…7=Field Decay). Sets its done bit and clears
+    // Mark one wizard stage complete (i = 0=Prep…8=Stress test). Sets its done bit and clears
     // any downstream stage it feeds (coupling: see commissionDependentsMask). Drives the ✓ marks.
     if (request->hasParam("commissionStageDone")) {
       foundParameter = true;
@@ -3690,27 +3720,11 @@ void setupServer() {
       settingWrite(NK_faPeakMinA, String(faPeakMinA, 2).c_str());
     }
     // ---- Auto Min% learning ("knee tracker") knobs ----
-    // Master system toggle: gates the learner + its card + the standalone Min% floor calibration.
-    // The floor TABLE stays live either way (getMinimumFieldForRPM always interpolates it).
-    if (request->hasParam("minPctSystemEnabled")) {
-      foundParameter = true;
-      minPctSystemEnabled = (request->getParam("minPctSystemEnabled")->value().toInt() != 0);
-      settingWrite(NK_minPctSystem, minPctSystemEnabled ? "1" : "0");
-      if (minPctSystemEnabled && kneeLearnEnable) {
-        // Learner machinery comes alive — take ownership of the Min% column from the learned floors.
-        for (int i = 0; i < RPM_TABLE_SIZE; i++) {
-          float f = (i == 0) ? 0.0f : kneeFloor[i];
-          if (f < 0) f = 0; if (f > kneeMaxFloorPct) f = kneeMaxFloorPct;
-          rpmMinDutyTable[i] = f;
-        }
-      }
-      queueConsoleMessageF("Automatic Min%% learning system %s", minPctSystemEnabled ? "enabled" : "disabled");
-    }
     if (request->hasParam("kneeLearnEnable")) {
       foundParameter = true;
       kneeLearnEnable = (request->getParam("kneeLearnEnable")->value().toInt() != 0);
       settingWrite(NK_kneeLearnEnable, kneeLearnEnable ? "1" : "0");
-      if (minPctSystemEnabled && kneeLearnEnable) {
+      if (kneeLearnEnable) {
         // Take ownership of the Min% column immediately from the learned floors (bin 0 always 0%).
         for (int i = 0; i < RPM_TABLE_SIZE; i++) {
           float f = (i == 0) ? 0.0f : kneeFloor[i];
@@ -4446,6 +4460,11 @@ void setupServer() {
       nvsPersistNow = true;
       queueConsoleMessage("Battery Charged Energy: Reset requested from web interface");
     }
+    if (request->hasParam("RestartChargeCycle")) {
+      foundParameter = true;
+      restartChargeCycleRequested = true;   // consumed by updateChargingStage() on the control-loop task
+      queueConsoleMessage("Restart charge cycle: requested from web interface");
+    }
     if (request->hasParam("ResetDischargedEnergy")) {
       foundParameter = true;
       DischargedEnergy = 0;
@@ -5123,11 +5142,50 @@ void setupServer() {
       // re-measured at the new breakpoints instead of silently re-applied at shifted RPMs.
       if (rpmPointChanged) {
         kneeLearnResetDefaults();   // zero floors/knees, unfreeze, drop rpmMinDutyTable to 0
-        queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor calibration");
+        commissionClearStage(7);    // Min% floor + Field decay stage now stale (demotes a commissioned device to in-progress)
+        queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor step");
       }
 
       pendingSaveUserTableEdits = true;  // deferred to Core 1 to avoid SSE gap
       queueConsoleMessage("Learning: Table saved to NVS");
+    }
+
+    // Pre-commissioning "Charge Rate Limits" screen: seed BOTH the Low and High cap tables in one
+    // request, independent of the live HiLow mode. Only the active mode's live ceiling is refreshed
+    // here (so the running alternator honors the edit immediately); the mode switch itself rides a
+    // separate HiLow request so its ceiling glide runs. Both blobs are written on Core 1.
+    if (request->hasParam("capBothSave")) {
+      foundParameter = true;
+      char pn[32];
+      bool ptsChanged = false;
+      float hiA[RPM_TABLE_SIZE], loA[RPM_TABLE_SIZE], hiW[RPM_TABLE_SIZE], loW[RPM_TABLE_SIZE];
+      for (int i = 0; i < RPM_TABLE_SIZE; i++) {
+        hiA[i] = rpmCapCurrentTable[i]; loA[i] = rpmCapCurrentTable[i];
+        hiW[i] = rpmCapPowerTable[i];   loW[i] = rpmCapPowerTable[i];
+        snprintf(pn, sizeof(pn), "rpmCapHi%d", i);    if (request->hasParam(pn)) hiA[i] = request->getParam(pn)->value().toFloat();
+        snprintf(pn, sizeof(pn), "rpmCapLo%d", i);    if (request->hasParam(pn)) loA[i] = request->getParam(pn)->value().toFloat();
+        snprintf(pn, sizeof(pn), "rpmCapPwrHi%d", i); if (request->hasParam(pn)) hiW[i] = request->getParam(pn)->value().toFloat() * 1000.0f;
+        snprintf(pn, sizeof(pn), "rpmCapPwrLo%d", i); if (request->hasParam(pn)) loW[i] = request->getParam(pn)->value().toFloat() * 1000.0f;
+
+        snprintf(pn, sizeof(pn), "rpmTableRPMPoints%d", i);
+        if (request->hasParam(pn)) {
+          int v = request->getParam(pn)->value().toInt();
+          if (v != rpmTableRPMPoints[i]) { ptsChanged = true; rpmTableRPMPoints[i] = v; }
+        }
+        // Refresh only the ACTIVE mode's live ceiling (so a running alternator honors the edit now);
+        // the mode switch itself rides a separate HiLow request so its ceiling glide runs.
+        rpmCapCurrentTable[i] = (HiLow == 1) ? hiA[i] : loA[i];
+        rpmCapPowerTable[i]   = (HiLow == 1) ? hiW[i] : loW[i];
+      }
+      if (ptsChanged) {
+        kneeLearnResetDefaults();
+        commissionClearStage(7);
+        queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor step");
+      }
+      saveBothCapTables(hiA, hiW, loA, loW);   // synchronous: NVS fresh before any following HiLow read
+      learningTableUpdated = true;
+      stateRevision++;
+      queueConsoleMessage("Learning: Low+High cap tables saved");
     }
 
     // Fuel table handlers
@@ -5380,6 +5438,24 @@ void setupServer() {
       cvRecovEmaxV = clamp_f(request->getParam("cvRecovEmaxV")->value().toFloat(), 0.05f, 2.0f);
       settingWrite(NK_cvRecovEmaxV, String(cvRecovEmaxV, 3).c_str());
       queueConsoleMessageF("CV recovery error cap: %.2f V", cvRecovEmaxV);
+    }
+    if (request->hasParam("cvRecovBoostEnable")) {  // master switch for the post-protection recovery P-boost (1=on, 0=off)
+      foundParameter = true;
+      cvRecovBoostEnable = (uint8_t)(request->getParam("cvRecovBoostEnable")->value().toInt() ? 1 : 0);
+      settingWrite(NK_cvRecovBoostEnable, String((int)cvRecovBoostEnable).c_str());
+      queueConsoleMessageF("CV recovery P-boost: %s", cvRecovBoostEnable ? "ON" : "OFF");
+    }
+    if (request->hasParam("cvRecovBoostMax")) {  // recovery P-boost max multiplier at full shortfall
+      foundParameter = true;
+      cvRecovBoostMax = clamp_f(request->getParam("cvRecovBoostMax")->value().toFloat(), 1.0f, 8.0f);
+      settingWrite(NK_cvRecovBoostMax, String(cvRecovBoostMax, 2).c_str());
+      queueConsoleMessageF("CV recovery P-boost max: %.2fx", cvRecovBoostMax);
+    }
+    if (request->hasParam("cvRecovBoostErrV")) {  // shortfall (V per 12V block) at which the boost reaches max
+      foundParameter = true;
+      cvRecovBoostErrV = clamp_f(request->getParam("cvRecovBoostErrV")->value().toFloat(), 0.1f, 5.0f);
+      settingWrite(NK_cvRecovBoostErrV, String(cvRecovBoostErrV, 3).c_str());
+      queueConsoleMessageF("CV recovery P-boost full-boost shortfall: %.2f V", cvRecovBoostErrV);
     }
     if (request->hasParam("dutySlewEnable")) {  // master switch for field duty slew (1=on, 0=instant)
       foundParameter = true;
@@ -7014,9 +7090,10 @@ void setupServer() {
     request->send(200, "application/json", buf);
   });
 
-  // Field de-energize τ test (commissioning stage 7): filtered decay trace + fitted τ / 90→10 fall
-  // time. pts.t is ms relative to the detected cut edge (small negative lead-in shows the plateau).
-  // The wizard polls this, plots idle vs cruise, and checks the two τ agree (speed-independence).
+  // Field de-energize test (runs per speed inside commissioning stage 7): filtered decay trace +
+  // fitted τ / 90→10 fall time + the hold-averaged RPM and pre-cut amps this run's drain point is
+  // reported at. pts.t is ms relative to the detected cut edge (small negative lead-in shows the
+  // plateau). The wizard polls this once per Min%-floor speed and fits drain-vs-RPM across the runs.
   // "aborted" reported independently of "active" (same rationale as /fieldcurve.json).
   server.on("/fieldcut.json", HTTP_GET, [](AsyncWebServerRequest *request) {
     std::shared_ptr<char> bufPtr((char *)ps_malloc(8192), [](char *p) { if (p) free(p); });
@@ -7030,16 +7107,16 @@ void setupServer() {
     }
     pos += snprintf(buf + pos, 8192 - pos,
                     "],\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"tauMs\":%.1f,\"fallMs\":%.1f,\"drainMs\":%.1f,"
-                    "\"baseA\":%.1f,\"floorA\":%.2f,\"residPct\":%.1f,\"nPts\":%d,\"src\":%d,"
+                    "\"baseA\":%.1f,\"floorA\":%.2f,\"rpm\":%.0f,\"residPct\":%.1f,\"nPts\":%d,\"src\":%d,"
                     "\"calGain\":%.4f,\"calOffA\":%.3f,\"aborted\":%d,\"abort\":\"%s\"}",
                     fieldCutActive != 0 ? 1 : 0, (int)fieldCutPhase, fieldCutResultsReady ? 1 : 0,
                     fieldCutOk ? 1 : 0, fieldCutTauMs, fieldCutFallMs, fieldCutDrainMs, fieldCutBaseA, fieldCutFloorA,
-                    fieldCutResidPct, fcPlotN, (int)fieldCutSrc, faCalGain, faCalOffA,
+                    fieldCutRpm, fieldCutResidPct, fcPlotN, (int)fieldCutSrc, faCalGain, faCalOffA,
                     fieldCutAbortRequested ? 1 : 0, fieldCutAbortMsg);
     request->send(200, "application/json", buf);
   });
 
-  // CV plant-fit status + result (commissioning Step 9 polls this). "aborted" reported independently of
+  // CV plant-fit status + result (commissioning Step 7 polls this). "aborted" reported independently of
   // "active" (same rationale as /fieldcurve.json — a protection cut can leave active latched).
   server.on("/cvplantfit.json", HTTP_GET, [](AsyncWebServerRequest *request) {
     std::shared_ptr<char> bufPtr((char *)ps_malloc(768), [](char *p) { if (p) free(p); });
@@ -8605,7 +8682,7 @@ void SendWifiData() {
   // PRIORITY 5: CSVData3 — sent immediately when settingsDirty (event-driven), or every 60s fallback
   if (!sentSomething && (settingsDirty || now - lastpayload3send >= 60000) && events.count() > 0) {
     static char *payload3 = nullptr;
-    static const size_t PAYLOAD3_SIZE = 3000;  // ~7 chars per field ≈ 2.3k at the current 324 fields; 3000 leaves wide-field headroom (overflow is caught below, not truncated silently)
+    static const size_t PAYLOAD3_SIZE = 3000;  // ~7 chars per field ≈ 2.3k at the current 330 fields; 3000 leaves wide-field headroom (overflow is caught below, not truncated silently)
     if (!payload3) {
       payload3 = (char *)ps_malloc(PAYLOAD3_SIZE);  // allocated to PSRAM
       if (!payload3) {
@@ -8644,7 +8721,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8966,10 +9043,16 @@ void SendWifiData() {
                                SafeInt(cvAlpha, 1000),
                                SafeInt(CvKdSlopeCeil, 10),
                                SafeInt(cvComputedKd, 100),
-                               (int)minPctSystemEnabled,
                                SafeInt(CvKdDbSlope, 10000),
                                SafeInt(CvKdDbFloor, 100),
-                               SafeInt(CvKdDbCeil, 100));
+                               SafeInt(CvKdDbCeil, 100),
+                               (int)cvRecovBoostEnable,
+                               SafeInt(cvRecovBoostMax, 100),
+                               SafeInt(cvRecovBoostErrV, 1000),
+                               SafeInt(fdDrainLoMs),
+                               SafeInt(fdDrainHiMs),
+                               SafeInt(fdDrainRpmLo),
+                               SafeInt(fdDrainRpmHi));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;
