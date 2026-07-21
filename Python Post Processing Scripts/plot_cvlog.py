@@ -8,7 +8,7 @@ Diagnostic plotter for CVlog data from the ESP32 alternator regulator.
   Plot 3 — Engine RPM + CH1 scheduling jitter | duty% right axis
   Plot 4 — CV PID term decomposition (P / I / D / Icv from logged terms; D detail on Plot 6)
   Plot 5 — Voltage loop firing health (stall diagnostic)
-  Plot 6 — Voltage D term: voltage domain + current domain + armed window
+  Plot 6 — Voltage D term: voltage domain + current domain + gate domain (rise rate vs live gate & arm window)
 
 State strip (below each plot):
   - binding-cap track (capReason): which layer actually set the current ceiling each tick
@@ -1228,30 +1228,48 @@ _sc6 = [c for c in ax6b.collections if not c.get_label().startswith("_")]
 _leg6b = ax6b.legend(_h6b + _sc6, [a.get_label() for a in _h6b + _sc6], loc="lower right", fontsize=9)
 _leg6b.set_draggable(True)
 
-# --- 6c: the gate signal, on its own axes (V/s never shares a frame with amps) ---
+# --- 6c: the gate signal vs the LIVE gate + arm window (V/s never shares a frame with amps) ---
 # cvDSlope_Vps IS the gated signal — a sliding-window (~100 ms) backward diff of cvKdFiltV_V, refreshed
-# every output tick, that the firmware compares directly to CvKdDeadbandVps. No slope-EMA layer: dropping
+# every output tick, that the firmware compares directly to the live deadband. No slope-EMA layer: dropping
 # the old 250 ms average is the whole point of the D-term rework (its lag released past the crest).
 if "cvDSlope_Vps" in df.columns:
     ax6c.plot(df["t_plot"], df["cvDSlope_Vps"],
               color="#00838f", lw=1.8, alpha=0.95,
               label="Rise rate — the gated signal (cvDSlope_Vps)")
-# Header carries only the line's BASE (CvKdDeadbandVps); the firmware evaluates base + CvKdDbSlope·I
-# clamped to floor/ceil at the live command, so the true gate rides at or above this line.
-if not np.isnan(_brk_thresh):
-    ax6c.axhline(_brk_thresh, color="#f57c00", linewidth=1.2, linestyle="--",
-                 alpha=0.85, label=f"deadband base ({_brk_thresh:.3g} V/s; live gate = base + slope·I)")
+# The ACTUAL per-row gate the firmware compared against: clamp(floor, base + CvKdDbSlope·I, ceil). Drawing
+# the header base alone read as a bug — the rise rate crossed it with no trim because the live gate rides
+# higher with current. Plot the logged live value so a crossing lines up with a 6b trim point. Non-positive
+# is a not-evaluated sentinel, masked out.
+if "kdDeadband_Vps" in df.columns and (df["kdDeadband_Vps"] > 0).any():
+    _gate6c = df["kdDeadband_Vps"].where(df["kdDeadband_Vps"] > 0)
+    ax6c.plot(df["t_plot"], _gate6c, color="#f57c00", lw=1.4, linestyle="--",
+              alpha=0.90, label="Live deadband gate (kdDeadband_Vps = base + slope·I)")
     if _brk_onesided == 0:
-        ax6c.axhline(-_brk_thresh, color="#f57c00", linewidth=1.0, linestyle=":",
-                     alpha=0.7, label="−deadband base (two-sided mode)")
+        ax6c.plot(df["t_plot"], -_gate6c, color="#f57c00", lw=1.0, linestyle=":",
+                  alpha=0.7, label="−live gate (two-sided mode)")
 ax6c.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
+# Distance-gate window: the D term is eligible ONLY inside these bands (voltage within CvKdArmV of target).
+# A rise-rate crossing OUTSIDE a band cannot trim — that is the second reason 6b shows no dot there.
+_armed_shaded = False
+if "kdArmed" in df.columns and (df["kdArmed"] == 1).any():
+    for _a6, _b6 in _bool_spans(df["t_plot"].values, df["kdArmed"].values.astype(bool), bridge_s=0.12):
+        ax6c.axvspan(_a6, _b6, color="#43a047", alpha=0.10, zorder=0)
+    _armed_shaded = True
 ax6c.set_ylabel("Rise slope (V/s)")
 ax6c.set_xlabel(time_label, fontsize=11)
 ax6c.grid(**GRID_KW)
-ax6c.set_title("Gate domain — rise rate vs deadband", fontsize=10, color="#444444", style="italic", pad=4)
+ax6c.set_title("Gate domain — rise rate vs live gate & arm window", fontsize=10, color="#444444", style="italic", pad=4)
 add_kd_shading(ax6c, df)
 _h6c = [l for l in ax6c.get_lines() if not l.get_label().startswith("_")]
-_leg6c = ax6c.legend(_h6c, [l.get_label() for l in _h6c], loc="lower right", fontsize=9)
+# Armed band and teal trim band are axvspans, not lines — add proxy patches so the legend explains them.
+from matplotlib.patches import Patch
+_p6c = []
+if _armed_shaded:
+    _p6c.append(Patch(color="#43a047", alpha=0.10, label="D-term armed (distance gate open)"))
+if ("kdTrim_A" in df.columns and (df["kdTrim_A"].values != 0).any()) or \
+   ("kdActive" in df.columns and df["kdActive"].any()):
+    _p6c.append(Patch(color=KD_COLOR, alpha=0.16, label="CV D term trimming"))
+_leg6c = ax6c.legend(_h6c + _p6c, [a.get_label() for a in _h6c + _p6c], loc="lower right", fontsize=9)
 _leg6c.set_draggable(True)
 
 _cb6 = _make_checkbox_panel(fig6, _h6 + _h6_duty + _h6b + _h6c)
@@ -1280,9 +1298,17 @@ if "kdActive" in df.columns and df["kdActive"].any():
 elif _helpers_en == 0:
     print("CV D term: never engaged — cvHelpersEnabled=0, the D term was switched OFF")
 else:
-    # Nearest miss: how close the rise rate got to the deadband. Answers "why didn't it fire?" without a re-run.
+    # Nearest miss: how close the rise rate got to the gate. Answers "why didn't it fire?" without a re-run.
+    # Test against the LIVE per-row gate (kdDeadband_Vps), not the header base — the base alone would call a
+    # sub-gate slope a "crossing" and wrongly blame the arm gate.
     _msg = "CV D term: never engaged in this log"
-    if "cvDSlope_Vps" in df.columns and not np.isnan(_brk_thresh):
+    if "cvDSlope_Vps" in df.columns and "kdDeadband_Vps" in df.columns and (df["kdDeadband_Vps"] > 0).any():
+        _pk = df["cvDSlope_Vps"].max()
+        _cleared = ((df["cvDSlope_Vps"] > df["kdDeadband_Vps"]) & (df["kdDeadband_Vps"] > 0)).any()
+        _gmin = df.loc[df["kdDeadband_Vps"] > 0, "kdDeadband_Vps"].min()
+        _msg += f"  (peak rise rate {_pk:.3f} V/s vs live gate {_gmin:.3g}+ V/s"
+        _msg += " — never cleared it)" if not _cleared else " — cleared it, so the arm-distance gate held it off)"
+    elif "cvDSlope_Vps" in df.columns and not np.isnan(_brk_thresh):
         _pk = df["cvDSlope_Vps"].max()
         _msg += f"  (peak rise rate {_pk:.3f} V/s vs deadband {_brk_thresh:.3g} V/s"
         _msg += " — never crossed)" if _pk <= _brk_thresh else " — crossed, so the arm-distance gate held it off)"

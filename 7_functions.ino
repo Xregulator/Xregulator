@@ -3915,8 +3915,8 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 
   // ── CUT + TAIL: duty steps to MinDuty (the real OV-clamp floor) and stays FIELDCUT_MEAS_MS.
   //   Decay: fast ring grabbed FIELDCUT_SNAP_MS after the cut; ADS samples recorded for fallback.
-  //   Tail: residual floor (ADS) + low calibration point (four spaced ring grabs) over the same
-  //   final 2.4 s — long after the decay, pure settled floor. ──
+  //   Tail: residual floor (ADS) + low calibration point (four spaced ring grabs) over the
+  //   final 2.5 s — starts ~1.3 s after the drain has fully settled, pure floor. ──
   if (phase == 3) {
     dutyOut = MinDuty; fieldCutPhase = 2;
     uint32_t el = nowMs - phaseStartMs;
@@ -3931,7 +3931,7 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       snapped = true;
     }
     if (el >= FIELDCUT_MEAS_MS - 2500UL) { adsTailSum += ampsRaw; adsTailN++; }
-    // Four non-overlapping 500 ms windows at 8.0/8.65/9.3/9.95 s — [7.5-8.0][8.15-8.65][8.8-9.3][9.45-9.95]
+    // Four non-overlapping 500 ms windows at 2.0/2.65/3.3/3.95 s — [1.5-2.0][2.15-2.65][2.8-3.3][3.45-3.95]
     if (tailGrabs < 4 && el >= (FIELDCUT_MEAS_MS - 2000UL) + 650UL * tailGrabs) {
       int n = faGrabRecent(fcScratch, FIELDCUT_FAST_N);
       if (n >= 2000) { faLoSum += fcMeanMv(fcScratch, n); faLoN++; }

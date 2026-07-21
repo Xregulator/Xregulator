@@ -1156,7 +1156,7 @@ int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) 
 #define FIELDCUT_SETTLE_MS  3000UL   // measured current must sit in-band this long (after the setpoint slew arrives) before the hold starts
 #define FIELDCUT_SETTLE_TIMEOUT_MS 30000UL  // never settles (e.g. target unreachable at idle) → proceed with what we have if it clears FIELDCUT_MIN_BASE_A
 #define FIELDCUT_HOLD_MS    5000UL   // duty FROZEN this long before the cut — field at a constant, settled operating point; baseline + high calibration point averaged over the tail of this window
-#define FIELDCUT_MEAS_MS    10000UL  // cut window: field at MinDuty; decay in the first ~0.5 s, the rest establishes the residual floor + low calibration point
+#define FIELDCUT_MEAS_MS    4000UL   // cut window: field at MinDuty. Decay is done in ~0.2 s (τ tens of ms); the window only needs to outlast it, then average the residual floor + low calibration point over the final 2.5 s. Was 10 s — 5-7.5 s of it measured nothing.
 #define FIELDCUT_SNAP_MS    400UL    // grab the 500 ms fast-channel ring this long after the cut → window spans ~[cut-100, cut+400] ms even with drain lag
 #define FIELDCUT_EASE_MS    1500.0f  // ease duty back to the pre-test operating point on exit — gentle re-engagement can't trip a protection
 #define FIELDCUT_MIN_BASE_A 5.0f     // baseline-above-floor must clear this or there is no decay to fit
@@ -1374,7 +1374,8 @@ int NMEA0183Data = 0;      // Set to 1 if NMEA serial data exists doesn't do any
 // ── HARD OVER-CURRENT PROTECTION ─────────────────────────────
 // "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
 float HardOCTripAmps = 160.0f;   // derived: MaxTableValue + 10A — recomputed at boot and on MaxTableValue change, not persisted
-uint32_t HardOCDebounceMs = 20;  // user-adjustable, persisted in LittleFS
+uint32_t HardOCDebounceMs = 20;  // user-adjustable, persisted in NVS
+bool HardOCEnable = true;        // Group 0 enable — gates the last-resort trip; survives the global protections toggle, so OFF removes the final over-current backstop
 uint32_t hardOCStartMs = 0;
 //Field PWM stuff
 const int pwmPin = 14;  // field PWM pin
@@ -3026,10 +3027,16 @@ float    cvpfPilotK = 0.02f, cvpfPilotVbase = 12.0f, cvpfCmdA = 10.0f;
 bool     cvpfFellBack = false;
 float    cvpfBaseDuty = 0.0f, cvpfStepDuty = 0.0f;  // settled duties captured from the current PID, replayed abruptly
 float    cvpfPreSetpoint = 0.0f;   // setpointLimited before the test — restored pre-override so the resume snapshot is clean
-uint32_t cvpfEdgeMs[8] = { 0 };    // tick timestamp of each abrupt duty edge (4 up + 4 down)
+uint32_t cvpfEdgeMs[8] = { 0 };    // tick timestamp of each abrupt duty edge (even idx = step-up, odd = step-down; pulse = idx>>1)
 uint8_t  cvpfEdgeCount = 0;
+float    cvpfEdgeK[8]   = { 0 };   // per-edge stiffness mV/A for the wizard table (0 = no reading)
+uint8_t  cvpfEdgeStat[8] = { 4, 4, 4, 4, 4, 4, 4, 4 };  // 0 used · 1 weak step · 2 wrong-way · 3 window starved · 4 not fired
 float    cvpfDiMaxA = 40.0f;       // per-run current-step ceiling (A); raised only when the operator accepts the weak-signal re-run, reset each start
-float    cvpfRpmAtFit = 0.0f;      // RPM at fit completion — feeds the re-run RPM advice
+float    cvpfRpmAtFit = 0.0f;      // mean RPM over the two middle pulse segments — re-run RPM advice + result-card conditions
+float    cvpfBattVAtFit = 0.0f;    // mean IBV over the two middle pulse segments — result-card "test conditions" only
+float    cvpfSocAtFit = -1.0f;     // mean SOC% over the two middle pulse segments (−1 when socInfoAvailable false) — result-card only
+double   cvpfRpmSum = 0.0, cvpfBattVSum = 0.0, cvpfSocSum = 0.0;   // accumulators, summed over the settled tail of the mid high+low segments
+uint32_t cvpfCondN = 0;            // condition samples accumulated (settled tails of segments 3 & 4 → ~1 s of stable level each)
 float    cvpfCapHeadroomA = 0.0f;  // A — alternator cap-table headroom at fit time (g_I_cap − cvpfBaseA); how much bigger a step the table allows
 
 // ── CV stress test (commissioning stage 8 / standalone from Diag) ──
@@ -3083,7 +3090,7 @@ void   applyChemistryOcvPreset();
 // measure measured-vs-reference gain/phase = the closed-loop frequency response.
 int     tuningWaveform     = 0;        // 0 square, 1 sine manual, 2 sine auto-sweep
 float   tuningSineFreq     = 2.0f;     // Hz — manual sine frequency
-float   tuningSweepStart   = 0.3f;     // Hz — auto-sweep low end
+float   tuningSweepStart   = 0.2f;     // Hz — auto-sweep low end
 float   tuningSweepEnd      = 15.0f;   // Hz — auto-sweep high end
 uint8_t tuningSweepCycles   = 2;       // analysed cycles per frequency (1 settle cycle skipped); integer-cycle windowed, so 2 is clean
 volatile bool tuningSweepRequested = false;  // UI "Run Sweep" → start/restart the sweep
@@ -3505,6 +3512,7 @@ float CvKdDeadbandVps = 0.4f;       // V/s at zero amps — BASE of the deadband
 float CvKdDbSlope = 0.0f;           // V/s per A — deadband line slope vs the slew-limited command (ripple-driven slope noise grows with output, same physics as the G3 trip line); 0 = flat, the pre-measurement behavior; set from the Step-5 slope fit b1
 float CvKdDbFloor = 0.10f;          // V/s — lowest the evaluated deadband may go (guards the low-current extrapolation below the tested sweep span)
 float CvKdDbCeil  = 3.5f;           // V/s — highest the evaluated deadband may go; MUST stay below CvKdSlopeCeil: the gate compares cvDSlope already clamped to ±CvKdSlopeCeil, so a deadband at/above it could never be crossed and D would go dead at that current
+bool  CvKdExcessMode = true;        // true = trim ∝ (slope − deadband line), continuous from zero at the line — no engagement step, so a small coherent swing can't self-sustain (the 2026-07-21 1.4 Hz hold limit cycle). false = legacy full-slope hysteretic latch (bench A/B only): trim jumps to Kd×deadband at the line — that step is a relay behind the ~0.2 s field lag
 bool  CvKdOneSided = false;         // false = two-sided: also adds on a fast fall, ONLY below target (that gate is what makes two-sided safe)
 float CvKdArmV = 0.5f;              // V below target within which D acts (0 = always); tight so D stays off the sag-recovery climb and only brakes the final approach to setpoint (1.25 armed 1.25V early and chopped the recovering field)
 float CvKdMaxTrimA = 500.0f;        // A — deliberately-inactive backstop on the D back-off; the real bound on D depth is CvKdSlopeCeil × Kd, this only bites at Kd far above the seeded range. FLAT amps
@@ -3528,6 +3536,7 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 // oscillation (belt resonance, stator imbalance, rectifier ripple) to ~0 before the
 // threshold is applied.
 // See Working Markdown Docs/iExcess_Redesign_Spec.md and CV_Loop_Dev_Summary.md.
+bool IExcessEnable    = true;    // Group 3 enable — gates BOTH iExcess detectors (CV + bulk); OV groups, Load Dump, and the hard OC trip are unaffected
 float IExcessFrac     = 0.031f;  // shared trip-line SLOPE (A per A of command); commissioning sets it to the measured ripple slope. E = clamp(floor, frac·cmd + base, ceil).
 float IExcessFracBulk = 0.031f;  // CC-detector slope; the UI keeps it equal to IExcessFrac so the CV and CC trip lines stay parallel. Differs from CV only on an uncommissioned device.
 float IExcessBaseA    = 5.8f;    // A — trip-line intercept (CV base). 0 = through-origin. Commissioning sets it to ripple-at-idle + Safety Margin, lifting the line above the measured ripple.
@@ -3535,6 +3544,7 @@ float IExcessCcOffsetA = 4.0f;   // A — the CC trip line sits this far above t
 float IExcessFloorA   = 5.0f;    // A — trip-line floor; it never dips below this even at tiny commands.
 float IExcessCeilA    = 25.0f;   // A — trip-line ceiling; it never rises above this on very large commands.
 float BattCurrentLimitA = 100.0f;  // A — max battery charge current (G4). Ceiling on the alternator-amp command = limit + measured house-load offset; requires the INA228 battery shunt as Battery Current Source. 0 = disabled.
+bool BattLimitEnable  = true;    // Group 4 enable — gates the battery charge-current ceiling AND Load Dump (which otherwise survives even the global protections toggle)
 float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst-case (idle) belt resonance; one fixed value covers the whole RPM range. dt-aware alpha.
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (scale-aware).
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
@@ -3566,6 +3576,7 @@ float voltageTargetSlewed = 0.0f;        // rise-governor output — the setpoin
 float Icv = 0.0f;                         // CV PID output — direct current setpoint (A)
 float cv_I = 0.0f;                        // CV integrator state (A)
 bool voltageControlActive = false;        // true when voltage PID is active (non-idle stages)
+bool lastVoltageControlActive = false;    // CV-entry tracker for the bumpless seed. Maintained by the CV block and the MANUAL branch; runShutdownPath/runCommissionIdle return before that line, so they clear it themselves — left stale-TRUE there, a re-enable skips the entry seed and resumes a stale cv_I (2026-07-20 double fire). Deliberately NOT cleared by the in-AUTO test branches: their capture/restore contract (cvContextUnchanged) relies on it staying set.
 uint32_t thermalCvOwnStartMs = 0;         // millis() the CV loop took the current command (0 = it has not); de-glitch timer for the thermal accuracy gate
 // =====================================================================================
 // Table Bounds & Safety
@@ -3736,9 +3747,9 @@ float cvRecovEmaxV = 0.25f;  // recovery error cap (V, per-12V-block — scaled 
 // before it can re-fire an OV. Only the P term is scaled — cv_I and the D trim are untouched.
 // Independent of cvRecovEnable (works with the timed window off). The bare loop's peak recovery
 // current sits ~5% above the pre-trip hold, so without this the post-cut return is integrator-paced.
-uint8_t cvRecovBoostEnable = 1;   // master switch for the recovery P-boost. DEFAULT ON — bench-untested; turn off if a faster climb re-trips OV on the approach
-float   cvRecovBoostMax    = 3.0f;  // P-gain multiplier at ≥ cvRecovBoostErrV of shortfall; 1.0 = no boost, taper is linear from 1× at target. Clamp [1,8]
-float   cvRecovBoostErrV   = 1.5f;  // shortfall (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use) at which the boost reaches cvRecovBoostMax. Clamp [0.1,5]
+uint8_t cvRecovBoostEnable = 1;   // master switch for the recovery P-boost. DEFAULT ON — seen live at 3×/1.5V (2026-07-20 G2 recovery, ~2.4× in the valley); 4×/0.6V untested — turn off if a faster climb re-trips OV on the approach
+float   cvRecovBoostMax    = 4.0f;  // P-gain multiplier at ≥ cvRecovBoostErrV of shortfall; 1.0 = no boost, taper is linear from 1× at target. Clamp [1,8]
+float   cvRecovBoostErrV   = 0.6f;  // shortfall (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use) at which the boost reaches cvRecovBoostMax. Clamp [0.1,5]
 bool    g_autoTestActive  = false;  // set per control-loop tick: an automated/guided test owns the limiters now (commissioning / battery-health DCIR / resonance / system-ID). While true the four user limiter toggles above are inert so a stray user setting can't corrupt a measurement; each test's own built-in slew behavior governs.
 const float TEST_ENTRY_RATE_A = 8.0f;  // A/s — FIXED, conservative ramp rate for an automated test's transition up from the rest floor and back down (NOT the user's SetpointRiseRate/FallRate, which a user could set aggressively). Used by DCIR, the resonance check, and the TuningMode entry ramp so a test never slams the field coming on/off. Current-domain, so no bus-voltage scaling.
 const float CVPF_ENTRY_RATE_A = 50.0f; // A/s — cvpf current-PID phase setpoint rate; the measured edges are direct-duty, so this only paces the practice run
@@ -4137,7 +4148,7 @@ uint32_t thermalLogBurstUntilMs = 0;
 
 #define PID_LOG_SIZE 2400
 #define CV_LOG_SIZE 6000
-#define CV_LOG_HEADER_SIZE 40
+#define CV_LOG_HEADER_SIZE 64
 
 volatile bool pidLogPaused = false;
 volatile uint32_t pidLogPausedAtMs = 0;
@@ -4264,7 +4275,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //  24      iMeas            ×10        MeasuredAmps (raw alternator current)
 //  26      duty             ×10        dutyCycle
 //  28      flags            —          see bit definitions below
-//  29      awState          —          0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
+//  29      awState          —          0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless
 //  30      rpm              raw        RPM, clamped to int16 range
 //  32      battV_filt_x100  ×100       IBV_filtered (display EMA, VoltageFilterTC)
 //  34      ch1IntervalMs    raw ms     last CH1 inter-sample gap
@@ -4319,7 +4330,7 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t iMeas;
   int16_t duty;
   uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive b7=recovActive
-  uint8_t awState; // 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
+  uint8_t awState; // 0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless
   int16_t rpm;
   int16_t battV_filt_x100;  // IBV_filtered × 100 (V) — display EMA, VoltageFilterTC
   int16_t ch1IntervalMs;    // last CH1 inter-sample gap   (ms)
@@ -4351,18 +4362,27 @@ struct CvBinDLState {
 };
 
 // ---------------------------------------------------------------------------
-// BINARY HEADER  (40 bytes)
+// BINARY HEADER  (64 bytes) — carries the FULL D-term trim equation so a log is
+// self-describing: kdTrim can be reconstructed from cvDSlope + spLimited alone.
 // offset  field           type      notes
 //   0     count           uint32    number of valid entries
 //   4     entrySize       uint32    = 57
-//   8     voltageKp       float     VoltageKp at download time
-//  12     voltageKi       float     VoltageKi at download time
+//   8     voltageKp       float     VoltageKp_active at download time (the gain in effect, not the typed knob)
+//  12     voltageKi       float     VoltageKi_active at download time
 //  16     voltageInterval uint32    VoltageLoopInterval ms
-//  20     kdDeadband      float     CvKdDeadbandVps (V/s) — the deadband line's BASE only (slope/floor/ceil not logged)
-//  24     kd              float     VoltageKd (A/(V/s))
+//  20     kdDeadband      float     CvKdDeadbandVps (V/s) — deadband line BASE (b of clamp(floor, b + m·I, ceil))
+//  24     kdActiveGain    float     VoltageKd_active (A/(V/s)) — the D gain the trim law actually multiplies
+//                                   (pack-space: Auto Td·Kp or Manual typed, ×vNorm×derate). Was the typed
+//                                   VoltageKd before 2026-07-21, which mislabeled Auto-mode logs.
 //  28     kdArmV          float     CvKdArmV (V)
 //  32     kdOneSided      float     CvKdOneSided (0/1, stored as float for header layout stability)
 //  36     kdVoltFiltTC    float     CvKdVoltFiltTC (ms) — the D term's dedicated voltage-EMA time constant
+//  40     kdDbSlope       float     CvKdDbSlope (V/s per A) — deadband line slope m, evaluated at spLimited
+//  44     kdDbFloor       float     CvKdDbFloor (V/s) — deadband line clamp floor
+//  48     kdDbCeil        float     CvKdDbCeil (V/s) — deadband line clamp ceiling
+//  52     kdSlopeCeil     float     EFFECTIVE slope ceiling (V/s, already ×V/12) — cvDSlope is clamped to ±this
+//  56     kdMaxTrimA      float     CvKdMaxTrimA (A) — flat trim cap
+//  60     kdExcessMode    float     CvKdExcessMode (0/1): 1 = trim = Kd×(slope − band), 0 = legacy Kd×slope latch
 // ---------------------------------------------------------------------------
 
 static CvLogEntry *cvLog = nullptr;
@@ -4495,7 +4515,7 @@ float LoadDumpDtThresh1 = 7000.0f;  // A/s — tier 1: fires on a SINGLE sample 
 float LoadDumpDtThresh  = 5000.0f;  // A/s — tier 2: fires when TWO consecutive samples both exceed this; noise ceiling ~354 A/s consecutive
 float LoadDumpDtThresh3 = 5000.0f;  // A/s — tier 3: fires when THREE consecutive samples all exceed this (slow relay-contact disconnects)
 volatile bool g_loadDumpActive = false;
-uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
+uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless
 uint32_t g_loadDumpCount = 0;
 
 // Protection event counters — rising-edge, cleared by web UI reset buttons

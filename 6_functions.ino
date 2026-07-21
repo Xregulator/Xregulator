@@ -681,6 +681,7 @@ void handleLimpHome(uint32_t currentMillis, const TickSnapshot &tick) {
 void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEventReason reason,
                      float actualDtSec, bool exitingNormal) {
   voltageControlActive = false;
+  lastVoltageControlActive = false;  // caller returns before the CV block's tracker line — stale TRUE would skip the re-entry bumpless seed on re-enable
 
   // GPIO38 driven solely by CheckAlarms — do not write here
 
@@ -827,6 +828,7 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
 // selectFieldControlMode returns the fault mode instead, so this is only reached when nominal.
 void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float actualDtSec) {
   voltageControlActive = false;
+  lastVoltageControlActive = false;  // same stale-tracker clear as runShutdownPath — the wizard's test-FAIL→rest→retry flow is the path that double-fired 2026-07-20
   uTargetAmps = 0;
   setpointLimited = 0.0f;
   ctrlLimiter = 0;
@@ -2292,11 +2294,6 @@ void AdjustFieldLearnMode() {
     // ========== SETPOINT COMPUTATION (AUTO mode only) ==========
     setpointCommand = 0.0f;   // global (declared in Xregulator.ino) — read by the Control Accuracy score gate
 
-    // Tracks voltageControlActive across both AUTO and MANUAL branches so AUTO
-    // re-entry from MANUAL correctly fires the bumpless CV seed. Declared here
-    // (outside the AUTO branch) so the MANUAL branch can also update it.
-    static bool lastVoltageControlActive = false;
-
     if (sysMode == SYS_MODE_AUTO) {
 
       static bool lastTuningMode = false;
@@ -2639,7 +2636,7 @@ void AdjustFieldLearnMode() {
         // current lags ABOVE any descending reference — so the glide ALSO drives modeCapGlideSuppress
         // (glide window + a settling-tail grace), which both iExcess detectors read to hold their EMA
         // at 0 for the duration (see those blocks below).
-        // The HARD protections stay live throughout — hardware OV, fast OV, and the HardOCTripAmps trip.
+        // The HARD protections stay live throughout — hardware OV, fast OV, and (unless Group 0 is toggled off) the HardOCTripAmps trip.
         // The glide self-clears once the held ceiling reaches the new cap (or an up-switch raises it past).
         if (modeCapSlewActive) {
           if (modeCapSlew > (float)uTargetAmps) {
@@ -2686,7 +2683,7 @@ void AdjustFieldLearnMode() {
           }
         }
         bool battCeilBinding = false;  // battery charge-current ceiling won the min-select this tick (banner limiter code 4)
-        if (BattCurrentLimitA > 0.0f && BatteryCurrentSource == 0 && ShuntResistanceMicroOhm > 0 && BatteryShuntPresent) {
+        if (BattLimitEnable && BattCurrentLimitA > 0.0f && BatteryCurrentSource == 0 && ShuntResistanceMicroOhm > 0 && BatteryShuntPresent) {
           float battCeilAlt = BattCurrentLimitA + fmaxf(0.0f, loadOffsetFilt);
           // Console note when the battery limit is the binding ceiling AND output is actually riding it
           // (e.g. absorption approaching target slowly, or bulk capped below the RPM table): once after
@@ -2723,8 +2720,8 @@ void AdjustFieldLearnMode() {
         // Fires on a SUSTAINED current excess over the CV command: an EMA of
         // (MeasuredAmps − setpointLimited) crossing E = clamp(IExcessFrac × setpointLimited,
         // floor, ceil). Voltage-gated to near target (IBV > target − IExcessArmMarginV) so it
-        // can't fire during ramp-up; testProtectionsEnabled=false, TuningMode=1, or the
-        // battery-health DCIR test (batteryHealthTestActive) inhibit it
+        // can't fire during ramp-up; IExcessEnable=false (Group 3 toggle), testProtectionsEnabled=false,
+        // TuningMode=1, or the battery-health DCIR test (batteryHealthTestActive) inhibit it
         // (else branch releases the latch and reseeds the EMA).
         // Full math + rationale: Working Markdown Docs/iExcess_Redesign_Spec.md.
         {
@@ -2739,7 +2736,7 @@ void AdjustFieldLearnMode() {
           // MaintainMode / zero-current float: the command is deliberately 0 while the alternator supplies
           // the house loads, so percent-of-command has no meaning — both iExcess regimes disarm. OV groups,
           // Load Dump, and the hard OC trip stay armed.
-          if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && voltageControlActive
+          if (IExcessEnable && testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && voltageControlActive
               && MaintainMode == 0 && !zeroFloatActive && (IBV > ChargingVoltageTarget - IExcessArmMarginV)) {
             // Affine trip line: slope·command + base, floor/ceiling guarded. Commissioning fits slope to the
             // measured ripple slope and base to ripple-at-idle + Safety Margin, so the line rides a fixed
@@ -2867,7 +2864,7 @@ void AdjustFieldLearnMode() {
           static bool postProtMismatchBulk = false;  // wind-down gate (mirror of the CV detector's postProtMismatch): suppress a redundant bulk re-fire during the field-TC tail AFTER a clamp releases
           static uint32_t postProtClearMsBulk = 0;   // millis the wind-down safety cap is measured from (refreshed every clamped tick → counts from the release edge)
 
-          if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && voltageControlActive
+          if (IExcessEnable && testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && voltageControlActive
               && MaintainMode == 0 && !zeroFloatActive
               && (IBV <= ChargingVoltageTarget - IExcessArmMarginV)) {
             // Affine trip line vs the commanded ceiling: slope·ceiling + base + CC offset, floor/ceiling
@@ -2984,7 +2981,7 @@ void AdjustFieldLearnMode() {
           static int ldCount1 = 0;  // consecutive samples above LoadDumpDtThresh1
           static int ldCount2 = 0;  // consecutive samples above LoadDumpDtThresh
           static int ldCount3 = 0;  // consecutive samples above LoadDumpDtThresh3
-          if (voltageControlActive && inaFastModeActive && HAS_BATT_SHUNT) {  // no shunt → dBcur/dt is noise; fast-OV dV/dt is the load-dump backstop
+          if (BattLimitEnable && voltageControlActive && inaFastModeActive && HAS_BATT_SHUNT) {  // no shunt → dBcur/dt is noise; fast-OV dV/dt is the load-dump backstop
             if (g_dBcur_dt > LoadDumpDtThresh1) {
               ldCount1++;
             } else {
@@ -3100,8 +3097,8 @@ void AdjustFieldLearnMode() {
           ChargingVoltageTargetReq = cvStressTargetV;
         }
         // Detect CV entry so the voltage loop fires immediately on the first CV tick.
-        // (lastVoltageControlActive is declared above the AUTO/MANUAL branches so the
-        // MANUAL branch also resets it — see voltageControlActive=false in MANUAL below.)
+        // (lastVoltageControlActive is a global: the MANUAL branch and the shutdown/
+        // commission-idle early exits — which never reach this line — all reset it.)
         bool enteringCV = (!lastVoltageControlActive && voltageControlActive);
         lastVoltageControlActive = voltageControlActive;
 
@@ -3447,9 +3444,10 @@ void AdjustFieldLearnMode() {
           bool cvLoopFired = enteringCV || ((currentMillis - lastVoltageLoopMs) >= VoltageLoopInterval);
 
           // ===== CV D term — sliding-window derivative, recomputed every output tick =====
-          // kdTrim is a POSITION (VoltageKd_active × full slope, deadband-latch gated, capped), subtracted
-          // at the Icv output, never integrated into cv_I. Runs BEFORE the PI block so its anti-windup and
-          // the recovery starve-exit read this tick's fresh slope/trim.
+          // kdTrim is a POSITION (VoltageKd_active × slope EXCESS over the deadband line — or × full slope,
+          // latch-gated, in legacy CvKdExcessMode=0 — capped), subtracted at the Icv output, never integrated
+          // into cv_I. Runs BEFORE the PI block so its anti-windup and the recovery starve-exit read this
+          // tick's fresh slope/trim.
           {
             static const uint8_t KDBUF_N = 64;         // spans a 100 ms window down to ~1.5 ms/tick
             static uint32_t kdBufT[KDBUF_N];
@@ -3490,12 +3488,14 @@ void AdjustFieldLearnMode() {
                 cvDSlope = constrain((g_cvKdFiltV - vOld) / ((float)oldAge / 1000.0f), -slopeCeil, slopeCeil);
                 rollUpdate(ROLL_CVSLOPE, cvDSlope);   // D-term deadband-tuning readout (10 s peak raw rise)
               }
-              // Deadband is a hysteretic gate, not a subtraction: full slope once clearly past it,
-              // re-arm at half so ripple flickering across the edge can't jab the field. Latches track
-              // the slope every tick — outside the arm gate too — so a re-arm never acts on stale state.
-              // The deadband itself is a LINE in operating current (ripple-driven slope noise grows with
+              // The deadband is a LINE in operating current (ripple-driven slope noise grows with
               // output, mirroring the G3 trip line), evaluated at the slew-limited command — slow by
               // construction, so a genuine transient can't drag the threshold up while the D should fire.
+              // In excess mode the line is a SUBTRACTION (trim continuous from zero at it) and needs no
+              // hysteresis; the latches below serve only the legacy full-slope mode, where the engagement
+              // step needs a re-arm-at-half gate so ripple flickering across the edge can't jab the field.
+              // Latches track the slope every tick — outside the arm gate too — so a legacy re-arm never
+              // acts on stale state.
               float kdDb = clamp_f(CvKdDeadbandVps + CvKdDbSlope * setpointLimited, CvKdDbFloor, CvKdDbCeil);
               if (cvDSlope >  kdDb)             kdOutUp = true;
               else if (cvDSlope <  0.5f * kdDb) kdOutUp = false;
@@ -3508,13 +3508,28 @@ void AdjustFieldLearnMode() {
               if (cvHelpersEnabled && !fitProbeActive
                   && (CvKdArmV <= 0.0f || (voltageTargetSlewed - g_cvKdFiltV) < CvKdArmV)) {
                 float slopeExcess = 0.0f;
-                if (kdOutUp && cvDSlope > 0.0f) {
-                  slopeExcess = cvDSlope;                                // brake: full slope
-                } else if (!CvKdOneSided && kdOutDn && cvDSlope < 0.0f
-                           && (voltageTargetSlewed - g_cvKdFiltV) > 0.0f) {
-                  // two-sided add: only when BELOW target — damps the undershoot ring without
-                  // re-lifting an above-target overshoot (the old symmetric-D failure was adding here)
-                  slopeExcess = cvDSlope;                                // boost (below target only): full slope
+                if (CvKdExcessMode) {
+                  // Trim ∝ excess over the line, continuous from zero at it. The legacy full-slope form
+                  // jumped by Kd×deadband at engagement — a relay step that, behind the ~0.2 s field lag
+                  // and the stiff near-saturation local plant, self-sustained a 1.4 Hz hold limit cycle
+                  // (2026-07-21 12:48 log). Excess form gives a small swing near the line near-zero
+                  // authority, so the cycle cannot feed itself; deep-slope response is reduced by only
+                  // the band width (Td is the recovery knob if that haircut ever matters).
+                  if (cvDSlope > kdDb) {
+                    slopeExcess = cvDSlope - kdDb;                       // brake
+                  } else if (!CvKdOneSided && cvDSlope < -kdDb
+                             && (voltageTargetSlewed - g_cvKdFiltV) > 0.0f) {
+                    // two-sided add: only when BELOW target — damps the undershoot ring without
+                    // re-lifting an above-target overshoot (the old symmetric-D failure was adding here)
+                    slopeExcess = cvDSlope + kdDb;                       // boost (below target only)
+                  }
+                } else {
+                  if (kdOutUp && cvDSlope > 0.0f) {
+                    slopeExcess = cvDSlope;                              // legacy brake: full slope
+                  } else if (!CvKdOneSided && kdOutDn && cvDSlope < 0.0f
+                             && (voltageTargetSlewed - g_cvKdFiltV) > 0.0f) {
+                    slopeExcess = cvDSlope;                              // legacy boost (below target only): full slope
+                  }
                 }
                 kdTrim = clamp_f(VoltageKd_active * slopeExcess, -CvKdMaxTrimA, CvKdMaxTrimA);  // flat cap → per-cell-equal knee
               }
@@ -3623,10 +3638,13 @@ void AdjustFieldLearnMode() {
               float dI = (e >= 0.0f ? VoltageKi_active : KiDown) * e * dtSec;
 
               bool supervisorLimiting = fastOvClampActive && ((float)uTargetAmps < uTargetRaw_cached - 0.01f);
-              // Freeze upward integration while EITHER the fast-OV supervisor caps the ceiling OR the D
-              // term holds the output down: in both cases Icv is held below what the PI wants while V is
-              // still under target (e>0), so unfrozen cv_I would wind up invisibly and dump on release.
-              if ((supervisorLimiting || kdLimiting) && dI > 0.0f) {
+              bool slewStarved = (setpointLimited < Icv - 2.0f);  // 2A margin: >10x the steady-CV Icv-vs-setpoint jitter (p99 0.2A), so it engages only on genuine slew lag
+              // Freeze upward integration while the fast-OV supervisor caps the ceiling, the D term
+              // holds the output down, or the setpoint slew is still delivering a lower command: in
+              // all three cases Icv is held below what the PI wants while V is still under target
+              // (e>0), so unfrozen cv_I would wind up invisibly and dump on release (58->79A wind
+              // during the 13A/s crawl, 2026-07-20 double fire).
+              if ((supervisorLimiting || kdLimiting || slewStarved) && dI > 0.0f) {
                 g_awState = 1;
               } else if (!(satHi && dI > 0.0f) && !(satLo && dI < 0.0f)) {
                 cv_I += dI;
@@ -4729,7 +4747,7 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   // Priority 1: Hardware overvoltage - overrides everything
   if (tick.inaOvervoltageLatched) return REASON_INA_OVERVOLTAGE;
 
-  if (MeasuredAmps > HardOCTripAmps) {
+  if (HardOCEnable && MeasuredAmps > HardOCTripAmps) {
     if (hardOCStartMs == 0) hardOCStartMs = tick.nowMs;
     if ((tick.nowMs - hardOCStartMs) >= HardOCDebounceMs) {
       return REASON_HARD_OVERCURRENT;

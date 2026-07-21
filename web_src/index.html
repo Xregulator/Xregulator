@@ -2169,16 +2169,130 @@
                 </button>
               </div>
 
+              <!-- ============ ENABLE ============ -->
+              <section class="protections-phase" data-phase="enable">
+                <div class="protections-section-title">Enable</div>
+
+                <div class="protections-cards">
+
+                  <article class="protections-param" data-groups="cl">
+                    <div class="protections-name">
+                      <span class="protections-tag g0">G0</span>
+                      Group 0 Enable (<span id="HardOCEnable_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master switch for the last-resort over-current trip (Group 0), which switches the field off when measured alternator current exceeds the Command Limit plus 10 A for the debounce time. This trip stays armed even when the global Protections toggle is off — it is the final backstop against a runaway field. Leave it on except during bench diagnostics.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="HardOCEnable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('HardOCEnable_checkbox', 'HardOCEnable', 'HardOCEnable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="HardOCEnable" name="HardOCEnable" type="number" value="" style="display:none;" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span>
+                      Group 1 Enable (<span id="OvGroup1Enable_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master switch for the predictive overvoltage layer (Group 1). When off, the prediction-based cap never engages; the measured-voltage layer (Group 2) and all other protections are unaffected. On installs with heavy belt ripple the predictive lead can amplify ripple into false trips — that is the usual reason to run with this off.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="OvGroup1Enable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('OvGroup1Enable_checkbox', 'OvGroup1Enable', 'OvGroup1Enable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="OvGroup1Enable" name="OvGroup1Enable" type="number" value="" style="display:none;" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g2">
+                    <div class="protections-name">
+                      <span class="protections-tag g2">G2</span>
+                      Group 2 Enable (<span id="OvGroup2Enable_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master switch for the measured overvoltage layer (Group 2) — the primary voltage backstop, clamping the field when battery voltage exceeds the charge target by the Group 2 margin. Overvoltage damages every battery chemistry: leave this on unless a bench test specifically requires it off.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="OvGroup2Enable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('OvGroup2Enable_checkbox', 'OvGroup2Enable', 'OvGroup2Enable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="OvGroup2Enable" name="OvGroup2Enable" type="number" value="" style="display:none;" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g3">G3</span>
+                      Group 3 Enable (<span id="IExcessEnable_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master switch for both alternator over-current detectors (Group 3) — the near-target (CV) detector and the bulk (CC) detector. Turning it off silences only these detectors; the voltage layers, Load Dump, and the hard over-current trip stay armed. Useful when a mis-fitted trip line false-fires during tuning.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="IExcessEnable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('IExcessEnable_checkbox', 'IExcessEnable', 'IExcessEnable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="IExcessEnable" name="IExcessEnable" type="number" value="" style="display:none;" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param req-batt-current" data-groups="g4">
+                    <div class="protections-name">
+                      <span class="protections-tag g4">G4</span>
+                      Group 4 Enable (<span id="BattLimitEnable_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master switch for both battery-side features (Group 4): the Battery Charge Current Limit ceiling and the Load Dump rate-of-change trip. Load Dump normally stays armed even when the global Protections toggle is off — this switch is the only thing that disarms it. A load dump (battery disconnect under charge) is the most violent overvoltage event there is: leave this on unless bench work requires otherwise.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="BattLimitEnable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('BattLimitEnable_checkbox', 'BattLimitEnable', 'BattLimitEnable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="BattLimitEnable" name="BattLimitEnable" type="number" value="" style="display:none;" />
+                      </div>
+                    </form>
+                  </article>
+
+                </div>
+              </section>
+
               <!-- ============ DETECTION ============ -->
               <section class="protections-phase" data-phase="detection">
                 <div class="protections-section-title">Detection</div>
 
                 <div class="protections-intro">
                   <p data-intro="cl">When measured alternator current exceeds the safe limit for the debounce duration, the trip fires. Set <strong>Command Limit</strong> to the lowest safe maximum on the <strong>alternator side</strong> of the system — alternator continuous rating, mechanical belt drive capacity, fuse ratings, and wiring limits. Whichever is lowest. Battery acceptance is handled separately by the Group 4 <strong>Battery Charge Current Limit</strong>. The trip threshold is automatically 10 A above Command Limit.</p>
-                  <p data-intro="g1">Predicts where battery voltage will be a fraction of a second from now: <strong>predicted = measured + Prediction Horizon × voltage rise rate</strong>. Engages when the prediction exceeds the active charge target by more than the <strong>Group 1 Trigger Margin</strong>. <strong>dvdt EMA TC</strong> sets how much the rise rate is smoothed before prediction — larger TC means smoother but laggier. <strong>Group 1 Enable</strong> turns the whole layer off.</p>
-                  <p data-intro="g2">Engages when measured battery voltage exceeds the active charge target by more than the <strong>Group 2 Trigger Margin</strong>. <strong>Group 2 Enable</strong> turns the whole layer off.</p>
+                  <p data-intro="g1">Predicts where battery voltage will be a fraction of a second from now: <strong>predicted = measured + Prediction Horizon × voltage rise rate</strong>. Engages when the prediction exceeds the active charge target by more than the <strong>Group 1 Trigger Margin</strong>. <strong>dvdt EMA TC</strong> sets how much the rise rate is smoothed before prediction — larger TC means smoother but laggier. <strong>Group 1 Enable</strong> (in the Enable section above) turns the whole layer off.</p>
+                  <p data-intro="g2">Engages when measured battery voltage exceeds the active charge target by more than the <strong>Group 2 Trigger Margin</strong>. <strong>Group 2 Enable</strong> (in the Enable section above) turns the whole layer off.</p>
                   <p data-intro="g3">Watches <strong>alternator</strong> output current. Two regimes, split at the <strong>Strict Over-Current Band</strong> below the active voltage target. <strong>Near the target — the voltage-limited (CV) phase</strong>: engages when the time-averaged current rises above the moving current <strong>setpoint</strong> by more than the <strong>Detection Threshold</strong> — the sloped trip line set by <strong>Slope</strong> and <strong>CV base</strong> below. <strong>Below the band — the current-limited (bulk / CC) phase</strong>: the looser <strong>Detection Threshold (Bulk)</strong> takes over — the same line raised by <strong>CC offset</strong> and judged against the commanded <strong>ceiling</strong> instead of the moving setpoint, so normal speed-up ramps toward the ceiling don't false-trip. Both thresholds are bounded by the <strong>Threshold Floor / Ceiling</strong> (amps); <strong>Averaging Time Constant</strong> sets how heavily the current is smoothed before each comparison, and <strong>Release Hysteresis</strong> sets the re-arm point.</p>
-                  <p data-intro="g4">Two <strong>battery-side</strong> features. <strong>Battery Charge Current Limit</strong> is a ceiling, not a trip: the commanded alternator current is capped at the limit plus the measured house-load draw, so the battery never sees more than the set amps no matter what the loads are doing. It needs the INA228 battery shunt and is off when set to 0. <strong>Load Dump</strong> is a protection: three tiered thresholds on the <em>rate-of-change</em> of battery current — <strong>Tier 1</strong> fires when one sample exceeds its threshold, <strong>Tier 2</strong> when two consecutive do, <strong>Tier 3</strong> when three consecutive do — catching FET-disconnect or load-drop events. Unlike the over-current detectors, Load Dump stays armed even when test protections are disabled.</p>
+                  <p data-intro="g4">Two <strong>battery-side</strong> features. <strong>Battery Charge Current Limit</strong> is a ceiling, not a trip: the commanded alternator current is capped at the limit plus the measured house-load draw, so the battery never sees more than the set amps no matter what the loads are doing. It needs the INA228 battery shunt and is off when set to 0. <strong>Load Dump</strong> is a protection: three tiered thresholds on the <em>rate-of-change</em> of battery current — <strong>Tier 1</strong> fires when one sample exceeds its threshold, <strong>Tier 2</strong> when two consecutive do, <strong>Tier 3</strong> when three consecutive do — catching FET-disconnect or load-drop events. Unlike the over-current detectors, Load Dump stays armed even when test protections are disabled — only the <strong>Group 4 Enable</strong> toggle in the Enable section disarms it.</p>
                 </div>
 
                 <div class="protections-cards">
@@ -2213,26 +2327,6 @@
                         <input name="HardOCDebounceMs" type="number" step="1" min="0" max="999999" />
                         <span class="protections-unit">ms</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g1">
-                    <div class="protections-name">
-                      <span class="protections-tag g1">G1</span>
-                      Group 1 Enable (<span id="OvGroup1Enable_echo">?</span>)
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <span class="toggle-label">Off</span>
-                        <label class="switch">
-                          <input id="OvGroup1Enable_checkbox" type="checkbox"
-                            onchange="if(handleUserToggle('OvGroup1Enable_checkbox', 'OvGroup1Enable', 'OvGroup1Enable')) { this.form.submit(); submitMessage(); }" />
-                          <span class="slider round"></span>
-                        </label>
-                        <span class="toggle-label">On</span>
-                        <input id="OvGroup1Enable" name="OvGroup1Enable" type="number" value="" style="display:none;" />
                       </div>
                     </form>
                   </article>
@@ -2283,26 +2377,6 @@
                         <input name="DvdtTC" type="number" step="1" min="5" max="500" />
                         <span class="protections-unit">ms</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g2">
-                    <div class="protections-name">
-                      <span class="protections-tag g2">G2</span>
-                      Group 2 Enable (<span id="OvGroup2Enable_echo">?</span>)
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <span class="toggle-label">Off</span>
-                        <label class="switch">
-                          <input id="OvGroup2Enable_checkbox" type="checkbox"
-                            onchange="if(handleUserToggle('OvGroup2Enable_checkbox', 'OvGroup2Enable', 'OvGroup2Enable')) { this.form.submit(); submitMessage(); }" />
-                          <span class="slider round"></span>
-                        </label>
-                        <span class="toggle-label">On</span>
-                        <input id="OvGroup2Enable" name="OvGroup2Enable" type="number" value="" style="display:none;" />
                       </div>
                     </form>
                   </article>
@@ -2938,7 +3012,7 @@
           <div class="form-row" style="margin-bottom:0;">
             <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
               <span>⚠️ Protections:</span>
-              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), the Group 3 and Group 4 iExcess over-current detectors (alternator + battery), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>Load Dump (the Group 4 battery rate-of-change tiers), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), the Group 3 and Group 4 iExcess over-current detectors (alternator + battery), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>Load Dump (the Group 4 battery rate-of-change tiers), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless</strong> — though Load Dump and the overcurrent trip still obey their own Group Enable toggles on the Protections tab.<br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
             </div>
             <div class="form-input">
               <form action="/get" method="GET" target="hidden-form">
@@ -3396,7 +3470,7 @@
                   <div class="form-row" style="margin-bottom:0;">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>⚠️ Protections:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), the Group 3 and Group 4 iExcess over-current detectors (alternator + battery), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>Load Dump (the Group 4 battery rate-of-change tiers), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), the Group 3 and Group 4 iExcess over-current detectors (alternator + battery), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>Load Dump (the Group 4 battery rate-of-change tiers), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless</strong> — though Load Dump and the overcurrent trip still obey their own Group Enable toggles on the Protections tab.<br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4021,7 +4095,7 @@
                   <div class="form-row" style="margin-bottom:0;">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>⚠️ Protections:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), the Group 3 and Group 4 iExcess over-current detectors (alternator + battery), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>Load Dump (the Group 4 battery rate-of-change tiers), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), the Group 3 and Group 4 iExcess over-current detectors (alternator + battery), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>Load Dump (the Group 4 battery rate-of-change tiers), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless</strong> — though Load Dump and the overcurrent trip still obey their own Group Enable toggles on the Protections tab.<br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4592,6 +4666,29 @@
                       </label>
                       <span class="toggle-label">On</span>
                       <input id="CvKdOneSided" name="CvKdOneSided" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Gradual Response (<span id="CvKdExcessMode_echo">?</span>)
+                      <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
+                    </span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box"><strong>On (gradual)</strong>: the damper responds only to the part of the voltage-rise rate <em>beyond</em> the tolerance line, starting from zero — no step at the threshold. <strong>Off (stepped)</strong>: the older behavior — the damper switches in at full strength the moment the rise rate crosses the line. The stepped form injects a sudden current change right at the threshold, which can rock the system into a steady voltage see-saw during a quiet hold (each correction creates the next error). Off exists for A/B comparison; expect the see-saw to return with it.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="CvKdExcessMode_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('CvKdExcessMode_checkbox', 'CvKdExcessMode', 'CvKdExcessMode')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="CvKdExcessMode" name="CvKdExcessMode" type="number" value="" style="display:none;" />
                     </form>
                   </div>
                 </div>
@@ -13528,6 +13625,7 @@
     <div id="commission-modal-panel" style="pointer-events:auto; position:absolute; top:20px; left:20px; background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); overflow-y:auto;">
       <div id="commission-drag-handle" style="cursor:move; padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
         <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Commissioning</span>
+        <span id="cx-mode-pill" style="display:none; font-size:11px; font-weight:600; padding:2px 10px; border-radius:10px; margin-left:auto; margin-right:10px;"></span>
         <button onclick="closeCommissionModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
       </div>
       <div style="padding:20px;">
@@ -13641,7 +13739,7 @@
       <div id="commprep-body" style="padding:14px 16px; overflow-y:auto; flex:1; min-height:0;"></div>
       <div style="padding:12px 16px; border-top:1px solid #333; display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
         <button onclick="commPrepFinish(false)" style="background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">I'll do this later</button>
-        <button id="commprep-start-btn" onclick="commPrepFinish(true)" style="background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Start Commissioning →</button>
+        <button id="commprep-start-btn" onclick="commPrepFinish(true)" style="background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Next →</button>
       </div>
     </div>
   </div><!-- END commprep-modal-overlay -->
@@ -13660,8 +13758,8 @@
       <div style="padding:12px 16px; border-top:1px solid #333; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
         <button id="rpmcap-back-btn" onclick="rpmCapBack()" style="background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">← Back</button>
         <span style="flex:1;"></span>
-        <button onclick="rpmCapContinue(1)" style="background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Continue in High</button>
-        <button onclick="rpmCapContinue(0)" class="btn-primary" style="border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Continue in Low →</button>
+        <button id="rpmcap-continue-high-btn" onclick="rpmCapContinue(1)" style="background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Continue in High</button>
+        <button id="rpmcap-continue-btn" onclick="rpmCapContinue(0)" style="border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Continue in Low →</button>
       </div>
     </div>
   </div><!-- END rpmcap-modal-overlay -->

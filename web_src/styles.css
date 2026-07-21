@@ -1408,15 +1408,17 @@ input[type="submit"]:hover {
 #header-collapsed-strip .hcs-pill.st-fault    { color: #d9534f; }
 #header-collapsed-strip .hcs-pill.st-test     { color: #a78bfa; }
 
-/* Locked-out CTA: always visible (no @container hide rule), so on the narrowest strip it wins space
-   over the readouts. Muted brick-red, not alarm-red — a passive monitor sees it persistently. */
+/* Locked-out CTA: always visible (no @container hide rule). order:100 floats it past the grow
+   spacer to the far-right edge so it reads as a passive corner prompt, not an alarm crowding the
+   readouts. House teal, not red. */
 #header-collapsed-strip .hcs-unlock {
-  font-weight: 800; letter-spacing: .3px; cursor: pointer; color: #c0392b;
-  background: rgba(192, 57, 43, .12); border: 1px solid rgba(192, 57, 43, .35);
+  order: 100; margin-left: 8px;
+  font-weight: 800; letter-spacing: .3px; cursor: pointer; color: var(--accent);
+  background: rgba(0, 161, 154, .12); border: 1px solid rgba(0, 161, 154, .35);
   border-radius: 999px; padding: 4px 11px; line-height: 1;
 }
 .dark-mode #header-collapsed-strip .hcs-unlock {
-  color: #ff8a7a; background: rgba(255, 138, 122, .14); border-color: rgba(255, 138, 122, .4);
+  color: #78c8c4; background: rgba(120, 200, 196, .14); border-color: rgba(120, 200, 196, .4);
 }
 
 #header-collapsed-strip .hcs-m { display: inline-flex; align-items: baseline; font-weight: 700; font-variant-numeric: tabular-nums; }

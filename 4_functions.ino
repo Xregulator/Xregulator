@@ -1647,6 +1647,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     CvKdDbCeil = settingRead(NK_CvKdDbCeil).toFloat();
   }
+  if (!settingExists(NK_CvKdExcessMode)) {
+    settingWrite(NK_CvKdExcessMode, String((int)CvKdExcessMode).c_str());
+  } else {
+    CvKdExcessMode = settingRead(NK_CvKdExcessMode).toInt() != 0;
+  }
   if (!settingExists(NK_VoltageKd)) {
     settingWrite(NK_VoltageKd, String(VoltageKd, 1).c_str());  // A/(V/s), 12V-equivalent — no seed scaling; runtime-normalized to VoltageKd_active like VoltageKp/Ki
   } else {
@@ -2169,6 +2174,21 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
   } else {
     settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
+  }
+  if (!settingExists(NK_HardOCEnable)) {
+    settingWrite(NK_HardOCEnable, String((int)HardOCEnable).c_str());
+  } else {
+    HardOCEnable = settingRead(NK_HardOCEnable).toInt() != 0;
+  }
+  if (!settingExists(NK_IExcessEnable)) {
+    settingWrite(NK_IExcessEnable, String((int)IExcessEnable).c_str());
+  } else {
+    IExcessEnable = settingRead(NK_IExcessEnable).toInt() != 0;
+  }
+  if (!settingExists(NK_BattLimitEnable)) {
+    settingWrite(NK_BattLimitEnable, String((int)BattLimitEnable).c_str());
+  } else {
+    BattLimitEnable = settingRead(NK_BattLimitEnable).toInt() != 0;
   }
   if (!settingExists(NK_OutputPIDSigSrc)) {
     settingWrite(NK_OutputPIDSigSrc, String(OutputPIDSigSrc).c_str());

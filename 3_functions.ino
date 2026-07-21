@@ -1004,6 +1004,10 @@ enum Csv3Index {
   CSV3_fdDrainHiMs,            // drain-vs-RPM line: drain (ms) at fdDrainRpmHi
   CSV3_fdDrainRpmLo,           // drain-vs-RPM line: lowest tested RPM (lookup clamps here)
   CSV3_fdDrainRpmHi,           // drain-vs-RPM line: highest tested RPM (lookup clamps here)
+  CSV3_HardOCEnable,           // Group 0 hard over-current trip enable (0/1)
+  CSV3_IExcessEnable,          // Group 3 iExcess detectors enable (0/1, gates CV + bulk)
+  CSV3_BattLimitEnable,        // Group 4 battery limit + load dump enable (0/1)
+  CSV3_CvKdExcessMode,         // CV D-term response shape (1 = slope excess over the tolerance line, 0 = legacy full-slope latch)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -2703,21 +2707,33 @@ void setupServer() {
     uint32_t interval = (uint32_t)VoltageLoopInterval;
 
     float kdDeadband = CvKdDeadbandVps;
-    float kd         = VoltageKd;
+    float kdActiveGain = VoltageKd_active;  // the gain the trim law multiplies (Auto Td·Kp or Manual, ×vNorm×derate) — the typed VoltageKd here once mislabeled every Auto-mode log
     float kdArmV     = CvKdArmV;
     float kdOneSided = (float)(CvKdOneSided ? 1 : 0);
     float kdVoltFiltTC = CvKdVoltFiltTC;
+    float kdDbSlope  = CvKdDbSlope;
+    float kdDbFloor  = CvKdDbFloor;
+    float kdDbCeil   = CvKdDbCeil;
+    float kdSlopeCeil = CvKdSlopeCeil * ((float)BATTERY_VOLTAGE / 12.0f);  // EFFECTIVE ceiling — matches the ±clamp on the logged cvDSlope
+    float kdMaxTrimA = CvKdMaxTrimA;
+    float kdExcessMode = (float)(CvKdExcessMode ? 1 : 0);
 
     memcpy(state.header + 0,  &cnt,       4);
     memcpy(state.header + 4,  &entrySize, 4);
     memcpy(state.header + 8,  &kp,        4);
     memcpy(state.header + 12, &ki,        4);
     memcpy(state.header + 16, &interval,  4);
-    memcpy(state.header + 20, &kdDeadband, 4);  // CvKdDeadbandVps (V/s) — line BASE only; slope/floor/ceil live in CSV3/config
-    memcpy(state.header + 24, &kd,         4);  // VoltageKd (A/(V/s))
+    memcpy(state.header + 20, &kdDeadband, 4);  // deadband line BASE (b of clamp(floor, b + m·spLimited, ceil))
+    memcpy(state.header + 24, &kdActiveGain, 4);  // VoltageKd_active (A/(V/s))
     memcpy(state.header + 28, &kdArmV,     4);  // CvKdArmV (V)
     memcpy(state.header + 32, &kdOneSided, 4);  // CvKdOneSided (0/1)
     memcpy(state.header + 36, &kdVoltFiltTC, 4);  // CvKdVoltFiltTC (ms) — D-term voltage EMA TC
+    memcpy(state.header + 40, &kdDbSlope,  4);  // deadband line slope m (V/s per A)
+    memcpy(state.header + 44, &kdDbFloor,  4);  // deadband line clamp floor (V/s)
+    memcpy(state.header + 48, &kdDbCeil,   4);  // deadband line clamp ceiling (V/s)
+    memcpy(state.header + 52, &kdSlopeCeil, 4);  // effective slope ceiling (V/s, ×V/12 applied)
+    memcpy(state.header + 56, &kdMaxTrimA, 4);  // flat trim cap (A)
+    memcpy(state.header + 60, &kdExcessMode, 4);  // 1 = excess-over-line trim, 0 = legacy full-slope latch
 
     state.count = cvLogCount;
     state.oldest = (cvLogHead - cvLogCount + CV_LOG_SIZE) % CV_LOG_SIZE;
@@ -5591,6 +5607,13 @@ void setupServer() {
       settingWrite(NK_CvKdOneSided, String((int)CvKdOneSided).c_str());
       queueConsoleMessageF("CV D-term mode: %s", CvKdOneSided ? "ONE-SIDED (removes current only)" : "SYMMETRIC (adds on falling bus)");
     }
+    if (request->hasParam("CvKdExcessMode")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvKdExcessMode")->value();
+      CvKdExcessMode = inputMessage.toInt() != 0;
+      settingWrite(NK_CvKdExcessMode, String((int)CvKdExcessMode).c_str());
+      queueConsoleMessageF("CV D-term response: %s", CvKdExcessMode ? "GRADUAL (slope excess over tolerance line)" : "STEPPED (legacy full-slope latch)");
+    }
     if (request->hasParam("VoltageKd")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageKd")->value();
@@ -6003,6 +6026,27 @@ void setupServer() {
       OvGroup2Enable = inputMessage.toInt() != 0;
       settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
       queueConsoleMessageF("OV Group 2 (measured-voltage threshold): %s", OvGroup2Enable ? "ENABLED" : "DISABLED");
+    }
+    if (request->hasParam("HardOCEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("HardOCEnable")->value();
+      HardOCEnable = inputMessage.toInt() != 0;
+      settingWrite(NK_HardOCEnable, String((int)HardOCEnable).c_str());
+      queueConsoleMessageF("Group 0 (hard over-current trip): %s", HardOCEnable ? "ENABLED" : "DISABLED");
+    }
+    if (request->hasParam("IExcessEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessEnable")->value();
+      IExcessEnable = inputMessage.toInt() != 0;
+      settingWrite(NK_IExcessEnable, String((int)IExcessEnable).c_str());
+      queueConsoleMessageF("Group 3 (alternator iExcess detectors): %s", IExcessEnable ? "ENABLED" : "DISABLED");
+    }
+    if (request->hasParam("BattLimitEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("BattLimitEnable")->value();
+      BattLimitEnable = inputMessage.toInt() != 0;
+      settingWrite(NK_BattLimitEnable, String((int)BattLimitEnable).c_str());
+      queueConsoleMessageF("Group 4 (battery limit + load dump): %s", BattLimitEnable ? "ENABLED" : "DISABLED");
     }
     if (request->hasParam("OutputPIDSigSrc")) {
       foundParameter = true;
@@ -7119,25 +7163,31 @@ void setupServer() {
   // CV plant-fit status + result (commissioning Step 7 polls this). "aborted" reported independently of
   // "active" (same rationale as /fieldcurve.json — a protection cut can leave active latched).
   server.on("/cvplantfit.json", HTTP_GET, [](AsyncWebServerRequest *request) {
-    std::shared_ptr<char> bufPtr((char *)ps_malloc(768), [](char *p) { if (p) free(p); });
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(960), [](char *p) { if (p) free(p); });
     if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
     char *buf = bufPtr.get();
-    snprintf(buf, 768,
+    char eK[96], eS[48]; int pK = 0, pS = 0;   // per-edge stiffness + keep/drop status for the wizard table
+    for (int i = 0; i < 8; i++) {
+      pK += snprintf(eK + pK, sizeof(eK) - pK, i ? ",%.1f" : "%.1f", cvpfEdgeK[i]);
+      pS += snprintf(eS + pS, sizeof(eS) - pS, i ? ",%d" : "%d", (int)cvpfEdgeStat[i]);
+    }
+    snprintf(buf, 960,
              "{\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"aborted\":%d,"
              "\"K_mVpA\":%.1f,\"Ka_mVpA\":%.2f,\"Kb_mVpA\":%.2f,\"dV_mV\":%.0f,\"dI\":%.2f,\"snr\":%.0f,\"horizonS\":%.1f,"
-             "\"Kp\":%.2f,\"Ki\":%.2f,\"stepA\":%.1f,\"capHeadroomA\":%.1f,\"rpmAtFit\":%.0f,\"diMaxA\":%.1f,\"warn\":%d,\"abort\":\"%s\"}",
+             "\"Kp\":%.2f,\"Ki\":%.2f,\"stepA\":%.1f,\"capHeadroomA\":%.1f,\"rpmAtFit\":%.0f,\"battVAtFit\":%.2f,\"socAtFit\":%.0f,\"diMaxA\":%.1f,\"warn\":%d,"
+             "\"eK\":[%s],\"eS\":[%s],\"abort\":\"%s\"}",
              cvPlantFitActive ? 1 : 0, (int)cvpfPhase, cvpfReady ? 1 : 0, cvpfOk ? 1 : 0, (cvpfState == 3) ? 1 : 0,
              cvpfK * 1000.0f, cvpfKa * 1000.0f, cvpfKb * 1000.0f, cvpfDV * 1000.0f, cvpfDI, cvpfSNR, cvpfHorizonS,
-             cvpfKp, cvpfKi, cvpfStepA, cvpfCapHeadroomA, cvpfRpmAtFit, cvpfDiMaxA, (int)cvpfWarn, cvpfAbortMsg);
+             cvpfKp, cvpfKi, cvpfStepA, cvpfCapHeadroomA, cvpfRpmAtFit, cvpfBattVAtFit, cvpfSocAtFit, cvpfDiMaxA, (int)cvpfWarn, eK, eS, cvpfAbortMsg);
     request->send(200, "application/json", buf);
   });
 
   // CV stress-test status + result (wizard stage 8 and the Diag standalone modal poll this; the
   // poll itself stamps the browser-alive deadman inside cvStressJsonBuild).
   server.on("/cvstress.json", HTTP_GET, [](AsyncWebServerRequest *request) {
-    std::shared_ptr<char> bufPtr((char *)ps_malloc(1024), [](char *p) { if (p) free(p); });
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(1152), [](char *p) { if (p) free(p); });
     if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
-    cvStressJsonBuild(bufPtr.get(), 1024);
+    cvStressJsonBuild(bufPtr.get(), 1152);
     request->send(200, "application/json", bufPtr.get());
   });
 
@@ -8721,7 +8771,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -9052,7 +9102,11 @@ void SendWifiData() {
                                SafeInt(fdDrainLoMs),
                                SafeInt(fdDrainHiMs),
                                SafeInt(fdDrainRpmLo),
-                               SafeInt(fdDrainRpmHi));
+                               SafeInt(fdDrainRpmHi),
+                               (int)HardOCEnable,
+                               (int)IExcessEnable,
+                               (int)BattLimitEnable,
+                               (int)CvKdExcessMode);
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;
