@@ -717,6 +717,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "AwSeedProtectMs", NK_AwSeedProtectMs, 1 },
   { "SetpointRiseRate", NK_SetpointRiseRate, 1 },
   { "SetpointFallRate", NK_SetpointFallRate, 1 },
+  { "CvBrakeFallRate", NK_CvBrakeFallRate, 1 },
   { "SetpointBigStepThresh", NK_SetpointBigStepThresh, 1 },
   { "SetpointBigStepRiseRate", NK_SetpointBigStepRiseRate, 1 },
   { "FastSetpointRiseRate", NK_FastSetpointRiseRate, 1 },
@@ -733,8 +734,12 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "setpointSlewEnable", NK_setpointSlewEnable, 1 },
   { "cvRiseGovEnable", NK_cvRiseGovEnable, 1 },
   { "cvRecovEnable", NK_cvRecovEnable, 1 },
-  { "cvRecovSec", NK_cvRecovSec, 1 },
-  { "cvRecovEmaxV", NK_cvRecovEmaxV, 1 },
+  { "cvRecovSec", NK_cvRecovSec, 1 },      // retired, inert — kept so shared configs stay complete
+  { "cvRecovEmaxV", NK_cvRecovEmaxV, 1 },  // retired, inert — kept so shared configs stay complete
+  { "cvRecovKiMax", NK_cvRecovKiMax, 1 },
+  { "cvWindDownEnable", NK_cvWindDownEn, 1 },
+  { "cvWindDownRate", NK_cvWindDownRate, 1 },
+  { "cvWindDownStopV", NK_cvWindDownStopV, 1 },
   { "cvRecovBoostEnable", NK_cvRecovBoostEnable, 1 },
   { "cvRecovBoostMax", NK_cvRecovBoostMax, 1 },
   { "cvRecovBoostErrV", NK_cvRecovBoostErrV, 1 },
@@ -756,6 +761,8 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "CvKdMaxTrimA", NK_CvKdMaxTrimA, 1 },
   { "CvKdVoltFiltTC", NK_CvKdVoltFiltTC, 1 },
   { "CvKdSlopeCeil", NK_CvKdSlopeCeil, 1 },
+  { "CvStressDropV", NK_CvStressDropV, 1 },
+  { "CvStressFailBandV", NK_CvStressFailBandV, 1 },
   { "CvKdTd", NK_CvKdTd, 1 },
   { "TdPred", NK_TdPred, 1 },
   { "KHard", NK_KHard, 1 },
@@ -1044,7 +1051,7 @@ String manifestConfigObject() {
   j += ",\"commissioning_results\":{";
   {
     bool cfirst = true;
-    // CV stress test — ver-2 positional CSV (22 fields); layout documented at cvStressPersistResult().
+    // CV stress test — ver-2 positional CSV; layout documented at cvStressPersistResult().
     if (settingExists(NK_cvStressLast)) {
       j += "\"stress_test\":"; cfgAppendJsonStr(j, settingRead(NK_cvStressLast)); cfirst = false;
     }
@@ -1820,12 +1827,12 @@ void cvpfServiceCompletion() {
   if (millis() - cvpfTestStartMs > budget) cvpfAbort("timed out (engine stopped or left AUTO?)");
 }
 
-// ════════════════════════ CV STRESS TEST (commissioning stage 8 / standalone Diag) ════════════════════════
+// ═══════════════ CV STRESS TEST (commissioning stage 8 / standalone Tuning ▸ Stress Test) ═══════════════
 // Provokes the over-voltage protection on a battery of ANY state of charge by first parking the bus at an
 // ACHIEVABLE constant-voltage target, then having the operator snap the throttle. Flow:
 //   1 STAB_IDLE : charge normally at idle ≥10 s, wait for the bus to hold steady (≤0.10 V over 3 s). Then
-//                 target := mean(last 2 s bus V) − 0.20 V — guaranteed reachable, since idle already held
-//                 above it. At the deadline, a swing ≤ CVS_STAB_FAIL_BAND_V proceeds anyway (swing
+//                 target := mean(last 2 s bus V) − CvStressDropV — guaranteed reachable, since idle already
+//                 held above it. At the deadline, a swing ≤ CvStressFailBandV proceeds anyway (swing
 //                 reported, pre-stab graded marginal); beyond it = basic-stability FAIL (test can't run).
 //   2 STAB_CV   : force CV at that target, wait for the bus to re-settle onto it (same tiered rule), arm.
 //   3 ARMED     : operator snaps the throttle; alternator output multiplies and pushes the (now reachable)
@@ -1838,9 +1845,8 @@ void cvpfServiceCompletion() {
 static const uint32_t CVS_IDLE_MIN_MS       = 10000;   // min idle charge before the stability gate opens
 static const uint32_t CVS_STAB_WIN_MS       = 3000;    // stationarity window (idle and CV)
 static const float    CVS_STAB_BAND_V       = 0.10f;   // max−min of the filtered bus over the window (×V/12) — setup gate, not the graded subject; keep loose enough that normal idle ripple passes
-static const float    CVS_STAB_FAIL_BAND_V  = 0.25f;   // swing beyond this at a stabilization deadline = genuine instability, test cannot run (×V/12); at or under it the phase proceeds and the swing is reported as a marginal grade instead of failing
+// The fail band (CvStressFailBandV) and target headroom (CvStressDropV) are user settings — Xregulator.ino globals.
 static const uint32_t CVS_TARGET_AVG_MS     = 2000;    // averaging window for the achievable target
-static const float    CVS_TARGET_DROP_V     = 0.20f;   // target = idle avg − this (×V/12)
 static const float    CVS_RESETTLE_BAND_V   = 0.15f;   // |bus − target| that counts as "at setpoint" (×V/12)
 static const uint32_t CVS_SETTLE_MS         = 5000;    // sustained in-band + stable = recovered / end
 static const uint32_t CVS_IDLESTAB_TO_MS    = 45000;   // idle stability deadline — tight band missed: proceed wobbly (≤ fail band) or basic-stability fail
@@ -1890,9 +1896,10 @@ static float    cvsPeakV = 0.0f, cvsMinV = 0.0f, cvsOvershootV = 0.0f, cvsValley
 static float    cvsRpmMax = 0.0f, cvsRpmSlewMax = 0.0f, cvsRpmPrev = 0.0f;
 static uint32_t cvsRpmPrevMs = 0;
 static uint16_t cvsEvents = 0, cvsHardCuts = 0, cvsIxTrips = 0;
-static float    cvsWobbleIdleV = 0.0f, cvsWobbleCvV = 0.0f, cvsWobblePostV = 0.0f;  // measured swing (max−min) where a phase proceeded/settled outside the tight band; 0 = clean
+static float    cvsWobbleIdleV = 0.0f, cvsWobbleCvV = 0.0f, cvsWobblePostV = 0.0f;  // measured 3 s swing (max−min) at each phase's settle, clean or loose; 0 = that phase never completed
 static uint32_t cvsMaxLockoutMs = 0, cvsFirstEventMs = 0, cvsResettleSinceMs = 0, cvsRecoveryMs = 0;
 static bool     cvsSnapDetected = false, cvsRecovered = false, cvsSettled = false, cvsSoftStimulus = false;
+static bool     cvsLoosePost = false;   // post-snap settle was outside the tight band — drives the marginal stability grade (the wobble V is recorded even on a clean settle)
 // grade: 0 pass, 1 marginal, 2 fail, 3 n/a. outcome: 1 rode-it-out, 2 event-graded, 3 stability-fail
 static uint8_t  cvsOutcome = 0;
 static uint8_t  cvsGPreStab = 0, cvsGEvents = 3, cvsGHardCut = 3, cvsGRecovery = 3, cvsGStab = 3, cvsGOverall = 3;
@@ -1914,7 +1921,7 @@ bool cvStressStartTest() {
   cvStressTargetV = 0.0f; cvsIdleAvgV = 0.0f; cvsArmRpm = 0.0f;
   cvsEvents = cvsHardCuts = cvsIxTrips = 0;
   cvsMaxLockoutMs = 0; cvsFirstEventMs = 0; cvsResettleSinceMs = 0; cvsRecoveryMs = 0;
-  cvsSnapDetected = cvsRecovered = cvsSettled = cvsSoftStimulus = false;
+  cvsSnapDetected = cvsRecovered = cvsSettled = cvsSoftStimulus = cvsLoosePost = false;
   cvsOvershootV = cvsValleyV = 0.0f;
   cvsWobbleIdleV = cvsWobbleCvV = cvsWobblePostV = 0.0f;
   cvsPeakV = cvsMinV = IBV; cvsRpmMax = RPM; cvsRpmSlewMax = 0.0f;
@@ -1940,10 +1947,13 @@ void cvStressAbort(const char *reason) {
 
 // Serialize + persist the graded result so the wizard card and Diag survive a reload/reboot.
 // ver-2 positional blob (ver-1 layout is incompatible; the web parser reads the leading version).
-// The three wobble fields (V×100) are appended — the parser reads missing trailing fields as 0.
+// The three wobble fields then the two graded stability bands (all V×100; bands = constant × V/12
+// at grade time, so failBand reflects the live CvStressFailBandV) are appended — the parser reads
+// missing trailing fields as 0, so pre-band blobs fall back to the JS k estimate.
 static void cvStressPersistResult() {
+  const float k = (float)BATTERY_VOLTAGE / 12.0f;
   snprintf(cvsLastBlob, sizeof(cvsLastBlob),
-           "2,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+           "2,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
            (int)cvsOutcome, (int)cvsGOverall, (int)cvsGPreStab, (int)cvsGEvents, (int)cvsGHardCut,
            (int)cvsGRecovery, (int)cvsGStab, (unsigned long)cvsRecoveryMs, (unsigned long)cvsMaxLockoutMs,
            (int)cvsEvents, (int)cvsHardCuts, (int)cvsIxTrips,
@@ -1953,7 +1963,8 @@ static void cvStressPersistResult() {
            (int)lroundf(cvsBattStartA * 10.0f), (int)lroundf(cvStressTargetV * 100.0f),
            (int)(cvsSoftStimulus ? 1 : 0),
            (int)lroundf(cvsWobbleIdleV * 100.0f), (int)lroundf(cvsWobbleCvV * 100.0f),
-           (int)lroundf(cvsWobblePostV * 100.0f));
+           (int)lroundf(cvsWobblePostV * 100.0f),
+           (int)lroundf(CVS_STAB_BAND_V * k * 100.0f), (int)lroundf(CvStressFailBandV * k * 100.0f));
   settingWrite(NK_cvStressLast, cvsLastBlob);
 }
 
@@ -1970,7 +1981,7 @@ static void cvStressGrade() {
     cvsGRecovery = !cvsRecovered ? 2 : (cvsRecoveryMs <= 12000) ? 0 : (cvsRecoveryMs <= 20000) ? 1 : 2;
     cvsSoftStimulus = false;
   }
-  cvsGStab = !cvsSettled ? 2 : (cvsWobblePostV > 0.0f) ? 1 : 0;     // clean stationarity / settled-but-wobbling (swing reported) / never re-settled
+  cvsGStab = !cvsSettled ? 2 : cvsLoosePost ? 1 : 0;                // clean stationarity / settled-but-wobbling / never re-settled
   uint8_t worst = cvsGPreStab;                                      // 0 for any run that armed
   uint8_t gs[4] = { cvsGEvents, cvsGHardCut, cvsGRecovery, cvsGStab };
   for (int i = 0; i < 4; i++) if (gs[i] != 3 && gs[i] > worst) worst = gs[i];
@@ -1982,7 +1993,7 @@ static void cvStressGrade() {
                        cvsOvershootV, cvsValleyV, cvsRpmSlewMax, cvsSoftStimulus ? " (soft stimulus — snap harder)" : "");
 }
 
-// Basic-stability failure: the bus was swinging beyond CVS_STAB_FAIL_BAND_V at a stabilization
+// Basic-stability failure: the bus was swinging beyond CvStressFailBandV at a stabilization
 // deadline (a swing at or under it proceeds with a marginal grade instead — see the phase logic).
 // Recorded as a graded FAIL result — not a silent abort — so the card shows why the test couldn't run.
 static void cvStressStabilityFail(const char *where) {
@@ -2027,14 +2038,15 @@ void cvStress_tick(uint32_t nowMs) {
     case 1: {  // STAB_IDLE — charge normally ≥10 s, wait for the bus to hold steady, then fix the target
       bool  timedOut = elapsed > CVS_IDLESTAB_TO_MS;
       float range    = ready ? cvsStabRange(nowMs, CVS_STAB_WIN_MS) : 1e9f;
-      bool  wobblyOk = timedOut && range <= CVS_STAB_FAIL_BAND_V * k;  // tight band missed by the deadline but the swing is workable — proceed and report it
+      bool  wobblyOk = timedOut && range <= CvStressFailBandV * k;  // tight band missed by the deadline but the swing is workable — proceed and report it
       if (elapsed >= CVS_IDLE_MIN_MS && (stable || wobblyOk)) {
-        if (wobblyOk) { cvsWobbleIdleV = range; cvsGPreStab = 1; }
+        cvsWobbleIdleV = range;
+        if (!stable) cvsGPreStab = 1;
         cvsIdleAvgV = cvsStabMean(nowMs, CVS_TARGET_AVG_MS);
-        cvStressTargetV = cvsIdleAvgV - CVS_TARGET_DROP_V * k;   // achievable: idle already held above it
+        cvStressTargetV = cvsIdleAvgV - CvStressDropV * k;   // achievable: idle already held above it
         cvStressForceCV = true;                                   // AdjustField now parks CV at cvStressTargetV
-        if (wobblyOk)
-          queueConsoleMessageF("CV stress test: idle voltage still swinging %.2f V (within the %.2f V limit) — proceeding, target %.2f V; stability graded marginal", range, CVS_STAB_FAIL_BAND_V * k, cvStressTargetV);
+        if (!stable)
+          queueConsoleMessageF("CV stress test: idle voltage still swinging %.2f V (within the %.2f V limit) — proceeding, target %.2f V; stability graded marginal", range, CvStressFailBandV * k, cvStressTargetV);
         else
           queueConsoleMessageF("CV stress test: battery stabilized at %.2f V — target set to %.2f V, entering CV", cvsIdleAvgV, cvStressTargetV);
         cvStressPhase = 2; cvsPhaseStartMs = nowMs;
@@ -2047,10 +2059,10 @@ void cvStress_tick(uint32_t nowMs) {
       bool  atTarget = fabsf(IBV_filtered - ChargingVoltageTarget) <= CVS_RESETTLE_BAND_V * k;
       bool  timedOut = elapsed > CVS_CVSTAB_TO_MS;
       float range    = ready ? cvsStabRange(nowMs, CVS_STAB_WIN_MS) : 1e9f;
-      bool  wobblyOk = timedOut && atTarget && range <= CVS_STAB_FAIL_BAND_V * k;  // holding the level but wobbling — arm anyway and report it
+      bool  wobblyOk = timedOut && atTarget && range <= CvStressFailBandV * k;  // holding the level but wobbling — arm anyway and report it
       if ((stable && atTarget) || wobblyOk) {
-        if (wobblyOk) {
-          cvsWobbleCvV = range;
+        cvsWobbleCvV = range;
+        if (!stable) {
           if (cvsGPreStab < 1) cvsGPreStab = 1;
           queueConsoleMessageF("CV stress test: CV holding target but swinging %.2f V — arming anyway; stability graded marginal", range);
         }
@@ -2112,9 +2124,10 @@ void cvStress_tick(uint32_t nowMs) {
         // waiting → WATCH_MAX graded fail as before.
         float range = ready ? cvsStabRange(nowMs, CVS_STAB_WIN_MS) : 1e9f;
         bool  loose = ((uint32_t)(nowMs - cvsResettleSinceMs) >= 2UL * CVS_SETTLE_MS)
-                      && range <= CVS_STAB_FAIL_BAND_V * k;
+                      && range <= CvStressFailBandV * k;
         if (stable || loose) {
-          if (!stable) cvsWobblePostV = range;
+          cvsWobblePostV = range;
+          if (!stable) cvsLoosePost = true;
           cvsSettled = true;
           if (cvsFirstEventMs != 0) { cvsRecovered = true; cvsRecoveryMs = cvsResettleSinceMs - cvsFirstEventMs; }
         }
@@ -2138,6 +2151,7 @@ void cvStress_tick(uint32_t nowMs) {
 // /cvstress.json builder — also stamps the poll deadman.
 int cvStressJsonBuild(char *buf, int cap) {
   cvsLastPollMs = millis();
+  const float k = (float)BATTERY_VOLTAGE / 12.0f;   // graded bands are 12V-equiv constants × V/12
   return snprintf(buf, cap,
                   "{\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"aborted\":%d,\"abort\":\"%s\","
                   "\"targetV\":%.2f,\"idleAvgV\":%.2f,"
@@ -2146,6 +2160,7 @@ int cvStressJsonBuild(char *buf, int cap) {
                   "\"recovMs\":%lu,\"recovered\":%d,\"settled\":%d,\"softStim\":%d,"
                   "\"outcome\":%d,\"overall\":%d,\"gPreStab\":%d,\"gEvents\":%d,\"gHardCut\":%d,\"gRecov\":%d,\"gStab\":%d,"
                   "\"wobIdleV\":%.2f,\"wobCvV\":%.2f,\"wobPostV\":%.2f,"
+                  "\"stabBandV\":%.2f,\"failBandV\":%.2f,"
                   "\"tune\":{\"gainMode\":%d,\"alpha\":%.3f,\"td\":%.2f,\"kp\":%.2f,\"ki\":%.2f,\"kd\":%.1f,\"recovEn\":%d},"
                   "\"last\":\"%s\"}",
                   cvStressActive ? 1 : 0, (int)cvStressPhase, cvsReady ? 1 : 0, cvsOk ? 1 : 0, cvsAborted ? 1 : 0, cvStressAbortMsg,
@@ -2155,6 +2170,7 @@ int cvStressJsonBuild(char *buf, int cap) {
                   (unsigned long)cvsRecoveryMs, cvsRecovered ? 1 : 0, cvsSettled ? 1 : 0, cvsSoftStimulus ? 1 : 0,
                   (int)cvsOutcome, (int)cvsGOverall, (int)cvsGPreStab, (int)cvsGEvents, (int)cvsGHardCut, (int)cvsGRecovery, (int)cvsGStab,
                   cvsWobbleIdleV, cvsWobbleCvV, cvsWobblePostV,
+                  CVS_STAB_BAND_V * k, CvStressFailBandV * k,
                   (int)cvGainMode, cvAlpha, CvKdTd, VoltageKp, VoltageKi, VoltageKd, (int)cvRecovEnable,
                   cvsLastBlob);
 }

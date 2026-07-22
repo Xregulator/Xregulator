@@ -1575,6 +1575,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     SetpointFallRate = settingRead(NK_SetpointFallRate).toFloat();
   }
+  if (!settingExists(NK_CvBrakeFallRate)) {
+    settingWrite(NK_CvBrakeFallRate, String(CvBrakeFallRate, 2).c_str());  // flat amps — no seedVScale
+  } else {
+    CvBrakeFallRate = settingRead(NK_CvBrakeFallRate).toFloat();
+  }
   if (!settingExists(NK_SetpointBigStepThresh)) {
     settingWrite(NK_SetpointBigStepThresh, String(SetpointBigStepThresh, 2).c_str());
   } else {
@@ -1673,9 +1678,20 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     CvKdMaxTrimA = settingRead(NK_CvKdMaxTrimA).toFloat();
   }
   if (!settingExists(NK_CvKdSlopeCeil)) {
-    settingWrite(NK_CvKdSlopeCeil, String(CvKdSlopeCeil, 1).c_str());  // 12V-equiv, class-scaled at use — no seed scaling
+    CvKdSlopeCeil *= seedVScale;  // V/s real per-bus (WYSIWYG) — first-creation class scale, like CvKdDbCeil
+    settingWrite(NK_CvKdSlopeCeil, String(CvKdSlopeCeil, 1).c_str());
   } else {
     CvKdSlopeCeil = settingRead(NK_CvKdSlopeCeil).toFloat();
+  }
+  if (!settingExists(NK_CvStressDropV)) {
+    settingWrite(NK_CvStressDropV, String(CvStressDropV, 2).c_str());  // 12V-equiv, class-scaled at use — no seed scaling
+  } else {
+    CvStressDropV = settingRead(NK_CvStressDropV).toFloat();
+  }
+  if (!settingExists(NK_CvStressFailBandV)) {
+    settingWrite(NK_CvStressFailBandV, String(CvStressFailBandV, 2).c_str());
+  } else {
+    CvStressFailBandV = settingRead(NK_CvStressFailBandV).toFloat();
   }
   if (!settingExists(NK_CvKdTd)) {
     settingWrite(NK_CvKdTd, String(CvKdTd, 2).c_str());  // s — derivative time; Auto Kd = Td·Kp
@@ -1739,6 +1755,22 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     vTgtRampDn = settingRead(NK_vTgtRampDn).toFloat();
   }
+  if (!settingExists(NK_cvWindDownEn)) {
+    settingWrite(NK_cvWindDownEn, String((int)cvWindDownEnable).c_str());
+  } else {
+    cvWindDownEnable = (uint8_t)settingRead(NK_cvWindDownEn).toInt();
+  }
+  if (!settingExists(NK_cvWindDownRate)) {
+    settingWrite(NK_cvWindDownRate, String(cvWindDownRate, 3).c_str());
+  } else {
+    cvWindDownRate = settingRead(NK_cvWindDownRate).toFloat();
+  }
+  if (!settingExists(NK_cvWindDownStopV)) {
+    cvWindDownStopV *= seedVScale;
+    settingWrite(NK_cvWindDownStopV, String(cvWindDownStopV, 3).c_str());
+  } else {
+    cvWindDownStopV = settingRead(NK_cvWindDownStopV).toFloat();
+  }
   if (!settingExists(NK_setpointSlewEnable)) {
     settingWrite(NK_setpointSlewEnable, String((int)setpointSlewEnable).c_str());
   } else {
@@ -1754,6 +1786,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvRecovEnable = (uint8_t)settingRead(NK_cvRecovEnable).toInt();
   }
+  // cvRecovSec / cvRecovEmaxV: retired timed-window knobs — seeds kept so the NVS keys stay stable (never repurpose)
   if (!settingExists(NK_cvRecovSec)) {
     settingWrite(NK_cvRecovSec, String(cvRecovSec, 2).c_str());
   } else {
@@ -1763,6 +1796,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_cvRecovEmaxV, String(cvRecovEmaxV, 3).c_str());
   } else {
     cvRecovEmaxV = settingRead(NK_cvRecovEmaxV).toFloat();
+  }
+  if (!settingExists(NK_cvRecovKiMax)) {
+    settingWrite(NK_cvRecovKiMax, String(cvRecovKiMax, 2).c_str());
+  } else {
+    cvRecovKiMax = settingRead(NK_cvRecovKiMax).toFloat();
   }
   if (!settingExists(NK_cvRecovBoostEnable)) {
     settingWrite(NK_cvRecovBoostEnable, String((int)cvRecovBoostEnable).c_str());
@@ -2157,7 +2195,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     settingWrite(NK_ReseedFrac, String(ReseedFrac, 2).c_str());
   }
-  // OvGroup1Enable — migrates from old /OvLayer2Enable.txt if found
+  // OvGroup1Enable — migrates from old OvLayer2Enable NVS key if found
   if (settingExists(NK_OvGroup1Enable)) {
     OvGroup1Enable = settingRead(NK_OvGroup1Enable).toInt() != 0;
   } else if (settingExists(NK_OvLayer2Enable)) {
@@ -2166,7 +2204,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     settingWrite(NK_OvGroup1Enable, String((int)OvGroup1Enable).c_str());
   }
-  // OvGroup2Enable — migrates from old /OvLayer3Enable.txt if found
+  // OvGroup2Enable — migrates from old OvLayer3Enable NVS key if found
   if (settingExists(NK_OvGroup2Enable)) {
     OvGroup2Enable = settingRead(NK_OvGroup2Enable).toInt() != 0;
   } else if (settingExists(NK_OvLayer3Enable)) {

@@ -267,8 +267,10 @@ void applyNominalVoltageChange(int oldV, int newV) {
     CvKdDbSlope               *= ratio;  // V/s per A — deadband line slope, same V-domain scaling as the base
     CvKdDbFloor               *= ratio;
     CvKdDbCeil                *= ratio;
+    CvKdSlopeCeil             *= ratio;  // V/s real per-bus — class-change scale, now conforms to this function's WYSIWYG rule (no ×V/12 left at use)
     vTgtRampUp                *= ratio;  // V/s
     vTgtRampDn                *= ratio;  // V/s
+    cvWindDownStopV           *= ratio;  // V real per-bus — wind-down stop margin scales with class
     capSettleRateMv10         *= ratio;  // mV/10min rest-settle gate
     cvWaveAmplitudeV          *= ratio;  // CV waveform-test step height
     altVbusTol                *= ratio;  // alt-health bus-voltage steadiness band
@@ -321,8 +323,10 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_CvKdDbSlope, String(CvKdDbSlope, 5).c_str());
     settingWrite(NK_CvKdDbFloor, String(CvKdDbFloor, 3).c_str());
     settingWrite(NK_CvKdDbCeil, String(CvKdDbCeil, 3).c_str());
+    settingWrite(NK_CvKdSlopeCeil, String(CvKdSlopeCeil, 1).c_str());
     settingWrite(NK_vTgtRampUp, String(vTgtRampUp, 3).c_str());
     settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
+    settingWrite(NK_cvWindDownStopV, String(cvWindDownStopV, 3).c_str());
     settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str());
     updateINA228OvervoltageThreshold();
   }
@@ -479,7 +483,7 @@ void enter_sys_off() {
 }
 
 // Adaptive fast-OV lockout ladder. An isolated transient (RPM blip crest) re-arms fast so the
-// G2 clamp + recovery window own the retry; a persistent cause escalates so cut/restart churn
+// G2 clamp + post-release refill own the retry; a persistent cause escalates so cut/restart churn
 // stays bounded. 3 fires per tier: 0.5s, 1s, 2s, 4s, 8s, then 10s cap. 60s with no fast-OV fire
 // resets to the first tier. RAM-only by design — a reboot restarts the ladder.
 uint32_t nextFastOvLockoutMs(uint32_t nowMs) {
@@ -682,6 +686,7 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
                      float actualDtSec, bool exitingNormal) {
   voltageControlActive = false;
   lastVoltageControlActive = false;  // caller returns before the CV block's tracker line — stale TRUE would skip the re-entry bumpless seed on re-enable
+  cvWindDownActive = false;          // same early-exit rule — a stale wind-down cap must not survive a charge-disable gap
 
   // GPIO38 driven solely by CheckAlarms — do not write here
 
@@ -829,6 +834,7 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
 void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float actualDtSec) {
   voltageControlActive = false;
   lastVoltageControlActive = false;  // same stale-tracker clear as runShutdownPath — the wizard's test-FAIL→rest→retry flow is the path that double-fired 2026-07-20
+  cvWindDownActive = false;          // same early-exit rule — a stale wind-down cap must not survive a commission rest
   uTargetAmps = 0;
   setpointLimited = 0.0f;
   ctrlLimiter = 0;
@@ -1492,8 +1498,7 @@ void thermalAccuracyScore_tick(uint32_t nowMs, float dtSec) {
 // target (shortfall≤0) and ramps linearly to cvRecovBoostMax at cvRecovBoostErrV (×class) of
 // shortfall. Not gated to protection events — any below-target error is boosted; the payoff case
 // is climbing out of a post-protection voltage hole, self-disarming to 1× at target before it can
-// re-fire the OV that tripped. Fed the loop's live error, so if the recovery window's error cap is
-// engaged the boost shrinks with it. Scales only the P term; cv_I and the D trim are untouched.
+// re-fire the OV that tripped. Scales only the P term; cv_I and the D trim are untouched.
 static inline float cvRecovBoostMult(float shortfallV) {
   if (!cvRecovBoostEnable || shortfallV <= 0.0f) return 1.0f;
   float span = cvRecovBoostErrV * ((float)BATTERY_VOLTAGE / 12.0f);
@@ -1658,32 +1663,28 @@ void AdjustFieldLearnMode() {
     preEventCvI = cv_I;  // refresh while no protection is clamping
     preEventIcv = Icv;
   }
-  // Post-protection recovery window (timed cv_I re-injection + PI error cap). Normalizes
-  // recovery time across target voltages: at a low target the post-cut error is tiny so the
-  // plain PI rebuild is glacial; at a high target the error is huge so the rebuild slams the
-  // predictive-OV trip slope. The window ramps cv_I from its ReseedFrac seed back to the
-  // pre-event value over cvRecovSec, and caps the positive PI error at cvRecovEmaxV so drive
-  // cannot scale with the post-cut voltage collapse. Protections are untouched; any new fire
-  // cancels the window (and preEventCvI mid-ramp keeps the de-escalation ratchet).
-  //
-  // Icv is additionally ceilinged at recovCvGoal for the life of the window: the pre-trip current
-  // is the current that held the target, so commanding more than it on the way back can only
-  // overshoot — that ceiling is what stops a recovery from re-arming the protection that fired.
-  // Goal is max(cvSteadyHoldEma, Icv) at the snapshot. The EMA is cv_I averaged during clean CV near
-  // target — the current that actually holds it — NOT the instantaneous pre-clamp cv_I, which an
-  // overshoot droop and (worse) a multi-fire event's release-gap re-samples drag to ~half the hold
-  // (21A vs 39A, cvlog_20260718_1117). In a near-target CV trip Icv sits just BELOW the hold (P-term
-  // negative with V above target) so max() = EMA; railed-in-bulk (aw ceiling, integrator stale) Icv IS
-  // the legitimate command and wins the max(). Stale-EMA fallback is preEventCvI (never worse than before).
-  // Premise: the plant did not change. recovStarveTicks detects when it did (goal handed back in
-  // full, bus still low and not rising) and releases the window instead of starving the field.
+  // Post-protection integrator refill (deficit-gated rate law). While active, UP-integration of
+  // cv_I runs at VoltageKi_active × M, M = 1 + (cvRecovKiMax−1)·(remaining deficit / deficit at
+  // release) — fast while the reseed hole is big, tapering to normal as it heals. It rides the
+  // NORMAL integration path, so the plant paces it through live error and every existing gate
+  // applies (kdLimiting freeze, satHi, cv_I_aw_cap, battery-current ceiling) — which is why the
+  // old timed window's error cap is unnecessary. A premise-void backstop survives (see the
+  // termination block): satHi freezes cv_I whenever Icv rails at the goal ceiling, so if the
+  // pre-trip current stops holding the target the deficit could never heal and the ceiling
+  // would cap CV at the stale pre-trip current forever. Icv stays ceilinged at
+  // recovCvGoal for the life of the refill: the pre-trip current held the target, so commanding
+  // more on the way back can only overshoot. Goal basis is max(cvSteadyHoldEma, preEventIcv) —
+  // the EMA is the current that actually holds the target, immune to the overshoot droop and
+  // release-gap re-samples that drag the raw snapshot to ~half the hold (21A vs 39A,
+  // cvlog_20260718_1117); stale-EMA fallback is preEventCvI. Any new fire cancels the refill —
+  // the mid-heal cv_I becomes the next reseed base (de-escalation ratchet).
   static bool recovActive = false;
-  static float recovCvGoal = 0.0f;  // max(cvSteadyHoldEma, preEventIcv) snapshot at release — the re-injection target AND the Icv ceiling
-  static float recovCvSeed = 0.0f;  // cv_I as seeded at release (ReseedFrac fraction)
+  static float recovCvGoal = 0.0f;    // max(cvSteadyHoldEma, preEventIcv) snapshot at release — heal target AND the Icv ceiling
+  static float recovDeficit0 = 0.5f;  // recovCvGoal − cv_I at release (floored 0.5A) — normalizes the Ki-boost taper
+  static uint32_t recovStartMs = 0;     // release stamp — the premise-void exit arms 2 s later (field-lag gap right after release has the ceiling pinned on a briefly-flat bus)
+  static uint8_t recovStarveTicks = 0;  // consecutive PI ticks the goal ceiling is pinned with the bus low + not rising
+  static float recovSlopeEma = 0.0f;    // ~1s EMA of cvDSlope for the premise-void exit — raw per-tick slope is ripple-fakeable
   static float cvSteadyHoldEma = 0.0f;  // slow EMA of cv_I during clean CV near target = true holding current; recovCvGoal basis, immune to overshoot droop + flutter-gap re-sampling
-  static uint32_t recovStartMs = 0;
-  static uint8_t recovStarveTicks = 0;  // consecutive ticks the goal ceiling is pinned and the bus is low + not rising
-  static float recovSlopeEma = 0.0f;    // ~1s EMA of cvDSlope for the starve exit — raw per-tick slope is ripple-fakeable
   // Post-protection fast-rise window — opened by the falling-edge handler below.
   // 0 = window inactive. Gated again at slew site by FastSetpointRiseWindowMs cap
   // and FastSetpointRiseHeadroomV vs ChargingVoltageTarget.
@@ -3322,7 +3323,7 @@ void AdjustFieldLearnMode() {
             cv_I_track = seed;
             cv_I_aw_cap = (float)MaxTableValue;    // clear AW cap — stale values constrain CV entry
             awSeedProtectStartMs = currentMillis;  // start seed-protection window
-            recovActive = false;                   // stale recovery window must not survive a CV re-entry
+            recovActive = false;                   // stale refill must not survive a CV re-entry
           }
           // ── Unified protection-release reseed + unified telemetry export ───────────
           // Single falling-edge handler for ALL three protection paths (Group 1/2 OV,
@@ -3355,7 +3356,7 @@ void AdjustFieldLearnMode() {
               recovActive = true;
               float holdBasis = (cvSteadyHoldEma > 0.5f) ? cvSteadyHoldEma : preEventCvI;  // EMA is the true hold; fall back to raw snapshot if CV never settled
               recovCvGoal = clamp_f(fmaxf(holdBasis, preEventIcv), 0.0f, icvHi_seed);  // snapshot NOW — preEvent* refresh to post-seed values next tick
-              recovCvSeed = cv_I;
+              recovDeficit0 = fmaxf(recovCvGoal - cv_I, 0.5f);
               recovStartMs = currentMillis;
               recovStarveTicks = 0;
               recovSlopeEma = 0.0f;
@@ -3373,13 +3374,13 @@ void AdjustFieldLearnMode() {
             bool tachSuspect = (g_lastProtClampMs != 0)
                                && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS + 2000UL);
             g_ovClampRpm = tachSuspect ? -1.0f : RPM;
-            recovActive = false;  // a new fire cancels the recovery ramp; the mid-ramp cv_I becomes the next reseed base (de-escalation ratchet)
+            recovActive = false;  // a new fire cancels the refill; the mid-heal cv_I becomes the next reseed base (de-escalation ratchet)
           }
           g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
           g_fastOvCapReason = capReasonTick;      // export reason atomically with the cap — CV log reads a coherent pair
           g_fastOvClampActive = fastOvClampActive;  // commit unified flag for next tick
           if (fastOvClampActive) g_lastProtClampMs = currentMillis;  // stamps the RPM-dropout grace window (buildTickSnapshot)
-          g_cvRecovActive = recovActive;            // export recovery-window state for cvLog flags b7
+          g_cvRecovActive = recovActive;            // export refill-active state for cvLog flags b7
           // Latch which protection bound the cap this tick into the Plots-tab marker
           // bitmask (consumed + cleared by the CSV1 sender). capReasonTick is a faithful
           // proxy for fastOvClampActive — every clamp site sets both.
@@ -3446,8 +3447,7 @@ void AdjustFieldLearnMode() {
           // ===== CV D term — sliding-window derivative, recomputed every output tick =====
           // kdTrim is a POSITION (VoltageKd_active × slope EXCESS over the deadband line — or × full slope,
           // latch-gated, in legacy CvKdExcessMode=0 — capped), subtracted at the Icv output, never integrated
-          // into cv_I. Runs BEFORE the PI block so its anti-windup and the recovery starve-exit read this
-          // tick's fresh slope/trim.
+          // into cv_I. Runs BEFORE the PI block so its anti-windup reads this tick's fresh slope/trim.
           {
             static const uint8_t KDBUF_N = 64;         // spans a 100 ms window down to ~1.5 ms/tick
             static uint32_t kdBufT[KDBUF_N];
@@ -3484,7 +3484,7 @@ void AdjustFieldLearnMode() {
               // CV entry) still holds cvDSlope at 0 until a real window exists.
               if (!spanned && kdBufN >= KDBUF_N && oldestAge > 0) { vOld = vOldest; oldAge = oldestAge; spanned = true; }
               if (spanned && oldAge > 0) {
-                float slopeCeil = CvKdSlopeCeil * ((float)BATTERY_VOLTAGE / 12.0f);  // stored 12 V-equiv, scaled ×V/12
+                float slopeCeil = CvKdSlopeCeil;  // V/s real per-bus (WYSIWYG) — no ×V/12 at use
                 cvDSlope = constrain((g_cvKdFiltV - vOld) / ((float)oldAge / 1000.0f), -slopeCeil, slopeCeil);
                 rollUpdate(ROLL_CVSLOPE, cvDSlope);   // D-term deadband-tuning readout (10 s peak raw rise)
               }
@@ -3574,35 +3574,23 @@ void AdjustFieldLearnMode() {
               cvSteadyHoldEma = (cvSteadyHoldEma < 0.5f) ? cv_I
                                                          : cvSteadyHoldEma + aH * (cv_I - cvSteadyHoldEma);
             }
-            // Recovery window: end once the ramp has completed AND voltage has reached target
-            // (first eRaw<=0 alone is too early — cv_I may still be below need and V would sag
-            // back into a small-error crawl), hard-capped at 4×cvRecovSec so a weak-alt stall
-            // can't leave the error cap engaged indefinitely. While active, cap the positive
-            // error so P+I drive cannot scale with the post-cut voltage collapse.
+            // Refill ends when the deficit is healed (or the existing cancels: new fire, CV
+            // exit/re-entry). The goal ceiling on icvHi lifts with it. Premise-void backstop:
+            // healing needs cv_I to rise, but satHi freezes cv_I the whole time Icv rails at the
+            // goal ceiling — so if the pre-trip current no longer holds the target (load/plant
+            // changed since the trip) the refill would latch and cap CV at the stale pre-trip
+            // current forever. Signature: full goal commanded, bus still low and not rising.
             if (recovActive) {
-              float eRaw = e;
-              uint32_t recovTMs = (uint32_t)(fmaxf(cvRecovSec, 0.2f) * 1000.0f);
-              uint32_t recovElapsed = currentMillis - recovStartMs;
-              // Premise-void exit: cv_I has been handed the whole pre-trip current, yet the bus is
-              // still below target and not rising — so that current no longer holds the target (load
-              // or plant changed) and the ceiling would starve the field for the 4× backstop.
-              // Slope term is a ~1s EMA of cvDSlope (≥ one full period of the slowest 1-2Hz idle
-              // resonance): raw per-tick slope produced 5 consecutive ripple-faked ≤0 readings and
-              // released the window 2.6s early on a rising bus (midrangeblip t=7.52, 2026-07-12).
-              // Seeded 0 at window open — a genuinely flat/falling bus (true premise-void) still
-              // exits in ~0.5s once cv_I pins; a recovering bus drives the EMA positive first.
-              {
-                float aSt = (float)g_voltLoopActualIntervalMs / (1000.0f + (float)g_voltLoopActualIntervalMs);
-                recovSlopeEma += aSt * (cvDSlope - recovSlopeEma);
-              }
-              bool starved = (cv_I >= recovCvGoal - 0.05f) && (eRaw > 0.0f) && (recovSlopeEma <= 0.0f);
+              float aSt = (float)g_voltLoopActualIntervalMs / (1000.0f + (float)g_voltLoopActualIntervalMs);
+              recovSlopeEma += aSt * (cvDSlope - recovSlopeEma);
+              bool starved = (Icv >= recovCvGoal - 0.05f) && (e > 0.0f) && (recovSlopeEma <= 0.0f)
+                             && ((uint32_t)(currentMillis - recovStartMs) > 2000UL);
               recovStarveTicks = starved ? (uint8_t)(recovStarveTicks + 1) : 0;
-              if ((recovElapsed >= recovTMs && eRaw <= 0.0f) || recovElapsed >= 4u * recovTMs
-                  || recovStarveTicks >= 5) {
+              if (cv_I >= recovCvGoal - 0.5f) {
                 recovActive = false;
-              } else {
-                float eCap = cvRecovEmaxV * ((float)BATTERY_VOLTAGE / 12.0f);
-                if (e > eCap) e = eCap;
+              } else if (recovStarveTicks >= 5) {
+                recovActive = false;
+                queueConsoleMessage("CV recovery: pre-trip current no longer holds the target — ceiling released");
               }
             }
             float dtSec = (prevVoltageLoopMs == 0)
@@ -3617,7 +3605,7 @@ void AdjustFieldLearnMode() {
             float icvLo = 0.0f;
 
             // cvDSlope + kdTrim (g_cvKdTrimLive) are computed once per output tick above (sliding window);
-            // this block only consumes them. cvDSlope also feeds the recovery starve-exit below.
+            // this block only consumes them.
 
             if (!enteringCV) {
               float p = VoltageKp_active * cvRecovBoostMult(e) * e;  // recovery P-boost scales the proportional term while below target
@@ -3635,32 +3623,30 @@ void AdjustFieldLearnMode() {
               // cvHelpersEnabled OFF → symmetric plain PI (integrator unwinds at the same VoltageKi rate it builds);
               // ON → asymmetric 7× faster unwind above target (aggressive overshoot recovery). See "CV tuning helpers" toggle.
               float KiDown = cvHelpersEnabled ? 7.0f * VoltageKi_active : VoltageKi_active;
-              float dI = (e >= 0.0f ? VoltageKi_active : KiDown) * e * dtSec;
+              // Deficit-gated refill boost: UP-integration only, through this normal path so every
+              // gate below (kdLimiting, slew-starve, satHi, aw cap) paces the refill unchanged.
+              float KiUp = VoltageKi_active;
+              if (recovActive) {
+                KiUp *= 1.0f + (cvRecovKiMax - 1.0f) * clamp_f((recovCvGoal - cv_I) / recovDeficit0, 0.0f, 1.0f);
+              }
+              float dI = (e >= 0.0f ? KiUp : KiDown) * e * dtSec;
 
               bool supervisorLimiting = fastOvClampActive && ((float)uTargetAmps < uTargetRaw_cached - 0.01f);
               bool slewStarved = (setpointLimited < Icv - 2.0f);  // 2A margin: >10x the steady-CV Icv-vs-setpoint jitter (p99 0.2A), so it engages only on genuine slew lag
               // Freeze upward integration while the fast-OV supervisor caps the ceiling, the D term
-              // holds the output down, or the setpoint slew is still delivering a lower command: in
-              // all three cases Icv is held below what the PI wants while V is still under target
-              // (e>0), so unfrozen cv_I would wind up invisibly and dump on release (58->79A wind
-              // during the 13A/s crawl, 2026-07-20 double fire).
-              if ((supervisorLimiting || kdLimiting || slewStarved) && dI > 0.0f) {
-                g_awState = 1;
+              // holds the output down, the setpoint slew is still delivering a lower command, or the
+              // commanded-target wind-down owns the ceiling: in all four cases Icv is held below what
+              // the PI wants while V is still under target (e>0), so unfrozen cv_I would wind up
+              // invisibly and dump on release (58->79A wind during the 13A/s crawl, 2026-07-20 double
+              // fire). Wind-down positive error is real (the gliding protection reference sits above
+              // the bus mid-descent) but undeliverable by design.
+              if ((supervisorLimiting || kdLimiting || slewStarved || cvWindDownActive) && dI > 0.0f) {
+                g_awState = cvWindDownActive ? 5 : 1;
               } else if (!(satHi && dI > 0.0f) && !(satLo && dI < 0.0f)) {
                 cv_I += dI;
                 g_awState = 0;
               } else {
                 g_awState = 2;  // PID output at ceiling or floor; standard anti-windup
-              }
-
-              // Timed re-injection: lift cv_I along a ramp from its reseed toward the pre-event
-              // value over cvRecovSec. Floor-lift only (fmaxf) and only while V is below target. No
-              // longer guards against the D term — the D term subtracts at the output and never touches
-              // cv_I, so the ramp (restoring cv_I toward the known-good pre-trip current) and the D term
-              // (shaping the approach rate) act independently instead of fighting over cv_I.
-              if (recovActive && (voltageTargetSlewed - IBV) > 0.0f) {
-                float frac = fminf(1.0f, (float)(currentMillis - recovStartMs) / (fmaxf(cvRecovSec, 0.2f) * 1000.0f));
-                cv_I = fmaxf(cv_I, fminf(recovCvSeed + (recovCvGoal - recovCvSeed) * frac, icvHi));
               }
 
               Icv = clamp_f(VoltageKp_active * cvRecovBoostMult(e) * e + cv_I - g_cvKdTrimLive, icvLo, icvHi);
@@ -3688,16 +3674,69 @@ void AdjustFieldLearnMode() {
         // position, not an integral: zeroed on CV entry, recomputed from the present slope each tick.
         {
           float e_now = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on per-tick proportional (governor output)
-          if (recovActive) {
-            float eCapT = cvRecovEmaxV * ((float)BATTERY_VOLTAGE / 12.0f);
-            if (e_now > eCapT) e_now = eCapT;  // same recovery error cap as the 100ms PI path
-          }
           float icvHi_tick = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
           if (recovActive) icvHi_tick = fminf(icvHi_tick, recovCvGoal);    // same pre-trip-current ceiling as the PI path
           if (!enteringCV) {
             float boost_now = cvRecovBoostMult(e_now);  // recovery P-boost; 1× at/above target
             g_cvPTerm = VoltageKp_active * boost_now * e_now;  // P contribution to Icv, live (CSV1 P/I/D plot) — reflects the boost
             Icv = clamp_f(VoltageKp_active * boost_now * e_now + cv_I - g_cvKdTrimLive, 0.0f, icvHi_tick);
+          }
+        }
+
+        // ===== CV COMMANDED-TARGET WIND-DOWN GOVERNOR =====
+        // A commanded target DROP cannot be tracked by the PI inside the OvMeasMarginV band: the shed
+        // rate is KiDown×error, so the bus can fall at most ~3.5·cvAlpha·margin V/s (~16 mV/s with the
+        // auto gains — plant-independent, since Kp = α/K). The 2026-07-21 FAIL log: a 13.9→13.3 V step
+        // through the 0.15 V/s glide alone left the bus +110 mV over the gliding target and fired G2
+        // three times, parking the bus 140 mV UNDER the new target. Fix: walk the current command down
+        // at a deliberate rate and stop on the MEASURED bus — cap Icv (and cv_I with it) along a ramp
+        // from the pre-step command, hold once the filtered bus reaches the commanded target + stop
+        // margin, and hand back to the PI with a bumpless seed after the protection-reference glide
+        // (vTgtRampDn) has also arrived (releasing earlier would let the PI chase the still-elevated
+        // slewed target back up). Protections are untouched: the gliding ChargingVoltageTarget stays
+        // their reference and G2 backstops a stalled wind-down exactly as before. Sits after the
+        // per-tick Icv recompute so the cap is the last writer before setpointCommand reads Icv.
+        {
+          float kWd = (float)BATTERY_VOLTAGE / 12.0f;
+          bool fitProbeActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
+                                resTestActive || batteryHealthTestActive || cvPlantFitActive;
+          if (!voltageControlActive || !cvWindDownEnable || fitProbeActive ||
+              (CVTuningMode != 0) || g_autoTestActive) {
+            cvWindDownActive = false;  // tests/probes drive targets deliberately; idle exit clears like the other trackers
+          } else if (!cvWindDownActive) {
+            if (!enteringCV && !fastOvClampActive
+                && (ChargingVoltageTarget - ChargingVoltageTargetReq) > CV_WINDDOWN_TRIG_V * kWd) {
+              cvWindDownActive = true;
+              cvWindDownCap = Icv;
+              cvWindDownFinalV = ChargingVoltageTargetReq;
+              queueConsoleMessageF("CV wind-down: target %.2f->%.2fV, walking command down from %.1fA",
+                                   ChargingVoltageTarget, ChargingVoltageTargetReq, cvWindDownCap);
+            }
+          } else {
+            cvWindDownFinalV = fminf(cvWindDownFinalV, ChargingVoltageTargetReq);  // follow further drops
+            bool busArrived = (g_ovIbvFilt <= cvWindDownFinalV + cvWindDownStopV);
+            bool glideDone = (ChargingVoltageTarget <= cvWindDownFinalV + 0.01f * kWd);
+            bool raised = (ChargingVoltageTargetReq > cvWindDownFinalV + 0.05f * kWd);
+            if (!busArrived) {
+              cvWindDownCap = fmaxf(0.0f, cvWindDownCap - cvWindDownRate * (float)MaxTableValue * actualDtSec);
+            }
+            if ((busArrived && glideDone) || raised || fastOvClampActive) {
+              // Bumpless handback: seed so Icv = Kp·boost·e + cv_I lands exactly at the cap, then the
+              // PI owns the hold. On a protection abort the unified release will reseed again from
+              // preEventCvI — which tracked the capped cv_I, so the de-escalation ratchet is intact.
+              float icvHi_wd = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);
+              float e_wd = voltageTargetSlewed - IBV;
+              cv_I = clamp_f(cvWindDownCap - VoltageKp_active * cvRecovBoostMult(e_wd) * e_wd, 0.0f, icvHi_wd);
+              cvWindDownActive = false;
+              if (raised) queueConsoleMessage("CV wind-down: released (target raised)");
+              else if (fastOvClampActive) queueConsoleMessage("CV wind-down: released (protection owns)");
+              else queueConsoleMessageF("CV wind-down: complete - bus %.2fV, PI resumes at %.1fA",
+                                        g_ovIbvFilt, cvWindDownCap);
+            }
+          }
+          if (cvWindDownActive) {
+            cv_I = fminf(cv_I, cvWindDownCap);  // walk the integrator with the cap: handback is near-seamless and preEventCvI snapshots the true operating point
+            Icv = fminf(Icv, cvWindDownCap);
           }
         }
 
@@ -3806,7 +3845,8 @@ void AdjustFieldLearnMode() {
 
         setpointCommand = voltageControlActive ? Icv : (float)uTargetAmps;
 
-        float effectiveFallRate = fastOvClampActive ? 1.0e9f : SetpointFallRate;
+        bool cvBrakingDown = voltageControlActive && (g_cvKdTrimLive > 0.0f);  // D-term pulling the command down on a fast rise → controlled brake-tier fall, still finite (never the OV slam)
+        float effectiveFallRate = fastOvClampActive ? 1.0e9f : (cvBrakingDown ? fmaxf(CvBrakeFallRate, SetpointFallRate) : SetpointFallRate);  // fmaxf: the submit-time floor can be stale (SetpointFallRate raised later, or config import) — braking must never fall slower than normal
         // Post-protection fast-rise: while the window is open AND battV still has
         // clear headroom below the active charge target, multiply the normal rise
         // slew so the alternator crosses its deadband and starts producing again
@@ -3864,6 +3904,10 @@ void AdjustFieldLearnMode() {
         // charging (zero-current cmd, CV square-wave tuning, startup ramp). 5 = machine limit,
         // read from the ACTUATOR (applied duty riding MaxDuty, sustained, output still short) —
         // output error alone can't distinguish "won't get there" from "not there yet".
+        // 6 = protection: the fastOvCurrentCap fold undercut the pre-OV ceiling (battCeilBinding
+        // latches BEFORE that fold, so without this check the whole event misattributes to "Batt"),
+        // extended through the post-protection fast-rise window so the entire recovery climb reads
+        // as protection, not the ceiling the command happens to rail against.
         {
           bool zeroCmd = (MaintainMode == 1 || zeroFloatActive);
           bool underTracking = ((float)pidInput < setpointLimited - fmaxf(3.0f, 0.10f * setpointLimited));
@@ -3875,8 +3919,11 @@ void AdjustFieldLearnMode() {
             dutyPegStartMs = 0;
           }
           bool fieldSaturated = (dutyPegStartMs != 0) && ((uint32_t)(currentMillis - dutyPegStartMs) >= 2000UL);
+          bool protBinding = (fastOvClampActive && ((float)uTargetAmps < i_ceiling_pre_ov - 0.01f))
+                             || postProtectRiseActive;
           uint8_t rawCode;
           if (CVTuningMode || zeroCmd || inStartupRamp)           rawCode = 0;
+          else if (protBinding)                                   rawCode = 6;
           else if (fieldSaturated)                                rawCode = 5;
           else if (voltageControlActive && Icv < icvCeil - 0.5f)  rawCode = 3;
           else if (battCeilBinding)                               rawCode = 4;
@@ -3896,6 +3943,7 @@ void AdjustFieldLearnMode() {
       // ===== MANUAL mode: no setpoint management =====
       voltageControlActive = false;
       lastVoltageControlActive = false;  // keep tracker in sync so AUTO re-entry from MANUAL fires the bumpless CV seed
+      cvWindDownActive = false;          // MANUAL owns the field — drop any in-flight wind-down
       g_thermalOwnsCeiling = false;      // ceiling chain does not run here; must not read stale-true on AUTO re-entry
       uTargetAmps = 0;
       setpointLimited = 0.0f;
@@ -5960,14 +6008,16 @@ void saveKneeLearnState() {
 // the persistent Min% state (minDutyTable + the knee tracker: floor, knee, frozen) as parallel
 // "bk_*" blobs in the "learning" namespace so an abort (or a reboot mid-run) reverts Min% too.
 // kneeLearnTempF is diagnostic-only and never persisted, so it is not backed up.
-void commissionBackupMinPct() {
+// Takes the arrays by pointer because the deferred-Start worker persists RAM copies staged at the
+// click, not the live tables (which the ~1 s persist window could have moved under it).
+void commissionBackupMinPct(const float *minDuty, const float *flr, const float *kn, const bool *frz, float fitA) {
   nvs_handle_t h;
   if (nvs_open("learning", NVS_READWRITE, &h) != ESP_OK) return;
-  nvs_set_blob(h, "bk_minDuty", rpmMinDutyTable, sizeof(rpmMinDutyTable));
-  nvs_set_blob(h, "bk_kneeFlr", kneeFloor, sizeof(kneeFloor));
-  nvs_set_blob(h, "bk_kneeKn", kneeKnee, sizeof(kneeKnee));
-  nvs_set_blob(h, "bk_kneeFrz", kneeFrozen, sizeof(kneeFrozen));
-  nvs_set_blob(h, "bk_kneeFitA", &kneeFitA, sizeof(kneeFitA));  // restore the live-correction threshold on abort too
+  nvs_set_blob(h, "bk_minDuty", minDuty, sizeof(rpmMinDutyTable));
+  nvs_set_blob(h, "bk_kneeFlr", flr, sizeof(kneeFloor));
+  nvs_set_blob(h, "bk_kneeKn", kn, sizeof(kneeKnee));
+  nvs_set_blob(h, "bk_kneeFrz", frz, sizeof(kneeFrozen));
+  nvs_set_blob(h, "bk_kneeFitA", &fitA, sizeof(fitA));  // restore the live-correction threshold on abort too
   nvs_commit(h);
   nvs_close(h);
 }

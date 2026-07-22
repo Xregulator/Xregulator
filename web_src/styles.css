@@ -252,6 +252,29 @@ textarea {
   min-height: 1.2em;
 }
 
+/* Protection cue (ctrlLimiter 6): red word inline LEFT of the charge-stage word — same line,
+   so showing/hiding it never changes header height (it grows into the brand row's empty
+   middle). Below 360px viewport the full word swaps to a lone red P so the row can't wrap. */
+.stage-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.prot-word {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: #e53935;
+  white-space: nowrap;
+  animation: stage-pulse 1.5s ease-in-out infinite;
+}
+.prot-word .pw-short { display: none; }
+@media (max-width: 359px) {
+  .prot-word .pw-full { display: none; }
+  .prot-word .pw-short { display: inline; }
+}
+
 /* Why the field reads OFF — plain-English cause under the charge-stage badge (banner). Only shown
    when field-status is OFF and the firmware reason is meaningful; muted amber so it reads as a note,
    not an alarm. */
@@ -1399,14 +1422,17 @@ input[type="submit"]:hover {
 #header-collapsed-strip > span { flex: none; }
 #header-collapsed-strip .hcs-grow { flex: 1 1 auto; min-width: 0; }
 
-/* state word carries the colour: charging teal, idle slate, manual amber, off gray, fault red, test violet */
-#header-collapsed-strip .hcs-pill { font-weight: 800; letter-spacing: .4px; max-width: 46cqw; overflow: hidden; text-overflow: ellipsis; }
+/* state word carries the colour: charging teal, idle slate, manual amber, off gray, fault red, test violet.
+   Sits RIGHT of the numbers (against the grow spacer) and is the ONLY shrinkable element, so when a
+   reveal threshold leaves the row tight the word ellipsizes instead of clipping the toggle/chevron. */
+#header-collapsed-strip .hcs-pill { font-weight: 800; letter-spacing: .4px; max-width: 46cqw; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
 #header-collapsed-strip .hcs-pill.st-charging { color: var(--accent); }
 #header-collapsed-strip .hcs-pill.st-idle     { color: #5f7d94; }
 #header-collapsed-strip .hcs-pill.st-manual   { color: #c9791f; }
 #header-collapsed-strip .hcs-pill.st-off      { color: #8a9097; }
 #header-collapsed-strip .hcs-pill.st-fault    { color: #d9534f; }
 #header-collapsed-strip .hcs-pill.st-test     { color: #a78bfa; }
+#header-collapsed-strip .hcs-pill.st-prot     { color: #d9534f; animation: stage-pulse 1.5s ease-in-out infinite; }
 
 /* Locked-out CTA: always visible (no @container hide rule). order:100 floats it past the grow
    spacer to the far-right edge so it reads as a passive corner prompt, not an alarm crowding the
@@ -1423,6 +1449,12 @@ input[type="submit"]:hover {
 
 #header-collapsed-strip .hcs-m { display: inline-flex; align-items: baseline; font-weight: 700; font-variant-numeric: tabular-nums; }
 #header-collapsed-strip .hcs-m i { font-style: normal; font-weight: 400; opacity: .6; margin-left: 2px; font-size: .84em; }
+/* Fixed-width right-aligned value boxes sized for each field's widest case: digit-count
+   changes (97.3 A → 3.2 A) right-align inside the box instead of re-flowing the row, so
+   decimals, units, and group separators never move. */
+#header-collapsed-strip .hcs-m > span { display: inline-block; text-align: right; }
+#hcs-volt, #hcs-soc, #hcs-alt, #hcs-batt, #hcs-temp, #hcs-duty { min-width: 5ch; }
+#hcs-rpm { min-width: 4ch; }
 
 #header-collapsed-strip .hcs-gsep { display: inline-block; width: 1px; height: 20px; background: rgba(0, 161, 154, .32); margin: 0 3px; }
 #header-collapsed-strip .hcs-divider { display: inline-block; width: 1px; height: 18px; background: rgba(0, 161, 154, .15); }
@@ -1720,6 +1752,18 @@ input[type="submit"]:hover {
   white-space: nowrap;
 }
 
+/* Invisible bold twin (text from data-t) reserves the label's BOLD width at rest, so the
+   pill's font-weight change can't widen the auto-sized label column — chip widths stay
+   constant and the space-evenly grid never redistributes (whole-row jump killer). */
+.duo-lbl::after {
+  content: attr(data-t);
+  display: block;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  font-weight: 700;
+}
+
 /* Active-limit cue: solid teal pill on the figure's LABEL so the value never changes
    weight/colour/size. Negative margin cancels the padding's width so the number column
    (fixed 3.5em, next in the grid) never shifts when the pill appears. */
@@ -1732,19 +1776,34 @@ input[type="submit"]:hover {
   margin: -1px -5px;
 }
 
-/* ctrlLimiter 5 (field at max duty): pill wraps the header duty % readout. !important beats
-   the inline color applyStaleStyleByAge() writes on #dutyCycleID3 and the cluster's
-   .field-status-* !important tints. */
-#duty-pill-wrap.limit-pill {
-  background: var(--accent);
-  border-radius: 6px;
+/* Header duty readout: geometry is CONSTANT in every state — the wrap always carries the
+   pill's padding (negative margin cancels it) and the digits sit right-aligned in a fixed
+   5-character box, so a highlight or digit-count change (5.6 → 100.0) moves nothing.
+   inline-flex: the JS show/hide writes of display:inline on the inner spans stay harmless
+   because flex items blockify. */
+#duty-pill-wrap {
+  display: inline-flex;
+  justify-content: flex-end;
+  align-items: baseline;
   padding: 1px 5px;
   margin: -1px -5px;
+  border-radius: 6px;
 }
-#duty-pill-wrap.limit-pill span {
-  color: #fff !important;
+#duty-pill-wrap span {
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
+#dutyCycleID3 {
+  min-width: 5ch;
+  text-align: right;
+}
+/* ctrlLimiter 5 (machine limit) = teal, 6 (protection) = red; background-only so the pill
+   never changes layout. !important beats the inline color applyStaleStyleByAge() writes on
+   #dutyCycleID3 and the cluster's .field-status-* !important tints. */
+#duty-pill-wrap.limit-pill { background: var(--accent); }
+#duty-pill-wrap.limit-pill span { color: #fff !important; }
+#duty-pill-wrap.prot-pill { background: #e53935; }
+#duty-pill-wrap.prot-pill span { color: #fff !important; }
 
 .duo-num {
   font-size: 15px;

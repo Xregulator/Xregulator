@@ -1,13 +1,3 @@
-/**
- * AI_SUMMARY: Important functions for AI to parse to help solve the problem. There are more files called 3_nonImportantFunctions and 4_optional that can be shared if necessary.
- * AI_PURPOSE: 
- * AI_INPUTS: 
- * AI_OUTPUTS: 
- * AI_DEPENDENCIES: 
- * AI_RISKS: 
- * CRITICAL_INSTRUCTION_FOR_AI:: When adding new code, try to first use or modify existing code whenever possible, to avoid bloat. When impossible, always mimick my style and coding patterns. If you have a performance improvement idea, tell me. When giving me new code, I prefer complete copy and paste functions when they are short, or for you to give step by step instructions for me to edit if function is long, to conserve tokens. Always specify which option you chose.
- */
-
 // X Engineering Alternator Regulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
@@ -275,6 +265,7 @@ bool fsRemove(const char *path) {
 #define NK_SocSeedAck "SocSeedAck"
 #define NK_SocSeedSnap "SocSeedSnap"
 #define NK_SetpointFallRate "SetpointFallRat"
+#define NK_CvBrakeFallRate "CvBrakeFallRate"
 #define NK_SetpointRiseRate "SetpointRiseRat"
 #define NK_SetpointBigStepThresh "SetpntBigStpTh"
 #define NK_SetpointBigStepRiseRate "SetpntBigStpRt"
@@ -289,11 +280,15 @@ bool fsRemove(const char *path) {
 #define NK_vTgtRampEnable "vTgtRampEn"
 #define NK_vTgtRampUp "vTgtRampUp"
 #define NK_vTgtRampDn "vTgtRampDn"
+#define NK_cvWindDownEn "cvWindDownEn"
+#define NK_cvWindDownRate "cvWindDownRate"
+#define NK_cvWindDownStopV "cvWindDownStopV"
 #define NK_setpointSlewEnable "setptSlewEn"
 #define NK_cvRiseGovEnable "cvRiseGovEn"
 #define NK_cvRecovEnable "cvRecovEn"
-#define NK_cvRecovSec "cvRecovSec"
-#define NK_cvRecovEmaxV "cvRecovEmaxV"
+#define NK_cvRecovSec "cvRecovSec"       // retired timed-window knob — key kept (never repurpose)
+#define NK_cvRecovEmaxV "cvRecovEmaxV"   // retired timed-window knob — key kept (never repurpose)
+#define NK_cvRecovKiMax "cvRecovKiMax"
 #define NK_cvRecovBoostEnable "cvRcvBoostEn"
 #define NK_cvRecovBoostMax "cvRcvBoostMax"
 #define NK_cvRecovBoostErrV "cvRcvBoostErrV"
@@ -337,6 +332,8 @@ bool fsRemove(const char *path) {
 #define NK_CvKdDbCeil "CvKdDbCeil"
 #define NK_CvKdExcessMode "CvKdExcessMode"
 #define NK_CvKdSlopeCeil "CvKdSlopeCeil"
+#define NK_CvStressDropV "CvStressDropV"
+#define NK_CvStressFailBandV "CvStressFailBnd"
 #define NK_CvKdTd "CvKdTd"
 #define NK_SolarWatts "SolarWatts"
 #define NK_StartupRiseRate "StartupRiseRate"
@@ -573,25 +570,19 @@ static const int COMMISSION_SNAP_FIELDS = 14;
 // Serialize the current scalar tune into `key` as one positional CSV. 12th field = HiLow (charge-rate
 // mode) so a revert never strands the user in the wrong mode; fields 13/14 = IExcessBaseA/CcOffsetA (the
 // affine trip-line the Thresholds step writes). This scalar set IS the whole positional snapshot; the
-// Min% floor table is backed up separately (see commissionSnapshot).
-void commissionSnapshotScalars(const char* key) {
-  char buf[180];
-  snprintf(buf, sizeof(buf),
+// Min% floor table is backed up separately (see the deferred-Start worker, cxStartPersistService).
+void commissionSnapshotScalarsToBuf(char *buf, size_t n) {
+  snprintf(buf, n,
            "%.4f,%.4f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d,%.1f,%.1f",
            PidKp, PidKi, OutputPIDFilterTC, VoltageFilterTC,
            IExcessTau, IExcessFloorA, IExcessCeilA, IExcessFrac, IExcessFracBulk,
            SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow, IExcessBaseA, IExcessCcOffsetA);
-  settingWrite(key, buf);
 }
 
-// Origin snapshot for the explicit-abort full revert: scalar tune + the Min% floor table/knee (bk_* blobs).
-// Taken once at Prep (a resume Start skips re-taking it) and left untouched for the whole run so an abort
-// reverts to the pre-commissioning tune.
-void commissionSnapshot() {
-  commissionSnapshotScalars(NK_commissionSnap);
-  // The Min% floor table + knee tracker don't fit the positional CSV (10 floats × 3 + bools), so they are
-  // backed up separately as "bk_*" blobs. Keeps an abort able to revert the Min% floor table too.
-  commissionBackupMinPct();
+void commissionSnapshotScalars(const char* key) {
+  char buf[180];
+  commissionSnapshotScalarsToBuf(buf, sizeof(buf));
+  settingWrite(key, buf);
 }
 
 // In-flight step snapshot: re-taken on each step entry, so it holds the scalar tune as of the START of the
@@ -780,266 +771,97 @@ void commissionClearRpmDependents() {
   if (commissionState == 2) commissionSetState(1);
 }
 
-// One-time sweep at boot: move any pre-NVS settings file into NVS, then delete
-// the file. No-op once the filesystem is clean; a virgin device finds nothing
-// and falls through to hardcoded defaults in InitSystemSettings.
-struct LegacySettingFile { const char *file; const char *key; };
-static const LegacySettingFile LEGACY_SETTINGS[] = {
-  { "/AbsorptionTimeoutMs.txt", NK_AbsorptionTimeoutMs },
-  { "/AbsorptionVoltage.txt", NK_AbsorptionVoltage },
-  { "/AlarmActivate.txt", NK_AlarmActivate },
-  { "/AlarmLatchEnabled.txt", NK_AlarmLatchEnabled },
-  { "/AlternatorCOffset.txt", NK_AlternatorCOffset },
-  { "/AlternatorHardShutdownV.txt", NK_AlternatorHardShutdownV },
-  { "/AlternatorNominalAmps.txt", NK_AlternatorNominalAmps },
-  { "/AmpSensorRange.txt", NK_AmpSensorRange },
-  { "/AutoAltCurrentZero.txt", NK_AutoAltCurrentZero },
-  { "/AutoShuntGainCorrection.txt", NK_AutoShuntGainCorrection },
-  { "/AwBleedRate.txt", NK_AwBleedRate },
-  { "/AwSeedProtectMs.txt", NK_AwSeedProtectMs },
-  { "/BatteryCOffset.txt", NK_BatteryCOffset },
-  { "/BatteryCapacity_Ah.txt", NK_BatteryCapacity_Ah },
-  { "/BatteryCurrentSource.txt", NK_BatteryCurrentSource },
-  { "/Beta.txt", NK_Beta },
-  { "/BulkVoltage.txt", NK_BulkVoltage },
-  { "/CAPSIZE_THRESHOLD_DEG.txt", NK_CAPSIZE_THRESHOLD_DEG },
-  { "/CVTuningMode.txt", NK_CVTuningMode },
-  { "/ChargeEfficiency.txt", NK_ChargeEfficiency },
-  { "/ChargedDetectionTime.txt", NK_ChargedDetectionTime },
-  { "/ChargedVoltage.txt", NK_ChargedVoltage },
-  { "/CloudFeatures.txt", NK_CloudFeatures },
-  { "/CurrentAlarmHigh.txt", NK_CurrentAlarmHigh },
-  { "/CurrentThreshold.txt", NK_CurrentThreshold },
-  { "/DutyRampRate.txt", NK_DutyRampRate },
-  { "/DutySlowRampRate.txt", NK_DutySlowRampRate },
-  { "/DvdtAlpha.txt", NK_DvdtAlpha },
-  { "/DvdtTC.txt", NK_DvdtTC },
-  { "/FIELD_COLLAPSE_DELAY.txt", NK_FIELD_COLLAPSE_DELAY },
-  { "/FLOAT_DURATION.txt", NK_FLOAT_DURATION },
-  { "/FastSetpointRiseHeadroomV.txt", NK_FastSetpointRiseHeadroomV },
-  { "/FastSetpointRiseRate.txt", NK_FastSetpointRiseRate },
-  { "/FastSetpointRiseWindowMs.txt", NK_FastSetpointRiseWindowMs },
-  { "/FieldAdjustmentInterval.txt", NK_FieldAdjustmentInterval },
-  { "/FieldResistance.txt", NK_FieldResistance },
-  { "/FloatVoltage.txt", NK_FloatVoltage },
-  { "/FuelEfficiency.txt", NK_FuelEfficiency },
-  { "/HardOCDebounceMs.txt", NK_HardOCDebounceMs },
-  { "/HiLow.txt", NK_HiLow },
-  { "/IExcessArmMarginV.txt", NK_IExcessArmMarginV },
-  { "/IExcessKBleed.txt", NK_IExcessKBleed },
-  { "/IExcessReseedFrac.txt", NK_IExcessReseedFrac },
-  { "/IgnitionOverride.txt", NK_IgnitionOverride },
-  { "/IgnoreLearningDuringPenalty.txt", NK_IgnoreLearningDuringPenalty },
-  { "/IgnoreRPM.txt", NK_IgnoreRPM },
-  { "/IgnoreTemperature.txt", NK_IgnoreTemperature },
-  { "/InvertAltAmps.txt", NK_InvertAltAmps },
-  { "/InvertBattAmps.txt", NK_InvertBattAmps },
-  { "/BatteryShuntPresent.txt", NK_BatteryShuntPresent },
-  { "/KHard.txt", NK_KHard },
-  { "/LastResetReason.txt", NK_LastResetReason },
-  { "/LatitudeManual.txt", NK_LatitudeManual },
-  { "/LatitudeNMEA.txt", NK_LatitudeNMEA },
-  { "/LearningDownStep.txt", NK_LearningDownStep },
-  { "/LearningMemoryDuration.txt", NK_LearningMemoryDuration },
-  { "/LearningRPMChangeThreshold.txt", NK_LearningRPMChangeThreshold },
-  { "/LearningSettlingPeriod.txt", NK_LearningSettlingPeriod },
-  { "/LearningTempHysteresis.txt", NK_LearningTempHysteresis },
-  { "/LearningUpStep.txt", NK_LearningUpStep },
-  { "/LimpHome.txt", NK_LimpHome },
-  { "/LoadDumpDtThresh.txt", NK_LoadDumpDtThresh },
-  { "/LoadDumpDtThresh1.txt", NK_LoadDumpDtThresh1 },
-  { "/LoadDumpDtThresh3.txt", NK_LoadDumpDtThresh3 },
-  { "/LogAllLearningEvents.txt", NK_LogAllLearningEvents },
-  { "/LongitudeManual.txt", NK_LongitudeManual },
-  { "/LongitudeNMEA.txt", NK_LongitudeNMEA },
-  { "/MaintainMode.txt", NK_MaintainMode },
-  { "/ManualDutyTarget.txt", NK_ManualDutyTarget },
-  { "/ManualFieldToggle.txt", NK_ManualFieldToggle },
-  { "/ManualLifePercentage.txt", NK_ManualLifePercentage },
-  { "/ManualSOCPoint.txt", NK_ManualSOCPoint },
-  { "/MaxDuty.txt", NK_MaxDuty },
-  { "/MaxPenaltyDuration.txt", NK_MaxPenaltyDuration },
-  { "/MaxPenaltyPercent.txt", NK_MaxPenaltyPercent },
-  { "/MaxTableValue.txt", NK_MaxTableValue },
-  { "/MaximumAllowedBatteryAmps.txt", NK_MaximumAllowedBatteryAmps },
-  { "/MinDuty.txt", NK_MinDuty },
-  { "/MinFloatTime.txt", NK_MinFloatTime },
-  { "/MinLearningInterval.txt", NK_MinLearningInterval },
-  { "/MinRPMForField.txt", NK_MinRPMForField },
-  { "/NMEA0183Data.txt", NK_NMEA0183Data },
-  { "/NMEA2KData.txt", NK_NMEA2KData },
-  { "/NeighborLearningFactor.txt", NK_NeighborLearningFactor },
-  { "/OnOff.txt", NK_OnOff },
-  { "/OutputPIDFilterTC.txt", NK_OutputPIDFilterTC },
-  { "/OutputPIDMA_N.txt", NK_OutputPIDMA_N },
-  { "/OutputPIDSigSrc.txt", NK_OutputPIDSigSrc },
-  { "/OvGroup1Enable.txt", NK_OvGroup1Enable },
-  { "/OvGroup2Enable.txt", NK_OvGroup2Enable },
-  { "/OvLayer2Enable.txt", NK_OvLayer2Enable },
-  { "/OvLayer3Enable.txt", NK_OvLayer3Enable },
-  { "/OvMeasMarginV.txt", NK_OvMeasMarginV },
-  { "/OvPredMarginV.txt", NK_OvPredMarginV },
-  { "/PIDTrackingGain.txt", NK_PIDTrackingGain },
-  { "/PITCHPOLE_THRESHOLD_DEG.txt", NK_PITCHPOLE_THRESHOLD_DEG },
-  { "/PeukertExponent.txt", NK_PeukertExponent },
-  { "/PidKd.txt", NK_PidKd },
-  { "/PidKi.txt", NK_PidKi },
-  { "/PidKp.txt", NK_PidKp },
-  { "/PidSampleDivisor.txt", NK_PidSampleDivisor },
-  { "/PulleyRatio.txt", NK_PulleyRatio },
-  { "/RPMScalingFactor.txt", NK_RPMScalingFactor },
-  { "/R_fixed.txt", NK_R_fixed },
-  { "/RebulkCurrent_A.txt", NK_RebulkCurrent_A },
-  { "/RebulkVoltage.txt", NK_RebulkVoltage },
-  { "/ReseedFrac.txt", NK_ReseedFrac },
-  { "/SLAM_THRESHOLD_G.txt", NK_SLAM_THRESHOLD_G },
-  { "/SOC_AllowRebulk_percent.txt", NK_SOC_AllowRebulk_percent },
-  { "/SOC_BlockRebulk_percent.txt", NK_SOC_BlockRebulk_percent },
-  { "/SafeOperationThreshold.txt", NK_SafeOperationThreshold },
-  { "/SetpointFallRate.txt", NK_SetpointFallRate },
-  { "/SetpointRiseRate.txt", NK_SetpointRiseRate },
-  { "/SettleTimeBeforeCut.txt", NK_SettleTimeBeforeCut },
-  { "/ShuntResistanceMicroOhm.txt", NK_ShuntResistanceMicroOhm },
-  { "/ShutdownPhase2HoldMs.txt", NK_ShutdownPhase2HoldMs },
-  { "/SolarWatts.txt", NK_SolarWatts },
-  { "/StartupRiseRate.txt", NK_StartupRiseRate },
-  { "/SwitchControlOverride.txt", NK_SwitchControlOverride },
-  { "/SwitchingFrequency.txt", NK_SwitchingFrequency },
-  { "/SystemIDStepAmplitude.txt", NK_SystemIDStepAmplitude },
-  { "/T0_C.txt", NK_T0_C },
-  { "/TailCurrent.txt", NK_TailCurrent },
-  { "/TailCurrent_A.txt", NK_TailCurrent_A },
-  { "/TargetVoltageMode.txt", NK_TargetVoltageMode },
-  { "/TargetVoltageSetpoint.txt", NK_TargetVoltageSetpoint },
-  { "/TdPred.txt", NK_TdPred },
-  { "/TempAlarm.txt", NK_TempAlarm },
-  { "/TempAlarmLow.txt", NK_TempAlarmLow },
-  { "/TempCritExcess.txt", NK_TempCritExcess },
-  { "/TempPIDFilterAlpha.txt", NK_TempPIDFilterAlpha },
-  { "/TempPIDIntervalMs.txt", NK_TempPIDIntervalMs },
-  { "/TempPIDKi.txt", NK_TempPIDKi },
-  { "/TempPIDKp.txt", NK_TempPIDKp },
-  { "/TempSource.txt", NK_TempSource },
-  { "/TempSustainedTimeout.txt", NK_TempSustainedTimeout },
-  { "/TempWarnExcess.txt", NK_TempWarnExcess },
-  { "/TemperatureLimitF.txt", NK_TemperatureLimitF },
-  { "/ThermalLookaheadSec.txt", NK_ThermalLookaheadSec },
-  { "/TuningMode.txt", NK_TuningMode },
-  { "/UVThresholdHigh.txt", NK_UVThresholdHigh },
-  { "/UseFloat.txt", NK_UseFloat },
-  { "/VHardMarginV.txt", NK_VHardMarginV },
-  { "/VSoftMarginV.txt", NK_VSoftMarginV },
-  { "/VeData.txt", NK_VeData },
-  { "/VoltageAlarmHigh.txt", NK_VoltageAlarmHigh },
-  { "/VoltageAlarmLow.txt", NK_VoltageAlarmLow },
-  { "/VoltageDisagreeThreshold.txt", NK_VoltageDisagreeThreshold },
-  { "/VoltageDisagreeTimeout.txt", NK_VoltageDisagreeTimeout },
-  { "/VoltageFilterTC.txt", NK_VoltageFilterTC },
-  { "/VoltageKi.txt", NK_VoltageKi },
-  { "/VoltageKp.txt", NK_VoltageKp },
-  { "/VoltageLoopInterval.txt", NK_VoltageLoopInterval },
-  { "/VoltageSpikeMargin.txt", NK_VoltageSpikeMargin },
-  { "/WarmupRampRate.txt", NK_WarmupRampRate },
-  { "/WeatherTimeoutMs.txt", NK_WeatherTimeoutMs },
-  { "/WeatherUpdateInterval.txt", NK_WeatherUpdateInterval },
-  { "/WindingTempOffset.txt", NK_WindingTempOffset },
-  { "/Ymax1.txt", NK_Ymax1 },
-  { "/Ymax2.txt", NK_Ymax2 },
-  { "/Ymax3.txt", NK_Ymax3 },
-  { "/Ymax4.txt", NK_Ymax4 },
-  { "/Ymin1.txt", NK_Ymin1 },
-  { "/Ymin2.txt", NK_Ymin2 },
-  { "/Ymin3.txt", NK_Ymin3 },
-  { "/Ymin4.txt", NK_Ymin4 },
-  { "/absorptionCompleteTime.txt", NK_absorptionCompleteTime },
-  { "/altPaused.txt", NK_altPaused },
-  { "/altbaseSec.txt", NK_altbaseSec },
-  { "/bmsLogic.txt", NK_bmsLogic },
-  { "/bmsLogicLevelOff.txt", NK_bmsLogicLevelOff },
-  { "/bulkVoltageHoldMs.txt", NK_bulkVoltageHoldMs },
-  { "/capLimitMode.txt", NK_capLimitMode },
-  { "/cvConsecutiveReads.txt", NK_cvConsecutiveReads },
-  { "/cvKOvershoot.txt", NK_cvKOvershoot },
-  { "/cvWaveAmplitudeV.txt", NK_cvWaveAmplitudeV },
-  { "/cvWavePeriodSec.txt", NK_cvWavePeriodSec },
-  { "/displayTempUnit.txt", NK_displayTempUnit },
-  { "/gpsManualActive.txt", NK_gpsManualActive },
-  { "/gpsTimeSourceMode.txt", NK_gpsTimeSourceMode },
-  { "/hardwarePresent.txt", NK_hardwarePresent },
-  { "/maxPoints.txt", NK_maxPoints },
-  { "/perfPaused.txt", NK_perfPaused },
-  { "/performanceRatio.txt", NK_performanceRatio },
-  { "/plotTimeWindow.txt", NK_plotTimeWindow },
-  { "/rebulkDebounceTime.txt", NK_rebulkDebounceTime },
-  { "/socInfoAvailable.txt", NK_socInfoAvailable },
-  { "/timeAxisModeChanging.txt", NK_timeAxisModeChanging },
-  { "/totalPowerCycles.txt", NK_totalPowerCycles },
-  { "/waveAmplitude.txt", NK_waveAmplitude },
-  { "/wavePeriod.txt", NK_wavePeriod },
-  { "/weatherDataValid.txt", NK_weatherDataValid },
-  { "/weatherModeEnabled.txt", NK_weatherModeEnabled },
-  { "/webgaugesinterval.txt", NK_webgaugesinterval },
-  { "/xTime.txt", NK_xTime },
-  { "/yyMax.txt", NK_yyMax },
-  { "/yyMin.txt", NK_yyMin },
-  { "/altRpmTol.txt", "altRpmTol" },
-  { "/altRpmSec.txt", "altRpmSec" },
-  { "/altDutyTolPct.txt", "altDutyTolPct" },
-  { "/altDutySec.txt", "altDutySec" },
-  { "/altVbusTol.txt", "altVbusTol" },
-  { "/altVbusSec.txt", "altVbusSec" },
-  { "/altThermDegF.txt", "altThermDegF" },
-  { "/altThermSec.txt", "altThermSec" },
-  { "/altMinAmps.txt", "altMinAmps" },
-  { "/altMinDuty.txt", "altMinDuty" },
-  { "/altSafetyMargin.txt", "altSafetyMargin" },
-  { "/altIdwPower.txt", "altIdwPower" },
-  { "/altPruneK.txt", "altPruneK" },
-  { "/perfWsTol.txt", "perfWsTol" },
-  { "/perfWsSec.txt", "perfWsSec" },
-  { "/perfWaTol.txt", "perfWaTol" },
-  { "/perfWaSec.txt", "perfWaSec" },
-  { "/perfSeaTol.txt", "perfSeaTol" },
-  { "/perfSeaSec.txt", "perfSeaSec" },
-  { "/perfSeaWinSec.txt", "perfSeaWinSec" },
-  { "/perfRpmTol.txt", "perfRpmTol" },
-  { "/perfRpmSec.txt", "perfRpmSec" },
-  { "/perfHwTol.txt", "perfHwTol" },
-  { "/perfHwSec.txt", "perfHwSec" },
-  { "/perfMinBoatSpeed.txt", "perfMinBoatSpee" },
-  { "/perfMinWindSpeed.txt", "perfMinWindSpee" },
-  { "/perfRpmFloor.txt", "perfRpmFloor" },
-  { "/perfSafetyMargin.txt", "perfSafetyMargi" },
-  { "/perfIdwPower.txt", "perfIdwPower" },
-  { "/perfPruneK.txt", "perfPruneK" },
-  { "/perfSpeedSrc.txt", "perfSpeedSrc" },
-  { "/perfFoldSymmetric.txt", "perfFoldSymmetr" },
-  // WiFi provisioning, interface password, IMU level calibration.
-  // Values may carry a trailing newline from the old file writers (println) —
-  // the loaders trim. imu_zero is the whole JSON blob as one string value.
-  { "/ssid.txt", NK_ssid },
-  { "/pass.txt", NK_pass },
-  { "/apssid.txt", NK_apssid },
-  { "/appass.txt", NK_appass },
-  { "/first_config_done.txt", NK_first_config_done },
-  { "/password.txt", NK_password },
-  { "/password.hash", NK_passwordHash },
-  { "/imu_zero.json", NK_imu_zero },
-};
+// ── Deferred commissioning-start persist ─────────────────────────────────────
+// Start used to retire its whole restore point (origin snapshot + Min% blobs + state keys, ~7 NVS
+// commits) inside the /get handler; on the shared network task that starved the SSE stream and froze
+// the interface ~2 s. The handler now stages everything in RAM — atomic at the click — and
+// cxStartPersistService(), called once per loop() pass, retires ONE commit per pass. Write order is
+// the crash guarantee: commissionState=1 is committed LAST, so a persisted state byte proves the
+// whole restore point is on flash; a reboot mid-burst boots as "never started". The wizard polls
+// /cxStartState and advances only on IDLE — the HTTP 200 means accepted, not saved.
+static char  cxStartTuneCsv[192];   // scalar tune at the click — origin snapshot AND step baseline
+static float cxStartMinDuty[RPM_TABLE_SIZE], cxStartKneeFloor[RPM_TABLE_SIZE], cxStartKneeKnee[RPM_TABLE_SIZE];
+static bool  cxStartKneeFrozen[RPM_TABLE_SIZE];
+static float cxStartKneeFitA;
+static bool  cxStartResume;         // resuming a live run: origin snapshot + Min% backup kept from the original Start
+static uint8_t  cxStartPrevPhase;   // pre-click wizard bookkeeping, restored exactly if a fresh
+static uint16_t cxStartPrevDoneMask, cxStartPrevManualMask;  // still-pending Start is cancelled
+volatile uint8_t cxStartPersistStep = 0;  // 0 = idle; 1..6 = next write to retire
+volatile bool cxStartPersistFail = false; // restore-point write refused → start cancelled
 
-void importLegacySettingsFromLittleFS() {
-  if (!littleFSMounted) return;
-  int moved = 0;
-  for (size_t i = 0; i < sizeof(LEGACY_SETTINGS) / sizeof(LEGACY_SETTINGS[0]); i++) {
-    if (!fsExists(LEGACY_SETTINGS[i].file)) continue;
-    if (!settingExists(LEGACY_SETTINGS[i].key)) {
-      String v = readFile(LittleFS, LEGACY_SETTINGS[i].file);
-      if (v.length()) settingWrite(LEGACY_SETTINGS[i].key, v.c_str());
-      moved++;
-    }
-    fsRemove(LEGACY_SETTINGS[i].file);
+void cxStartPersistBegin(bool resuming) {
+  commissionSnapshotScalarsToBuf(cxStartTuneCsv, sizeof(cxStartTuneCsv));
+  memcpy(cxStartMinDuty, rpmMinDutyTable, sizeof(cxStartMinDuty));
+  memcpy(cxStartKneeFloor, kneeFloor, sizeof(cxStartKneeFloor));
+  memcpy(cxStartKneeKnee, kneeKnee, sizeof(cxStartKneeKnee));
+  memcpy(cxStartKneeFrozen, kneeFrozen, sizeof(cxStartKneeFrozen));
+  cxStartKneeFitA = kneeFitA;
+  cxStartPrevPhase = commissionPhase;
+  cxStartPrevDoneMask = commissionDoneMask;
+  cxStartPrevManualMask = commissionManualMask;
+  cxStartResume = resuming;
+  cxStartPersistFail = false;
+  cxStartPersistStep = 1;   // flag flips only after staging is complete — the worker reads nothing sooner
+}
+
+bool cxStartPersistFreshPending() {
+  return cxStartPersistStep != 0 && !cxStartResume;
+}
+
+// Cancel a still-pending Start (abort/done raced the worker). Fresh start: nothing has run, so this
+// is an exact teardown to the pre-click state — NOT a revert, and the caller must not fall into the
+// live-run teardown (which would demote a previously-commissioned device whose re-run never began).
+// Resume: just stop the worker — the original committed snapshot is intact for the normal teardown.
+void cxStartPersistCancel() {
+  if (cxStartPersistStep == 0) return;
+  bool fresh = !cxStartResume;
+  cxStartPersistStep = 0;
+  if (!fresh) return;
+  testProtectionsEnabled = commissionProtBackup;
+  settingRemove(NK_commissionSnap);       // drop whatever subset the worker already wrote
+  settingRemove(NK_commissionStepSnap);
+  commissionClearMinPctBackup();
+  commissionSetPhase(cxStartPrevPhase);
+  commissionDoneMask = cxStartPrevDoneMask;
+  commissionWriteDoneMask();
+  commissionManualMask = cxStartPrevManualMask;
+  commissionWriteManualMask();
+}
+
+// Retire one staged write per call — called every loop() pass, no-op when idle. The step is
+// double-checked around every advance: cxStartPersistCancel runs on the network task, and an
+// unguarded ++ after a mid-case cancel would read the fresh 0 and resurrect the cancelled
+// sequence from step 1 — marching a torn-down Start all the way to commissionSetState(1).
+void cxStartPersistService() {
+  uint8_t s = cxStartPersistStep;
+  if (s == 0) return;
+  switch (s) {
+    case 1:  // origin snapshot FIRST — it is the abort path's entire restore point
+      if (!cxStartResume && !settingWrite(NK_commissionSnap, cxStartTuneCsv)) {
+        // No restore point ⇒ refuse the run: starting anyway would leave Abort with nothing to revert to.
+        testProtectionsEnabled = commissionProtBackup;
+        cxStartPersistStep = 0;
+        cxStartPersistFail = true;
+        settingsDirty = true;
+        queueConsoleMessage("Commissioning: could not save the settings restore point (flash write failed) — start cancelled");
+        return;
+      }
+      break;
+    case 2:
+      if (!cxStartResume) commissionBackupMinPct(cxStartMinDuty, cxStartKneeFloor, cxStartKneeKnee, cxStartKneeFrozen, cxStartKneeFitA);
+      break;
+    case 3: settingWrite(NK_commissionStepSnap, cxStartTuneCsv); break;
+    case 4: commissionSetPhase(0); break;
+    case 5: commissionMarkStage(0); break;  // Prep complete: snapshot staged, preconditions checked
+    case 6:
+      if (cxStartPersistStep != 6) return;  // last-instant cancel re-check — state=1 is the irreversible commit
+      commissionSetState(1);  // LAST — a persisted state=1 proves the restore point is on flash
+      cxStartPersistStep = 0;
+      settingsDirty = true;   // push the CSV3 state echo promptly
+      queueConsoleMessage("Commissioning: started — settings snapshotted");
+      return;
   }
-  if (moved) Serial.printf("Settings: imported %d legacy LittleFS settings into NVS\n", moved);
+  if (cxStartPersistStep == s) cxStartPersistStep = (uint8_t)(s + 1);  // advance only if no cancel landed mid-case
 }
 
 bool fsMkdir(const char *path) {

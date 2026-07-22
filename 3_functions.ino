@@ -664,7 +664,7 @@ enum Csv4Index {
   CSV4_VictronCurrent,          // Victron battery current (A ×100)
   CSV4_currentFuelGPH,          // live fuel flow (gal/hr ×100)
   CSV4_currentNMPG,             // live fuel economy (naut mi/gal ×100)
-  CSV4_ctrlLimiter,             // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty — rides NavStream so the banner tint updates at ~500ms
+  CSV4_ctrlLimiter,             // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty, 6 protection (cap binding or recovery window) — rides NavStream so the banner tint updates at ~500ms
   CSV4_chargeStage,             // CHARGE_STAGE_* code — rides NavStream so the Plots-tab mode ribbon tracks stage changes at ~500ms (CSV2 still carries it for the thermal ring)
   CSV4_FIELD_COUNT  // = 19
 };
@@ -982,9 +982,9 @@ enum Csv3Index {
   CSV3_IExcessBaseA,            // over-current trip-line intercept / CV base (A ×10)
   CSV3_IExcessCcOffsetA,        // CC trip line offset above CV (A ×10)
   CSV3_BatteryShuntPresent,     // 1 = INA228 battery shunt fitted; 0 = no battery-current sensor
-  CSV3_cvRecovEnable,           // post-protection CV recovery window master switch (0/1)
-  CSV3_cvRecovSec,              // recovery time target (s); ×10
-  CSV3_cvRecovEmaxV,            // recovery error cap (V per 12V block); ×1000
+  CSV3_cvRecovEnable,           // post-protection integrator-refill master switch (0/1)
+  CSV3_cvRecovSec,              // retired timed-window knob; slot kept (never repurpose); ×10
+  CSV3_cvRecovEmaxV,            // retired timed-window knob; slot kept (never repurpose); ×1000
   CSV3_testSlewMode,           // manual CC square-wave test slew mode (0=off, 1=default rates, 2=custom)
   CSV3_cvTestSlewMode,         // manual CV square-wave test slew mode (0=off, 1=default rates, 2=custom)
   CSV3_CvKdOneSided,           // CV D-term mode: 1=one-sided (removes current only), 0=symmetric
@@ -992,7 +992,7 @@ enum Csv3Index {
   CSV3_commissionManualMask,   // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
   CSV3_CvKdMaxTrimA,           // CV D-term back-off ceiling (A ×10); caps kdTrim so a fast rise saturates instead of flooring the field
   CSV3_cvAlpha,                // CV auto-gain aggressiveness α (fraction of the deadbeat-ohmic gain); ×1000
-  CSV3_CvKdSlopeCeil,          // CV D-term slope ceiling (V/s 12V-equiv ×10) — max slope the D acts on, class-scaled at use
+  CSV3_CvKdSlopeCeil,          // CV D-term slope ceiling (V/s real per-bus ×10) — max slope the D acts on
   CSV3_cvComputedKd,           // Auto-computed D gain Kd = CvKdTd·cvComputedKp (12V-equiv); ×100
   CSV3_CvKdDbSlope,            // CV D-term deadband line slope (V/s per A ×10000)
   CSV3_CvKdDbFloor,            // CV D-term deadband line floor (V/s ×100)
@@ -1008,6 +1008,13 @@ enum Csv3Index {
   CSV3_IExcessEnable,          // Group 3 iExcess detectors enable (0/1, gates CV + bulk)
   CSV3_BattLimitEnable,        // Group 4 battery limit + load dump enable (0/1)
   CSV3_CvKdExcessMode,         // CV D-term response shape (1 = slope excess over the tolerance line, 0 = legacy full-slope latch)
+  CSV3_CvStressDropV,          // stress-test target headroom below settled idle (V 12V-equiv ×100, class-scaled at use)
+  CSV3_CvStressFailBandV,      // stress-test stability fail band (V 12V-equiv ×100, class-scaled at use)
+  CSV3_CvBrakeFallRate,        // brake-tier setpoint fall rate while CV D-term removes current (A/s ×100)
+  CSV3_cvRecovKiMax,           // refill Ki multiplier at release, tapering to 1x as the deficit heals; ×100
+  CSV3_cvWindDownEnable,       // commanded-target wind-down governor master switch (0/1)
+  CSV3_cvWindDownRate,         // wind-down shed rate (fraction of MaxTableValue per second); ×1000
+  CSV3_cvWindDownStopV,        // wind-down stop margin above commanded target (V real per-bus, class-scaled at store); ×1000
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -2395,6 +2402,13 @@ void setupServer() {
   server.on("/kneeLearnState", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", kneeLearnStateJson());
   });
+  // Deferred commissioning-start persist status: PENDING while the loop worker retires the Start's
+  // staged NVS writes, FAILED if the restore-point write was refused, IDLE otherwise. The wizard
+  // polls this after commissionStart and advances only on IDLE — HTTP 200 means accepted, not saved.
+  server.on("/cxStartState", HTTP_GET, [](AsyncWebServerRequest *request) {
+    const char *st = (cxStartPersistStep != 0) ? "PENDING" : (cxStartPersistFail ? "FAILED" : "IDLE");
+    request->send(200, "application/json", String("{\"state\":\"") + st + "\"}");
+  });
   // First-boot SoC seed record for the commissioning popup; ack=1 once the user pressed Finish.
   server.on("/socseed", HTTP_GET, [](AsyncWebServerRequest *request) {
     String snap = settingExists(NK_SocSeedSnap) ? settingRead(NK_SocSeedSnap) : String();
@@ -2714,9 +2728,10 @@ void setupServer() {
     float kdDbSlope  = CvKdDbSlope;
     float kdDbFloor  = CvKdDbFloor;
     float kdDbCeil   = CvKdDbCeil;
-    float kdSlopeCeil = CvKdSlopeCeil * ((float)BATTERY_VOLTAGE / 12.0f);  // EFFECTIVE ceiling — matches the ±clamp on the logged cvDSlope
+    float kdSlopeCeil = CvKdSlopeCeil;  // real per-bus — matches the ±clamp on the logged cvDSlope
     float kdMaxTrimA = CvKdMaxTrimA;
     float kdExcessMode = (float)(CvKdExcessMode ? 1 : 0);
+    float brakeFallRate = CvBrakeFallRate;
 
     memcpy(state.header + 0,  &cnt,       4);
     memcpy(state.header + 4,  &entrySize, 4);
@@ -2731,9 +2746,10 @@ void setupServer() {
     memcpy(state.header + 40, &kdDbSlope,  4);  // deadband line slope m (V/s per A)
     memcpy(state.header + 44, &kdDbFloor,  4);  // deadband line clamp floor (V/s)
     memcpy(state.header + 48, &kdDbCeil,   4);  // deadband line clamp ceiling (V/s)
-    memcpy(state.header + 52, &kdSlopeCeil, 4);  // effective slope ceiling (V/s, ×V/12 applied)
+    memcpy(state.header + 52, &kdSlopeCeil, 4);  // slope ceiling (V/s, real per-bus)
     memcpy(state.header + 56, &kdMaxTrimA, 4);  // flat trim cap (A)
     memcpy(state.header + 60, &kdExcessMode, 4);  // 1 = excess-over-line trim, 0 = legacy full-slope latch
+    memcpy(state.header + 64, &brakeFallRate, 4);  // CvBrakeFallRate (A/s) at log time
 
     state.count = cvLogCount;
     state.oldest = (cvLogHead - cvLogCount + CV_LOG_SIZE) % CV_LOG_SIZE;
@@ -3306,7 +3322,22 @@ void setupServer() {
       if (cvpfState == 1) cvpfAbort("cancelled by user");
     }
 
-    // ── CV stress test (commissioning stage 8 / standalone from Diag) ──
+    // ── CV stress test (commissioning stage 8 / standalone from Tuning ▸ Stress Test) ──
+    if (request->hasParam("CvStressDropV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvStressDropV")->value();
+      // floor: a non-positive drop parks the CV target AT/ABOVE idle — unreachable, inverts the test's "guaranteed reachable" premise
+      CvStressDropV = clamp_f(inputMessage.toFloat(), 0.05f, 1.0f);
+      settingWrite(NK_CvStressDropV, String(CvStressDropV, 2).c_str());
+      queueConsoleMessageF("CV stress test target headroom: %.2f V below settled idle", CvStressDropV);
+    }
+    if (request->hasParam("CvStressFailBandV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvStressFailBandV")->value();
+      CvStressFailBandV = clamp_f(inputMessage.toFloat(), 0.05f, 1.0f);
+      settingWrite(NK_CvStressFailBandV, String(CvStressFailBandV, 2).c_str());
+      queueConsoleMessageF("CV stress test stability fail band: %.2f V", CvStressFailBandV);
+    }
     if (request->hasParam("cvStressStart")) {
       foundParameter = true;
       if (!cvStressStartTest()) queueConsoleMessageF("CV stress test: cannot start — %s", cvStressAbortMsg);
@@ -3491,28 +3522,30 @@ void setupServer() {
     // ── Auto-commissioning: state machine ───────────────────────────────────
     if (request->hasParam("commissionStart")) {
       foundParameter = true;
-      // Resuming a live run (IN_PROGRESS with its origin snapshot still present — e.g. reopening the
-      // wizard after a page reload or a mid-wizard reboot) must NOT re-baseline: the origin snapshot and
-      // the protection-flag backup keep their values from the original Start, so a later Abort still
-      // reverts to the true pre-commissioning tune. Any other Start (fresh, restart after abort/done,
-      // re-run on a demoted state==1 device that has no snapshot) captures the current tune as origin.
-      bool resumingRun = (commissionState == 1 && settingExists(NK_commissionSnap));
-      if (!resumingRun) commissionProtBackup = testProtectionsEnabled;
-      // Force protections ON for the run so the tuning-tab Protections sliders can't leak a stray "off"
-      // into commissioning. Restored to the backup on done/abort.
-      testProtectionsEnabled = true;
-      if (!resumingRun) commissionSnapshot();   // origin snapshot + Min% backup for the abort path
-      commissionStepSnapshot();     // seed the in-flight step baseline; each step entry re-takes it
-      commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
-      commissionSetPhase(0);        // back to Prep (the wizard writes the phase on every step entry)
-      commissionMarkStage(0);       // Prep complete: snapshot taken, preconditions checked
-      // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (stage 7) starts its
-      // sweeps clean. (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable
-      // floors, which are left intact.)
-      kneeAnchorN = 0;
-      kneeFitResidPct = -1.0f; kneeFitWorstIdx = -1; kneeFitA = 0.0f; kneeFitC = 0.0f;
-      settingsDirty = true;         // push the CSV3 state echo promptly
-      queueConsoleMessage("Commissioning: started — settings snapshotted");
+      // Repeat click while a Start is already staging (double-click / second tab): first staging
+      // wins — the wizard's /cxStartState poll resolves either way.
+      if (cxStartPersistStep == 0) {
+        // Resuming a live run (IN_PROGRESS with its origin snapshot still present — e.g. reopening the
+        // wizard after a page reload or a mid-wizard reboot) must NOT re-baseline: the origin snapshot and
+        // the protection-flag backup keep their values from the original Start, so a later Abort still
+        // reverts to the true pre-commissioning tune. Any other Start (fresh, restart after abort/done,
+        // re-run on a demoted state==1 device that has no snapshot) captures the current tune as origin.
+        bool resumingRun = (commissionState == 1 && settingExists(NK_commissionSnap));
+        if (!resumingRun) commissionProtBackup = testProtectionsEnabled;
+        // Force protections ON for the run so the tuning-tab Protections sliders can't leak a stray "off"
+        // into commissioning. Restored to the backup on done/abort.
+        testProtectionsEnabled = true;
+        // RAM-only staging of the origin snapshot + step baseline + state keys; the loop worker
+        // retires the NVS writes one commit per pass so this handler never stalls the network task
+        // (the old in-handler burst froze the SSE stream ~2 s). The wizard polls /cxStartState and
+        // advances only when the worker reports IDLE — the HTTP 200 alone means accepted, not saved.
+        cxStartPersistBegin(resumingRun);
+        // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (stage 7) starts its
+        // sweeps clean. (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable
+        // floors, which are left intact. cxStartPersistBegin above already captured kneeFitA for the backup.)
+        kneeAnchorN = 0;
+        kneeFitResidPct = -1.0f; kneeFitWorstIdx = -1; kneeFitA = 0.0f; kneeFitC = 0.0f;
+      }
     }
     // Mark one wizard stage complete (i = 0=Prep…8=Stress test). Sets its done bit and clears
     // any downstream stage it feeds (coupling: see commissionDependentsMask). Drives the ✓ marks.
@@ -3542,26 +3575,37 @@ void setupServer() {
     }
     if (request->hasParam("commissionAbort")) {
       foundParameter = true;
-      faCommissionGate = false;
-      // Abort is a teardown path too: committed cells from an aborted sweep are honest data captured
-      // at level — freeze + persist, never discard (RPM_RIPPLE_TABLE_SPEC §2.2).
-      if (ripGameFill || ripTabPendingWipe) { ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true; }
-      testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
-      bool reverted = commissionRestore();  // revert every setting to the Phase-0 snapshot
-      commissionSetState(0);                // NOT_COMMISSIONED
-      commissionSetPhase(0);                // clear checklist progress
-      commissionDoneMask = 0;               // revert also drops all per-stage completion
-      commissionWriteDoneMask();
-      commissionManualMask = 0;             // …and all hand-set flags
-      commissionWriteManualMask();
-      settingRemove(NK_commissionStepSnap); // teardown: no interrupted step to revert on next boot
-      settingsDirty = true;
-      queueConsoleMessageF("Commissioning: aborted — %s",
-                           reverted ? "settings reverted to the pre-commissioning snapshot"
-                                    : "no usable pre-state snapshot, settings left as they are");
+      if (cxStartPersistFreshPending()) {
+        // A fresh Start still staging (state=1 not yet committed) never began: cancel back to the
+        // exact pre-click state. The live-run teardown below would wrongly demote a previously-
+        // commissioned device whose re-run never actually started.
+        cxStartPersistCancel();
+        settingsDirty = true;
+        queueConsoleMessage("Commissioning: start cancelled before the restore point was saved — nothing changed");
+      } else {
+        cxStartPersistCancel();  // a resume raced the worker: stop its bookkeeping writes — the original snapshot is intact
+        faCommissionGate = false;
+        // Abort is a teardown path too: committed cells from an aborted sweep are honest data captured
+        // at level — freeze + persist, never discard (RPM_RIPPLE_TABLE_SPEC §2.2).
+        if (ripGameFill || ripTabPendingWipe) { ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true; }
+        testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
+        bool reverted = commissionRestore();  // revert every setting to the Phase-0 snapshot
+        commissionSetState(0);                // NOT_COMMISSIONED
+        commissionSetPhase(0);                // clear checklist progress
+        commissionDoneMask = 0;               // revert also drops all per-stage completion
+        commissionWriteDoneMask();
+        commissionManualMask = 0;             // …and all hand-set flags
+        commissionWriteManualMask();
+        settingRemove(NK_commissionStepSnap); // teardown: no interrupted step to revert on next boot
+        settingsDirty = true;
+        queueConsoleMessageF("Commissioning: aborted — %s",
+                             reverted ? "settings reverted to the pre-commissioning snapshot"
+                                      : "no usable pre-state snapshot, settings left as they are");
+      }
     }
     if (request->hasParam("commissionDone")) {
       foundParameter = true;
+      cxStartPersistCancel();  // never expected mid-Done, but a raced Start must not commit state=1 after this teardown
       faCommissionGate = false;
       if (ripGameFill || ripTabPendingWipe) { ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true; }
       testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
@@ -5297,6 +5341,15 @@ void setupServer() {
       if (TuningMode) tuningParamChanged = true;
       if (CVTuningMode) cvTuningParamChanged = true;
     }
+    if (request->hasParam("CvBrakeFallRate")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvBrakeFallRate")->value();
+      CvBrakeFallRate = fmaxf(SetpointFallRate, inputMessage.toFloat());  // a brake rate below the normal fall rate is meaningless
+      settingWrite(NK_CvBrakeFallRate, String(CvBrakeFallRate, 2).c_str());
+      queueConsoleMessageF("CV D-term brake fall rate: %.1f A/s", CvBrakeFallRate);
+      if (TuningMode) tuningParamChanged = true;
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
     if (request->hasParam("StartupRiseRate")) {
       foundParameter = true;
       inputMessage = request->getParam("StartupRiseRate")->value();
@@ -5437,23 +5490,29 @@ void setupServer() {
       settingWrite(NK_cvRiseGovEnable, String((int)cvRiseGovEnable).c_str());
       queueConsoleMessageF("CV rise governor (anti-windup): %s", cvRiseGovEnable ? "ON" : "OFF — OV-trip risk on up-steps");
     }
-    if (request->hasParam("cvRecovEnable")) {  // master switch for post-protection CV recovery window (1=on, 0=legacy)
+    if (request->hasParam("cvRecovEnable")) {  // master switch for the post-protection integrator refill (1=on, 0=plain PI)
       foundParameter = true;
       cvRecovEnable = (uint8_t)(request->getParam("cvRecovEnable")->value().toInt() ? 1 : 0);
       settingWrite(NK_cvRecovEnable, String((int)cvRecovEnable).c_str());
-      queueConsoleMessageF("CV protection recovery window: %s", cvRecovEnable ? "ON" : "OFF — recovery pace scales with post-cut error");
+      queueConsoleMessageF("CV recovery refill: %s", cvRecovEnable ? "ON" : "OFF — recovery pace scales with post-cut error");
     }
-    if (request->hasParam("cvRecovSec")) {  // recovery time target (s) for the post-protection cv_I re-injection ramp
+    if (request->hasParam("cvRecovSec")) {  // retired timed-window knob — writes the inert global (UI field removed)
       foundParameter = true;
       cvRecovSec = clamp_f(request->getParam("cvRecovSec")->value().toFloat(), 0.5f, 30.0f);
       settingWrite(NK_cvRecovSec, String(cvRecovSec, 2).c_str());
       queueConsoleMessageF("CV recovery time: %.1f s", cvRecovSec);
     }
-    if (request->hasParam("cvRecovEmaxV")) {  // recovery error cap (V per 12V block)
+    if (request->hasParam("cvRecovEmaxV")) {  // retired timed-window knob — writes the inert global (UI field removed)
       foundParameter = true;
       cvRecovEmaxV = clamp_f(request->getParam("cvRecovEmaxV")->value().toFloat(), 0.05f, 2.0f);
       settingWrite(NK_cvRecovEmaxV, String(cvRecovEmaxV, 3).c_str());
       queueConsoleMessageF("CV recovery error cap: %.2f V", cvRecovEmaxV);
+    }
+    if (request->hasParam("cvRecovKiMax")) {  // refill Ki multiplier at release, tapering to 1x as the deficit heals
+      foundParameter = true;
+      cvRecovKiMax = clamp_f(request->getParam("cvRecovKiMax")->value().toFloat(), 1.0f, 10.0f);
+      settingWrite(NK_cvRecovKiMax, String(cvRecovKiMax, 2).c_str());
+      queueConsoleMessageF("CV recovery refill max rate: %.1fx", cvRecovKiMax);
     }
     if (request->hasParam("cvRecovBoostEnable")) {  // master switch for the post-protection recovery P-boost (1=on, 0=off)
       foundParameter = true;
@@ -5506,6 +5565,24 @@ void setupServer() {
       vTgtRampDn = clamp_f(request->getParam("vTgtRampDn")->value().toFloat(), 0.0f, 5.0f * ((float)BATTERY_VOLTAGE / 12.0f));
       settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
       queueConsoleMessageF("CV target ramp down: %.3f V/s", vTgtRampDn);
+    }
+    if (request->hasParam("cvWindDownEnable")) {  // commanded-target wind-down governor master switch
+      foundParameter = true;
+      cvWindDownEnable = (uint8_t)(request->getParam("cvWindDownEnable")->value().toInt() != 0);
+      settingWrite(NK_cvWindDownEn, String((int)cvWindDownEnable).c_str());
+      queueConsoleMessageF("CV target wind-down: %s", cvWindDownEnable ? "enabled" : "disabled");
+    }
+    if (request->hasParam("cvWindDownRate")) {  // fraction of MaxTableValue shed per second
+      foundParameter = true;
+      cvWindDownRate = clamp_f(request->getParam("cvWindDownRate")->value().toFloat(), 0.005f, 1.0f);
+      settingWrite(NK_cvWindDownRate, String(cvWindDownRate, 3).c_str());
+      queueConsoleMessageF("CV wind-down rate: %.3f of max amps/s", cvWindDownRate);
+    }
+    if (request->hasParam("cvWindDownStopV")) {  // V real per-bus — stop margin above the commanded target
+      foundParameter = true;
+      cvWindDownStopV = clamp_f(request->getParam("cvWindDownStopV")->value().toFloat(), 0.0f, 0.3f * ((float)BATTERY_VOLTAGE / 12.0f));
+      settingWrite(NK_cvWindDownStopV, String(cvWindDownStopV, 3).c_str());
+      queueConsoleMessageF("CV wind-down stop margin: %.3f V", cvWindDownStopV);
     }
     // Plant curve K(t) = Ka + Kb·√t. The fit step writes both; a bench hand-entry may send cvPlantK alone,
     // which means "flat curve" (Kb = 0) — the old single-point behaviour.
@@ -5653,7 +5730,7 @@ void setupServer() {
     if (request->hasParam("CvKdSlopeCeil")) {
       foundParameter = true;
       inputMessage = request->getParam("CvKdSlopeCeil")->value();
-      CvKdSlopeCeil = clamp_f(inputMessage.toFloat(), 1.0f, 12.0f);
+      CvKdSlopeCeil = clamp_f(inputMessage.toFloat(), 1.0f*((float)BATTERY_VOLTAGE/12.0f), 20.0f*((float)BATTERY_VOLTAGE/12.0f));  // real per-bus — bounds scale with class like the input widget
       settingWrite(NK_CvKdSlopeCeil, String(CvKdSlopeCeil, 1).c_str());
       queueConsoleMessageF("CV D-term slope ceiling: %.1f V/s", CvKdSlopeCeil);
     }
@@ -6108,7 +6185,7 @@ void setupServer() {
     if (request->hasParam("ReseedFrac")) {
       foundParameter = true;
       inputMessage = request->getParam("ReseedFrac")->value();
-      ReseedFrac = inputMessage.toFloat();
+      ReseedFrac = clamp_f(inputMessage.toFloat(), 0.2f, 1.0f);  // at exactly 1.0 the re-fire de-escalation ratchet (ReseedFrac^n) is dead — UI max stays 0.95, 1.0 is deliberate-raw-URL territory
       settingWrite(NK_ReseedFrac, String(ReseedFrac, 2).c_str());
       queueConsoleMessageF("Recovery seed fraction set to: %.2f", ReseedFrac);
       if (CVTuningMode) cvTuningParamChanged = true;
@@ -7185,9 +7262,9 @@ void setupServer() {
   // CV stress-test status + result (wizard stage 8 and the Diag standalone modal poll this; the
   // poll itself stamps the browser-alive deadman inside cvStressJsonBuild).
   server.on("/cvstress.json", HTTP_GET, [](AsyncWebServerRequest *request) {
-    std::shared_ptr<char> bufPtr((char *)ps_malloc(1152), [](char *p) { if (p) free(p); });
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(1280), [](char *p) { if (p) free(p); });
     if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
-    cvStressJsonBuild(bufPtr.get(), 1152);
+    cvStressJsonBuild(bufPtr.get(), 1280);
     request->send(200, "application/json", bufPtr.get());
   });
 
@@ -8771,7 +8848,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -9106,7 +9183,14 @@ void SendWifiData() {
                                (int)HardOCEnable,
                                (int)IExcessEnable,
                                (int)BattLimitEnable,
-                               (int)CvKdExcessMode);
+                               (int)CvKdExcessMode,
+                               SafeInt(CvStressDropV, 100),
+                               SafeInt(CvStressFailBandV, 100),
+                               SafeInt(CvBrakeFallRate, 100),
+                               SafeInt(cvRecovKiMax, 100),
+                               (int)cvWindDownEnable,
+                               SafeInt(cvWindDownRate, 1000),
+                               SafeInt(cvWindDownStopV, 1000));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

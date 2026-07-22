@@ -2361,7 +2361,7 @@ void cvLog_tick(uint32_t nowMs) {
   if (g_iExcessBulkActive) e.flags |= (1 << 3);  // iExcess BULK sub-mode (current-control phase)
   if (g_iExcessActive)   e.flags |= (1 << 5);
   if (g_loadDumpActive)  e.flags |= (1 << 6);
-  if (g_cvRecovActive)   e.flags |= (1 << 7);    // post-protection recovery window
+  if (g_cvRecovActive)   e.flags |= (1 << 7);    // post-protection integrator refill
 
   e.capReason = g_fastOvCapReason;  // which layer set the binding fastOvCap this tick
   e.ovFilt_x100 = (int16_t)clamp_f(g_ovIbvFilt * 100.0f, -32767.0f, 32767.0f);

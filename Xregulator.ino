@@ -1,13 +1,3 @@
-/**  
-* AI_SUMMARY: Alternator Regulator Project - Hardware: ESP32-S3-WROOM-1U-N16R8 with PSRAM enabled- this file contains libraries, hardcoded values, setup(), and loop(). Supporting functions are in thee additional files: 2_importantFunctions should always be parsed, but 3_nonImportantFunctions and 4_optional are usually not necessary, containing functions less relevant to this debugging session.
-* AI_PURPOSE: Read data from various sensors (ADS1115, INA228, NMEA2K CAN Network, VictronVEDirect), control alternator field output, provide real-time user interface with persistent settings
-* AI_INPUTS: Sensor data from hardware, hardcoded values, and settings from user interface
-* AI_OUTPUTS: user interface display, control of GPIO
-* AI_DEPENDENCIES:
-* AI_RISKS: Variable naming is inconsistent, need to be careful not to assume consistent patterns. Unit conversion can be very confusing and propagate to many places, have to trace dependencies in variables ALL THE WAY to every end point.  Everything works, but the battery monitor units are challenging to follow thru the codebase.
-* CRITICAL_INSTRUCTION_FOR_AI:: When adding new code, try to first use or modify existing code whenever possible, to avoid bloat. When impossible, always mimick my style and coding patterns. If you have a performance improvement idea, tell me. When giving me new code, I prefer complete copy and paste functions when they are short, or for you to give step by step instructions for me to edit if function is long, to conserve tokens. Always specify which option you chose.
-*/
-
 // X Engineering Alternator Regulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
@@ -33,7 +23,7 @@
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.4";
+const char *FIRMWARE_VERSION = "0.0.5";
 
 // OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
 // proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
@@ -2863,7 +2853,7 @@ GovernorMode govMode = GOV_NORMAL_SLEW;
 // Setpoint tracking
 float setpointLimited = 0.0f;
 float setpointCommand = 0.0f;   // pre-slew current command (Icv in CV, uTargetAmps in idle); global so the Control Accuracy score gate can see whether setpointLimited is still slewing toward it
-uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty (machine/RPM limit)
+uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty (machine/RPM limit), 6 protection (cap binding or post-protection recovery window)
 bool setpointInitialized = false;
 
 // ===== LEARNING MODE CONTROL PARAMETERS =====
@@ -3048,7 +3038,9 @@ volatile bool cvStressActive = false;       // master flag (mutexes, idle-rest s
 volatile bool cvStressAbortRequested = false;
 volatile bool cvStressForceCV = false;      // phases 2-3: AdjustField forces CV at cvStressTargetV (TargetVoltageMode-style)
 volatile uint8_t cvStressPhase = 0;         // 0 idle 1 STAB_IDLE 2 STAB_CV 3 ARMED 4 DONE
-float cvStressTargetV = 0.0f;               // achievable CV target the test computes (idle avg − 0.20 V), driven while forced
+float cvStressTargetV = 0.0f;               // achievable CV target the test computes (idle avg − CvStressDropV), driven while forced
+float CvStressDropV = 0.20f;                // V (12V-equiv, ×V/12 at use) — target headroom: CV target parks this far below the settled idle voltage; bigger = snap provokes OV more easily
+float CvStressFailBandV = 0.25f;            // V (12V-equiv, ×V/12 at use) — swing beyond this at a stabilization deadline = genuine instability, test cannot run; at or under it the phase proceeds with the swing reported as a marginal grade
 const char *cvStressAbortMsg = "";
 char cvsLastBlob[224] = "";                 // last persisted result CSV (NK_cvStressLast, ver-2), cached for /cvstress.json
 
@@ -3499,7 +3491,18 @@ float   cvTempDerateScale    = 1.0f;  // live multiplier recomputeCvGains() appl
 uint8_t vTgtRampEnable = 1;       // master switch for the target slew (1=on, default). 0 = instant target,
                                   // byte-identical to pre-ramp behaviour; lets you A/B the limiter, incl. in CV tuning.
 float   vTgtRampUp   = 0.15f;     // V/s — max rate the target may RISE  (up-steps are loop-limited anyway)
-float   vTgtRampDn   = 0.15f;     // V/s — max rate the target may FALL  (the knob that prevents the OV trip)
+float   vTgtRampDn   = 0.15f;     // V/s — max rate the target may FALL  (protection-reference glide; the wind-down governor below owns the actual current shed on commanded drops)
+// Commanded-target wind-down governor: on a commanded target DROP, walk the current command down at a
+// deliberate rate and stop on the MEASURED bus instead of asking the PI to track within the OV margin
+// (PI shed rate = KiDown×error ≈ 3.5·cvAlpha·margin V/s ≈ 16 mV/s — a 0.6 V drop through the glide alone
+// left the bus +110 mV over the gliding target and fired G2 three times, 2026-07-21 FAIL log).
+uint8_t cvWindDownEnable = 1;         // master switch (0 = old behaviour: PI + glide alone)
+float   cvWindDownRate   = 0.05f;     // fraction of MaxTableValue shed per second (self-scales with alternator size)
+float   cvWindDownStopV  = 0.05f;     // V real per-bus — stop walking when filtered bus is within this of the commanded target (class-scaled at store)
+const float CV_WINDDOWN_TRIG_V = 0.15f;  // V ×class at use — commanded drop must exceed this to arm (small trims stay pure PI)
+bool  cvWindDownActive = false;       // cleared by runShutdownPath/runCommissionIdle/MANUAL like lastVoltageControlActive
+float cvWindDownCap    = 0.0f;        // ramped ceiling on Icv (and cv_I) while active
+float cvWindDownFinalV = 0.0f;        // commanded final target latched at arm; follows further drops, abort on raise
 volatile float VoltageKp_active = 8.5f;  // DERIVED pack-space Kp the loop uses (selected gain × 12/BATTERY_VOLTAGE). Set by recomputeCvGains().
 volatile float VoltageKi_active = 6.0f;  // DERIVED pack-space Ki the loop uses.
 volatile float VoltageKd_active = 10.0f; // DERIVED pack-space D gain the loop uses (VoltageKd × 12/BATTERY_VOLTAGE × temp derate). Set by recomputeCvGains(), same pipeline as Kp/Ki.
@@ -3517,7 +3520,7 @@ bool  CvKdOneSided = false;         // false = two-sided: also adds on a fast fa
 float CvKdArmV = 0.5f;              // V below target within which D acts (0 = always); tight so D stays off the sag-recovery climb and only brakes the final approach to setpoint (1.25 armed 1.25V early and chopped the recovering field)
 float CvKdMaxTrimA = 500.0f;        // A — deliberately-inactive backstop on the D back-off; the real bound on D depth is CvKdSlopeCeil × Kd, this only bites at Kd far above the seeded range. FLAT amps
 float CvKdVoltFiltTC = 40.0f;       // ms — dedicated EMA on IBV feeding only the D slope (g_cvKdFiltV), separate from VoltageFilterTC; 0 = raw IBV
-float CvKdSlopeCeil = 4.0f;         // V/s (12 V-equiv, class-scaled ×V/12 at use) — max slope the D acts on; the real cap on D depth
+float CvKdSlopeCeil = 10.0f;        // V/s real per-bus (WYSIWYG; seed/class-scaled ×V/12 at store) — max slope the D acts on; the real cap on D depth
 bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "helpers" (asymmetric 7× KiDown unwind + the one-sided D term). ON = both active (reduce overshoot / speed OV recovery). OFF = symmetric plain PI, easier to tune/understand. Does NOT touch real OV protections.
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 // --- FastOV supervisor ---
@@ -3549,7 +3552,7 @@ float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (scale-aware).
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
 float IExcessArmMarginV = 0.100f; // V below target at which iExcess voltage gate opens. Sized to block recovery double-fires (belt-resonance peaks mid-recovery) while keeping real catches (which fire at/above target)
-float ReseedFrac = 0.75f;  // shared: fraction of pre-event cv_I to seed on any protection recovery
+float ReseedFrac = 0.95f;  // shared: fraction of pre-event cv_I to seed on any protection recovery. 0.75→0.95 2026-07-21: blip log showed the seed dock (not the clamp) caused the multi-second below-target tails. Must stay <1.0 — the re-fire de-escalation ratchet compounds as ReseedFrac^n and dies at exactly 1.0
 // --- Anti-windup ---
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
 float AwRecoverRate = 0.1f;      // HARDCODED, not user-adjustable. cv_I_aw_cap recovery rate (fraction of MaxTableValue/s) after fastOV clears. Only exercised on cold CV re-entry (MANUAL→AUTO, idle→bulk, post-shutdown). CSV3 slot CSV3_reserved_AwRecoverRate held for future use.
@@ -3719,6 +3722,7 @@ uint8_t dutySlewEnable = 1;  // master switch for the field duty slew (GOV_NORMA
 // Asymmetric setpoint slew
 float SetpointRiseRate = 30.0f;  // A/sec
 float SetpointFallRate = 50.0f;  // A/sec
+float CvBrakeFallRate = 200.0f;  // A/s — brake-tier setpoint down-slew while the CV D-term removes current; between the 50 A/s comfort limit and the fastOvClamp slam; flat amps
 uint8_t setpointSlewEnable = 1;  // master switch for the inner-loop current setpoint slew. 0 = setpoint steps instantly (drops startup ramp / big-step gentling too); applies in the CC test and normal operation
 // Manual CC square-wave test slew mode (Current-tab Test Limiters). 0=Off (setpoint abrupt + duty bypassed),
 // 1=Default (factory setpoint rate below; field keeps its DutyRampRate protection), 2=Custom (user
@@ -3737,15 +3741,16 @@ const float SETPOINT_FALL_DEFAULT = 50.0f;  // A/s
 uint8_t cvTestSlewMode = 2;
 const float VTGT_RAMP_DEFAULT = 0.050f;  // V/s @12V — factory target ramp for cvTestSlewMode=Default; scaled ×BATTERY_VOLTAGE/12 at use
 uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise governor (anti-windup clamp). 0 = rises are not clamped — integrator can wind up into an OV trip on an up-step; applies in the CV test and normal operation
-uint8_t cvRecovEnable = 0;   // master switch for the post-protection CV recovery window (timed cv_I re-injection + error cap). DEFAULT OFF (2026-07-18): the timed window masks CV gain problems; recovery is left to the bare loop so gains must be tuned to survive a step. 1 = timed re-injection + error cap; 0 = plain PI walks itself back (pace scales with post-cut error)
-float cvRecovSec = 2.5f;     // recovery time target (s): cv_I ramps from its ReseedFrac seed back to the pre-event value over this span, at any target voltage / chemistry / bank size
-float cvRecovEmaxV = 0.25f;  // recovery error cap (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use): max positive error the CV PI sees during recovery, so P+I drive can't scale with the post-cut collapse
+uint8_t cvRecovEnable = 0;   // master switch for the post-protection integrator refill (deficit-gated Ki boost, replaced the timed window 2026-07-21). 1 = up-integration runs at Ki × up-to-cvRecovKiMax, tapering with the remaining reseed deficit; 0 = plain PI walks itself back (pace scales with post-cut error). Dev default OFF; production default TBD
+float cvRecovSec = 2.5f;     // retired timed-window ramp span, inert; NVS key + CSV3 slot kept (never repurpose)
+float cvRecovEmaxV = 0.25f;  // retired timed-window error cap, inert; NVS key + CSV3 slot kept (never repurpose)
+float cvRecovKiMax = 5.0f;   // refill Ki multiplier at the moment of release (M tapers linearly to 1× as the deficit heals). Clamp [1,10]
 // Error-scheduled CV P-boost: whenever the bus is below target in CV — NOT gated to protection
 // events; post-protection recovery is the motivating case, but CV-entry climbs and load dips get
 // it too — the proportional term is scaled up to command transient overcurrent that climbs out of
 // the voltage hole faster than the Ki-limited crawl, then tapers to 1× at target so it self-disarms
 // before it can re-fire an OV. Only the P term is scaled — cv_I and the D trim are untouched.
-// Independent of cvRecovEnable (works with the timed window off). The bare loop's peak recovery
+// Independent of cvRecovEnable (works with the refill off). The bare loop's peak recovery
 // current sits ~5% above the pre-trip hold, so without this the post-cut return is integrator-paced.
 uint8_t cvRecovBoostEnable = 1;   // master switch for the recovery P-boost. DEFAULT ON — seen live at 3×/1.5V (2026-07-20 G2 recovery, ~2.4× in the valley); 4×/0.6V untested — turn off if a faster climb re-trips OV on the approach
 float   cvRecovBoostMax    = 4.0f;  // P-gain multiplier at ≥ cvRecovBoostErrV of shortfall; 1.0 = no boost, taper is linear from 1× at target. Clamp [1,8]
@@ -3909,11 +3914,13 @@ bool  kneeFloorActive = false;   // governor is clamping up to the floor right n
 bool  kneeSteadyNow   = false;   // inputs currently within steady bands
 // Prototypes (defined in 6_functions.ino) — declared here so setup()/loop() and 3_functions.ino see them.
 void loadCapTablesForMode(int mode);   // also called from 2_functions.ino, which concatenates before 3_functions.ino's prototype — declare in the main sketch so the earlier file sees it
-// Min%-floor commissioning snapshot helpers (defined in 6_functions.ino) — called from
-// commissionSnapshot()/commissionRestore() in 2_functions.ino, so declare them here too.
-void commissionBackupMinPct();
+// Min%-floor commissioning snapshot helpers (defined in 6_functions.ino) — called from the
+// deferred-Start worker/commissionRestore() in 2_functions.ino, so declare them here too.
+void commissionBackupMinPct(const float *minDuty, const float *flr, const float *kn, const bool *frz, float fitA);
 bool commissionRestoreMinPct();
 void commissionClearMinPctBackup();
+// Deferred commissioning-start persist worker (defined in 2_functions.ino) — called from loop().
+void cxStartPersistService();
 void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk);
 void kneeLearnInit();
@@ -4148,7 +4155,7 @@ uint32_t thermalLogBurstUntilMs = 0;
 
 #define PID_LOG_SIZE 2400
 #define CV_LOG_SIZE 6000
-#define CV_LOG_HEADER_SIZE 64
+#define CV_LOG_HEADER_SIZE 68
 
 volatile bool pidLogPaused = false;
 volatile uint32_t pidLogPausedAtMs = 0;
@@ -4362,7 +4369,7 @@ struct CvBinDLState {
 };
 
 // ---------------------------------------------------------------------------
-// BINARY HEADER  (64 bytes) — carries the FULL D-term trim equation so a log is
+// BINARY HEADER  (68 bytes) — carries the FULL D-term trim equation so a log is
 // self-describing: kdTrim can be reconstructed from cvDSlope + spLimited alone.
 // offset  field           type      notes
 //   0     count           uint32    number of valid entries
@@ -4380,9 +4387,10 @@ struct CvBinDLState {
 //  40     kdDbSlope       float     CvKdDbSlope (V/s per A) — deadband line slope m, evaluated at spLimited
 //  44     kdDbFloor       float     CvKdDbFloor (V/s) — deadband line clamp floor
 //  48     kdDbCeil        float     CvKdDbCeil (V/s) — deadband line clamp ceiling
-//  52     kdSlopeCeil     float     EFFECTIVE slope ceiling (V/s, already ×V/12) — cvDSlope is clamped to ±this
+//  52     kdSlopeCeil     float     slope ceiling (V/s, real per-bus) — cvDSlope is clamped to ±this
 //  56     kdMaxTrimA      float     CvKdMaxTrimA (A) — flat trim cap
 //  60     kdExcessMode    float     CvKdExcessMode (0/1): 1 = trim = Kd×(slope − band), 0 = legacy Kd×slope latch
+//  64     brakeFallRate   float     A/s — CvBrakeFallRate at log time
 // ---------------------------------------------------------------------------
 
 static CvLogEntry *cvLog = nullptr;
@@ -4398,7 +4406,7 @@ float g_fastOvDvdt = 0.0f;        // filtered dV/dt (V/s), updated every IBV fre
 float g_dBcur_dt = 0.0f;          // dBcur/dt (A/s), updated every INA228 read; positive = load dump
 float g_fastOvVpred = 0.0f;       // predicted voltage, updated when voltageControlActive
 float g_ovIbvFilt = 0.0f;         // Group 2 comparator input: plant-tau-derived EMA of IBV (see fast-OV block)
-bool g_cvRecovActive = false;     // post-protection recovery window state, exported for cvLog flags b7
+bool g_cvRecovActive = false;     // post-protection integrator-refill state, exported for cvLog flags b7
 bool g_fastOvHardActive = false;  // K_HARD or hysteresis block fired this tick
 
 // CV P/I/D decomposition telemetry — the three contributions to Icv, streamed live (CSV1) for the
@@ -4515,7 +4523,7 @@ float LoadDumpDtThresh1 = 7000.0f;  // A/s — tier 1: fires on a SINGLE sample 
 float LoadDumpDtThresh  = 5000.0f;  // A/s — tier 2: fires when TWO consecutive samples both exceed this; noise ceiling ~354 A/s consecutive
 float LoadDumpDtThresh3 = 5000.0f;  // A/s — tier 3: fires when THREE consecutive samples all exceed this (slow relay-contact disconnects)
 volatile bool g_loadDumpActive = false;
-uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless
+uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless 5=target wind-down
 uint32_t g_loadDumpCount = 0;
 
 // Protection event counters — rising-edge, cleared by web UI reset buttons
@@ -5273,7 +5281,6 @@ void setup() {
   MaxLoopTime = 0;                       // reset for this session (persists to NVS on next save)
   totalPowerCycles++;
   saveNVSDataFull();  // Synchronous write — persists boot-time adjustments before loop() starts
-  importLegacySettingsFromLittleFS();  // one-time pre-NVS sweep — MUST run before ANY settings reader (alt/perf loaders below, InitSystemSettings, WiFi creds, password)
   initAlternatorHealth();
   altSettingsLoad();
   initBoatPerformance();
@@ -5493,6 +5500,10 @@ void loop() {
     Serial.println("=== REMOTE REBOOT (/get?RebootRegulator) ===");
     ESP.restart();
   }
+
+  // Deferred commissioning-start persist (2_functions.ino): one staged NVS commit per pass — keeps
+  // the Start's restore-point burst off the network task (in-handler it froze the SSE stream ~2 s).
+  cxStartPersistService();
   Ignition = !digitalRead(1);  // ! is for optocoupler (LOW = ignition ON)
   if (IgnitionOverride == 1) {
     Ignition = 1;  // force ON (bench / no ignition wire) — override can ONLY force on, never off

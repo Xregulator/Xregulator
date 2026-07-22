@@ -274,37 +274,99 @@ outer_label = f"VoltageKp={_kp:.4g}  VoltageKi={_ki:.4g}"
 print(f"Voltage loop gains: {outer_label}")
 
 # Extract CV D-term constants from the header comment line emitted by cvBinToCsv.
-# Format (2026-07-17 onward, the deadbanded D term that replaced the slope-bleed brake; one- or two-sided):
-#   "# VoltageD: VoltageKd=8.0A/(V/s) CvKdDeadbandVps=0.700V/s CvKdArmV=1.250V CvKdOneSided=1"
-# Match on the KEY, not a line tag.
-_brk_thresh    = float("nan")   # V/s — deadband; D acts only on the rise beyond it
-_brk_k         = float("nan")   # A/(V/s) — D gain (amps trimmed per V/s of excess rise)
+# 2026-07-21 onward the header carries the FULL trim equation:
+#   "# VoltageD: VoltageKdActive=2.38A/(V/s) CvKdDeadbandVps=0.500V/s CvKdDbSlope=0.00400V/s/A
+#    CvKdDbFloor=0.100V/s CvKdDbCeil=3.500V/s CvKdSlopeCeil=10.00V/s CvKdMaxTrimA=500A
+#    CvKdArmV=0.500V CvKdOneSided=0 CvKdExcessMode=1 CvKdVoltFiltTC=40ms CvBrakeFallRate=200A/s"
+# Older logs have only "VoltageKd=" (the TYPED knob — in Auto mode NOT the gain the loop ran,
+# which is why VoltageKdActive is preferred when present). Match on the KEY, not a line tag.
+_brk_thresh    = float("nan")   # V/s — deadband line BASE (b of clamp(floor, b + m·I, ceil))
+_brk_k         = float("nan")   # A/(V/s) — D gain; ACTIVE gain on new logs, typed knob on old ones
+_brk_k_typed   = False          # True when _brk_k came from the old typed-knob key (Auto logs: distrust it)
 _brk_armv      = float("nan")   # V — max distance under target for the D term to act (0 = always)
 _brk_onesided  = float("nan")   # 1 = removes current only; 0 = two-sided (adds below target)
 _brk_voltfilt  = float("nan")   # ms — CvKdVoltFiltTC, the dedicated voltage EMA the D term differentiates
+_brk_dbslope   = float("nan")   # V/s per A — deadband line slope m, evaluated at spLimited_A
+_brk_dbfloor   = float("nan")   # V/s — deadband line clamp floor
+_brk_dbceil    = float("nan")   # V/s — deadband line clamp ceiling
+_brk_slopeceil = float("nan")   # V/s — slope ceiling, real per-bus (2026-07-21 on; older logs stored it ×V/12-effective, same value); cvDSlope clamps to ±this
+_brk_maxtrim   = float("nan")   # A — flat trim cap
+_brk_excess    = float("nan")   # 1 = trim = Kd×(slope − band) continuous; 0 = legacy Kd×slope latch
+_brk_fallrate  = float("nan")   # A/s — CvBrakeFallRate: brake-tier setpoint fall rate while D-term removes current
 for _raw in _lines[:_header_idx]:
     if "CvKdDeadbandVps" not in _raw and "VoltageKd" not in _raw:
         continue
     m = re.search(r"CvKdDeadbandVps=([\d.]+)", _raw)
     if m: _brk_thresh = float(m.group(1))
-    m = re.search(r"VoltageKd=([\d.]+)", _raw)
-    if m: _brk_k = float(m.group(1))
+    m = re.search(r"VoltageKdActive=([\d.]+)", _raw)
+    if m:
+        _brk_k = float(m.group(1))
+    else:
+        m = re.search(r"VoltageKd=([\d.]+)", _raw)
+        if m: _brk_k = float(m.group(1)); _brk_k_typed = True
     m = re.search(r"CvKdArmV=([\d.]+)", _raw)
     if m: _brk_armv = float(m.group(1))
     m = re.search(r"CvKdOneSided=([\d.]+)", _raw)
     if m: _brk_onesided = float(m.group(1))
     m = re.search(r"CvKdVoltFiltTC=([\d.]+)", _raw)
     if m: _brk_voltfilt = float(m.group(1))
+    m = re.search(r"CvKdDbSlope=([\d.]+)", _raw)
+    if m: _brk_dbslope = float(m.group(1))
+    m = re.search(r"CvKdDbFloor=([\d.]+)", _raw)
+    if m: _brk_dbfloor = float(m.group(1))
+    m = re.search(r"CvKdDbCeil=([\d.]+)", _raw)
+    if m: _brk_dbceil = float(m.group(1))
+    m = re.search(r"CvKdSlopeCeil=([\d.]+)", _raw)
+    if m: _brk_slopeceil = float(m.group(1))
+    m = re.search(r"CvKdMaxTrimA=([\d.]+)", _raw)
+    if m: _brk_maxtrim = float(m.group(1))
+    m = re.search(r"CvKdExcessMode=([\d.]+)", _raw)
+    if m: _brk_excess = float(m.group(1))
+    m = re.search(r"CvBrakeFallRate=([\d.]+)", _raw)
+    if m: _brk_fallrate = float(m.group(1))
     break
 _brk_label = (
-    f"VoltageKd={_brk_k:.4g}A/(V/s)  "
-    f"CvKdDeadbandVps={_brk_thresh:.3g}V/s  "
-    f"CvKdArmV={_brk_armv:.3g}V  "
-    f"CvKdOneSided={'1' if _brk_onesided == 1 else '0' if _brk_onesided == 0 else '?'}"
+    (f"VoltageKd(TYPED — Auto logs ran Td·Kp, not this)={_brk_k:.4g}A/(V/s)  " if _brk_k_typed
+     else f"VoltageKdActive={_brk_k:.4g}A/(V/s)  ")
+    + f"CvKdDeadbandVps={_brk_thresh:.3g}V/s  "
+    + (f"CvKdDbSlope={_brk_dbslope:.4g}V/s/A  floor/ceil={_brk_dbfloor:.3g}/{_brk_dbceil:.3g}V/s  "
+       if not np.isnan(_brk_dbslope) else "")
+    + f"CvKdArmV={_brk_armv:.3g}V  "
+    + f"CvKdOneSided={'1' if _brk_onesided == 1 else '0' if _brk_onesided == 0 else '?'}"
+    + (f"  CvKdExcessMode={'EXCESS-over-line' if _brk_excess == 1 else 'LEGACY full-slope latch'}"
+       if not np.isnan(_brk_excess) else "")
+    + (f"  CvKdSlopeCeil={_brk_slopeceil:.4g}V/s" if not np.isnan(_brk_slopeceil) else "")
+    + (f"  CvKdMaxTrimA={_brk_maxtrim:.4g}A" if not np.isnan(_brk_maxtrim) else "")
     + (f"  CvKdVoltFiltTC={_brk_voltfilt:.4g}ms" if not np.isnan(_brk_voltfilt) else "")
+    + (f"  CvBrakeFallRate={_brk_fallrate:.4g}A/s" if not np.isnan(_brk_fallrate) else "")
     if not np.isnan(_brk_thresh) else "CV D-term params not in header (older log)"
 )
 print(f"CV D-term params: {_brk_label}")
+
+# Trim-law self-check — the header now carries the full equation, so verify the logged trims
+# against it: expected = Kd × (slope − band) in excess mode, Kd × slope in legacy mode. Uses only
+# rows where a trim landed (kdTrim_A ≠ 0); the ratio flags a header/firmware mismatch (≈1 = healthy).
+def _kd_law_check(_df):
+    if _brk_k_typed or np.isnan(_brk_k) or np.isnan(_brk_thresh): return
+    need = ("kdTrim_A", "cvDSlope_Vps", "kdDeadband_Vps")
+    if not all(c in _df.columns for c in need): return
+    _rows = _df[(_df["kdTrim_A"] != 0) & (_df["kdDeadband_Vps"] > 0)]
+    if len(_rows) < 3: return
+    _band = _rows["kdDeadband_Vps"]
+    _slp = _rows["cvDSlope_Vps"]
+    if _brk_excess == 1:
+        _exp = np.where(_slp > _band, _slp - _band, np.where(_slp < -_band, _slp + _band, 0.0)) * _brk_k
+    else:
+        _exp = _slp * _brk_k
+    if not np.isnan(_brk_maxtrim):
+        _exp = np.clip(_exp, -_brk_maxtrim, _brk_maxtrim)
+    _mask = np.abs(_exp) > 0.05
+    if _mask.sum() < 3: return
+    _ratio = (_rows["kdTrim_A"].values[_mask] / _exp[_mask])
+    print(f"D-term law check: kdTrim / header-equation ratio median {np.median(_ratio):.2f} "
+          f"(p10 {np.percentile(_ratio, 10):.2f}, p90 {np.percentile(_ratio, 90):.2f}) over {_mask.sum()} trim rows"
+          + ("" if 0.8 <= np.median(_ratio) <= 1.25 else "  *** MISMATCH — header params or law differ from what ran ***"))
+_kd_law_check(df)
 
 # Loop-shape toggles (cvBinToCsv "# Toggles:" line). cvHelpersEnabled=0 means the D term never ran at
 # all — without this a reader cannot tell "never triggered" from "switched off".

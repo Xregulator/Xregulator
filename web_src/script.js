@@ -2588,9 +2588,9 @@ const CSV3_FIELDS = [
     "IExcessBaseA",                  // over-current trip-line intercept / CV base (A ×10)
     "IExcessCcOffsetA",              // CC trip line offset above CV (A ×10)
     "BatteryShuntPresent",
-    "cvRecovEnable",                 // post-protection CV recovery window master switch (0/1)
-    "cvRecovSec",                    // recovery time target (s); ×10
-    "cvRecovEmaxV",                  // recovery error cap (V per 12V block); ×1000
+    "cvRecovEnable",                 // post-protection integrator-refill master switch (0/1)
+    "cvRecovSec",                    // retired timed-window knob; slot kept (never repurpose); ×10
+    "cvRecovEmaxV",                  // retired timed-window knob; slot kept (never repurpose); ×1000
     "testSlewMode",                  // manual CC square-wave test slew mode (0=off, 1=default, 2=custom)
     "cvTestSlewMode",                // manual CV square-wave test slew mode (0=off, 1=default, 2=custom)
     "CvKdOneSided",                  // CV D-term mode: 1=one-sided (removes current only), 0=two-sided (also adds below target)
@@ -2598,7 +2598,7 @@ const CSV3_FIELDS = [
     "commissionManualMask",          // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with commissionDoneMask
     "CvKdMaxTrimA",                  // CV D-term back-off ceiling (A ×10)
     "cvAlpha",                       // CV auto-gain aggressiveness α (fraction of deadbeat-ohmic gain); ×1000
-    "CvKdSlopeCeil",                 // CV D-term slope ceiling (V/s 12V-equiv ×10)
+    "CvKdSlopeCeil",                 // CV D-term slope ceiling (V/s real per-bus ×10)
     "cvComputedKd",                  // Auto-computed D gain Kd = CvKdTd·cvComputedKp (12V-equiv); ×100
     "CvKdDbSlope",                   // CV D-term deadband line slope (V/s per A ×10000)
     "CvKdDbFloor",                   // CV D-term deadband line floor (V/s ×100)
@@ -2614,6 +2614,13 @@ const CSV3_FIELDS = [
     "IExcessEnable",                 // Group 3 iExcess detectors enable (0/1)
     "BattLimitEnable",               // Group 4 battery limit + load dump enable (0/1)
     "CvKdExcessMode",                // CV D-term response shape (1 = gradual excess-over-line, 0 = legacy stepped latch)
+    "CvStressDropV",                 // stress-test target headroom below settled idle (V 12V-equiv ×100)
+    "CvStressFailBandV",             // stress-test stability fail band (V 12V-equiv ×100)
+    "CvBrakeFallRate",               // brake-tier setpoint fall rate while CV D-term removes current (A/s ×100)
+    "cvRecovKiMax",                  // refill Ki multiplier at release, tapering to 1x as the deficit heals; ×100
+    "cvWindDownEnable",              // commanded-target wind-down governor master switch (0/1)
+    "cvWindDownRate",                // wind-down shed rate (fraction of max alternator amps per second); ×1000
+    "cvWindDownStopV",               // wind-down stop margin above commanded target (V); ×1000
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5684,7 +5691,7 @@ function updateAllEchosOptimized(data) {
         { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
         { key: 'DutyRampRate', id: 'DutyRampRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SettleTimeBeforeCut', id: 'SettleTimeBeforeCut_echo', transform: v => Math.round(v) },
-        { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => { window._tempWarnExcessF = v / 100; return toDisplayTempDelta(v / 100).toFixed(1); } },  // stash native °F so the Control Accuracy thermal-peak red line tracks the actual shutdown trip
+        { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
         { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
         { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v) },
         { key: 'AlternatorHardShutdownV', id: 'AlternatorHardShutdownV_echo', transform: v => (v / 100).toFixed(2) },
@@ -5709,6 +5716,7 @@ function updateAllEchosOptimized(data) {
         { key: 'VoltageKi', id: 'VoltageKi_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'CvBrakeFallRate', id: 'CvBrakeFallRate_echo', transform: v => (v / 100).toFixed(2) },  // ×100 CSV3 emit
         { key: 'SetpointBigStepThresh', id: 'SetpointBigStepThresh_echo', transform: v => (v / 100).toFixed(1) },
         { key: 'SetpointBigStepRiseRate', id: 'SetpointBigStepRiseRate_echo', transform: v => (v / 100).toFixed(1) },
         { key: 'PIDTrackingGain', id: 'PIDTrackingGain_echo', transform: v => (v / 100).toFixed(2) },
@@ -5747,8 +5755,10 @@ function updateAllEchosOptimized(data) {
         { key: 'setpointSlewEnable', id: 'setpointSlewEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'cvRiseGovEnable',   id: 'cvRiseGovEnable_echo',   transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'cvRecovEnable',     id: 'cvRecovEnable_echo',     transform: v => v == 1 ? 'ON' : 'OFF' },
-        { key: 'cvRecovSec',        id: 'cvRecovSec_echo',        transform: v => (v / 10).toFixed(1) },
-        { key: 'cvRecovEmaxV',      id: 'cvRecovEmaxV_echo',      transform: v => (v / 1000).toFixed(2) },
+        { key: 'cvRecovKiMax',      id: 'cvRecovKiMax_echo',      transform: v => (v / 100).toFixed(1) },
+        { key: 'cvWindDownEnable',  id: 'cvWindDownEnable_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'cvWindDownRate',    id: 'cvWindDownRate_echo',    transform: v => (v / 1000).toFixed(3) },
+        { key: 'cvWindDownStopV',   id: 'cvWindDownStopV_echo',   transform: v => (v / 1000).toFixed(3) },
         { key: 'cvRecovBoostEnable', id: 'cvRecovBoostEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'cvRecovBoostMax',   id: 'cvRecovBoostMax_echo',   transform: v => (v / 100).toFixed(2) },
         { key: 'cvRecovBoostErrV',  id: 'cvRecovBoostErrV_echo',  transform: v => (v / 1000).toFixed(2) },
@@ -5789,6 +5799,8 @@ function updateAllEchosOptimized(data) {
         { key: 'CvKdExcessMode',        id: 'CvKdExcessMode_echo',            transform: v => (v == 1 ? 'Gradual' : 'Stepped') },
         { key: 'DvdtTC',                id: 'DvdtTC_echo',                    transform: v => (v / 10).toFixed(1) },
         { key: 'CvKdArmV',              id: 'CvKdArmV_echo',                  transform: v => (v / 100).toFixed(2) },
+        { key: 'CvStressDropV',         id: 'CvStressDropV_echo',             transform: v => (v / 100).toFixed(2) },
+        { key: 'CvStressFailBandV',     id: 'CvStressFailBandV_echo',         transform: v => (v / 100).toFixed(2) },
         { key: 'CvKdMaxTrimA',          id: 'CvKdMaxTrimA_echo',              transform: v => (v / 10).toFixed(1) },
         { key: 'CvKdVoltFiltTC',        id: 'CvKdVoltFiltTC_echo',            transform: v => Math.round(v) },
         { key: 'CvKdSlopeCeil',         id: 'CvKdSlopeCeil_echo',             transform: v => (v / 10).toFixed(1) },
@@ -6361,7 +6373,7 @@ const BATTDEF_FW_DEFAULT = {
     AbsorptionTimeoutMs: 20,
     VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0, AlternatorHardShutdownV: 15.0,
     capSocLowMax: 20, capMinSpan: 70, capRestFloor: 30, capSettleRate: 2.0, bhStepLowA: 30, bhStepDeltaA: 30,
-    CvKdDeadbandVps: 0.4, CvKdArmV: 0.5,
+    CvKdDeadbandVps: 0.4, CvKdArmV: 0.5, CvKdTd: 0.85,
     vTgtRampUp: 0.15, vTgtRampDn: 0.15,
     cvAlpha: 0.05, cvPiZero: 0.5
 };
@@ -6514,9 +6526,13 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
     rows.push({ param: 'vTgtRampUp', label: 'Voltage Setpoint — Rise Rate (V/s)', value: r2(0.15 * kV) });
     rows.push({ param: 'vTgtRampDn', label: 'Voltage Setpoint — Fall Rate (V/s)', value: r2(0.15 * kV) });
 
-    // α/ρ are dimensionless and chemistry-independent (the ohmic anchor carries the per-install
-    // variation); proposed so devices tuned under the old crossover rule pick up the current defaults.
-    rows.push({ param: 'cvAlpha', label: 'Voltage Loop Aggressiveness (α)', value: 0.05 });
+    // α doubles on LiFePO4 (stiff plant → tiny post-event errors; P/I must double for usable
+    // regulation/recovery pace) while Td halves so the effective D gain Kd = Td·Kp stays constant —
+    // surplus D authority against a locally-stiff plant is a documented failure mode ("sub-ceiling
+    // relay", CV_Loop_Dev_Summary.md 07-21). ρ stays chemistry-independent.
+    const isLfp = (type === 'lifepo4');
+    rows.push({ param: 'cvAlpha', label: 'Voltage Loop Aggressiveness (α)', value: isLfp ? 0.10 : 0.05 });
+    rows.push({ param: 'CvKdTd', label: 'Voltage D Term — Derivative Time (s)', value: isLfp ? 0.42 : 0.85 });
     rows.push({ param: 'cvPiZero', label: 'Voltage Loop Ki/Kp Ratio (ρ)', value: 0.5 });
     return { rows, useFloat };
 }
@@ -7676,7 +7692,7 @@ async function resetTuningLog() {
 // live excursion stopwatches on the device; the cells fall to dashes until fresh challenged
 // time accrues.
 async function resetAccuracyScores() {
-    if (!await xConfirm('Reset the Control Accuracy numbers (tracking, excursions, worst overshoot for all three loops)?')) return;
+    if (!await xConfirm('Reset the Control Accuracy numbers (tracking and excursions for all three loops)?')) return;
     fetch(buildURL('/resetAccuracyScores'), { method: 'POST' }).catch(() => {});
 }
 
@@ -7904,7 +7920,7 @@ function fmtT(s) {
 // Control Accuracy cell writer with render-stamp caching. Dash rule keys on `observedS`
 // (the metric's own denominator), NOT the value: 0 observed → "—" ("not observed" is never
 // shown as "perfect"). higherBetter=true colors green ABOVE the first threshold (tracking %);
-// false colors green BELOW it (worst overshoot, recovery time).
+// false colors green BELOW it (recovery time).
 function accCell(elId, txt, v, t1, t2, higherBetter, observedS) {
     const el = document.getElementById(elId);
     if (!el) return;
@@ -10555,7 +10571,8 @@ function applyStaleStyleByAge(elementId, ageMs, staleThreshold = STALE_THRESHOLD
     }
 }
 // Active-limit cue: teal pill on the governing figure's label (ctrlLimiter 1 alt current,
-// 2 thermal, 3 CV voltage, 4 battery limit, 5 field at max duty → header duty readout).
+// 2 thermal, 3 CV voltage, 4 battery limit, 5 field at max duty → header duty readout,
+// 6 protection → RED duty pill + PROTECTION word left of the charge stage).
 // Alt temp digits also go red >2°F over the limit.
 function updateHeaderLimiterColors(sa) {
     const RED = "#f44336", NORM = "var(--reading)";
@@ -10582,6 +10599,12 @@ function updateHeaderLimiterColors(sa) {
     pill('lbl-alt-current', sa.measuredAmps, STALE_THRESHOLD_DEFAULT_MS, lim === 1);
     pill('lbl-batt-current', sa.bcur, STALE_THRESHOLD_DEFAULT_MS, lim === 4);
     pill('duty-pill-wrap', sa.dutyCycle, STALE_THRESHOLD_DEFAULT_MS, lim === 5);
+    // Code 6 (protection): red duty pill + red PROTECTION word inline left of the stage word
+    const dw = document.getElementById('duty-pill-wrap');
+    const want6 = (sa.dutyCycle <= STALE_THRESHOLD_DEFAULT_MS) && lim === 6;
+    if (dw && dw._protPill !== want6) { dw.classList.toggle('prot-pill', want6); dw._protPill = want6; }
+    const pn = document.getElementById('prot-note');
+    if (pn) { const d = (lim === 6) ? '' : 'none'; if (pn.style.display !== d) pn.style.display = d; }
 }
 
 function updateAllStalenessStyles() {
@@ -11209,6 +11232,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("CvKdOneSided_checkbox", data.CvKdOneSided, "CvKdOneSided");
         updateCheckbox("CvKdExcessMode_checkbox", data.CvKdExcessMode, "CvKdExcessMode");
         updateCheckbox("vTgtRampEnable_checkbox", data.vTgtRampEnable, "vTgtRampEnable");
+        updateCheckbox("cvWindDownEnable_checkbox", data.cvWindDownEnable, "cvWindDownEnable");
         updateCheckbox("setpointSlewEnable_checkbox", data.setpointSlewEnable, "setpointSlewEnable");
         updateCheckbox("cvRiseGovEnable_checkbox", data.cvRiseGovEnable, "cvRiseGovEnable");
         updateCheckbox("cvRecovEnable_checkbox", data.cvRecovEnable, "cvRecovEnable");
@@ -11687,6 +11711,9 @@ function computeStripState() {
     const txt = id => (document.getElementById(id)?.textContent || '').trim().toUpperCase();
     const fs = txt('field-status');
     const cs = txt('charge-stage');
+    // Protection (ctrlLimiter 6) outranks every stage word — same freshness gate as the expanded banner
+    const limFresh = (performance.now() - (window._ctrlLimiterAtMs || 0)) < 5000;
+    if (limFresh && Number(window._ctrlLimiter) === 6) return { label: 'PROTECT', cls: 'st-prot' };
     if (cs === 'COMMISSIONING')                    return { label: 'SETUP', cls: 'st-test' };
     if (cs === 'PLANT TEST' || cs === 'CURR TEST') return { label: 'TEST',  cls: 'st-test' };
     if (cs === 'WAVE GEN')                         return { label: 'WAVE',  cls: 'st-test' };
@@ -12909,6 +12936,13 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 100).toFixed(1);
                     }
 
+                    // Banner amps: fixed 1 decimal at every magnitude so the decimal point never
+                    // walks as ripple crosses 10/100 A (the 3-sig-fig scheme stays on data tabs).
+                    if ((elementId === "header-alt-current" || elementId === "header-batt-current")
+                        && (key === "MeasuredAmps" || key === "Bcur")) {
+                        newTextContent = (value / 100).toFixed(1);
+                    }
+
                     // ONLY UPDATE DOM IF VALUE ACTUALLY CHANGED
                     const cacheKey = `${elementId}_${key}`;
                     if (lastValues.get(cacheKey) !== newTextContent) {
@@ -13477,40 +13511,28 @@ window.addEventListener("load", function () {
                 inb:   parseFloat(data[pfx + 'InbandS']) || 0,
                 con:   parseFloat(data[pfx + 'ConstS']) || 0,
                 exc:   parseInt(data[pfx + 'Exc']) || 0,
-                rec:   (parseFloat(data[pfx + 'RecovS10']) || 0) / 10,
-                worst: parseFloat(data[pfx + 'Worst']) || 0
+                rec:   (parseFloat(data[pfx + 'RecovS10']) || 0) / 10
             });
             const covTxt = a => fmtT(a.act) + ' challenged · '
                 + fmtT(Math.max(0, a.valid - a.act - a.con)) + ' quiet · '
                 + fmtT(a.con) + ' constrained of ' + fmtT(a.valid) + ' in control';
-            const renderElec = (a, ids, worstScale, worstUnit, worstDec, worstT1, worstT2, recT1, recT2) => {
+            const renderElec = (a, ids, recT1, recT2) => {
                 const trk = 100 * a.inb / Math.max(a.act, 0.001);
                 accCell(ids.trk, trk.toFixed(1) + ' %', trk, 95, 85, true, a.act);
                 const meanRec = a.exc > 0 ? a.rec / a.exc : 0;
                 accCell(ids.exc, a.exc + (a.exc > 0 ? ' · ' + meanRec.toFixed(1) + 's avg' : ''),
                         meanRec, recT1, recT2, false, a.valid);
-                accCell(ids.worst, (a.worst / worstScale).toFixed(worstDec) + worstUnit,
-                        a.worst / worstScale, worstT1, worstT2, false, a.valid);
                 accCovLine(ids.cov, covTxt(a));
             };
-            renderElec(accLoop('accCur'), { trk: 'accCurTrk', exc: 'accCurExc_c', worst: 'accCurWorst_c', cov: 'accCurCov' },
-                       100, ' A', 1, 6, 12, 5, 15);
-            renderElec(accLoop('accVolt'), { trk: 'accVoltTrk', exc: 'accVoltExc_c', worst: 'accVoltWorst_c', cov: 'accVoltCov' },
-                       1, ' mV', 0, 200, 400, 20, 60);
-            // Thermal: containment % while binding + unconditional worst-over-limit. Worst goes red
-            // once the peak reaches the over-temp shutdown trip (limit + TempWarnExcess, default
-            // 2°F) — if it shut down, it's red; orange from half that. Peak is tracked in all modes,
-            // so it shows whenever it's nonzero even if the loop never formally bound.
+            renderElec(accLoop('accCur'), { trk: 'accCurTrk', exc: 'accCurExc_c', cov: 'accCurCov' }, 5, 15);
+            renderElec(accLoop('accVolt'), { trk: 'accVoltTrk', exc: 'accVoltExc_c', cov: 'accVoltCov' }, 20, 60);
+            // Thermal: containment % while binding.
             const thermBindS = parseFloat(data.accThermBindS) || 0;
             const thermInbS = parseFloat(data.accThermInbandS) || 0;
-            const thermWorstF = (parseFloat(data.accThermWorst) || 0) / 100;
-            const thermWarnF = (window._tempWarnExcessF > 0) ? window._tempWarnExcessF : 2.0;
             const thermCont = 100 * thermInbS / Math.max(thermBindS, 0.001);
             accCell('accThermTrk', thermCont.toFixed(1) + ' %', thermCont, 95, 85, true, thermBindS);
             accCovLine('accThermSess_c', thermBindS > 0 || (parseInt(data.accThermSess) || 0) > 0
                 ? String(parseInt(data.accThermSess) || 0) : '—');
-            accCell('accThermWorst_c', thermWorstF.toFixed(1) + ' °F', thermWorstF,
-                    thermWarnF * 0.5, thermWarnF, false, thermWorstF > 0 ? 1 : thermBindS);
             accCovLine('accThermCov', (parseInt(data.accThermSess) || 0) + ' containment session'
                 + ((parseInt(data.accThermSess) || 0) === 1 ? '' : 's') + ' · '
                 + fmtT(thermBindS) + ' binding · ' + fmtT(thermInbS) + ' in band');
@@ -15659,6 +15681,12 @@ const SINFO = {
         ['Acts on', 'the voltage-loop integrator while any protection is clamping'],
         ['Effective rate', (function () { const r = parseFloat(getEchoText('AwBleedRate_echo')), m = parseFloat(getEchoText('MaxTableValue_echo')); return svv('AwBleedRate_echo') + ' × Command Limit ' + svv('MaxTableValue_echo', 'A') + (isFinite(r) && isFinite(m) ? ' = <b>' + (r * m).toFixed(0) + '&nbsp;A/s</b>' : ''); })()],    ],
     // ── Protections: Recovery ──
+    cvRecovKiMax: () => [
+        ['Acts on', 'the voltage loop’s stored current memory (its integrator) after every protection has released, while Recovery Refill is on'],
+        ['Effective rate', 'up to ' + svv('cvRecovKiMax_echo', '×') + ' the integrator’s normal rebuild rate at the moment of release, tapering back to 1× as the memory refills'],
+        ['Paced by', 'live voltage error (' + S_INA_V + ' vs target) — the boost multiplies the normal error-driven rebuild, so it never pushes at/above target and pauses while the derivative brake or anti-windup holds the loop down'],
+        ['Ceiling', 'the current that held the target before the event — commanding more on the way back can only overshoot'],
+    ],
     fastRise: () => [
         ['Acts on', 'the current-setpoint slew after a protection releases'],
         ['Effective rate', (function () { const x = parseFloat(getEchoText('FastSetpointRiseRate_echo')), b = parseFloat(getEchoText('SetpointRiseRate_echo')); return svv('FastSetpointRiseRate_echo', '×') + ' the normal Setpoint Rise Rate ' + svv('SetpointRiseRate_echo', 'A/s') + ' (set on Tuning ▸ Current)' + (isFinite(x) && isFinite(b) ? ' = <b>' + (x * b).toFixed(0) + '&nbsp;A/s</b>' : ''); })()],
@@ -18012,7 +18040,7 @@ function updateFloatVisibility(pendingVal) {
 //   offset 28  uint8    flags       (b0=fastOvActive b1=voltLoopFired b2=cvActive
 //                                    b3=iExcessBulk b4=hard b5=iExcess b6=loadDumpActive
 //                                    b7=recovActive — post-protection recovery window)
-//   offset 29  uint8    awState     (0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless)
+//   offset 29  uint8    awState     (0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless 5=target wind-down)
 //   offset 30  int16    rpm
 //   offset 32  int16    battV_filt_x100 / 100 → V  (IBV_filtered — display EMA, VoltageFilterTC)
 //   offset 34  int16    ch1IntervalMs        → ms  (last CH1 inter-sample gap)
@@ -18034,7 +18062,7 @@ function updateFloatVisibility(pendingVal) {
 //   offset 55  int16    cvKdFiltV_x100 / 100 → V (g_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC; the D term's slope input)
 // ===========================================================================
 
-const CV_LOG_HEADER_SIZE = 64;
+const CV_LOG_HEADER_SIZE = 68;
 const CV_LOG_MIN_ENTRY_SIZE = 51;   // minimum accepted stride (ovFilt-era); actual stride comes from the header
 
 // ---------------------------------------------------------------------------
@@ -18063,9 +18091,10 @@ function parseCvBin(buf) {
     const kdDbSlope  = view.getFloat32(40, true);   // deadband line slope m (V/s per A)
     const kdDbFloor  = view.getFloat32(44, true);   // deadband line clamp floor (V/s)
     const kdDbCeil   = view.getFloat32(48, true);   // deadband line clamp ceiling (V/s)
-    const kdSlopeCeil = view.getFloat32(52, true);  // effective slope ceiling (V/s, ×V/12 applied) — cvDSlope clamps to ±this
+    const kdSlopeCeil = view.getFloat32(52, true);  // slope ceiling (V/s, real per-bus) — cvDSlope clamps to ±this
     const kdMaxTrimA = view.getFloat32(56, true);   // flat trim cap (A)
     const kdExcessMode = view.getFloat32(60, true); // 1 = trim = Kd×(slope − band), 0 = legacy Kd×slope latch
+    const brakeFallRate = view.getFloat32(64, true); // CvBrakeFallRate (A/s) at log time
 
     if (count === 0) return null;
 
@@ -18169,7 +18198,7 @@ function parseCvBin(buf) {
     return {
         count, voltKp, voltKi, voltInterval,
         kdDeadband, kd, kdArmV, kdOneSided, kdVoltFiltTC, targSlewed,
-        kdDbSlope, kdDbFloor, kdDbCeil, kdSlopeCeil, kdMaxTrimA, kdExcessMode,
+        kdDbSlope, kdDbFloor, kdDbCeil, kdSlopeCeil, kdMaxTrimA, kdExcessMode, brakeFallRate,
         ts, battV, targV, vError, dvdt, vPred,
         fastOvCap, cv_I, Icv, uTarget, spLimited,
         iMeas, duty, flags,
@@ -18219,7 +18248,7 @@ function cvBinToCsv(d, csv3) {
         ` CvKdDbSlope=${fmtHdr(d.kdDbSlope, 5)}V/s/A CvKdDbFloor=${fmtHdr(d.kdDbFloor, 3)}V/s CvKdDbCeil=${fmtHdr(d.kdDbCeil, 3)}V/s` +
         ` CvKdSlopeCeil=${fmtHdr(d.kdSlopeCeil, 2)}V/s CvKdMaxTrimA=${fmtHdr(d.kdMaxTrimA, 0)}A` +
         ` CvKdArmV=${d.kdArmV.toFixed(3)}V CvKdOneSided=${d.kdOneSided.toFixed(0)} CvKdExcessMode=${fmtHdr(d.kdExcessMode, 0)}` +
-        ` CvKdVoltFiltTC=${d.kdVoltFiltTC !== undefined ? d.kdVoltFiltTC.toFixed(0) : '—'}ms`
+        ` CvKdVoltFiltTC=${d.kdVoltFiltTC !== undefined ? d.kdVoltFiltTC.toFixed(0) : '—'}ms CvBrakeFallRate=${fmtHdr(d.brakeFallRate, 0)}A/s`
     );
     lines.push(
         `# VoltageD law: band = clamp(CvKdDbFloor, CvKdDeadbandVps + CvKdDbSlope*spLimited_A, CvKdDbCeil) = kdDeadband_Vps column;` +
@@ -18233,7 +18262,7 @@ function cvBinToCsv(d, csv3) {
         `# Toggles: cvHelpersEnabled=${fmtRaw(c.cvHelpersEnabled, 0)} cvRiseGovEnable=${fmtRaw(c.cvRiseGovEnable, 0)}`
     );
     lines.push(
-        `# Recovery: cvRecovEnable=${fmtRaw(c.cvRecovEnable, 0)} cvRecovSec=${fmtDiv(c.cvRecovSec, 10, 1)}s cvRecovEmaxV=${fmtDiv(c.cvRecovEmaxV, 1000, 2)}V ReseedFrac=${fmtDiv(c.ReseedFrac, 100, 2)} cvRecovBoostEnable=${fmtRaw(c.cvRecovBoostEnable, 0)} cvRecovBoostMax=${fmtDiv(c.cvRecovBoostMax, 100, 2)}x cvRecovBoostErrV=${fmtDiv(c.cvRecovBoostErrV, 1000, 2)}V`
+        `# Recovery: cvRecovEnable=${fmtRaw(c.cvRecovEnable, 0)} cvRecovKiMax=${fmtDiv(c.cvRecovKiMax, 100, 1)} ReseedFrac=${fmtDiv(c.ReseedFrac, 100, 2)} cvRecovBoostEnable=${fmtRaw(c.cvRecovBoostEnable, 0)} cvRecovBoostMax=${fmtDiv(c.cvRecovBoostMax, 100, 2)}x cvRecovBoostErrV=${fmtDiv(c.cvRecovBoostErrV, 1000, 2)}V`
     );
     lines.push(
         `# capReason codes: 0=none(unclamped) 1=KHard_G1(predictive) 2=KHard_G2(measured) 3=iExcess 4=loadDump 5=iExcessBulk(current-control phase)`
@@ -18566,9 +18595,11 @@ function applyClassScaledInputAttrs() {
     if (md) md.step = String(1 / k);
     const cw = document.querySelector('input[name="cvWaveAmplitudeV"]');
     if (cw) { cw.min = String(0.05 * k); cw.max = String(2.0 * k); cw.step = String(0.05 * k); }
-    // D-term deadband (V/s) and arm window (V) are WYSIWYG per-bus (scale ×class), so their input
-    // bounds must too, else a 24/48 V user is capped at the 12 V ceiling. Kd/cap are NOT here — Kd is
-    // voltage-normalized (12 V-equivalent) and the cap is flat amps, both class-invariant.
+    // D-term deadband + slope ceiling (V/s), arm window (V), target ramp rates (V/s) and the
+    // wind-down stop margin (V) are WYSIWYG per-bus (scale ×class), so their input bounds must
+    // too, else a 24/48 V user is capped at the 12 V ceiling. Kd/cap are NOT here — Kd is
+    // voltage-normalized (12 V-equivalent) and the cap is flat amps, both class-invariant; the
+    // stress-test bands are 12 V-equivalent by design (scaled ×class at use), so not here either.
     const db = document.querySelector('input[name="CvKdDeadbandVps"]');
     if (db) { db.max = String(4 * k); db.step = String(0.05 * k); }
     const ds = document.querySelector('input[name="CvKdDbSlope"]');
@@ -18577,6 +18608,14 @@ function applyClassScaledInputAttrs() {
     if (df) { df.max = String(2 * k); df.step = String(0.05 * k); }
     const dc = document.querySelector('input[name="CvKdDbCeil"]');
     if (dc) { dc.max = String(4 * k); dc.step = String(0.1 * k); }
+    const sc = document.querySelector('input[name="CvKdSlopeCeil"]');
+    if (sc) { sc.min = String(1 * k); sc.max = String(20 * k); sc.step = String(0.5 * k); }
+    const ws = document.querySelector('input[name="cvWindDownStopV"]');
+    if (ws) { ws.max = String(0.3 * k); ws.step = String(0.005 * k); }
+    const ru = document.querySelector('input[name="vTgtRampUp"]');
+    if (ru) { ru.max = String(5 * k); ru.step = String(0.001 * k); }
+    const rd = document.querySelector('input[name="vTgtRampDn"]');
+    if (rd) { rd.max = String(5 * k); rd.step = String(0.001 * k); }
     const dm = document.getElementById('cvKdMarginInput');
     if (dm) { dm.max = String(2 * k); dm.step = String(0.05 * k); }
     const aw = document.querySelector('input[name="CvKdArmV"]');
@@ -20130,7 +20169,7 @@ function cxFinePrint(phase) {
     case 5: return 'Sets the over-current trip line from the ripple measured in Step 5. The trip line is <code>Slope·current + CV base</code>, floored and capped: Slope is set to the measured ripple slope and CV base to ripple-at-idle + the Safety Margin, so the line runs parallel to the ripple that margin above it. The CC (current-limited) line runs the same slope, the CC offset above CV. Any current where the ripple would cross the line is shaded red. These are the exact G3 settings on Settings ▸ Alternator ▸ Protections — editing here writes them live. The second section sets the voltage-loop damper\'s deadband line the same way: slope = the measured rise-rate slope, base = the measured intercept + its own Safety Margin (V/s), clamped by its floor and ceiling — the Voltage-Rise Tolerance settings on Tuning ▸ Voltage. No fit yet (Step 5 skipped) → set them by hand.';
     case 6: return 'Measures how stiff the battery is — how many millivolts it moves per amp — at the <strong>voltage loop\'s own (~0.6 s) reaction timescale</strong>, so the loop\'s stability margin comes out the same on any battery (a multi-second reading is mostly slow diffusion "soak" and swings 2–3× between lithium, AGM and flooded banks). The wizard settles at a baseline current, sizes a safe test step (auto-reduced if the bank nears its over-voltage ceiling), runs a practice hold through the current loop to learn the two field settings, then fires <strong>4 abrupt field pulses</strong> and reads the settled voltage change 550–650 ms after each edge against the settled current change — median over the 8 edges, so a disturbed edge is thrown out instead of biasing the result. Measured at the battery shunt, or at the alternator sensor when no shunt is fitted (with loads held steady the two are equal). The gains follow as <strong>Kp = α ÷ stiffness</strong>, <strong>Ki = ρ × Kp</strong>, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
     case 7: return 'Two measurements per held speed. First the onset knee: field ramps briefly until output current just begins. The onset follows a 1/RPM law, so the three points fit the whole Min% column, parked a margin below (and maintained automatically over alternator life when Automatic Min% Learning is on); above your highest captured RPM the floor is forced to zero, so the field can always shut fully off at speed. Then the field drain: the current loop ramps to the commissioned test level, the duty is frozen 5 s for a settled baseline, and the field steps to the exact floor a real over-voltage cut drives to (Min Duty) while the decay is recorded on the 20 kHz current channel (calibrated against the precision sensor during the same run). The stored number per speed is the measured time from field-off command until output falls to 10% of its pre-cut level — read directly off the trace, no model; the fitted time constant (τ = L/R) is reported as a cross-check. The drain time varies with engine speed, so the three points are fitted with a straight line, shifted up to sit at or above every measured point, and the over-voltage response reads it at your live speed — held constant beyond the tested range, never extrapolated. The engine-speed value for each point is captured before the cut (the cut scrambles the tach signal for a few seconds), and the tach gates are suspended during each run. Field at the cut floor cannot over-volt, so the drain runs are inherently safe.';
-    case 8: return 'This test provokes the over-voltage protection safely on a battery at any state of charge. It charges at idle until the battery voltage holds steady (within 0.10 V for 3 seconds), then picks a constant-voltage target 0.2 V below that — a level the alternator can definitely reach — and parks the bus there. A voltage that keeps wobbling does not fail the test: as long as the swing stays within 0.25 V the test carries on and reports the wobble as a marginal stability grade — only a swing beyond 0.25 V stops the test. When you snap the throttle, the alternator briefly pushes the bus above that reachable target and the over-voltage protection fires; the test counts every protection event (rapid re-clamping counts as several — that chatter is itself a fault), measures how far the voltage overshoots and how deep it dips afterward, and times how long the loop takes to return to the target and hold it. Grades: protection-event count (1 ideal, 2 marginal, 3 or more a fail), any hard current-sensor cut (a fail), and recovery time (under 12 s good, over 20 s a fail). Overshoot and the recovery dip are reported for context but never fail the test. A gentle snap that never trips is a pass, with a note to snap harder if the engine allows. Voltage thresholds scale with system voltage class. The test ends itself once the voltage has settled back — you never end it early.';
+    case 8: return 'This test provokes the over-voltage protection safely on a battery at any state of charge. It charges at idle until the battery voltage holds steady (within 0.10 V for 3 seconds), then picks a constant-voltage target a set headroom below that — a level the alternator can definitely reach — and parks the bus there (the headroom is adjustable as Target Headroom Below Idle on the Stress Test tuning tab). A voltage that keeps wobbling does not fail the test: as long as the swing stays within the stability limit (adjustable on the same tab) the test carries on and reports the wobble as a marginal stability grade — only a swing beyond that limit stops the test. When you snap the throttle, the alternator briefly pushes the bus above that reachable target and the over-voltage protection fires; the test counts every protection event (rapid re-clamping counts as several — that chatter is itself a fault), measures how far the voltage overshoots and how deep it dips afterward, and times how long the loop takes to return to the target and hold it. Grades: protection-event count (1 ideal, 2 marginal, 3 or more a fail), any hard current-sensor cut (a fail), and recovery time (under 12 s good, over 20 s a fail). Overshoot and the recovery dip are reported for context but never fail the test. A gentle snap that never trips is a pass, with a note to snap harder if the engine allows. Voltage thresholds scale with system voltage class. The test ends itself once the voltage has settled back — you never end it early.';
     default: return '';
   }
 }
@@ -20167,8 +20206,15 @@ function cxVerifyParams() {
 //   closed-loop sine-sweep verify                                          → Tuning ▸ Current
 function cxShowTab(main, sub) {
   try {
-    if (main === 'tuning') { goToTuning(sub); return; }   // #tuning is an alt-panel, not a main tab
-    showMainTab(main); showSubTab(main, sub);
+    if (main === 'tuning') { goToTuning(sub); }   // #tuning is an alt-panel, not a main tab
+    else { showMainTab(main); showSubTab(main, sub); }
+    // The wizard panel floats over the page — the tab's live plot sits below the fold behind it.
+    // Scroll the relevant first plot into view so the user can watch the run without hunting for it.
+    const firstPlot = { 'plots|displays': 'current-temp-plot', 'tuning|current': 'pid-tuning-plot', 'tuning|voltage': 'cv-tuning-plot' }[main + '|' + sub];
+    if (firstPlot) {
+      const el = document.getElementById(firstPlot);
+      if (el) requestAnimationFrame(() => { try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { } });
+    }
   } catch (e) { /* tab not present — non-fatal */ }
 }
 
@@ -20231,14 +20277,23 @@ function closeCommissionModal() {
     document.getElementById('commission-modal-overlay').style.display = 'none';
 }
 
+// Background page plot each phase should reveal on entry, by phase index. cxShowTab switches the tab
+// AND scrolls its first plot into view, so the relevant live graph is on-screen the instant the step
+// opens — not only once its Run button is pressed. Fault Threshold (5) draws its plots inside the
+// modal, so it (and any unlisted phase) keeps whatever tab is showing.
+const CX_PHASE_TAB = { 0: ['plots', 'displays'], 1: ['plots', 'displays'], 2: ['plots', 'displays'], 3: ['tuning', 'current'], 4: ['plots', 'displays'], 6: ['plots', 'displays'], 7: ['plots', 'displays'], 8: ['plots', 'displays'] };
+
 function cxGoto(phase) {
     cxStopPoll();                 // drop any timer from the phase we're leaving
     cx.phase = phase;
     // Persist the current phase (moves backward on Back) so the checklist survives a page reload /
     // other clients, and so the firmware re-baselines the in-flight step snapshot on each step entry.
     if (currentAdminPassword) cxGet('commissionPhase=' + phase).catch(() => { });
-    // No tab switch on phase entry — only the field-action buttons move the tab (cxShowTab).
     commissionRender();
+    // Open each phase at the top: the panel is one scroll box and a tall step (Stress Test)
+    // would otherwise inherit the prior phase's scroll offset and land mid/bottom.
+    { const p = document.getElementById('commission-modal-panel'); if (p) p.scrollTop = 0; }
+    const bgTab = CX_PHASE_TAB[phase]; if (bgTab) cxShowTab(bgTab[0], bgTab[1]);   // reveal this step's plot behind the wizard
     if (phase === 0) { cxPollTimer = setInterval(cxPrepRefresh, 1000); cxPrepRefresh(); }      // live Prep precheck
 }
 
@@ -20337,11 +20392,44 @@ function cxPrepRefresh() {
     }
     btn.disabled = !engineOk;
 }
+// The device defers the Start's flash writes to its main loop (the old in-handler burst froze the
+// whole interface ~2 s), so the HTTP 200 means "accepted", NOT "saved". Poll /cxStartState until
+// the worker reports IDLE — the state byte is committed last, so IDLE proves the entire restore
+// point (the tune Abort reverts to) is on flash. Never advance on a timeout or a FAILED report.
+function cxAwaitStartPersist(timeoutMs) {
+    const t0 = Date.now();
+    return new Promise((resolve, reject) => {
+        const tick = () => {
+            fetchWithTimeout(buildURL('/cxStartState'), { cache: 'no-store' }, 3000)
+                .then(r => r.json())
+                .then(s => {
+                    if (s.state === 'IDLE') return resolve();
+                    if (s.state === 'FAILED') return reject('the device could not write the settings restore point to storage');
+                    if (Date.now() - t0 > timeoutMs) return reject('the device did not confirm the restore point in time');
+                    setTimeout(tick, 250);
+                })
+                .catch(() => {
+                    if (Date.now() - t0 > timeoutMs) return reject('the device did not confirm the restore point in time');
+                    setTimeout(tick, 400);
+                });
+        };
+        tick();
+    });
+}
 function cxStart() {
-    // commissionStart snapshots the tune (kept from the original Start when resuming a live run)
-    // + marks Prep done; jump to the first selected stage (or finish immediately if Prep-only).
+    // commissionStart stages the restore-point snapshot (kept from the original Start when resuming
+    // a live run) + marks Prep done; advance only after the device confirms it is written to flash.
     if (cx) cx.handled = {};   // fresh run — clear any skip/manual notes carried over from a prior session
-    cxGet('commissionStart=1').then(() => { const nx = cxNextSelected(0); if (nx === -1) cxFinish(); else cxGoto(nx); }).catch(e => xAlert('Start failed: ' + e));
+    const btn = document.getElementById('cx-start-btn');
+    const label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving restore point…'; }
+    cxGet('commissionStart=1')
+        .then(r => { if (!r.ok) throw ('rejected (HTTP ' + r.status + ')'); return cxAwaitStartPersist(8000); })
+        .then(() => { const nx = cxNextSelected(0); if (nx === -1) cxFinish(); else cxGoto(nx); })
+        .catch(e => {
+            if (btn) { btn.disabled = false; btn.textContent = label; }
+            xAlert('Commissioning has not started — ' + e + '. Nothing was changed; check the connection and try again.');
+        });
 }
 
 // ── Engine-speed (tach) alignment — pre-wizard, standalone modal ──────────────
@@ -20559,7 +20647,7 @@ function cxRenderField(b) {
             (r.ok ? '' : '<br><span style="color:#f0a500;">Curve looks marginal — review before applying.</span>') +
             (cx.fieldApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>';
     }
-    if (!cx.fieldRunning && !r) body += '<p style="font-size:15px;line-height:1.5;"><strong>Raise engine speed to something within normal cruising range, press Run, and keep it roughly steady until the test finishes — best effort is fine, it doesn\'t have to be perfect.</strong></p><button onclick="cxFieldStart()" class="btn-primary" style="width:100%;padding:9px;">Run field-% ramp</button>';
+    if (!cx.fieldRunning && !r) body += '<p style="font-size:15px;line-height:1.5;"><strong>Raise engine speed to something within normal cruising range, press Run, and keep it roughly steady</strong> until the test finishes — best effort is fine, it doesn\'t have to be perfect.</p><button onclick="cxFieldStart()" class="btn-primary" style="width:100%;padding:9px;">Run field-% ramp</button>';
     else if (!cx.fieldRunning && r) {
         // One primary action: clean result → Apply & run next (cxApplyRunBtn); applied → advance.
         const action = cx.fieldApplied ? cxNextBtn(true) : cxApplyRunBtn('cxFieldApply', r.ok && !r.ceilLimited);
@@ -21831,7 +21919,7 @@ function cxMatrixPoll() {
 }
 async function cxMatrixDone() {
     if (!cx.matrixCov) {
-        if (!await xConfirm('The sweep hasn\'t pinned down the worst-ripple speed yet — finishing now builds the projection from incomplete data. Only finish early if you\'re struggling to reach the remaining targets. Finish anyway?')) return;
+        if (!await xConfirm('The sweep hasn\'t pinned down the worst-ripple speed yet — finishing now builds the projection from incomplete data. Only finish early if you\'re struggling to reach the remaining targets or confident you\'ve captured the peaks, which usually appear at low speed. Finish anyway?')) return;
         cx.matrixCov = true;   // confirmed early finish → unlock the advance path (otherwise the step drops back to Start with no way forward)
     }
     cxMatrixStop();
@@ -22913,13 +23001,13 @@ function cxAppliedSummary() {
     if (flr > 0) rows.push('Over-current floor (set in Protections): ' + flr.toFixed(1) + ' A');
     return rows.length ? rows.join('<br>') : 'No settings applied yet — earlier phases were skipped.';
 }
-// ══════════ CV Stress Test (wizard stage 8, Step 9 + standalone Diag modal) ══════════
+// ══════════ CV Stress Test (wizard stage 8, Step 9 + standalone Tuning-tab modal) ══════════
 // Firmware engine: /get?cvStressStart=1 → poll /cvstress.json (the poll doubles as the
 // browser-alive deadman). The firmware ENDS the run itself once the bus re-settles at the
 // target — the operator never presses Finish. Rendering is shared between the wizard body
-// and the Diag modal via cvsResultsHtml/cvsFixesHtml.
+// and the standalone modal (Setup → Alternator → Tuning → Stress Test) via cvsResultsHtml/cvsFixesHtml.
 // Flow: charge at idle until the bus holds steady → park CV at an achievable target
-// (idle avg − 0.2 V) → snap the throttle → the OV protection fires on a REACHABLE setpoint.
+// (idle avg − CvStressDropV) → snap the throttle → the OV protection fires on a REACHABLE setpoint.
 let _cvsTune = null;   // last-seen tune values from /cvstress.json — feeds the corrective buttons
 
 // A hung fetch (wedged connection during the electrically noisy snap) neither resolves nor
@@ -22955,25 +23043,35 @@ function cvsParseLast(s) {
              recovMs: v[8], lockMs: v[9], events: v[10], hardCuts: v[11], ix: v[12],
              overV: v[13] / 100, valleyV: v[14] / 100, peakV: v[15] / 100, minV: v[16] / 100,
              rpmSlew: v[17], rpmMax: v[18], battA: v[19] / 10, targetV: (v[20] || 0) / 100, softStim: v[21] === 1,
-             wobIdleV: (v[22] || 0) / 100, wobCvV: (v[23] || 0) / 100, wobPostV: (v[24] || 0) / 100, stored: true };
+             wobIdleV: (v[22] || 0) / 100, wobCvV: (v[23] || 0) / 100, wobPostV: (v[24] || 0) / 100,
+             stabBandV: (v[25] || 0) / 100, failBandV: (v[26] || 0) / 100, stored: true };
 }
 // The graded verdict card. j = live JSON after DONE, or a cvsParseLast() object.
 function cvsResultsHtml(j) {
     if (!j) return '';
     const row = (label, val, g) => '<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid #2a2a2a;">' +
         '<span>' + label + '</span><span style="text-align:right;">' + val + (g !== undefined ? ' · ' + cvsChip(g) : '') + '</span></div>';
+    const cell = (k, v) => '<div style="background:#1c1c1c;border-radius:5px;padding:6px 8px;">' +
+        '<div style="font-size:11px;color:#8a8a8a;">' + k + '</div>' +
+        '<div style="font-size:15px;font-weight:600;color:#ddd;margin-top:1px;">' + v + '</div></div>';
     const overall = j.overall === 0 ? '<span style="color:#5a5;">PASS</span>' : j.overall === 1 ? '<span style="color:#c9a227;">MARGINAL</span>' : '<span style="color:#e05a4e;">FAIL</span>';
     let h = '<div style="margin:10px 0;padding:10px 12px;background:#222;border-radius:6px;">';
     h += '<div style="font-size:16px;font-weight:600;margin-bottom:6px;">Verdict: ' + overall + '</div>';
+    // Bands come from firmware (already × V/12; failBand reflects the live CvStressFailBandV). Pre-band stored blobs report 0 → fall back to the 12V-equiv constants × k (nominal/12).
+    const k = (parseInt(window._nominalStored, 10) || 12) / 12;
+    const stabBand = (j.stabBandV > 0 ? j.stabBandV : 0.10 * k).toFixed(2);
+    const failBand = (j.failBandV > 0 ? j.failBandV : 0.25 * k).toFixed(2);
     if (j.outcome === 3) {
         // Basic-stability failure — swinging beyond the fail band, so the test could not arm.
-        h += '<div style="font-size:13px;color:#e0a0a0;">The battery voltage was swinging more than 0.25 V, so the test could not run. A smaller wobble would have been reported and the test would have continued — this level of instability needs attention first. Let the battery settle at a steady idle charge and try again.</div></div>';
+        h += '<div style="font-size:13px;color:#e0a0a0;">The battery voltage was swinging more than ' + failBand + ' V, so the test could not run. A smaller wobble would have been reported and the test would have continued — this level of instability needs attention first. Let the battery settle at a steady idle charge and try again.</div></div>';
         return h;
     }
     const preWob = Math.max(j.wobIdleV || 0, j.wobCvV || 0);
-    const stabTxt = j.gStab === 0 ? 'held 0.10 V / 3 s'
-                  : j.gStab === 1 ? 'settled, still wobbling ' + (j.wobPostV || 0).toFixed(2) + ' V'
-                  : 'never re-settled';
+    // Wobble fields are measured swings; 0 = blob from firmware that only recorded loose settles — show the band ceiling, never a fake 0.00.
+    const swingV = j.wobPostV || 0;
+    const stabTxt = j.gStab === 2 ? 'never re-settled'
+                  : swingV > 0 ? 'within ' + swingV.toFixed(2) + ' V / 3 s'
+                  : 'held under ' + stabBand + ' V / 3 s';
     if (j.outcome === 1) {
         h += '<div style="font-size:13px;color:#aaa;margin-bottom:6px;">Rode it out — the loop held through the snap with no protection event.</div>';
         if (j.gPreStab === 1) h += row('Pre-test stability', 'wobbling ' + preWob.toFixed(2) + ' V at setup', 1);
@@ -22986,7 +23084,16 @@ function cvsResultsHtml(j) {
         h += row('Post-recovery stability', stabTxt, j.gStab);
     }
     h += row('Hard current cut (INA228)', j.hardCuts > 0 ? j.hardCuts + ' — over-current' : 'none', j.gHardCut);
-    h += '<div style="margin-top:8px;color:#8a8a8a;font-size:12.5px;">Context: throttle rise ' + Math.round(j.rpmSlew) + ' RPM/s, peak ' + Math.round(j.rpmMax) + ' RPM · target ' + (j.targetV || 0).toFixed(2) + ' V · overshoot +' + j.overV.toFixed(2) + ' V' +
+    const swingTile = j.gStab === 2 ? '—'
+                    : swingV > 0 ? swingV.toFixed(2) + ' V <span style="font-size:11px;font-weight:400;color:#8a8a8a;">/ ' + stabBand + '</span>'
+                    : 'under ' + stabBand + ' V';
+    h += '<div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:6px;">' +
+        cell((j.outcome === 2 ? 'Post-recovery swing' : 'Post-snap swing'), swingTile) +
+        cell('Peak bus voltage', (j.peakV || 0).toFixed(2) + ' V') +
+        cell('Overshoot', '+' + j.overV.toFixed(2) + ' V') +
+        cell('Pre-test wobble', preWob > 0 ? preWob.toFixed(2) + ' V' : 'under ' + stabBand + ' V') +
+        '</div>';
+    h += '<div style="margin-top:8px;color:#8a8a8a;font-size:12.5px;">Context: throttle rise ' + Math.round(j.rpmSlew) + ' RPM/s, peak ' + Math.round(j.rpmMax) + ' RPM · target ' + (j.targetV || 0).toFixed(2) + ' V' +
          (j.outcome === 2 ? ' · valley −' + j.valleyV.toFixed(2) + ' V' : '') + (j.ix ? ' · current-limit ' + j.ix : '') + '.' +
          (j.stored ? ' <em>(stored result)</em>' : '') + '</div>';
     if (j.softStim) h += '<div style="margin-top:4px;color:#c9a227;font-size:12.5px;">Soft stimulus — the snap was gentle (under 1000 RPM/s). If the engine can rev faster, re-run with a harder snap; if not, this is a pass.</div>';
@@ -23038,6 +23145,7 @@ function cxStressStart() {
     cx.cvs._pollStart = performance.now();
     cxFieldArm();
     cxStopPoll();
+    cxShowTab('plots', 'displays');   // watch bus-voltage stability on Plots ▸ Short Term
     commissionRender();
     cxGet('cvStressStart=1')
         .then(() => { setTrackedTimeout(cxStressPoll, 700); })
@@ -23103,7 +23211,7 @@ function cxRenderStress(b) {
     }
     const last = cvsParseLast((j && j.last) || null) || cvsParseLast(s.lastBlob || null);
     body += '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine to idle</strong>, then press Start. ' +
-        'The regulator charges normally until the battery voltage holds steady, then parks the bus at a constant-voltage target it can actually reach (0.2 V below the settled idle voltage) and says <strong>ARMED</strong>. Snap the throttle to about half max RPM and return to idle — the alternator briefly pushes the bus over that target and the protection fires. Every protection stays fully active; the test grades the response and <strong>ends itself</strong> once the voltage settles back.</p>' +
+        'The regulator charges normally until the battery voltage holds steady, then parks the bus at a constant-voltage target it can actually reach (a set headroom below the settled idle voltage) and says <strong>ARMED</strong>. Snap the throttle to about half max RPM and return to idle — the alternator briefly pushes the bus over that target and the protection fires. Every protection stays fully active; the test grades the response and <strong>ends itself</strong> once the voltage settles back.</p>' +
         '<button onclick="cxStressStart()" class="btn-primary btn-sm">Start stress test</button>';
     if (last) body += cvsResultsHtml(last);
     body += '<div style="margin-top:8px;">' + cxNextBtn(false, false) + '</div>';
@@ -23115,9 +23223,9 @@ function cxRenderStress(b) {
     }).catch(() => { });
 }
 
-// ── Standalone Diag modal (Live Data ▸ Diag ▸ Alternator) — bhw-style shell ──
+// ── Standalone modal (Setup ▸ Alternator ▸ Tuning ▸ Stress Test) — bhw-style shell ──
 let cvsD = null;   // { pane:'pre'|'run'|'done', renderedPane, j, poll }
-function cvsDiagGet(params) {
+function cvsGet(params) {
     const pw = encodeURIComponent(currentAdminPassword || '');
     return fetch(buildURL('/get?' + params + '&password=' + pw));
 }
@@ -23141,13 +23249,13 @@ function cvsOpen() {
 function cvsClose() {
     if (cvsD) {
         if (cvsD.poll) { clearInterval(cvsD.poll); cvsD.poll = null; }
-        if (cvsD.j && cvsD.j.active) cvsDiagGet('cvStressCancel=1').catch(() => { });
+        if (cvsD.j && cvsD.j.active) cvsGet('cvStressCancel=1').catch(() => { });
         cvsD.pane = 'pre'; cvsD.renderedPane = null;
     }
     document.getElementById('cvs-modal-overlay').style.display = 'none';
 }
 function cvsStartD() {
-    cvsDiagGet('cvStressStart=1').catch(() => { });
+    cvsGet('cvStressStart=1').catch(() => { });
     cvsD.pane = 'run'; cvsD.renderedPane = null; cvsD._sawActive = false; cvsD._runStart = Date.now(); cvsRenderD();
 }
 function cvsPollD() {
@@ -23178,14 +23286,14 @@ function cvsRenderD() {
                     '<div style="font-size:14.5px;line-height:1.5;">Accelerate briskly to about <strong>half of max RPM</strong>, then straight back to idle — a rapid throttle blip. The test ends itself once the voltage settles back.</div></div>' +
                     '<div id="cvsArmLiveD" style="font-size:13.5px;margin:8px 0;"></div>' +
                     '<div class="btn-row" style="display:flex;gap:8px;flex-wrap:wrap;">' +
-                    '<button onclick="cvsDiagGet(\'cvStressCancel=1\')" class="btn-danger-ghost btn-sm">Cancel</button></div>';
+                    '<button onclick="cvsGet(\'cvStressCancel=1\')" class="btn-danger-ghost btn-sm">Cancel</button></div>';
             }
             const el = document.getElementById('cvsArmLiveD'); if (el) el.innerHTML = cxStressArmLive(j);
         } else {
             if (rebuild || cvsD._runPh === 3 || !document.getElementById('cvsPhaseD')) {
                 b.innerHTML = '<p style="color:#4a9eff;">Setting up — keep the engine at idle.</p>' +
                     '<p id="cvsPhaseD" style="font-size:13px;color:#ddd;"></p>' +
-                    '<button onclick="cvsDiagGet(\'cvStressCancel=1\')" class="btn-danger-ghost btn-sm">Cancel</button>';
+                    '<button onclick="cvsGet(\'cvStressCancel=1\')" class="btn-danger-ghost btn-sm">Cancel</button>';
             }
             const el = document.getElementById('cvsPhaseD'); if (el) el.textContent = cvsPhaseText(j.phase, j);
         }
@@ -23293,7 +23401,7 @@ const COMMISSION_STEPS = [
     { name: 'Fault Threshold Autotuning', desc: 'Set the over-current trip points above that disturbance floor.' },
     { name: 'Voltage Control Autotuning', desc: 'Step the charge current and measure the battery-voltage step gain at the loop\'s own response timescale (read at 1/ω_c, flat baseline, with a settled-baseline gate so surface charge has relaxed first). Computes the voltage-loop Kp/Ki from that gain and your configured response time, then switches the CV gain source to Auto.' },
     { name: 'Min% Floor & Field Decay', desc: 'Runs near the end with the engine fully warm: at each of three held RPMs (max working → mid → idle) an onset-knee automatic current sweep fits the per-RPM Min% floor (forced to zero above the max), then a field cut times the alternator-current drain at that speed — the three drain points fit the speed-dependent line the over-voltage field-drain timing reads.' },
-    { name: 'Stress Test', desc: 'Charges at idle until the battery voltage holds steady, parks the bus at a constant-voltage target it can actually reach (0.2 V below the settled idle voltage), then you snap the throttle to about half max RPM so the over-voltage protection fires on a reachable setpoint. Grades the protection-event count, any hard current-sensor cut, recovery time, and post-recovery stability (overshoot and the recovery dip are reported for context), and offers corrective actions on a poor result. The test ends itself once the voltage settles back; a run with no protection event is itself a pass — the loop rode it out.' },
+    { name: 'Stress Test', desc: 'Charges at idle until the battery voltage holds steady, parks the bus at a constant-voltage target it can actually reach (a set headroom below the settled idle voltage), then you snap the throttle to about half max RPM so the over-voltage protection fires on a reachable setpoint. Grades the protection-event count, any hard current-sensor cut, recovery time, and post-recovery stability (overshoot and the recovery dip are reported for context), and offers corrective actions on a poor result. The test ends itself once the voltage settles back; a run with no protection event is itself a pass — the loop rode it out.' },
 ];
 let cxLastState = 0;   // remembered from the last CSV3 frame, for the clear/restart confirm text
 

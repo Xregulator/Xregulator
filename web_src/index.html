@@ -109,7 +109,6 @@
            Shown by syncHeaderStrip only while currentAdminPassword is empty. -->
       <span id="hcs-unlock" class="hcs-unlock" style="display:none;" title="Expand the header and enter the settings password" onclick="stripExpandToUnlock(event)">Tap to unlock</span>
       <!-- Alternator group -->
-      <span id="hcs-pill" class="hcs-pill">—</span>
       <span class="hcs-m hcs-alt"><span id="hcs-alt">-</span><i>A</i></span>
       <span class="hcs-m hcs-temp"><span id="hcs-temp">-</span><i>°F</i></span>
       <span class="hcs-m hcs-duty"><span id="hcs-duty">-</span><i>% duty</i></span>
@@ -122,6 +121,9 @@
       <!-- Engine group -->
       <span class="hcs-m hcs-rpm"><span id="hcs-rpm">-</span><i>rpm</i></span>
       <span class="hcs-grow"></span>
+      <!-- State word sits RIGHT of the numbers so its width changes (BULK → ABSORPTION →
+           PROTECT) grow into the flex spacer and never shift the readouts -->
+      <span id="hcs-pill" class="hcs-pill">—</span>
       <!-- Alternator On/Off — isolated control; stopPropagation keeps it from expanding -->
       <span class="hcs-divider"></span>
       <span id="hcs-toggle" class="hcs-toggle" title="Alternator On/Off" onclick="stripAltToggle(event)"><span class="hcs-knob"></span></span>
@@ -139,7 +141,10 @@
           <span id="field-status">?</span>
           <span id="duty-pill-wrap"><span id="dutyCycleID3" style="display:none;"></span><span id="dutyCyclePercentSign" style="display:none;">%</span></span>
         </div>
-        <span id="charge-stage" class="charge-stage charge-stage-unknown">—</span>
+        <div class="stage-row">
+          <span id="prot-note" class="prot-word" style="display:none;"><span class="pw-full">PROTECTION</span><span class="pw-short">P</span></span>
+          <span id="charge-stage" class="charge-stage charge-stage-unknown">—</span>
+        </div>
         <span id="field-off-reason" class="field-off-reason" style="display:none;"></span>
       </div>
     </div>
@@ -150,27 +155,27 @@
       <div class="sensor-readings-tier">
         <!-- Battery + SOC -->
         <div class="reading-duo">
-          <span class="duo-lbl" id="lbl-voltage">Batt</span>
+          <span class="duo-lbl" id="lbl-voltage" data-t="Batt">Batt</span>
           <span class="duo-num"><span id="header-voltage">-</span></span>
           <span class="duo-unit">V</span>
-          <span class="duo-lbl req-batt-current" onclick="socSeedOpen()" style="cursor:pointer;">SOC</span>
+          <span class="duo-lbl req-batt-current" data-t="SOC" onclick="socSeedOpen()" style="cursor:pointer;">SOC</span>
           <span class="duo-num req-batt-current" onclick="socSeedOpen()" style="cursor:pointer;"><span id="header-soc">-</span></span>
           <span class="duo-unit req-batt-current" onclick="socSeedOpen()" style="cursor:pointer;">%</span>
         </div>
 
         <!-- Alt + Batt currents — 3-column grid keeps A's vertically aligned -->
         <div class="reading-duo">
-          <span class="duo-lbl" id="lbl-alt-current">Alt</span>
+          <span class="duo-lbl" id="lbl-alt-current" data-t="Alt">Alt</span>
           <span class="duo-num"><span id="header-alt-current">-</span></span>
           <span class="duo-unit">A</span>
-          <span class="duo-lbl req-batt-current" id="lbl-batt-current">Batt</span>
+          <span class="duo-lbl req-batt-current" id="lbl-batt-current" data-t="Batt">Batt</span>
           <span class="duo-num req-batt-current"><span id="header-batt-current">-</span></span>
           <span class="duo-unit req-batt-current">A</span>
         </div>
 
         <!-- Alt Temp: label above value row to save horizontal space -->
         <div class="reading-duo reading-duo-solo">
-          <span class="duo-lbl" id="lbl-alt-temp">Temp</span>
+          <span class="duo-lbl" id="lbl-alt-temp" data-t="Temp">Temp</span>
           <div class="duo-value-row">
             <span class="duo-num"><span id="header-alt-temp">-</span></span>
             <span class="duo-unit"><span class="temp-unit-label">°F</span></span>
@@ -179,10 +184,10 @@
 
         <!-- RPM + Ignition -->
         <div class="reading-duo">
-          <span class="duo-lbl">RPM</span>
+          <span class="duo-lbl" data-t="RPM">RPM</span>
           <span class="duo-num"><span id="header-rpm">-</span></span>
           <span class="duo-unit"></span>
-          <span class="duo-lbl">IGN</span>
+          <span class="duo-lbl" data-t="IGN">IGN</span>
           <span class="duo-num" id="ignition-status">?</span>
           <span class="duo-unit"></span>
         </div>
@@ -1600,6 +1605,25 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>D-term brake fall rate (A/s) (<span id="CvBrakeFallRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Faster
+                        down-slew used only while the constant-voltage damper (D term) is actively pulling current out on
+                        a fast rise, so its commanded cut lands in time. Sits between the normal Setpoint Fall Rate and
+                        the instantaneous overvoltage clamp — a controlled brake, not a protection slam. A value below
+                        the Setpoint Fall Rate is ignored (raised to it).</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="CvBrakeFallRate" type="number" step="0.1" min="0.1" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Startup Rise Rate (A/s) (<span id="StartupRiseRate_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Setpoint
                         slew rate applied only when the field is first turned on (OFF to AUTO). A slow value (e.g. 3
@@ -2725,7 +2749,7 @@
                 <div class="protections-intro">
                   <p data-intro="cl">After the trip, the regulator enters a ramp-and-lockout — the field stays at 0 until the over-current condition has cleared. The recovery path used by the other protections (Recovery Seed Fraction, Seed Protect Window) is not used here.</p>
                   <!-- one shared paragraph for all four groups — data-intro is a space-separated list, matched like data-groups -->
-                  <p data-intro="g1 g2 g3 g4">When all protections have released, the voltage integrator is restored to <strong>pre-event value × Recovery Seed Fraction</strong>. <strong>Seed Protect Window</strong> protects the fresh seed from being immediately drained by a brief subsequent event. <strong>Fast Setpoint Rise Rate</strong> then accelerates the slewed current setpoint back up while battery voltage is comfortably below target, so the alternator crosses its deadband and starts producing current again quickly. With <strong>Recovery Pacing</strong> on, the setpoint is instead walked back on a fixed schedule — <strong>Recovery Time</strong> sets the duration and <strong>Recovery Error Cap</strong> bounds the voltage shortfall the loop may see — so the return takes about the same time at any target voltage (Load Dump excepted; it re-asserts on its own). <strong>Recovery Boost</strong> (independent of Recovery Pacing — both can be on) scales up the voltage loop's corrective push while the bus is below target, tapering back to normal as it reaches target, lifting the voltage out of a deep dip faster without a second trip.</p>
+                  <p data-intro="g1 g2 g3 g4">When all protections have released, the controller's stored current memory (the voltage-loop integrator) is restored to <strong>pre-event value × Recovery Seed Fraction</strong>. <strong>Seed Protect Window</strong> protects the fresh seed from being immediately drained by a brief subsequent event. <strong>Fast Setpoint Rise Rate</strong> then accelerates the slewed current setpoint back up while battery voltage is comfortably below target, so the alternator crosses its deadband and starts producing current again quickly. Two independent helpers speed the rest of the return — <strong>Recovery Refill</strong> rebuilds the stored current memory faster in proportion to what is missing, while <strong>Recovery Boost</strong> is an instant proportional bridge (P-boost) that scales up the loop's immediate corrective push while the bus is below target. Both pace themselves off live voltage error and taper away as the battery reaches target (Load Dump excepted; it re-asserts on its own).</p>
                 </div>
 
                 <div class="protections-cards">
@@ -2733,8 +2757,8 @@
                   <article class="protections-param" data-groups="g1 g2 g3">
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span>
-                      Recovery Pacing — timed walk-back (<span id="cvRecovEnable_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">After an over-voltage or alternator over-current event ends, the regulator restores charging current on a fixed schedule (the recovery time below) instead of letting the size of the voltage dip set the pace. <strong>On:</strong> recovery takes about the same time at any target voltage — no long crawl back when the target sits near the battery's resting voltage, and no second trip from a too-violent return when it sits far above. <strong>Off:</strong> the plain PI walks itself back, so recovery pace scales with how far the voltage fell. Trip points themselves are not affected. Load Dump is excluded — it manages its own re-assertion.</span></span>
+                      Recovery Refill — rebuild the stored current memory (<span id="cvRecovEnable_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">After a protection event ends, the controller's stored current memory (the voltage-loop integrator) restarts at the Reseed fraction of its pre-event value. <strong>On:</strong> the memory rebuilds faster in proportion to what is missing, pacing itself by live voltage error — it never pushes when the battery says full, and it pauses while the derivative brake is acting. <strong>Off:</strong> the plain voltage loop walks itself back, so recovery pace scales with how far the voltage fell. Trip points themselves are not affected. Load Dump is excluded — it manages its own re-assertion.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2754,30 +2778,30 @@
                   <article class="protections-param" data-groups="g1 g2 g3">
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span>
-                      Recovery Time (s) (<span id="cvRecovSec_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long the regulator takes to restore charging current after a protection event ends, when Recovery Pacing is On. The current that was flowing before the event is re-applied gradually over this many seconds, at any target voltage and any battery size. Shorter = charging resumes sooner; longer = a gentler return with more settling margin.</span></span>
+                      Max Refill Speed (×) (<span id="cvRecovKiMax_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How fast the stored current memory rebuilds right after a protection event ends, when Recovery Refill is On: a multiplier on the integrator's normal rebuild rate at the moment of release, tapering back to normal as the memory refills. Higher = charging current is restored sooner after an event; lower = a gentler, more conservative return.</span></span>
+                      <span class="sinfo" data-sinfo="cvRecovKiMax" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
-                        <input name="cvRecovSec" type="number" step="0.1" min="0.5" max="30" />
-                        <span class="protections-unit">s</span>
+                        <input name="cvRecovKiMax" type="number" step="0.5" min="1" max="10" />
+                        <span class="protections-unit">×</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
                   </article>
 
-                  <article class="protections-param" data-groups="g1 g2 g3">
+                  <article class="protections-param" data-groups="g1 g2 g3 g4">
                     <div class="protections-name">
-                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span>
-                      Recovery Error Cap (V) (<span id="cvRecovEmaxV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">While recovery is in progress, the voltage loop is not allowed to see more than this much voltage shortfall, no matter how far the voltage actually fell when the field was cut. This keeps the return to target gentle enough that the rising voltage cannot re-trigger the predictive over-voltage protection. Entered per 12 V; scales automatically on 24 V and 48 V systems. Raise for a snappier return; lower if recovery ever re-trips protection.</span></span>
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      Recovery Seed Fraction (<span id="ReseedFrac_echo">?</span>)
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
-                        <input name="cvRecovEmaxV" type="number" step="0.01" min="0.05" max="2" />
-                        <span class="protections-unit">V</span>
+                        <input name="ReseedFrac" type="number" step="0.05" min="0.2" max="0.95" />
+                        <span class="protections-unit">×</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -2787,7 +2811,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span>
                       Recovery Boost — faster climb out of the hole (<span id="cvRecovBoostEnable_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Whenever battery voltage sits below the charge target during voltage control — most visibly after a protection cut has knocked it well below — the regulator normally walks charging current back up only as fast as its integrator can rebuild, so the return crawls even while the battery sits far below target. <strong>On:</strong> while the voltage is below target the loop's corrective push (its proportional term) is scaled up (see the two settings below) so the alternator drives extra current and lifts the voltage faster, then eases back to normal as it nears target so it cannot overshoot into a second over-voltage trip. <strong>Off:</strong> the plain loop paces the return. Trip points themselves are not affected. Independent of Recovery Pacing above — both can be on.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Whenever battery voltage sits below the charge target during voltage control — most visibly after a protection cut has knocked it well below — the regulator normally walks charging current back up only as fast as its stored memory can rebuild, so the return crawls even while the battery sits far below target. <strong>On:</strong> while the voltage is below target the loop's immediate corrective push (its proportional term) is scaled up (see the two settings below) so the alternator drives extra current and lifts the voltage faster, then eases back to normal as it nears target so it cannot overshoot into a second over-voltage trip. <strong>Off:</strong> the plain loop paces the return. Trip points themselves are not affected. This is an instant proportional bridge (P-boost), independent of the Recovery Refill memory rebuild above — both can be on.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2831,21 +2855,6 @@
                       <div class="protections-edit-row">
                         <input name="cvRecovBoostErrV" type="number" step="0.05" min="0.1" max="5" />
                         <span class="protections-unit">V</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g1 g2 g3 g4">
-                    <div class="protections-name">
-                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
-                      Recovery Seed Fraction (<span id="ReseedFrac_echo">?</span>)
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="ReseedFrac" type="number" step="0.05" min="0.1" max="0.9" />
-                        <span class="protections-unit">×</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -2948,6 +2957,7 @@
       <button class="tuning-tab" onclick="showTuningPanel('current', event)">Current</button>
       <button class="tuning-tab" onclick="showTuningPanel('voltage', event)">Voltage</button>
       <button class="tuning-tab" onclick="showTuningPanel('temperature', event)">Temperature</button>
+      <button class="tuning-tab" onclick="showTuningPanel('stress-test', event)">Stress Test</button>
       <button class="tuning-tab" onclick="showTuningPanel('about', event)">About</button>
     </div>
 
@@ -4716,12 +4726,12 @@
                     <span>Slope Ceiling (V/s) (<span id="CvKdSlopeCeil_echo">?</span>)
                       <span class="sinfo" data-sinfo="cvKd" onclick="sinfoToggle(this)"></span>
                     </span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The fastest voltage rise the back-off reacts to — anything faster is treated as this rate, so together with Kd this sets the deepest back-off a rise can command. Raising it lets the D term pull more current on very fast rises before the overvoltage protections take over; too high makes it twitchy. Entered as a 12 V value and scaled automatically on 24 / 48 V banks.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The fastest voltage rise the back-off reacts to — anything faster is treated as this rate, so together with Kd this sets the deepest back-off a rise can command. Raising it lets the D term pull more current on very fast rises before the overvoltage protections take over; too high makes it twitchy. Entered directly in volts per second for the current battery bank.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="CvKdSlopeCeil" type="number" step="0.5" min="1" max="12" />
+                      <input name="CvKdSlopeCeil" type="number" step="0.5" min="1" max="20" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -4784,7 +4794,7 @@
                 </div> <!-- end cvDerateDetailBlock -->
 
                 <!-- ============ TARGET SHAPING & TIMING ============ -->
-                <div class="param-subhead">Target shaping &amp; timing</div>
+                <div class="param-subhead">Target voltage ramp</div>
 
                 <hr />
                 <div class="form-row">
@@ -4838,6 +4848,63 @@
                     </form>
                   </div>
                 </div>
+
+                <div class="param-subhead">Setpoint drop wind-down</div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Enable wind-down (<span id="cvWindDownEnable_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Handles a <strong>lowered</strong> voltage target (a smaller manual setpoint, or the Absorption→Float hand-off). <strong>On:</strong> instead of waiting for the voltage loop to ease current off — which is slow enough that the over-voltage protection often fires and knocks the voltage below the new target — the regulator walks the current command down at the rate below, watches the measured voltage, and hands control back to the loop the moment the voltage lands at the new target. Typical result: a large setpoint drop completes in a few seconds with no protection events. <strong>Off:</strong> the loop and the target ramp handle drops alone (old behaviour). Protections are never disabled by this — they stay armed the whole time as the backstop.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="cvWindDownEnable_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('cvWindDownEnable_checkbox', 'cvWindDownEnable', 'cvWindDownEnable')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="cvWindDownEnable" name="cvWindDownEnable" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Wind-down rate (fraction of max amps/s) (<span id="cvWindDownRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How fast the wind-down walks the current command toward zero after a lowered setpoint, as a fraction of your alternator's maximum table amps per second — so the same setting behaves the same on a small or large alternator. Larger = the voltage reaches the new setpoint sooner, but stopping exactly on target gets harder (the field lags the command slightly), so a very fast rate can dip the voltage under the new setpoint before settling. Smaller = gentler and more precise, but the drop takes longer.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="cvWindDownRate" type="number" step="0.005" min="0.005" max="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Wind-down stop margin (V) (<span id="cvWindDownStopV_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The wind-down stops walking current down once the measured (smoothed) voltage is within this many volts <strong>above</strong> the new setpoint, leaving the last little bit to the voltage loop. A larger margin hands back earlier — safer against dipping under the new setpoint, but the final approach is slower. A smaller margin rides the wind-down closer to the target — quicker finish, but the field's slight lag can carry the voltage a touch below the setpoint before the loop catches it.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="cvWindDownStopV" type="number" step="0.005" min="0" max="0.3" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <div class="param-subhead">Governors &amp; loop timing</div>
 
                 <hr />
                 <div class="form-row">
@@ -5196,6 +5263,52 @@
                 <!-- Temp Warning/Critical Excess and Sustained Timeout live in Setup → Alternator → Temperature Settings -->
 
               </details> <!-- END Temperature Controller Parameters -->
+
+      </div>
+    </div>
+    <!-- Stress Test -->
+    <div id="tuning-stress-test" class="tuning-panel">
+      <div class="settings-card">
+        <p style="font-size:13px;line-height:1.55;margin:0 0 8px 0;">Provokes the over-voltage protection safely at any state of charge: it
+          charges at idle until the battery voltage holds steady, parks the bus at a constant-voltage target it
+          can actually reach (a set headroom below the settled idle voltage), and you snap the throttle to about
+          half max RPM. The response is scored — protection-event count, any hard current-sensor cut, recovery
+          time, and post-recovery stability; overshoot and the recovery dip are reported for context. All
+          protections stay fully active; the firmware ends the run itself. Also the final commissioning wizard
+          step — run it here any time after a tuning change.</p>
+        <button type="button" class="btn-primary" onclick="cvsOpen()">Run Stress Test</button>
+
+        <hr />
+        <p class="card-group-title" style="margin:12px 0 10px 0;">Test Parameters</p>
+
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Target Headroom Below Idle (V) (<span id="CvStressDropV_echo">?</span>)</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far below the settled idle voltage the test parks its constant-voltage target (the target headroom). Bigger = the throttle snap pushes the bus past the target more easily, provoking the protection harder; smaller = a gentler test that may never trip on a stiff, well-charged bank. Entered as a 12 V value — scaled automatically with system voltage class on 24 V and 48 V banks.</span></span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="CvStressDropV" type="number" step="0.05" min="0.05" max="1.0" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Stability Limit (V) (<span id="CvStressFailBandV_echo">?</span>)</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much the battery voltage may swing during the setup phases before the test refuses to run (the stability fail band). A swing at or under this limit lets the test proceed, with the wobble reported and stability graded marginal; beyond it the run is recorded as a basic-stability fail. Loosen it on a boat whose cycling loads (fridge, autopilot) keep the idle bus moving — the measured swing is always reported either way. Entered as a 12 V value — scaled automatically with system voltage class on 24 V and 48 V banks.</span></span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="CvStressFailBandV" type="number" step="0.05" min="0.1" max="1.0" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
 
       </div>
     </div>
@@ -12117,8 +12230,7 @@
           <b>Tracking</b> is the share of challenged time (target moving, or just after a
           disturbance) spent inside the accuracy band — quiet steady running earns nothing here.
           <b>Excursions</b> counts how often the loop left its band, with the average time it took
-          to get back. <b>Worst over</b> is the largest push past the band on the damaging side,
-          recorded no matter the cause. Time when the output was pinned at a limit or a protection
+          to get back. Time when the output was pinned at a limit or a protection
           held it is set aside as "constrained" (shown in the small line) rather than blamed on
           the loop. A dash means not observed yet — never perfection. Accumulates since the last
           reset; auto-resets after each daily cloud snapshot, or press Reset below.
@@ -12130,7 +12242,6 @@
           <span class="metric-value" style="display:flex;gap:10px;">
             <span style="min-width:72px;text-align:right;">Tracking</span>
             <span style="min-width:86px;text-align:right;">Excursions</span>
-            <span style="min-width:72px;text-align:right;">Worst over</span>
           </span>
         </div>
         <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
@@ -12142,7 +12253,6 @@
           <span class="metric-value" style="display:flex;gap:10px;">
             <span id="accCurTrk"     style="font-weight:bold;min-width:72px;text-align:right;">—</span>
             <span id="accCurExc_c"   style="font-weight:bold;min-width:86px;text-align:right;">—</span>
-            <span id="accCurWorst_c" style="font-weight:bold;min-width:72px;text-align:right;">—</span>
           </span>
         </div>
         <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
@@ -12154,7 +12264,6 @@
           <span class="metric-value" style="display:flex;gap:10px;">
             <span id="accVoltTrk"     style="font-weight:bold;min-width:72px;text-align:right;">—</span>
             <span id="accVoltExc_c"   style="font-weight:bold;min-width:86px;text-align:right;">—</span>
-            <span id="accVoltWorst_c" style="font-weight:bold;min-width:72px;text-align:right;">—</span>
           </span>
         </div>
         <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
@@ -12166,7 +12275,6 @@
           <span class="metric-value" style="display:flex;gap:10px;">
             <span id="accThermTrk"     style="font-weight:bold;min-width:72px;text-align:right;">—</span>
             <span id="accThermSess_c"  style="font-weight:bold;min-width:86px;text-align:right;">—</span>
-            <span id="accThermWorst_c" style="font-weight:bold;min-width:72px;text-align:right;">—</span>
           </span>
         </div>
         <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
@@ -12207,30 +12315,11 @@
                   <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">20 – 60 s</td>
                   <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 60 s</td>
                 </tr>
-                <tr style="border-top:1px solid var(--border);">
-                  <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Current worst over</td>
-                  <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 6 A</td>
-                  <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">6 – 12 A</td>
-                  <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 12 A</td>
-                </tr>
-                <tr style="border-top:1px solid var(--border);">
-                  <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Voltage worst over</td>
-                  <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 200 mV</td>
-                  <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">200 – 400 mV</td>
-                  <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 400 mV</td>
-                </tr>
-                <tr style="border-top:1px solid var(--border);">
-                  <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Thermal worst over</td>
-                  <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 1 °F</td>
-                  <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">1 – 2 °F</td>
-                  <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 2 °F</td>
-                </tr>
               </tbody>
             </table>
             <p style="font-size:0.74em;color:var(--text-muted);margin:8px 0 0 0;">
               Excursion cells show count · average recovery time and are colored by the recovery
               time. The thermal row's middle cell counts containment sessions (not colored).
-              Voltage values are 12&nbsp;V-equivalent so systems of any voltage compare directly.
             </p>
           </div>
         </details>
@@ -12323,21 +12412,6 @@
       </details>
 
       <details class="diag-section">
-        <summary class="diag-section-title">CV Stress Test (throttle snap)</summary>
-        <div class="settings-card">
-          <div style="max-width:560px;margin:0 auto;font-size:13px;line-height:1.55;">
-            <p style="margin:0 0 8px 0;">Provokes the over-voltage protection safely at any state of charge: it
-              charges at idle until the battery voltage holds steady, parks the bus at a constant-voltage target it
-              can actually reach (0.2 V below the settled idle voltage), and you snap the throttle to about half max
-              RPM. The response is scored — protection-event count, any hard current-sensor cut, recovery time, and
-              post-recovery stability; overshoot and the recovery dip are reported for context. All protections stay
-              fully active; the firmware ends the run itself. Also the final commissioning wizard step — run it here
-              any time after a tuning change.</p>
-            <button type="button" class="btn-primary" onclick="cvsOpen()">Run Stress Test</button>
-          </div>
-        </div>
-      </details>
-      <details class="diag-section">
         <summary class="diag-section-title">About this Alternator Diag Page</summary>
         <div class="settings-card">
           <div style="max-width:560px;margin:0 auto;font-size:13px;color:#555;line-height:1.55;">
@@ -12362,8 +12436,8 @@
               the present speed and temperature, and roughly how much component life remains
               (based on physics, but not yet calibrated&hellip;)</p>
             <p><b>Control Accuracy</b> reports how each loop — current, voltage, thermal —
-              performs during normal running: time-in-band while challenged, how often it leaves
-              its band and how fast it recovers, and the worst push past the band. Quiet steady
+              performs during normal running: time-in-band while challenged, and how often it
+              leaves its band and how fast it recovers. Quiet steady
               running earns nothing, and time spent pinned at a limit is reported separately
               instead of blamed on the loop.</p>
             <p><b>Is an anomaly alert a confirmed failure?</b> No. The fault class is the monitor's
@@ -13663,7 +13737,7 @@
     </div>
   </div><!-- END bhw-modal-overlay -->
 
-  <!-- CV stress-test wizard (standalone from Diag) — same shell/styling as the commissioning modal.
+  <!-- CV stress-test wizard (standalone from Setup → Alternator → Tuning → Stress Test) — same shell/styling as the commissioning modal.
        A single dynamic body (#cvs-body) is re-rendered per pane by cvsRenderD(): pre → run → done. -->
   <div id="cvs-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
     <div id="cvs-modal-panel" style="pointer-events:auto; position:absolute; top:20px; left:20px; background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); overflow-y:auto;">
@@ -13757,9 +13831,11 @@
       <div id="rpmcap-body" style="padding:14px 16px; overflow-y:auto; flex:1; min-height:0;"></div>
       <div style="padding:12px 16px; border-top:1px solid #333; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
         <button id="rpmcap-back-btn" onclick="rpmCapBack()" style="background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">← Back</button>
-        <span style="flex:1;"></span>
-        <button id="rpmcap-continue-high-btn" onclick="rpmCapContinue(1)" style="background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Continue in High</button>
-        <button id="rpmcap-continue-btn" onclick="rpmCapContinue(0)" style="border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Continue in Low →</button>
+        <span style="flex:1; min-width:12px;"></span>
+        <div style="display:flex; gap:8px; flex-wrap:nowrap;">
+          <button id="rpmcap-continue-high-btn" onclick="rpmCapContinue(1)" style="background:rgba(255,255,255,0.10); color:#e8e8e8; border:1px solid rgba(255,255,255,0.18); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Continue in High</button>
+          <button id="rpmcap-continue-btn" onclick="rpmCapContinue(0)" style="border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Continue in Low →</button>
+        </div>
       </div>
     </div>
   </div><!-- END rpmcap-modal-overlay -->
