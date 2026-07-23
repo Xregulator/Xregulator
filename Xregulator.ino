@@ -3581,14 +3581,16 @@ float IExcessBaseA    = 5.8f;    // A — trip-line intercept (CV base). 0 = thr
 float IExcessCcOffsetA = 4.0f;   // A — the CC trip line sits this far above the CV line (parallel offset). 0 = coincident with CV.
 float IExcessFloorA   = 5.0f;    // A — trip-line floor; it never dips below this even at tiny commands.
 float IExcessCeilA    = 20.0f;   // A — trip-line ceiling; it never rises above this on very large commands.
-float BattCurrentLimitA = 100.0f;  // A — max battery charge current (G4). Ceiling on the alternator-amp command = limit + measured house-load offset; requires the INA228 battery shunt as Battery Current Source. 0 = disabled.
+float BattCurrentLimitA = 100.0f;  // A — max battery charge current (G4). Ceiling on the alternator-amp command = limit + (house loads − other charge sources), signed; requires the INA228 battery shunt as Battery Current Source. 0 = disabled.
 bool BattLimitEnable  = true;    // Group 4 enable — gates the battery charge-current ceiling only
 bool LoadDumpEnable   = true;    // Group 5 enable — gates the Load Dump dBcur/dt trip, which survives even the global protections toggle; this is its only disarm
 float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst-case (idle) belt resonance; one fixed value covers the whole RPM range. dt-aware alpha.
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (scale-aware).
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
 float IExcessArmMarginV = 0.100f; // V below target at which iExcess voltage gate opens. Sized to block recovery double-fires (belt-resonance peaks mid-recovery) while keeping real catches (which fire at/above target)
-float ReseedFrac = 0.95f;  // shared: fraction of pre-event cv_I to seed on any protection recovery. 0.75→0.95 2026-07-21: blip log showed the seed dock (not the clamp) caused the multi-second below-target tails. Must stay <1.0 — the re-fire de-escalation ratchet compounds as ReseedFrac^n and dies at exactly 1.0
+float ReseedFrac = 0.95f;  // shunted installs: fraction of pre-event cv_I to seed on any protection recovery (the measured demandDrop already corrected the base). 0.75→0.95 2026-07-21: blip log showed the seed dock (not the clamp) caused the multi-second below-target tails — tails now capped by the bus-watched climb floor (CvRecovClimbRate). Must stay <1.0 (first-fire de-escalation on a persistent cause).
+float ReseedFracNoShunt = 0.50f;  // no-shunt installs: the departed-load measurement needs Bcur, so a load-dump fire reseeds blind. Seed low and let the bus-watched climb rediscover demand — 22:17 07-22 log: 0.95 blind seed after a 24A dump re-fired G2 twice
+float CvRecovClimbRate = 0.10f;   // fraction of MaxTableValue/s — recovery up-integration floor rate (0.10×150A=15A/s), gated off at projected bus arrival
 // --- Anti-windup ---
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
 float AwRecoverRate = 0.1f;      // HARDCODED, not user-adjustable. cv_I_aw_cap recovery rate (fraction of MaxTableValue/s) after fastOV clears. Only exercised on cold CV re-entry (MANUAL→AUTO, idle→bulk, post-shutdown). CSV3 slot CSV3_reserved_AwRecoverRate held for future use.
@@ -3782,6 +3784,10 @@ uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise
 uint8_t cvRecovEnable = 1;   // master switch for the post-protection integrator refill (deficit-gated Ki boost, replaced the timed window 2026-07-21). 1 = up-integration runs at Ki × up-to-cvRecovKiMax, tapering with the remaining reseed deficit; 0 = plain PI walks itself back (pace scales with post-cut error). Default ON since the 07-22 lithium A/B (single fire, ~5× refill rate, healed exit, no overshoot)
 uint8_t loadServeBoostEnable = 1;  // load-serve Ki boost (07-22): while the battery shunt shows sustained discharge in CV, up-integration runs at the refill's boosted rate toward the measured house loads — a stiff plant hides a 35A load behind ~0.25V of error, so plain Ki picks it up in ~30s. Shunt-gated; inert without one. Dev default ON, production TBD
 uint8_t reseedCorrEnable = 1;      // demand-corrected reseed (07-22, the 8-fire train): subtract the measured load drop at the fire from the release reseed + refill goal (shunt-gated), and escalate the ratchet ×0.85 per re-fire <1.5s after release (shunt-independent). OFF = plain ReseedFrac reseed
+// --- Hunt Governor (universal anti-oscillation damper — Hunt_Governor_Spec.md) ---
+uint8_t HuntGovEnable = 1;           // 1 = watch applied duty for a sustained 0.3–3 Hz hunt (idle-knee speed-coupled plant, 07-22 22:16 AGM logs) and derate the inner-loop Ki until it dies; an episode gain cuts cannot quiet is reverted in full (external cyclic source)
+volatile float g_huntDerate = 1.0f;  // live Ki multiplier [0.25..1]; applied inside recomputeCcGains so every SetTunings path preserves it. Session-only — never persisted
+float g_huntFreqHz = 0.0f;           // last confirmed wobble frequency (CSV1/ledger)
 float cvRecovSec = 2.5f;     // retired timed-window ramp span, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovEmaxV = 0.25f;  // retired timed-window error cap, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovKiMax = 5.0f;   // refill Ki multiplier at the moment of release (M tapers linearly to 1× as the deficit heals). Clamp [1,10]
@@ -6023,6 +6029,7 @@ void loop() {
       // that stall is logged as a fast-mode (field-on) read interval. gpio4IsLow reflects field
       // state set inside the call above.
       if (gpio4IsLow) { pfHasPrev = false; inaResetIntervalBaseline(); }
+      runHuntGovernor();  // hunt-detector evaluation (self-gated to every 32 control ticks; never inside the control call)
       TIMED_CALL(ft_altHealth, altHealth_tick(millis()));
       TIMED_CALL(ft_boatPerf, boatPerf_tick(millis()));   // Phase 3 boat performance (timing exposed via PerfLive registry)
       if (hardwarePresent == 1) drainIMUFifo();  // skip in fake mode — no hardware means 15ms I2C timeout per call floods the loop

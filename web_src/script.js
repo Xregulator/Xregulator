@@ -251,6 +251,7 @@ const CSV1_FIELDS = [
     "cvIterm",           // CV loop I contribution to Icv (A ×100) — cv_I integrator, live
     "cvKdTrim",          // CV loop D back-off at the Icv output (A ×100) — plotted negated
     "cvKdFiltV",         // IBV smoothed by CvKdVoltFiltTC (V ×100) — "Voltage for D term" trace
+    "huntDerate",        // hunt-governor live Ki derate (×100; 100 = full gain)
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -2628,7 +2629,10 @@ const CSV3_FIELDS = [
     "cvWindDownStopV",               // wind-down stop margin above commanded target (V); ×1000
     "LoadDumpEnable",                // Group 5 load dump enable (0/1)
     "loadServeBoostEnable",          // load-serve Ki boost toward measured house loads (0/1, shunt-gated)
-    "reseedCorrEnable",              // demand-corrected reseed: load-drop subtraction + rapid-refire ratchet (0/1)
+    "reseedCorrEnable",              // demand-corrected reseed: load-drop subtraction + rapid-refire rebase (0/1)
+    "HuntGovEnable",                 // oscillation damper master switch (0/1)
+    "ReseedFracNoShunt",             // no-shunt recovery seed fraction (×100)
+    "CvRecovClimbRate",              // recovery climb floor rate, fraction of MaxTableValue/s (×100)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5784,6 +5788,9 @@ function updateAllEchosOptimized(data) {
         { key: 'LoadDumpEnable',    id: 'LoadDumpEnable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'loadServeBoostEnable', id: 'loadServeBoostEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'reseedCorrEnable',  id: 'reseedCorrEnable_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'ReseedFracNoShunt', id: 'ReseedFracNoShunt_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'CvRecovClimbRate',  id: 'CvRecovClimbRate_echo',  transform: v => (v / 100).toFixed(2) },
+        { key: 'HuntGovEnable',     id: 'HuntGovEnable_echo',     transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'cvHelpersEnabled',  id: 'cvHelpersEnabled_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'coldChargeLockoutEnable', id: 'coldChargeLockoutEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'MinChargeTempF',    id: 'MinChargeTempF_echo',    transform: v => Math.round(toDisplayTemp(v)) },
@@ -11245,6 +11252,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("LoadDumpEnable_checkbox", data.LoadDumpEnable, "LoadDumpEnable");
         updateCheckbox("loadServeBoostEnable_checkbox", data.loadServeBoostEnable, "loadServeBoostEnable");
         updateCheckbox("reseedCorrEnable_checkbox", data.reseedCorrEnable, "reseedCorrEnable");
+        updateCheckbox("HuntGovEnable_checkbox", data.HuntGovEnable, "HuntGovEnable");
         updateCheckbox("cvHelpersEnabled_checkbox", data.cvHelpersEnabled, "cvHelpersEnabled");
         updateCheckbox("CvKdOneSided_checkbox", data.CvKdOneSided, "CvKdOneSided");
         updateCheckbox("CvKdExcessMode_checkbox", data.CvKdExcessMode, "CvKdExcessMode");
@@ -18303,10 +18311,10 @@ function cvBinToCsv(d, csv3) {
     // cvRiseGovEnable=0 targSlewed follows targV exactly. Without these a reader cannot tell
     // "D term never triggered" from "D term was switched off".
     lines.push(
-        `# Toggles: cvHelpersEnabled=${fmtRaw(c.cvHelpersEnabled, 0)} cvRiseGovEnable=${fmtRaw(c.cvRiseGovEnable, 0)}`
+        `# Toggles: cvHelpersEnabled=${fmtRaw(c.cvHelpersEnabled, 0)} cvRiseGovEnable=${fmtRaw(c.cvRiseGovEnable, 0)} HuntGovEnable=${fmtRaw(c.HuntGovEnable, 0)}`
     );
     lines.push(
-        `# Recovery: cvRecovEnable=${fmtRaw(c.cvRecovEnable, 0)} cvRecovKiMax=${fmtDiv(c.cvRecovKiMax, 100, 1)} ReseedFrac=${fmtDiv(c.ReseedFrac, 100, 2)} cvRecovBoostEnable=${fmtRaw(c.cvRecovBoostEnable, 0)} cvRecovBoostMax=${fmtDiv(c.cvRecovBoostMax, 100, 2)}x cvRecovBoostErrV=${fmtDiv(c.cvRecovBoostErrV, 1000, 2)}V loadServeBoostEnable=${fmtRaw(c.loadServeBoostEnable, 0)} reseedCorrEnable=${fmtRaw(c.reseedCorrEnable, 0)}`
+        `# Recovery: cvRecovEnable=${fmtRaw(c.cvRecovEnable, 0)} cvRecovKiMax=${fmtDiv(c.cvRecovKiMax, 100, 1)} ReseedFrac=${fmtDiv(c.ReseedFrac, 100, 2)} ReseedFracNoShunt=${fmtDiv(c.ReseedFracNoShunt, 100, 2)} CvRecovClimbRate=${fmtDiv(c.CvRecovClimbRate, 100, 2)}/s cvRecovBoostEnable=${fmtRaw(c.cvRecovBoostEnable, 0)} cvRecovBoostMax=${fmtDiv(c.cvRecovBoostMax, 100, 2)}x cvRecovBoostErrV=${fmtDiv(c.cvRecovBoostErrV, 1000, 2)}V loadServeBoostEnable=${fmtRaw(c.loadServeBoostEnable, 0)} reseedCorrEnable=${fmtRaw(c.reseedCorrEnable, 0)}`
     );
     lines.push(
         `# capReason codes: 0=none(unclamped) 1=KHard_G1(predictive) 2=KHard_G2(measured) 3=iExcess 4=loadDump 5=iExcessBulk(current-control phase)`

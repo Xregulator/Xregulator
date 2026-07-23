@@ -63,8 +63,9 @@ enum Csv1Index {
   CSV1_cvIterm,          // CV loop I contribution to Icv (A ×100) — cv_I integrator, live (also on CSV2 at 5 s); P/I/D plot
   CSV1_cvKdTrim,         // CV loop D back-off applied at the Icv output (A ×100); plotted negated as the D contribution
   CSV1_cvKdFiltV,        // IBV smoothed by CvKdVoltFiltTC (V ×100) — the D term's slope input; "Voltage for D term" trace
+  CSV1_huntDerate,       // hunt-governor live Ki derate (×100; 100 = full gain)
 
-  CSV1_FIELD_COUNT  // = 46
+  CSV1_FIELD_COUNT  // = 47
 };
 
 enum Csv2Index {
@@ -1018,6 +1019,9 @@ enum Csv3Index {
   CSV3_LoadDumpEnable,         // Group 5 load dump enable (0/1)
   CSV3_loadServeBoostEnable,   // load-serve Ki boost toward measured house loads (0/1, shunt-gated)
   CSV3_reseedCorrEnable,       // demand-corrected reseed: load-drop subtraction + rapid-refire ratchet (0/1)
+  CSV3_HuntGovEnable,          // hunt-governor (oscillation damper) master switch (0/1)
+  CSV3_ReseedFracNoShunt,      // no-shunt recovery seed fraction (×100)
+  CSV3_CvRecovClimbRate,       // recovery climb floor rate, fraction of MaxTableValue/s (×100)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -2181,6 +2185,12 @@ void setupServer() {
     response->addHeader("Content-Disposition", "attachment");
     response->addHeader("Cache-Control", "no-cache");
     request->send(response);
+  });
+
+  // ── Hunt-governor episode ledger (Hunt_Governor_Spec.md): one CSV line per damping episode ──
+  server.on("/huntledger", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (fsExists("/huntledger.csv")) request->send(LittleFS, "/huntledger.csv", "text/plain");
+    else request->send(200, "text/plain", "no hunt episodes recorded");
   });
 
   // ── Console history: device-side source of truth for the Download Logs console file ──
@@ -5581,6 +5591,12 @@ void setupServer() {
       settingWrite(NK_reseedCorrEnable, String((int)reseedCorrEnable).c_str());
       queueConsoleMessageF("Smart reseed: %s", reseedCorrEnable ? "ON" : "OFF — every release restores the plain seed fraction");
     }
+    if (request->hasParam("HuntGovEnable")) {  // oscillation damper: hunt detector + verified inner-Ki derate
+      foundParameter = true;
+      HuntGovEnable = (uint8_t)(request->getParam("HuntGovEnable")->value().toInt() ? 1 : 0);
+      settingWrite(NK_HuntGovEnable, String((int)HuntGovEnable).c_str());
+      queueConsoleMessageF("Oscillation damper: %s", HuntGovEnable ? "ON" : "OFF — hunting persists at full gain");
+    }
     if (request->hasParam("cvRecovSec")) {  // retired timed-window knob — writes the inert global (UI field removed)
       foundParameter = true;
       cvRecovSec = clamp_f(request->getParam("cvRecovSec")->value().toFloat(), 0.5f, 30.0f);
@@ -6277,9 +6293,25 @@ void setupServer() {
     if (request->hasParam("ReseedFrac")) {
       foundParameter = true;
       inputMessage = request->getParam("ReseedFrac")->value();
-      ReseedFrac = clamp_f(inputMessage.toFloat(), 0.2f, 1.0f);  // at exactly 1.0 the re-fire de-escalation ratchet (ReseedFrac^n) is dead — UI max stays 0.95, 1.0 is deliberate-raw-URL territory
+      ReseedFrac = clamp_f(inputMessage.toFloat(), 0.2f, 1.0f);  // at exactly 1.0 the first-fire de-escalation on a persistent cause is dead — UI max stays 0.95, 1.0 is deliberate-raw-URL territory
       settingWrite(NK_ReseedFrac, String(ReseedFrac, 2).c_str());
       queueConsoleMessageF("Recovery seed fraction set to: %.2f", ReseedFrac);
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("ReseedFracNoShunt")) {
+      foundParameter = true;
+      inputMessage = request->getParam("ReseedFracNoShunt")->value();
+      ReseedFracNoShunt = clamp_f(inputMessage.toFloat(), 0.1f, 0.95f);
+      settingWrite(NK_ReseedFracNS, String(ReseedFracNoShunt, 2).c_str());
+      queueConsoleMessageF("No-shunt recovery seed fraction set to: %.2f", ReseedFracNoShunt);
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("CvRecovClimbRate")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CvRecovClimbRate")->value();
+      CvRecovClimbRate = clamp_f(inputMessage.toFloat(), 0.01f, 1.0f);
+      settingWrite(NK_CvRecovClimb, String(CvRecovClimbRate, 2).c_str());
+      queueConsoleMessageF("Recovery climb rate set to: %.2f of max/s (%.0f A/s here)", CvRecovClimbRate, CvRecovClimbRate * (float)MaxTableValue);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("CVTuningMode")) {
@@ -8128,7 +8160,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason; +4: cvPTerm, cvIterm, cvKdTrim, cvKdFiltV
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason; +4: cvPTerm, cvIterm, cvKdTrim, cvKdFiltV; +1: huntDerate
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -8177,7 +8209,8 @@ void SendWifiData() {
                                SafeInt(g_cvPTerm, 100),        // CSV1_cvPTerm — P contribution to Icv (A ×100)
                                SafeInt(cv_I, 100),             // CSV1_cvIterm — I contribution to Icv (A ×100)
                                SafeInt(g_cvKdTrimLive, 100),   // CSV1_cvKdTrim — D back-off at the Icv output (A ×100)
-                               SafeInt(g_cvKdFiltV, 100)       // CSV1_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC (V ×100)
+                               SafeInt(g_cvKdFiltV, 100),      // CSV1_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC (V ×100)
+                               SafeInt(g_huntDerate, 100)      // CSV1_huntDerate — hunt-governor live Ki derate (×100)
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
@@ -8942,7 +8975,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -9287,7 +9320,10 @@ void SendWifiData() {
                                SafeInt(cvWindDownStopV, 1000),
                                (int)LoadDumpEnable,
                                (int)loadServeBoostEnable,
-                               (int)reseedCorrEnable);
+                               (int)reseedCorrEnable,
+                               (int)HuntGovEnable,
+                               SafeInt(ReseedFracNoShunt, 100),
+                               SafeInt(CvRecovClimbRate, 100));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

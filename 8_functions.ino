@@ -736,6 +736,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "cvRecovEnable", NK_cvRecovEnable, 1 },
   { "loadServeBoostEnable", NK_loadServeBoostEnable, 1 },
   { "reseedCorrEnable", NK_reseedCorrEnable, 1 },
+  { "HuntGovEnable", NK_HuntGovEnable, 1 },
   { "cvRecovSec", NK_cvRecovSec, 1 },      // retired, inert — kept so shared configs stay complete
   { "cvRecovEmaxV", NK_cvRecovEmaxV, 1 },  // retired, inert — kept so shared configs stay complete
   { "cvRecovKiMax", NK_cvRecovKiMax, 1 },
@@ -780,6 +781,8 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "SettleTimeBeforeCut", NK_SettleTimeBeforeCut, 1 },
   { "ShutdownPhase2HoldMs", NK_ShutdownPhase2HoldMs, 1 },
   { "ReseedFrac", NK_ReseedFrac, 1 },
+  { "ReseedFracNoShunt", NK_ReseedFracNS, 1 },
+  { "CvRecovClimbRate", NK_CvRecovClimb, 1 },
   { "IExcessArmMarginV", NK_IExcessArmMarginV, 1 },
   { "IExcessCeilA", NK_IExcessCeilA, 1 },
   { "IExcessFloorA", NK_IExcessFloorA, 1 },

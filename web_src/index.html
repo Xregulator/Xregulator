@@ -2647,7 +2647,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
                       Battery Charge Current Limit (A) (<span id="BattCurrentLimitA_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The most charging current the battery is allowed to receive, in amps — set it to the battery bank's maximum acceptance (for lithium, the C-rate limit). This is a ceiling on the command, not a trip: the alternator command is capped at this limit plus the measured house-load draw, so loads are always covered and only the battery's share is limited. Requires the INA228 battery shunt as the Battery Current Source. 0 disables the limit.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The most charging current the battery is allowed to receive, in amps — set it to the battery bank's maximum acceptance (for lithium, the C-rate limit). This is a ceiling on the command, not a trip: the alternator command is capped at this limit plus the measured house-load draw, so loads are always covered and only the battery's share is limited. Requires the INA228 battery shunt as the Battery Current Source. 0 disables the limit.<br><br>If you have other charging sources on the bus (solar, shore power, a DC-DC charger), the shunt sees everything going into the battery, so the alternator is backed off to make room for them. When those sources are putting in more than the boat is using, the alternator gets a lower ceiling — and if they can cover the whole limit on their own, the alternator is commanded down to nothing until they ease off.</span></span>
                       <span class="sinfo" data-sinfo="BattCurrentLimitA" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
@@ -2857,6 +2857,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g5">G5</span>
                       Recovery Seed Fraction (<span id="ReseedFrac_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">After a protection trip clears, charging current restarts at this fraction of what was flowing before the trip. Used when a battery shunt is present: the Smart Reseed load measurement has already corrected the restart point, so most of the current can return at once. Without a shunt the No-Shunt fraction below is used instead.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2871,8 +2872,40 @@
                   <article class="protections-param" data-groups="g1 g2 g3 g5">
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g5">G5</span>
+                      Recovery Seed Fraction, No Shunt (<span id="ReseedFracNoShunt_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Restart fraction used when no battery shunt is fitted. Without a shunt the controller cannot measure how much load left the bus when a trip was caused by a load switching off, so it restarts deliberately low and climbs back at the Recovery Climb Rate while watching the bus voltage — the climb stops itself where the bus reaches the target, which rediscovers the true demand. A low value costs a few seconds of climbing; a high value risks a repeat trip after a load dump.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="ReseedFracNoShunt" type="number" step="0.05" min="0.1" max="0.95" />
+                        <span class="protections-unit">×</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g5">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g5">G5</span>
+                      Recovery Climb Rate (<span id="CvRecovClimbRate_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How fast charging current climbs back after a protection trip, as a fraction of the alternator's maximum per second — 0.20 on a 100 A alternator is 20 A per second. The climb watches the measured bus voltage and pauses whenever the bus is about to arrive at the target, so a fast rate does not overshoot; it only shortens the time spent below target after a trip. Applies to every recovery, with or without a shunt.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="CvRecovClimbRate" type="number" step="0.01" min="0.01" max="1.0" />
+                        <span class="protections-unit">×max/s</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g5">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g5">G5</span>
                       Smart Reseed — subtract loads that switched off (<span id="reseedCorrEnable_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A protection event caused by a big load switching OFF leaves the stored current memory holding current the boat no longer wants — restoring almost all of it pushes the voltage right back over the trip line, and the event repeats in a rapid cycle. <strong>On:</strong> at the moment of the trip the controller measures how much load left the bus (battery shunt) and subtracts it from the restored current; each repeat trip within a couple of seconds also shrinks the restore fraction further until the cycle breaks. <strong>Off:</strong> every release restores the plain Recovery Seed Fraction of the pre-event current. The load measurement needs a battery shunt; the repeat-trip shrink works without one.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A protection event caused by a big load switching OFF leaves the stored current memory holding current the boat no longer wants — restoring almost all of it pushes the voltage right back over the trip line, and the event repeats in a rapid cycle. <strong>On:</strong> at the moment of the trip the controller measures how much load left the bus (battery shunt) and subtracts it from the restored current; a repeat trip within a couple of seconds restarts 30% below the previous restart — cutting from a value already proven too high — until the cycle breaks. <strong>Off:</strong> every release restores the plain seed fraction of the pre-event current. The load measurement needs a battery shunt; the repeat-trip cut works without one.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -3976,6 +4009,27 @@
                       <input type="hidden" name="password" class="password_field">
                       <input name="PidKd" type="number" step="0.001" min="0" max="10000" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Oscillation Damper (<span id="HuntGovEnable_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Watches for sustained slow hunting — a steady wobble in field drive, engine speed, and voltage that some engine/alternator/belt combinations develop at low engine speed under heavy load — and temporarily reduces the current loop's integral gain until the wobble dies. The change is verified: if reducing gain does not calm the wobble (for example a cycling load or an engine problem is the cause), full gain is restored automatically and the event is noted in the console. Nothing is stored permanently; every episode is logged at /huntledger. <strong>Off:</strong> hunting persists at full gain until conditions change.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="HuntGovEnable_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('HuntGovEnable_checkbox', 'HuntGovEnable', 'HuntGovEnable')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="HuntGovEnable" name="HuntGovEnable" type="number" value="" style="display:none;" />
                     </form>
                   </div>
                 </div>
@@ -6419,7 +6473,13 @@
                     <span class="tooltip-box">Absorption ends when charging current tapers to or below this value
                       continuously for the Absorption Completion Time. Confirms the battery is genuinely full. 5 amps
                       per
-                      100Ah of bank is typical.</span>
+                      100Ah of bank is typical.<br><br>
+                      Two things must both be true before this counts: current at or below your number, AND the
+                      battery still sitting up at the Absorption Voltage. A big load coming on, or the engine
+                      dropping to idle, can pull charging current down to almost nothing while the battery is only
+                      part full — on its own that looks exactly like a finished battery. Requiring the voltage to
+                      still be up there tells the two apart. If another charge source (solar, shore power) is holding
+                      the battery even higher, that still counts.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -6458,7 +6518,12 @@
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                     <span class="tooltip-box">Maximum time in Absorption before forcing a transition regardless of
                       current. Safety fallback in case Tail Current is never reached. Typical starting point: 30m per
-                      100Ah of battery bank.</span>
+                      100Ah of battery bank.<br><br>
+                      This clock only runs while the battery is actually held up at the Absorption Voltage. If the
+                      voltage sags — engine at idle, a heavy load, or any limit holding the alternator back — the
+                      clock pauses and picks up where it left off, so time spent not really absorbing doesn't count
+                      against you. As a backstop the phase always ends at twice this figure of real elapsed time,
+                      even if the battery never got up to voltage.</span>
                   </span>
                 </div>
                 <div class="form-input">

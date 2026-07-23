@@ -1791,6 +1791,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     loadServeBoostEnable = (uint8_t)settingRead(NK_loadServeBoostEnable).toInt();
   }
+  if (!settingExists(NK_HuntGovEnable)) {
+    settingWrite(NK_HuntGovEnable, String((int)HuntGovEnable).c_str());
+  } else {
+    HuntGovEnable = (uint8_t)settingRead(NK_HuntGovEnable).toInt();
+  }
   if (!settingExists(NK_reseedCorrEnable)) {
     settingWrite(NK_reseedCorrEnable, String((int)reseedCorrEnable).c_str());
   } else {
@@ -2204,6 +2209,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_ReseedFrac, String(ReseedFrac, 2).c_str());
   } else {
     settingWrite(NK_ReseedFrac, String(ReseedFrac, 2).c_str());
+  }
+  if (settingExists(NK_ReseedFracNS)) {
+    ReseedFracNoShunt = settingRead(NK_ReseedFracNS).toFloat();
+  } else {
+    settingWrite(NK_ReseedFracNS, String(ReseedFracNoShunt, 2).c_str());
+  }
+  if (settingExists(NK_CvRecovClimb)) {
+    CvRecovClimbRate = settingRead(NK_CvRecovClimb).toFloat();
+  } else {
+    settingWrite(NK_CvRecovClimb, String(CvRecovClimbRate, 2).c_str());
   }
   // OvGroup1Enable — migrates from old OvLayer2Enable NVS key if found
   if (settingExists(NK_OvGroup1Enable)) {

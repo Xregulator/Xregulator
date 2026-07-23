@@ -190,13 +190,262 @@ void recomputeCvGains() {
 // ×(12/BATTERY_VOLTAGE) bakes them into the duty-space gains the inner current PID actually applies,
 // so one set of tunings behaves identically on 12/24/48 V (field current per duty-% scales with bus
 // voltage). Call after any PidK* change and after a BATTERY_VOLTAGE change. currentPID is a global
-// object (constructed before setup), so SetTunings is safe to call unconditionally.
+// object (constructed before setup), so SetTunings is safe to call unconditionally. The hunt
+// governor's Ki derate applies here — the single SetTunings choke point — so every recompute path
+// (setting change, class change, governor step) preserves it.
 void recomputeCcGains() {
   float vNorm = 12.0f / (float)BATTERY_VOLTAGE;     // 1, 0.5, 0.25 for 12/24/48 V
   PidKp_active = PidKp * vNorm;
   PidKi_active = PidKi * vNorm;
   PidKd_active = PidKd * vNorm;
-  currentPID.SetTunings(PidKp_active, PidKi_active, PidKd_active);
+  currentPID.SetTunings(PidKp_active, PidKi_active * g_huntDerate, PidKd_active);
+}
+
+// ==================== HUNT GOVERNOR ====================
+// Universal anti-oscillation damper (Hunt_Governor_Spec.md). A marginally-stable loop meeting a
+// speed-rotated plant (idle knee: each %duty sags rpm, the sag cancels the field gain → plant
+// ~quadrature) rings at 0.3–3 Hz. Detect the symptom, derate inner Ki in ×0.8 steps, and keep the
+// derate ONLY if the wobble measurably dies — an externally-forced wobble (cyclic load, faulty
+// governor) does not respond to our gain, so the episode reverts in full and stands down.
+#define HG_RING_N 128            // 6.4 s at 50 ms — two periods of the lowest bin (hard floor for 0.31 Hz selectivity)
+#define HG_EVAL_EVERY 32         // evaluate every 1.6 s (window/4)
+#define HG_NBINS 6
+#define HG_STEP 0.8f
+#define HG_MAX_STEPS 4           // ×0.8^4 ≈ 0.41 per episode
+#define HG_FLOOR 0.25f           // absolute derate floor — stacked hold-state episodes stop here
+#define HG_TRIG_AMP 0.5f         // % duty — hunt logs measured 1.17–1.48, quiet-log median ~0.4
+#define HG_TRIG_RATIO 3.0f       // peak vs median of other bins — rejected a 2.22% broadband load transient amplitude alone would have flagged
+#define HG_QUIET_AMP 0.3f
+#define HG_QUIET_RATIO 2.0f
+#define HG_STANDDOWN_MS 600000UL
+#define HG_EPISODE_TIMEOUT_MS 90000UL
+static const float HG_BIN_HZ[HG_NBINS] = { 0.31f, 0.47f, 0.70f, 1.05f, 1.56f, 2.34f };
+static float hgRing[HG_RING_N];  // 512 B, deliberately internal: control-adjacent and far below the PSRAM-rule size
+static uint16_t hgHead = 0;
+static uint32_t hgTick = 0;
+static uint32_t hgContamTick = 0;  // hgTick at the last contaminated push — window is clean once hgTick-this >= HG_RING_N
+static uint32_t hgLastPushMs = 0;
+static float hgDtEmaMs = 50.0f;
+static float hgSpEma = 0.0f;
+
+// Per-control-tick sampler: ONE ring write plus the contamination flags — the analysis never runs
+// here. Self-clocked to ~50 ms so loop cadence and FieldAdjustmentInterval changes don't move the
+// analysis band; Goertzel coefficients derive from the measured dt EMA at evaluation time.
+void huntGovObserve(float dutyApplied, bool closedLoopOk) {
+  uint32_t nowMs = millis();
+  if (hgLastPushMs != 0 && (uint32_t)(nowMs - hgLastPushMs) < 45UL) return;
+  float dtMs = (hgLastPushMs == 0) ? 50.0f : (float)(uint32_t)(nowMs - hgLastPushMs);
+  hgLastPushMs = nowMs;
+  if (dtMs > 250.0f) {  // sampling gap (mode exit, stall) — window unusable
+    dtMs = 250.0f;
+    hgContamTick = hgTick;
+  }
+  hgDtEmaMs += 0.05f * (dtMs - hgDtEmaMs);
+  hgRing[hgHead] = dutyApplied;
+  hgHead = (uint16_t)((hgHead + 1) % HG_RING_N);
+  hgTick++;
+  float spDev = fabsf(setpointLimited - hgSpEma);
+  hgSpEma += (dtMs / (2000.0f + dtMs)) * (setpointLimited - hgSpEma);
+  bool contam = !closedLoopOk
+                || g_fastOvClampActive || g_loadDumpActive || g_cvRecovActive
+                || TuningMode || CVTuningMode || batteryHealthTestActive
+                || systemIDActive || fieldCurveActive || fieldCutActive
+                || cvPlantFitActive || resTestActive || cvStressActive
+                || (ManualFieldToggle == 1)
+                || spDev > fmaxf(3.0f, 0.04f * (float)AlternatorNominalAmps);
+  if (contam) hgContamTick = hgTick;
+}
+
+static void hgLedgerAppend(const char *verdict, float freqHz, float a0, float aEnd, uint8_t steps) {
+  const char *hdr = "epoch,rpm,cv,freqHz,a0_pct,aEnd_pct,steps,verdict,derateExit";
+  if (!fsExists("/huntledger.csv")) {
+    File h = LittleFS.open("/huntledger.csv", "w");
+    if (h) {
+      h.println(hdr);
+      h.close();
+    }
+  } else {
+    File c = LittleFS.open("/huntledger.csv", "r");
+    if (c && c.size() > 6144) {  // cap the ledger: drop the oldest half, keep whole lines
+      c.readStringUntil('\n');
+      c.seek(c.size() / 2);
+      c.readStringUntil('\n');
+      String keep = c.readString();
+      c.close();
+      File w = LittleFS.open("/huntledger.csv", "w");
+      if (w) {
+        w.println(hdr);
+        w.print(keep);
+        w.close();
+      }
+    } else if (c) {
+      c.close();
+    }
+  }
+  File f = LittleFS.open("/huntledger.csv", "a");
+  if (!f) return;
+  f.printf("%lu,%d,%d,%.2f,%.2f,%.2f,%u,%s,%.2f\n", (unsigned long)time(nullptr), (int)RPM,
+           voltageControlActive ? 1 : 0, freqHz, a0, aEnd, (unsigned)steps, verdict, g_huntDerate);
+  f.close();
+}
+
+// Evaluation + state machine. Called every loop() pass from Xregulator.ino; self-gates to one
+// Goertzel pass (6 bins × 128 samples, tens of µs) per HG_EVAL_EVERY control ticks.
+void runHuntGovernor() {
+  static uint32_t lastEvalTick = 0;
+  static uint8_t hgState = 0;  // 0 idle, 1 episode, 2 hold(creep toward session ceiling), 3 standdown
+  static uint8_t consec = 0, quietCnt = 0, steps = 0, evalsSinceStep = 0;
+  static float a0 = 0.0f, baseDerate = 1.0f, sessCeil = 1.0f, rpmAtVerify = 0.0f, rpmEma = 0.0f;
+  static uint32_t standdownUntilMs = 0, episodeStartMs = 0;
+  static float hann[HG_RING_N];
+  static bool hannInit = false;
+
+  if (!HuntGovEnable) {
+    if (g_huntDerate < 1.0f) {
+      g_huntDerate = 1.0f;
+      recomputeCcGains();
+    }
+    hgState = 0;
+    consec = 0;
+    sessCeil = 1.0f;
+    g_huntFreqHz = 0.0f;
+    return;
+  }
+  if (hgTick - lastEvalTick < HG_EVAL_EVERY) return;
+  lastEvalTick = hgTick;
+
+  if (!hannInit) {
+    for (int i = 0; i < HG_RING_N; i++) hann[i] = 0.5f - 0.5f * cosf(2.0f * (float)M_PI * (float)i / (float)(HG_RING_N - 1));
+    hannInit = true;
+  }
+  rpmEma += 0.1f * ((float)RPM - rpmEma);  // τ ≈ 16 s at the 1.6 s eval cadence
+  // A large rpm-regime change voids the session ceiling — the pocket that justified it moved.
+  if (sessCeil < 0.999f && rpmAtVerify > 1.0f && (rpmEma < 0.75f * rpmAtVerify || rpmEma > 1.33f * rpmAtVerify)) sessCeil = 1.0f;
+
+  if (hgState == 3) {
+    if ((int32_t)(millis() - standdownUntilMs) < 0) return;
+    hgState = 0;
+  }
+  if (hgState == 2) {
+    if (g_huntDerate < sessCeil) {
+      g_huntDerate = fminf(sessCeil, g_huntDerate + 0.0032f);  // +0.2%/s at the 1.6 s cadence
+      recomputeCcGains();
+    }
+    if (g_huntDerate >= 0.999f) {
+      g_huntDerate = 1.0f;
+      recomputeCcGains();
+      hgState = 0;
+    }
+  }
+  if (hgState == 1 && (uint32_t)(millis() - episodeStartMs) > HG_EPISODE_TIMEOUT_MS) {
+    // Stalled — usually a mid-episode transient froze evaluation. Revert, no standdown.
+    g_huntDerate = baseDerate;
+    recomputeCcGains();
+    hgLedgerAppend("aborted", g_huntFreqHz, a0, 0.0f, steps);
+    hgState = 0;
+    consec = 0;
+    return;
+  }
+  if (hgTick < HG_RING_N || (hgTick - hgContamTick) < HG_RING_N) {
+    consec = 0;
+    return;
+  }
+
+  float fs = 1000.0f / fmaxf(hgDtEmaMs, 1.0f);
+  float s1[HG_NBINS] = { 0 }, s2[HG_NBINS] = { 0 }, coef[HG_NBINS];
+  bool binOk[HG_NBINS];
+  for (int b = 0; b < HG_NBINS; b++) {
+    binOk[b] = HG_BIN_HZ[b] < 0.4f * fs;
+    coef[b] = 2.0f * cosf(2.0f * (float)M_PI * HG_BIN_HZ[b] / fs);
+  }
+  float mean = 0.0f;
+  for (int i = 0; i < HG_RING_N; i++) mean += hgRing[i];
+  mean /= (float)HG_RING_N;
+  float mn = 1e9f, mx = -1e9f;
+  for (int i = 0; i < HG_RING_N; i++) {
+    float raw = hgRing[(hgHead + i) % HG_RING_N];
+    if (raw < mn) mn = raw;
+    if (raw > mx) mx = raw;
+    float v = (raw - mean) * hann[i];
+    for (int b = 0; b < HG_NBINS; b++) {
+      float s0 = v + coef[b] * s1[b] - s2[b];
+      s2[b] = s1[b];
+      s1[b] = s0;
+    }
+  }
+  if (mx - mn > 12.0f) {  // step/transient the contamination flags didn't catch
+    consec = 0;
+    return;
+  }
+  float amps[HG_NBINS];
+  int pk = 0;
+  for (int b = 0; b < HG_NBINS; b++) {
+    float p = s1[b] * s1[b] + s2[b] * s2[b] - coef[b] * s1[b] * s2[b];
+    amps[b] = binOk[b] ? 2.0f * sqrtf(fmaxf(p, 0.0f)) / (0.5f * (float)HG_RING_N) : 0.0f;  // Hann coherent gain 0.5
+    if (amps[b] > amps[pk]) pk = b;
+  }
+  float others[HG_NBINS - 1];
+  int n = 0;
+  for (int b = 0; b < HG_NBINS; b++)
+    if (b != pk) others[n++] = amps[b];
+  for (int i = 1; i < n; i++) {
+    float k = others[i];
+    int j = i - 1;
+    while (j >= 0 && others[j] > k) {
+      others[j + 1] = others[j];
+      j--;
+    }
+    others[j + 1] = k;
+  }
+  float aMed = others[n / 2];
+  float aPk = amps[pk];
+  bool hunt = (aPk > HG_TRIG_AMP) && (aPk > HG_TRIG_RATIO * aMed);
+  bool quiet = (aPk < HG_QUIET_AMP) || (aPk < HG_QUIET_RATIO * aMed);
+
+  if (hgState == 1) {
+    evalsSinceStep++;
+    quietCnt = quiet ? (uint8_t)(quietCnt + 1) : 0;
+    if (quietCnt >= 3) {
+      sessCeil = fminf(1.0f, g_huntDerate * 1.1f);  // recovery creep parks just above the verified quiet point for this session
+      rpmAtVerify = rpmEma;
+      hgLedgerAppend("damped", g_huntFreqHz, a0, aPk, steps);
+      queueConsoleMessageF("Oscillation damper: %.2f Hz wobble gone at %d%% current-loop gain", g_huntFreqHz, (int)(g_huntDerate * 100.0f));
+      hgState = 2;
+    } else if (!quiet && evalsSinceStep >= 3) {  // 3 evals ≈ window refilled with post-step data
+      if (steps < HG_MAX_STEPS) {
+        steps++;
+        evalsSinceStep = 0;
+        g_huntDerate = fmaxf(HG_FLOOR, g_huntDerate * HG_STEP);
+        recomputeCcGains();
+      } else {
+        g_huntDerate = baseDerate;
+        recomputeCcGains();
+        hgLedgerAppend("external-suspected", g_huntFreqHz, a0, aPk, steps);
+        queueConsoleMessageF("Oscillation damper: gain cuts did not calm the %.2f Hz wobble — restored full gain (external cyclic load or engine issue suspected)", g_huntFreqHz);
+        standdownUntilMs = millis() + HG_STANDDOWN_MS;
+        hgState = 3;
+        consec = 0;
+      }
+    }
+    return;
+  }
+  // Idle / hold: confirmation counter. A hold-state re-confirmation opens a new episode from the
+  // current derate, so a failed follow-up reverts to the verified level, never below it.
+  consec = hunt ? (uint8_t)(consec + 1) : 0;
+  if (consec >= 2) {
+    baseDerate = g_huntDerate;
+    a0 = aPk;
+    g_huntFreqHz = HG_BIN_HZ[pk];
+    steps = 1;
+    evalsSinceStep = 0;
+    quietCnt = 0;
+    episodeStartMs = millis();
+    g_huntDerate = fmaxf(HG_FLOOR, baseDerate * HG_STEP);
+    recomputeCcGains();
+    queueConsoleMessageF("Oscillation damper: %.2f Hz wobble detected (%.1f%% duty swing) — reducing current-loop gain", g_huntFreqHz, a0);
+    hgState = 1;
+    consec = 0;
+  }
 }
 
 // ccDutyCeiling — the upper duty bound the CC loop is allowed to reach. This is simply MaxDuty (Max
@@ -1718,9 +1967,11 @@ void AdjustFieldLearnMode() {
   }
   // Post-protection integrator refill (deficit-gated rate law). While active, UP-integration of
   // cv_I runs at VoltageKi_active × M, M = 1 + (cvRecovKiMax−1)·(remaining deficit / deficit at
-  // release) — fast while the reseed hole is big, tapering to normal as it heals. It rides the
-  // NORMAL integration path, so the plant paces it through live error and every existing gate
-  // applies (kdLimiting freeze, satHi, cv_I_aw_cap, battery-current ceiling) — which is why the
+  // release) — fast while the reseed hole is big, tapering to normal as it heals — floored at
+  // CvRecovClimbRate A/s while the projected bus arrival is still short of target (07-23), so a
+  // low seed heals in seconds instead of error-paced tails. It rides the NORMAL integration path,
+  // so every existing gate applies (kdLimiting freeze, satHi, cv_I_aw_cap, battery-current
+  // ceiling) — which is why the
   // old timed window's error cap is unnecessary. A premise-void backstop survives (see the
   // termination block): satHi freezes cv_I whenever Icv rails at the goal ceiling, so if the
   // pre-trip current stops holding the target the deficit could never heal and the ceiling
@@ -1735,15 +1986,16 @@ void AdjustFieldLearnMode() {
   // cvlog_20260718_1117); stale-EMA fallback is preEventCvI. Any new fire cancels the refill —
   // the mid-heal cv_I becomes the next reseed base (de-escalation ratchet).
   static bool recovActive = false;
-  static float recovCvGoal = 0.0f;    // max(cvSteadyHoldEma, preEventIcv) − demandDropA snapshot at release — heal target AND the Icv ceiling
+  static float recovCvGoal = 0.0f;    // max(cvSteadyHoldEma, preEventIcv) − demandDropA snapshot at release (= the seed on a rapid re-fire) — heal target AND the Icv ceiling
   static float recovDeficit0 = 0.5f;  // recovCvGoal − cv_I at release (floored 0.5A) — normalizes the Ki-boost taper
   static uint32_t recovStartMs = 0;     // release stamp — the premise-void + recovered exits arm 2 s later (field-lag gap right after release has the ceiling pinned on a briefly-flat bus)
   static uint8_t recovStarveTicks = 0;  // consecutive PI ticks the goal ceiling is pinned with the bus low + not rising
   static uint8_t recovHeldTicks = 0;    // consecutive PI ticks the bus has held ≈target — the "recovered" exit; without it the window latches as a stale ceiling whenever the plant heals needing less current than the goal (13:56 07-22 zombie)
   static float recovSlopeEma = 0.0f;    // ~1s EMA of cvDSlope for the premise-void exit — raw per-tick slope is ripple-fakeable
   static float demandDropA = 0.0f;      // house-load amps that left the bus at the fire (rising-edge loads vs preEventLoadEma) — subtracted from reseed base AND goal, else the refill restores a current the event proved unwanted
-  static uint8_t rapidReFires = 0;      // consecutive re-fires <1.5s after release — proof the seed is still high; escalates the reseed ratchet ×0.85^n
+  static uint8_t rapidReFires = 0;      // consecutive re-fires <1.5s after release — proof the seed is still high; rebases the next seed on lastSeedA ×0.7
   static uint32_t lastReleaseMs = 0;
+  static float lastSeedA = 0.0f;        // cv_I written at the last release — the rebase base on a rapid re-fire (preEventCvI regrows mid-train as the refill climbs: 22:17 07-22, 3 fires shedding only ~14%/cycle)
   static bool recovWalking = false;     // starve backstop engaged: the goal ceiling walks up at a bounded rate instead of releasing in one step (a one-tick release steps the command by the whole P+I surplus — 25-30A steps re-fired immediately, 18:31 07-22)
   static bool loadServeActive = false;    // load-serve Ki boost (loadServeBoostEnable): measured demand (loads + battery intake) exceeds cv_I with the bus low → boost up-integration toward it. e=K×ΔI hides a 35A load behind ~0.25V on lithium, so plain Ki serves it in ~30s; the old battery-discharge trigger never held — the P-boost parks Bcur near 0 within ~0.3s (16:24 07-22 log)
   static float loadServeGoal = 0.0f;      // loadsNow + battIntakeEma snapshot at engagement — taper reference and the healed-exit target
@@ -2737,14 +2989,17 @@ void AdjustFieldLearnMode() {
                           && MaintainMode == 0 && TargetVoltageMode == 0 && !CVTuningMode;
         if (MaintainMode == 1 || zeroFloatActive) uTargetAmps = 0;
 
-        // ── House-load offset + battery charge-current ceiling (G4) ─────────
-        // I_load = MeasuredAmps − Bcur (alternator minus battery current). Light EMA so it tracks
-        // real load changes within ~1 s without chasing INA ripple. Converts the operator's battery
-        // charge limit into alternator amps (limit + I_load) and min-selects it into the command
-        // ceiling — applies in bulk AND CV (icvCeil inherits uTargetAmps below). The offset is
-        // clamped ≥0 at use so estimate noise can only lower the ceiling (more conservative).
+        // ── House-load / other-source offset + battery charge-current ceiling (G4) ─────────
+        // MeasuredAmps − Bcur is house loads MINUS anything else charging the bank (solar, shore, DC-DC):
+        // the node balance is I_alt + I_other = I_batt + I_load. Light EMA so it tracks real changes within
+        // ~1 s without chasing INA ripple. Adding it to the operator's battery charge limit converts that
+        // limit into an alternator-amp ceiling that stays correct however many sources are on the bus, and
+        // min-selects it into the command ceiling — applies in bulk AND CV (icvCeil inherits uTargetAmps).
+        // Deliberately NOT clamped ≥0: a second source out-producing the house loads makes this legitimately
+        // negative, and clamping it there let the alternator overshoot the battery limit by exactly that
+        // source's contribution. Only the resulting ceiling is floored at 0.
         // Gated on a configured INA228 battery shunt; 0 = feature disabled.
-        static float loadOffsetFilt = 0.0f;  // EMA of MeasuredAmps − Bcur (house-load offset, A)
+        static float loadOffsetFilt = 0.0f;  // EMA of MeasuredAmps − Bcur (A; negative = other sources exceed loads)
         {
           const float ldoTC = 0.25f;  // s
           static bool ldoInit = false;
@@ -2757,7 +3012,7 @@ void AdjustFieldLearnMode() {
         }
         bool battCeilBinding = false;  // battery charge-current ceiling won the min-select this tick (banner limiter code 4)
         if (BattLimitEnable && BattCurrentLimitA > 0.0f && BatteryCurrentSource == 0 && ShuntResistanceMicroOhm > 0 && BatteryShuntPresent) {
-          float battCeilAlt = BattCurrentLimitA + fmaxf(0.0f, loadOffsetFilt);
+          float battCeilAlt = fmaxf(0.0f, BattCurrentLimitA + loadOffsetFilt);
           // Console note when the battery limit is the binding ceiling AND output is actually riding it
           // (e.g. absorption approaching target slowly, or bulk capped below the RPM table): once after
           // 5 s sustained, reminder at most every 10 min. Diagnosis aid, throttled against spam.
@@ -2771,8 +3026,8 @@ void AdjustFieldLearnMode() {
               else if ((uint32_t)(currentMillis - battCeilBindStartMs) > 5000UL
                        && (battCeilLastMsgMs == 0 || (uint32_t)(currentMillis - battCeilLastMsgMs) > 600000UL)) {
                 battCeilLastMsgMs = currentMillis;
-                queueConsoleMessageF("Battery charge limit binding: command capped at %.0fA (limit %.0fA + house loads %.0fA)",
-                                     battCeilAlt, BattCurrentLimitA, fmaxf(0.0f, loadOffsetFilt));
+                queueConsoleMessageF("Battery charge limit binding: alternator command capped at %.0fA (%.0fA battery limit %+.0fA house loads minus other charge sources)",
+                                     battCeilAlt, BattCurrentLimitA, loadOffsetFilt);
               }
             } else {
               battCeilBindStartMs = 0;
@@ -3422,16 +3677,24 @@ void AdjustFieldLearnMode() {
           if (voltageControlActive && g_fastOvClampActive && !fastOvClampActive) {
             g_ovClampRiseMs = 0;  // episode ended — disarm the tau timer until the next rising edge stamps it
             float icvHi_seed = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // alternator command ceiling in CV
-            // Demand-drop correction + rapid-refire escalation: preEventCvI is the wrong restore
-            // target when the fire was CAUSED by load leaving the bus (13:56 07-22: 8-fire train
-            // shedding 5%/cycle from a 50A seed toward an 18A plant). Subtract the measured load
-            // drop; each re-fire <1.5s after release proves the seed is still high. Base floored at
-            // the battery's charging share: a load departure can never justify reseeding below what
-            // the battery alone was taking at target (the floor sits inside fracEff, so the ×0.85^n
-            // de-escalation ratchet still dies out on a persistent cause).
-            float fracEff = fmaxf(ReseedFrac * powf(0.85f, (float)rapidReFires), 0.2f);
+            // Seed fraction is shunt-gated: with a shunt demandDropA already corrected the base
+            // (restore ReseedFrac); without one the drop is unmeasurable — seed low
+            // (ReseedFracNoShunt) and let the bus-watched climb floor rediscover demand.
+            // A re-fire <1.5s proves the SEED itself was above demand → rebase on the previous
+            // seed ×0.7, min-ed with preEventCvI (the refill regrows preEventCvI mid-train, which
+            // is how the old ×0.85^n ratchet took 3 fires to shed a 24A dump — 22:17 07-22).
+            // intakeFloor: a load departure never justifies seeding below the battery's own share.
             float intakeFloor = fminf(fmaxf(battIntakeEma, 0.0f), preEventCvI);
-            cv_I = clamp_f(fmaxf(preEventCvI - demandDropA, intakeFloor) * fracEff, 0.0f, icvHi_seed);
+            float seedBase, seedFrac;
+            if (rapidReFires == 0) {
+              seedBase = preEventCvI;
+              seedFrac = HAS_BATT_SHUNT ? ReseedFrac : ReseedFracNoShunt;
+            } else {
+              seedBase = fminf(lastSeedA, preEventCvI);
+              seedFrac = 0.7f;
+            }
+            cv_I = clamp_f(fmaxf(seedBase - demandDropA, intakeFloor) * seedFrac, 0.0f, icvHi_seed);
+            lastSeedA = cv_I;
             if (demandDropA > 0.0f || rapidReFires > 0) {
               queueConsoleMessageF("CV reseed %.0fA: measured load drop -%.0fA, rapid re-fire x%u",
                                    cv_I, demandDropA, (unsigned)rapidReFires);
@@ -3471,7 +3734,11 @@ void AdjustFieldLearnMode() {
               float holdBasis = holdFresh ? cvSteadyHoldEma : preEventCvI;
               // Goal drops by the measured demand too — else the refill drives cv_I right back to the
               // departed-load current and re-fires. Floored at the reseed so the deficit stays ≥0.
-              recovCvGoal = clamp_f(fmaxf(holdBasis, preEventIcv) - demandDropA, cv_I, icvHi_seed);  // snapshot NOW — preEvent* refresh to post-seed values next tick
+              // A rapid re-fire proved every memory-derived basis above demand: goal = seed, no
+              // refill past it (the starve-walk lifts the ceiling if the bus then stalls low).
+              recovCvGoal = (rapidReFires > 0)
+                              ? cv_I
+                              : clamp_f(fmaxf(holdBasis, preEventIcv) - demandDropA, cv_I, icvHi_seed);  // snapshot NOW — preEvent* refresh to post-seed values next tick
               recovDeficit0 = fmaxf(recovCvGoal - cv_I, 0.5f);
               recovStartMs = currentMillis;
               recovStarveTicks = 0;
@@ -3825,6 +4092,15 @@ void AdjustFieldLearnMode() {
                 KiUp *= 1.0f + (cvRecovKiMax - 1.0f) * clamp_f((loadServeGoal - cv_I) / loadServeDeficit0, 0.0f, 1.0f);
               }
               float dI = (e >= 0.0f ? KiUp : KiDown) * e * dtSec;
+              // Bus-watched climb floor: the error-paced refill trickles a low seed's last amps in
+              // at sub-A/s (07-21 below-target tails; the 16:25 07-22 zeroed seed took 28s). Gated
+              // on projected arrival — the A3 brake's staleness+actuator horizon — so the handback
+              // stops before the bus lands. The freeze/satHi gates below still veto the floor.
+              if (recovActive && e >= 0.0f) {
+                float arriveTauS = 0.10f + 0.0015f * (float)VoltageLoopInterval + 0.001f * VoltageFilterTC;
+                bool arriving = (getFiltV() + fmaxf(cvDSlope, 0.0f) * arriveTauS) >= voltageTargetSlewed;
+                if (!arriving) dI = fmaxf(dI, CvRecovClimbRate * (float)MaxTableValue * dtSec);
+              }
 
               bool supervisorLimiting = fastOvClampActive && ((float)uTargetAmps < uTargetRaw_cached - 0.01f);
               bool slewStarved = (setpointLimited < Icv - 2.0f);  // 2A margin: >10x the steady-CV Icv-vs-setpoint jitter (p99 0.2A), so it engages only on genuine slew lag
@@ -4192,6 +4468,12 @@ void AdjustFieldLearnMode() {
                      dutyRequest, tick.rpmMinDuty, kneeModeOk);
   }
 
+  {
+    bool huntModeOk = (sysMode == SYS_MODE_AUTO) && !sysIDRunning && tick.chargingEnabled
+                      && !tick.inLockout && !gpio4IsLow;
+    huntGovObserve(dutyNewFloat, huntModeOk);
+  }
+
   if (sysMode == SYS_MODE_AUTO) {
     innerTermP = (float)currentPID.GetPterm();
     innerTermI = (float)currentPID.GetIterm();
@@ -4539,27 +4821,65 @@ void updateChargingStage() {
     ChargingVoltageTargetReq = AbsorptionVoltage;
 
     const bool thermallyConstrained = (thermalPenaltyAmps > 2.0f) && (uTargetAmps <= TailCurrent_A * 2.0f);  //if you ever want CV-awareness here you'd change it to Icv <= TailCurrent_A * 2.0f.
+    // Tail current alone is ambiguous: a house load — or any non-thermal limiter holding the alternator
+    // short of target — drives Bcur to ~0 or negative while the pack is nowhere near absorbed, ending
+    // absorption on a half-charged bank. Require the bus to actually BE at the absorption target first.
+    // One-sided: another charge source holding the bus ABOVE target is a legitimate tail condition.
+    const float ABS_V_TAIL_BAND = 0.15f * ((float)BATTERY_VOLTAGE / 12.0f);
+    const bool atAbsorbV = (v >= (AbsorptionVoltage - ABS_V_TAIL_BAND));
     // No battery shunt → Bcur is meaningless (reads ~0), which would false-trip tail on tick 1 and drop
     // the bank out of absorption instantly. Disable the tail path; absorption then ends on AbsorptionTimeoutMs.
-    const bool tailReached = HAS_BATT_SHUNT && !thermallyConstrained && (Bcur <= TailCurrent_A);
-    const bool timedOut = ((uint32_t)(now - absorptionStartTime) >= AbsorptionTimeoutMs);
+    const bool tailReached = HAS_BATT_SHUNT && !thermallyConstrained && atAbsorbV && (Bcur <= TailCurrent_A);
 
-    static bool lastThermallyConstrained = false;
+    // AbsorptionTimeoutMs counts time actually spent AT the absorption voltage, not wall clock. Entering
+    // absorption only proves the bank hit the voltage once — it says nothing about who put it there, so a
+    // second charge source (or one idle-RPM sag) could otherwise burn the whole budget down and dump a
+    // half-charged bank into Float. absorbWallCeiling bounds the pause so a bank that can never reach
+    // target still leaves absorption. Epoch-keyed to absorptionStartTime so every reset path
+    // (enter_sys_auto, Restart button, bulk entry) re-arms this without knowing it exists.
+    static bool absorbClockArmed = false;
+    static uint32_t absorbClockEpoch = 0, absorbClockPrevMs = 0, absorbHeldMs = 0;
+    if (!absorbClockArmed || absorbClockEpoch != absorptionStartTime) {
+      absorbClockArmed = true;
+      absorbClockEpoch = absorptionStartTime;
+      absorbHeldMs = 0;
+      absorbClockPrevMs = now;
+    }
+    if (atAbsorbV) absorbHeldMs += (uint32_t)(now - absorbClockPrevMs);
+    absorbClockPrevMs = now;
+    const uint32_t absorbWallCeiling = (AbsorptionTimeoutMs > (UINT32_MAX / 2)) ? UINT32_MAX
+                                                                                : (AbsorptionTimeoutMs * 2);
+    const bool timedOut = (absorbHeldMs >= AbsorptionTimeoutMs) ||
+                          ((uint32_t)(now - absorptionStartTime) >= absorbWallCeiling);
+
+    const bool tailSuppressed = HAS_BATT_SHUNT && (thermallyConstrained || !atAbsorbV);
+    static bool lastTailSuppressed = false;
     static uint32_t lastTailConstraintLogMs = 0;
     // Throttle to once per 10s — thermal constraint can flap rapidly under oscillating penalty
-    if (thermallyConstrained != lastThermallyConstrained && (uint32_t)(now - lastTailConstraintLogMs) >= 10000) {
-      if (thermallyConstrained) {
+    if (tailSuppressed != lastTailSuppressed && (uint32_t)(now - lastTailConstraintLogMs) >= 10000) {
+      if (tailSuppressed) {
         queueConsoleMessageF(
-          "Absorption: tail detection suppressed (thermal) | penalty=%.1fA uTarget=%.1fA tailThresh=%.1fA",
-          thermalPenaltyAmps, uTargetAmps, TailCurrent_A);
+          "Absorption: tail detection suppressed (%s) | battV=%.2fV absTarget=%.2fV penalty=%.1fA uTarget=%.1fA tailThresh=%.1fA",
+          thermallyConstrained ? "thermal" : "below absorption voltage",
+          v, AbsorptionVoltage, thermalPenaltyAmps, uTargetAmps, TailCurrent_A);
       } else {
         queueConsoleMessageF(
-          "Absorption: tail detection resumed | penalty=%.1fA uTarget=%.1fA tailThresh=%.1fA",
-          thermalPenaltyAmps, uTargetAmps, TailCurrent_A);
+          "Absorption: tail detection resumed | battV=%.2fV absTarget=%.2fV penalty=%.1fA uTarget=%.1fA tailThresh=%.1fA",
+          v, AbsorptionVoltage, thermalPenaltyAmps, uTargetAmps, TailCurrent_A);
       }
       lastTailConstraintLogMs = now;
     }
-    lastThermallyConstrained = thermallyConstrained;
+    lastTailSuppressed = tailSuppressed;
+
+    static uint32_t lastAbsorbDebugMs = 0;
+    if ((uint32_t)(now - lastAbsorbDebugMs) >= 30000) {
+      lastAbsorbDebugMs = now;
+      queueConsoleMessageF(
+        "Absorption status | battV=%.2fV absTarget=%.2fV Bcur=%.1fA tailThresh=%.1fA | atVoltage=%.0fmin of %.0fmin%s",
+        v, AbsorptionVoltage, Bcur, TailCurrent_A,
+        (float)absorbHeldMs / 60000.0f, (float)AbsorptionTimeoutMs / 60000.0f,
+        atAbsorbV ? "" : " (paused - below target voltage)");
+    }
 
     if (tailReached) {
       if (absorptionTailTimer == 0) {
@@ -4589,8 +4909,11 @@ void updateChargingStage() {
       rebulkTimer = 0;
       const char *nextStage = (EFFECTIVE_USE_FLOAT == 0) ? "IDLE" : (EFFECTIVE_USE_FLOAT == 2) ? "FLOAT (zero-current)" : "FLOAT";
       queueConsoleMessageF(
-        "Stage: ABSORPTION→%s (timeout %.0f min) | battV=%.2fV Bcur=%.1fA",
-        nextStage, (float)AbsorptionTimeoutMs / 60000.0f, v, Bcur);
+        "Stage: ABSORPTION→%s (%s) | atVoltage=%.0fmin of %.0fmin, elapsed=%.0fmin | battV=%.2fV Bcur=%.1fA",
+        nextStage,
+        (absorbHeldMs >= AbsorptionTimeoutMs) ? "absorption time used up" : "absorption ran too long below target voltage",
+        (float)absorbHeldMs / 60000.0f, (float)AbsorptionTimeoutMs / 60000.0f,
+        (float)(uint32_t)(now - absorptionStartTime) / 60000.0f, v, Bcur);
     }
 
   } else if (inIdleStage) {
