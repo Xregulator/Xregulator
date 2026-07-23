@@ -892,6 +892,19 @@ volatile int consoleHead = 0;
 volatile int consoleTail = 0;
 volatile int consoleCount = 0;
 static portMUX_TYPE consoleMux = portMUX_INITIALIZER_UNLOCKED;
+// Console history ring (~55 KB PSRAM), served at /consolehist.txt. The 10-slot queue drains to
+// whichever SSE clients happen to be connected and the browser-side buffer lives in per-browser
+// localStorage — so a fresh browser (or a dropped SSE message) loses history forever. This ring is
+// the device-side source of truth the Download Logs console file is built from.
+#define CONSOLE_HIST_SIZE 200
+struct ConsoleHistEntry {
+  uint32_t ms;      // millis() at queue time
+  time_t epoch;     // soft-clock epoch at queue time (pre-2020 value = clock not yet synced)
+  char msg[CONSOLE_MSG_LEN];
+};
+ConsoleHistEntry *consoleHist = nullptr;
+volatile int consoleHistHead = 0;
+volatile int consoleHistCount = 0;
 
 
 // DNS Server for captive portal
@@ -965,6 +978,7 @@ uint16_t systemIDPlantTauMs   = 112;   // ms — default from the 2026-07-03 com
 struct SysIDBodePoint { float freqHz; float gainApPct; float phaseDeg; };  // gain = A output per %duty
 SysIDBodePoint systemIDBode[SYSID_SINE_NPOINTS] = {};
 uint8_t systemIDBodeCount = 0;         // valid Bode points after a sine run (served by /sysidbode)
+float   systemIDFsHz      = 0.0f;      // CH1 sample rate at the last plant sweep's start; 0 = not measured
 
 // SystemID open-loop sine-sweep history (50-record ring, /sysidsweeplog.bin).
 struct SysIDSweepRecord {
@@ -1212,7 +1226,8 @@ uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase �
 // Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
 // 0=Prep 1=Field curve 2=Plant fit 3=Verify 4=Disturbances 5=Thresholds 6=CV plant fit
 // 7=Min% floor + Field decay 8=Stress test. Drives the per-step ✓ marks and the default checkbox
-// selection for partial re-runs. COMMISSION_ALL_DONE = 0x1FF.
+// selection for partial re-runs. COMMISSION_ALL_DONE = 0x1FF, but the COMMISSIONED badge needs only
+// COMMISSION_REQUIRED_MASK = 0x0FF — stage 8 (Stress test) is an optional reference check.
 uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
 // Per-stage "set by hand, not measured" bitmask (mirrors NK_commissionManualMask). Combined with the
 // done bit it distinguishes four states per stage: measured (done, !manual), hand-marked complete
@@ -1362,7 +1377,7 @@ int resolution = 12;       // for OneWire temp sensor measurement
 int VeData = 0;            // Set to 1 if VE serial data exists
 int NMEA0183Data = 0;      // Set to 1 if NMEA serial data exists doesn't do anything yet
 // ── HARD OVER-CURRENT PROTECTION ─────────────────────────────
-// "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
+// "Group 0" in UI = hardware overcurrent trip; HardOCEnable is its group toggle (ignores the global protections flag)
 float HardOCTripAmps = 160.0f;   // derived: MaxTableValue + 10A — recomputed at boot and on MaxTableValue change, not persisted
 uint32_t HardOCDebounceMs = 20;  // user-adjustable, persisted in NVS
 bool HardOCEnable = true;        // Group 0 enable — gates the last-resort trip; survives the global protections toggle, so OFF removes the final over-current backstop
@@ -2444,6 +2459,24 @@ uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not c
 // Applies ONLY while charging is enabled — a shutdown has nothing to recover, so both cuts fire
 // ungated and a stopping engine can't sit with an energized field faking tach readings.
 #define PROT_RPM_GRACE_MS 5000
+// Tach-lie plausibility cut: tach claims the engine is running while the field is driven hard and
+// the alternator makes nothing — physically impossible above cut-in speed, so the RPM signal is
+// noise (field-PWM coupling / LM2907 re-bias) or the alternator is dead. Either way the field is
+// pure battery drain: immediate cut + escalating lockout (nextTachLieLockoutMs). The 2026-07-22
+// runaway: phantom ~950 RPM sustained 99% duty at -0.4 A output indefinitely — no RPM-only gate
+// can catch it because the phantom sits above MinRPMForField and below the 1000-RPM lone-jump bar.
+#define TACH_LIE_MIN_DUTY_PCT 25.0f  // applied duty at/above which a live alternator above cut-in always makes >TACH_LIE_MAX_AMPS
+#define TACH_LIE_MAX_AMPS 2.0f       // |alternator amps| below this = no output
+#define TACH_LIE_DWELL_MS 3000       // condition must persist this long — outlasts ramp/settling transients
+uint32_t tachLieSinceMs = 0;         // millis() when the implausible condition started (0 = clear)
+float tachLieTripRpm = 0.0f;         // RPM latched at trip — early-release rev-up reference
+bool tachLieLockoutArmed = false;    // active lockout was armed by a tach-lie trip (enables early release)
+// Engine-restart confirmation: after a confirmed stop, RPM must hold >= MinRPMForField this long
+// before the RPM gate releases — a noise blip (or a phantom's first seconds) can't re-energize the
+// field. Costs ~2 s of charging at every real engine start. Boot starts unconfirmed.
+#define RPM_RESTART_CONFIRM_MS 2000
+bool rpmRestartPending = true;       // set on confirmed stop, cleared by sustained above-min RPM
+uint32_t rpmAboveMinSinceMs = 0;     // millis() when RPM first held >= MinRPMForField (0 = below)
 uint32_t g_lastProtClampMs = 0;      // millis() of the most recent tick any protection clamp was active
 // Field-drain early release. g_ovClampRiseMs stamps the FIRST tick of a clamp episode (rising
 // edge) — distinct from g_lastProtClampMs, which restamps every clamped tick. Once a clamp has held
@@ -3029,7 +3062,7 @@ double   cvpfRpmSum = 0.0, cvpfBattVSum = 0.0, cvpfSocSum = 0.0;   // accumulato
 uint32_t cvpfCondN = 0;            // condition samples accumulated (settled tails of segments 3 & 4 → ~1 s of stable level each)
 float    cvpfCapHeadroomA = 0.0f;  // A — alternator cap-table headroom at fit time (g_I_cap − cvpfBaseA); how much bigger a step the table allows
 
-// ── CV stress test (commissioning stage 8 / standalone from Diag) ──
+// ── CV stress test (commissioning stage 8 / standalone from Tuning ▸ Stress Test) ──
 // Throttle-snap acceptance test: with the regulator running NORMALLY at idle (command = RPM
 // table with Lo/Hi and thermal derates — nothing overridden), the operator snaps the throttle
 // through the RPM band where alternator output multiplies, and the watcher grades the recovery
@@ -3039,7 +3072,7 @@ volatile bool cvStressAbortRequested = false;
 volatile bool cvStressForceCV = false;      // phases 2-3: AdjustField forces CV at cvStressTargetV (TargetVoltageMode-style)
 volatile uint8_t cvStressPhase = 0;         // 0 idle 1 STAB_IDLE 2 STAB_CV 3 ARMED 4 DONE
 float cvStressTargetV = 0.0f;               // achievable CV target the test computes (idle avg − CvStressDropV), driven while forced
-float CvStressDropV = 0.20f;                // V (12V-equiv, ×V/12 at use) — target headroom: CV target parks this far below the settled idle voltage; bigger = snap provokes OV more easily
+float CvStressDropV = 0.10f;                // V (12V-equiv, ×V/12 at use) — target headroom: CV target parks this far below the settled idle voltage; smaller = more standing current at the parked target = harsher snap (the settle-up gate keeps the level a true equilibrium so CV, not the current limit, stays in command)
 float CvStressFailBandV = 0.25f;            // V (12V-equiv, ×V/12 at use) — swing beyond this at a stabilization deadline = genuine instability, test cannot run; at or under it the phase proceeds with the swing reported as a marginal grade
 const char *cvStressAbortMsg = "";
 char cvsLastBlob[224] = "";                 // last persisted result CSV (NK_cvStressLast, ver-2), cached for /cvstress.json
@@ -3103,6 +3136,7 @@ float tuningSweepRpmMax     = 0.0f;
 float tuningSweepBattV      = 0.0f;    // bus voltage snapshot during the sweep
 bool  tuningSweepDutyRailed = false;   // field duty hit 0%/100% on any sine peak
 float tuningSweepWorstCoh   = 1.0f;    // min IN-BAND fit coherence (0..1, 1=clean); rolled-off points excluded so slow alternators don't false-fail
+float tuningSweepFsHz       = 0.0f;    // control-tick rate measured DURING the last sweep (samples/accumulate-window); 0 = not measured
 
 // Current closed-loop sine-sweep history (50-record ring, /tuningsweeplog.bin).
 struct TuningSweepRecord {
@@ -3369,7 +3403,7 @@ uint16_t cvTuningRunCounter = 0;
 CVTuningScoreState cvTuningScore = {};
 bool cvTuningParamChanged = false;
 
-float xTime = 60.0;     // seconds    PID Chart
+float xTime = 30.0;     // seconds    PID Chart
 int yyMax = 105;        // PID Chart     Amps
 int yyMin = -25;        //  PID Chart Amps
 float pidError = 0.0f;  // PID error for display (A)
@@ -3500,6 +3534,7 @@ uint8_t cvWindDownEnable = 1;         // master switch (0 = old behaviour: PI + 
 float   cvWindDownRate   = 0.05f;     // fraction of MaxTableValue shed per second (self-scales with alternator size)
 float   cvWindDownStopV  = 0.05f;     // V real per-bus — stop walking when filtered bus is within this of the commanded target (class-scaled at store)
 const float CV_WINDDOWN_TRIG_V = 0.15f;  // V ×class at use — commanded drop must exceed this to arm (small trims stay pure PI)
+const float CV_TGT_PACE_LEAD_V = 0.02f;  // V ×class at use — down-glide holds while getFiltV() lags more than this behind the reference (bus-paced descent floor). Must stay well under OvMeasMarginV minus the filtered ripple crest (~70mV worst bench) or ripple can still bridge the gap
 bool  cvWindDownActive = false;       // cleared by runShutdownPath/runCommissionIdle/MANUAL like lastVoltageControlActive
 float cvWindDownCap    = 0.0f;        // ramped ceiling on Icv (and cv_I) while active
 float cvWindDownFinalV = 0.0f;        // commanded final target latched at arm; follows further drops, abort on raise
@@ -3545,9 +3580,10 @@ float IExcessFracBulk = 0.031f;  // CC-detector slope; the UI keeps it equal to 
 float IExcessBaseA    = 5.8f;    // A — trip-line intercept (CV base). 0 = through-origin. Commissioning sets it to ripple-at-idle + Safety Margin, lifting the line above the measured ripple.
 float IExcessCcOffsetA = 4.0f;   // A — the CC trip line sits this far above the CV line (parallel offset). 0 = coincident with CV.
 float IExcessFloorA   = 5.0f;    // A — trip-line floor; it never dips below this even at tiny commands.
-float IExcessCeilA    = 25.0f;   // A — trip-line ceiling; it never rises above this on very large commands.
+float IExcessCeilA    = 20.0f;   // A — trip-line ceiling; it never rises above this on very large commands.
 float BattCurrentLimitA = 100.0f;  // A — max battery charge current (G4). Ceiling on the alternator-amp command = limit + measured house-load offset; requires the INA228 battery shunt as Battery Current Source. 0 = disabled.
-bool BattLimitEnable  = true;    // Group 4 enable — gates the battery charge-current ceiling AND Load Dump (which otherwise survives even the global protections toggle)
+bool BattLimitEnable  = true;    // Group 4 enable — gates the battery charge-current ceiling only
+bool LoadDumpEnable   = true;    // Group 5 enable — gates the Load Dump dBcur/dt trip, which survives even the global protections toggle; this is its only disarm
 float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst-case (idle) belt resonance; one fixed value covers the whole RPM range. dt-aware alpha.
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (scale-aware).
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
@@ -3562,11 +3598,11 @@ float FastSetpointRiseRate = 8.0f;       // multiplier on normal setpoint rise s
 uint32_t FastSetpointRiseWindowMs = 5000; // hard upper bound (ms) on how long the fast-rise window stays open after any protection releases
 float FastSetpointRiseHeadroomV = 0.2f;  // V below ChargingVoltageTarget at which fast-rise is allowed; gate closes once IBV climbs into target - this margin
 // --- Test-mode protection override ---
-// User-controlled flag (per test page). When TRUE (default) G1, G2, the G3/G4 iExcess
-// over-current detectors (alternator + battery), and AlternatorHardShutdownV all fire
+// User-controlled flag (per test page). When TRUE (default) G1, G2, the G3 iExcess
+// over-current detector (alternator), the G4 battery current limit, and AlternatorHardShutdownV all fire
 // normally. When FALSE the user has disabled them so step-tests can characterise the
 // plant without protection layers fighting the test. NOT persisted — resets to TRUE
-// (enabled) on every boot. Load Dump (the G4 battery rate-of-change tiers),
+// (enabled) on every boot. Load Dump (the G5 battery rate-of-change tiers),
 // INA228 hardware OV, and the hardware OC trip (MaxTableValue+10) stay active
 // regardless of this flag.
 bool testProtectionsEnabled = true;
@@ -3583,7 +3619,7 @@ bool lastVoltageControlActive = false;    // CV-entry tracker for the bumpless s
 uint32_t thermalCvOwnStartMs = 0;         // millis() the CV loop took the current command (0 = it has not); de-glitch timer for the thermal accuracy gate
 // =====================================================================================
 // Table Bounds & Safety
-// "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
+// "Group 0" in UI = hardware overcurrent trip; HardOCEnable is its group toggle (ignores the global protections flag)
 float MaxTableValue = 150.0;               // Maximum table entry (A)
 float MaxPenaltyPercent = 15.0;            // Max penalty as % of nominal
 unsigned long MaxPenaltyDuration = 60000;  // Max penalty time (ms)
@@ -3664,7 +3700,8 @@ enum FieldEventReason : uint8_t {
   REASON_CURRENT_STALE,
   REASON_FAST_OVERVOLTAGE,         // absolute OV ceiling — fires in ALL modes incl. MANUAL (live per-tick, immediate cut)
   REASON_BATTERY_TOO_COLD,         // board temp (battery proxy) below MinChargeTempF — cold-charge lockout (opt-in, lithium protection)
-  REASON_COMMISSION_REST           // commissioning idle-rest hold between guided steps (not a fault)
+  REASON_COMMISSION_REST,          // commissioning idle-rest hold between guided steps (not a fault)
+  REASON_TACH_IMPLAUSIBLE          // tach claims running, field driven hard, zero alternator output — RPM signal is noise or alternator dead
 };
 
 // ==================== TICK SNAPSHOT STRUCT ====================
@@ -3686,6 +3723,7 @@ struct TickSnapshot {
   bool ignoreRPM;
   bool rpmBelowMinimum;
   bool engineFullyStopped;   // RPM confirmed at 0 for >= RPM_ZERO_CUT_MS — forces immediate field cut
+  bool tachImplausible;      // tach claims running + field driven hard + zero output held TACH_LIE_DWELL_MS — forces immediate cut + lockout
 
   bool voltagePlausible;
   bool voltageDisagreementCritical;
@@ -3741,7 +3779,9 @@ const float SETPOINT_FALL_DEFAULT = 50.0f;  // A/s
 uint8_t cvTestSlewMode = 2;
 const float VTGT_RAMP_DEFAULT = 0.050f;  // V/s @12V — factory target ramp for cvTestSlewMode=Default; scaled ×BATTERY_VOLTAGE/12 at use
 uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise governor (anti-windup clamp). 0 = rises are not clamped — integrator can wind up into an OV trip on an up-step; applies in the CV test and normal operation
-uint8_t cvRecovEnable = 0;   // master switch for the post-protection integrator refill (deficit-gated Ki boost, replaced the timed window 2026-07-21). 1 = up-integration runs at Ki × up-to-cvRecovKiMax, tapering with the remaining reseed deficit; 0 = plain PI walks itself back (pace scales with post-cut error). Dev default OFF; production default TBD
+uint8_t cvRecovEnable = 1;   // master switch for the post-protection integrator refill (deficit-gated Ki boost, replaced the timed window 2026-07-21). 1 = up-integration runs at Ki × up-to-cvRecovKiMax, tapering with the remaining reseed deficit; 0 = plain PI walks itself back (pace scales with post-cut error). Default ON since the 07-22 lithium A/B (single fire, ~5× refill rate, healed exit, no overshoot)
+uint8_t loadServeBoostEnable = 1;  // load-serve Ki boost (07-22): while the battery shunt shows sustained discharge in CV, up-integration runs at the refill's boosted rate toward the measured house loads — a stiff plant hides a 35A load behind ~0.25V of error, so plain Ki picks it up in ~30s. Shunt-gated; inert without one. Dev default ON, production TBD
+uint8_t reseedCorrEnable = 1;      // demand-corrected reseed (07-22, the 8-fire train): subtract the measured load drop at the fire from the release reseed + refill goal (shunt-gated), and escalate the ratchet ×0.85 per re-fire <1.5s after release (shunt-independent). OFF = plain ReseedFrac reseed
 float cvRecovSec = 2.5f;     // retired timed-window ramp span, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovEmaxV = 0.25f;  // retired timed-window error cap, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovKiMax = 5.0f;   // refill Ki multiplier at the moment of release (M tapers linearly to 1× as the deficit heals). Clamp [1,10]
@@ -4160,6 +4200,15 @@ uint32_t thermalLogBurstUntilMs = 0;
 volatile bool pidLogPaused = false;
 volatile uint32_t pidLogPausedAtMs = 0;
 
+// Download-abort pause release. Safari (unlike Chrome) tears the connection down without a clean
+// close after the last byte, leaving xxxLogPaused stuck until the 60s watchdog — freezing log
+// appends (data gap) for the whole window. Each download handler bumps its token and registers
+// request->onDisconnect to clear the pause, guarded by token equality so a lingering keep-alive
+// connection from an EARLIER download closing late can't unfreeze a newer in-flight transfer.
+volatile uint32_t thermalLogDlToken = 0;
+volatile uint32_t pidLogDlToken = 0;
+volatile uint32_t cvLogDlToken = 0;
+
 struct PidLogEntry {
   // ── Timestamp ────────────────────────────────────────────────────
   uint32_t ts;  // millis() at log point
@@ -4216,7 +4265,7 @@ struct PidLogEntry {
   int16_t voltLoopIntervalMs;  // actual voltage loop interval when fired this tick (ms); 0 if not fired
   int16_t inaIntervalMs;       // ina_last_ms — INA228 read freshness (ms)
   int16_t pad2;                // alignment pad
-  // ── iExcess (Group 3 alternator / Group 4 battery) detector tuning traces ─────────────────────────────
+  // ── iExcess (Group 3 alternator) detector tuning traces ─────────────────────────────
   float mExcessEma;            // g_mExcessEma — time-averaged signed current excess over command (A)
   float iExcessThreshold;      // g_iExcessThreshold — computed fire threshold E (A)
 };                   // 140 bytes — naturally aligned, no implicit holes
@@ -4282,7 +4331,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //  24      iMeas            ×10        MeasuredAmps (raw alternator current)
 //  26      duty             ×10        dutyCycle
 //  28      flags            —          see bit definitions below
-//  29      awState          —          0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless
+//  29      awState          —          0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless 5=target wind-down
 //  30      rpm              raw        RPM, clamped to int16 range
 //  32      battV_filt_x100  ×100       IBV_filtered (display EMA, VoltageFilterTC)
 //  34      ch1IntervalMs    raw ms     last CH1 inter-sample gap
@@ -4315,9 +4364,9 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //    b2  cvActive        voltageControlActive
 //    b3  iExcessBulk     iExcess BULK sub-mode (current-control phase)
 //    b4  hardClamp       Group 1 (prediction cap) or Group 2 (voltage threshold) applied
-//    b5  iExcess         iExcess supervisor (Group 3 alternator or Group 4 battery) fired this tick
+//    b5  iExcess         iExcess supervisor (Group 3 alternator) fired this tick
 //    b6  loadDumpActive  load dump feedforward active this tick
-//    b7  recovActive     post-protection recovery window (Icv ceiling + error cap engaged)
+//    b7  recovActive     post-protection integrator refill (Icv goal ceiling + deficit-gated Ki boost engaged)
 
 
 
@@ -4337,7 +4386,7 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t iMeas;
   int16_t duty;
   uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive b7=recovActive
-  uint8_t awState; // 0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless
+  uint8_t awState; // 0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless 5=target wind-down
   int16_t rpm;
   int16_t battV_filt_x100;  // IBV_filtered × 100 (V) — display EMA, VoltageFilterTC
   int16_t ch1IntervalMs;    // last CH1 inter-sample gap   (ms)
@@ -4795,7 +4844,7 @@ struct WinAgg {
 // (ADS1115 CH0/CH2/CH3, ~30ms) are mean-only for cleaner plots — the Max toggle never touches them.
 WinAgg aggIbv, aggBcur, aggAltCur, aggBattV, aggRpm, aggCh3;
 bool battMaxMode = false;  // false = window mean (default), true = max-magnitude on the V/I traces it covers
-int plotTimeWindow = 60;                    // Plot time window in seconds
+int plotTimeWindow = 30;                    // Plot time window in seconds
 
 // WiFi provisioning settings persist in NVS as NK_ssid / NK_pass
 // Cached WiFi client credentials (loaded once, reused for reconnects)
@@ -5061,6 +5110,9 @@ void setup() {
   if (!messageBuffer) Serial.println("FATAL: messageBuffer ps_malloc failed");
   consoleQueue = (ConsoleMessage *)ps_malloc(CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   if (!consoleQueue) Serial.println("FATAL: consoleQueue ps_malloc failed");
+  consoleHist = (ConsoleHistEntry *)ps_malloc(CONSOLE_HIST_SIZE * sizeof(ConsoleHistEntry));
+  if (!consoleHist) Serial.println("FATAL: consoleHist ps_malloc failed");
+  else memset(consoleHist, 0, CONSOLE_HIST_SIZE * sizeof(ConsoleHistEntry));
   sensorRing = (SensorSnapshot *)ps_malloc(SENSOR_RING_SIZE * sizeof(SensorSnapshot));
   if (!sensorRing) Serial.println("FATAL: sensorRing ps_malloc failed");
   else memset(sensorRing, 0, SENSOR_RING_SIZE * sizeof(SensorSnapshot));
@@ -5304,7 +5356,7 @@ void setup() {
   // If you have custom headers, also:
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "*");
 
-  InitSystemSettings();       // load all settings from NVS (one-time LittleFS import sweep first).  If no keys exist, create them.
+  InitSystemSettings();       // load all settings from NVS. If no keys exist, create them.
   altApplyClassScales();      // alt-health Vbus cell size needs BATTERY_VOLTAGE — initAlternatorHealth ran before settings
   altSeedClassKnobs();        // deferred first-creation seeding of the class-dependent registry knobs (same reason)
   bhInitSettings();           // Battery Health: DCIR test config + persisted DCIR/capacity blobs

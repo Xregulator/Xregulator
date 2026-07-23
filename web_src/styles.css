@@ -4848,7 +4848,15 @@ input:checked+.slider:before {
 #alt-panel-protections .protections-tag.g2 { color: var(--accent); border-color: var(--accent); }
 #alt-panel-protections .protections-tag.g3 { color: #d68910; border-color: #d68910; }
 #alt-panel-protections .protections-tag.g4 { color: #7d3c98; border-color: #7d3c98; }
+#alt-panel-protections .protections-tag.g5 { color: #d81b60; border-color: #d81b60; }
 #alt-panel-protections .protections-tag.ab { color: #148f77; border-color: #148f77; }
+
+/* Which G3 trip line a setting moves — mirrors the ripple-plot line colors (orange CC / blue CV).
+   Global (unscoped): also used by the commissioning wizard's Advanced threshold fields. */
+.g3-line-chip { display: inline-block; width: 16px; height: 3px; border-radius: 2px; vertical-align: middle; margin-left: 5px; }
+.g3-line-chip + .g3-line-chip { margin-left: 3px; }
+.g3-line-chip.cc { background: #f0a500; }
+.g3-line-chip.cv { background: #4a9eff; }
 
 /* Dark-mode overrides — match the rest of the site's dark variants. */
 body.dark-mode #alt-panel-protections .protections-filters,

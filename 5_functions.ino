@@ -4001,6 +4001,22 @@ bool validatePassword(const char *password) {
 
   return (strcmp(hash, storedPasswordHash) == 0);
 }
+// Mirror every queued message into the /consolehist.txt history ring (own indices, own short
+// critical section — never nested inside the queue's).
+static void consoleHistAppend(const char *msg) {
+  if (!consoleHist || !msg) return;
+  time_t ep = time(nullptr);
+  uint32_t nowMs = millis();
+  portENTER_CRITICAL(&consoleMux);
+  ConsoleHistEntry &h = consoleHist[consoleHistHead];
+  h.ms = nowMs;
+  h.epoch = ep;
+  strncpy(h.msg, msg, CONSOLE_MSG_LEN - 1);
+  h.msg[CONSOLE_MSG_LEN - 1] = '\0';
+  consoleHistHead = (consoleHistHead + 1) % CONSOLE_HIST_SIZE;
+  if (consoleHistCount < CONSOLE_HIST_SIZE) consoleHistCount++;
+  portEXIT_CRITICAL(&consoleMux);
+}
 // printf-style — avoids String heap churn
 void queueConsoleMessageF(const char *format, ...) {
   if (otaInProgress) {
@@ -4013,7 +4029,7 @@ void queueConsoleMessageF(const char *format, ...) {
   vsnprintf(formattedMsg, sizeof(formattedMsg), format, args);
   va_end(args);
 
-
+  consoleHistAppend(formattedMsg);
   portENTER_CRITICAL(&consoleMux);
   if (consoleCount >= CONSOLE_QUEUE_SIZE) {
     consoleTail = (consoleTail + 1) % CONSOLE_QUEUE_SIZE;
@@ -4033,6 +4049,7 @@ void queueConsoleMessage(const char *msg) {
   }
   if (!consoleQueue || !msg) return;
 
+  consoleHistAppend(msg);
   portENTER_CRITICAL(&consoleMux);
   if (consoleCount >= CONSOLE_QUEUE_SIZE) {
     consoleTail = (consoleTail + 1) % CONSOLE_QUEUE_SIZE;

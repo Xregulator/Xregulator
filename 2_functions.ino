@@ -212,6 +212,7 @@ bool fsRemove(const char *path) {
 #define NK_LoadDumpDtThresh "LoadDumpDtThrsh"
 #define NK_LoadDumpDtThresh1 "LoadDmpDtThrsh1"
 #define NK_LoadDumpDtThresh3 "LoadDmpDtThrsh3"
+#define NK_LoadDumpEnable "LoadDumpEnable"
 #define NK_LogAllLearningEvents "LgAllLrnngEvnts"
 #define NK_LongitudeManual "LongitudeManual"
 #define NK_LongitudeNMEA "LongitudeNMEA"
@@ -292,6 +293,8 @@ bool fsRemove(const char *path) {
 #define NK_cvRecovBoostEnable "cvRcvBoostEn"
 #define NK_cvRecovBoostMax "cvRcvBoostMax"
 #define NK_cvRecovBoostErrV "cvRcvBoostErrV"
+#define NK_loadServeBoostEnable "loadServeBoost"
+#define NK_reseedCorrEnable "reseedCorrEn"
 #define NK_dutySlewEnable "dutySlewEn"
 #define NK_testSlewMode "testSlewMode"
 #define NK_cvTestSlewMode "cvTestSlewMode"
@@ -666,6 +669,11 @@ void commissionSetPhase(uint8_t p) {
 // the mask wherever it is recomputed below.
 #define COMMISSION_STAGE_COUNT 9
 #define COMMISSION_ALL_DONE    0x1FF  // bits 0..8 set = every stage complete (7 = Min% floor + Field decay, 8 = CV stress test)
+// COMMISSIONED requires only bits 0..7: the Stress test(8) is a diagnostic reference check that writes
+// no settings, so skipping it never blocks the badge or keeps the nag alive. Its done bit still drives
+// the step-9 ✓ and goes stale on upstream retunes like any other stage.
+#define COMMISSION_REQUIRED_MASK 0x0FF
+static bool commissionRequiredComplete() { return (commissionDoneMask & COMMISSION_REQUIRED_MASK) == COMMISSION_REQUIRED_MASK; }
 
 // Downstream stages invalidated when an upstream stage is (re)completed — see the coupling
 // analysis: Field curve(1) feeds Plant fit(2) + Verify(3); Plant fit(2) feeds Verify(3);
@@ -706,7 +714,7 @@ void commissionSkipStage(int stage) {
   commissionManualMask |= (1 << stage);
   commissionWriteDoneMask();
   commissionWriteManualMask();
-  if (commissionState == 2) commissionSetState(1);
+  if (commissionState == 2 && !commissionRequiredComplete()) commissionSetState(1);
 }
 
 // Mark a stage done BY HAND (unmeasured): sets its done bit so completion math is satisfied and the nag
@@ -720,12 +728,12 @@ void commissionManualStage(int stage) {
   commissionWriteManualMask();
 }
 
-// Derive the lifecycle byte from the mask: none done → NOT, all done → COMMISSIONED, anything
-// in between → IN_PROGRESS. Called at FINISH only — during an active wizard, commissionState is
-// held at IN_PROGRESS explicitly (set by commissionStart) so the badge reads "in progress" even
-// while the mask is briefly still all-set on a re-commission.
+// Derive the lifecycle byte from the mask: none done → NOT, required stages done (stress test
+// optional) → COMMISSIONED, anything in between → IN_PROGRESS. Called at FINISH only — during an
+// active wizard, commissionState is held at IN_PROGRESS explicitly (set by commissionStart) so the
+// badge reads "in progress" even while the mask is briefly still all-set on a re-commission.
 void commissionRecomputeState() {
-  uint8_t st = (commissionDoneMask == 0) ? 0 : (commissionDoneMask >= COMMISSION_ALL_DONE ? 2 : 1);
+  uint8_t st = (commissionDoneMask == 0) ? 0 : (commissionRequiredComplete() ? 2 : 1);
   if (st != commissionState) commissionSetState(st);
 }
 
@@ -753,7 +761,7 @@ void commissionClearStage(int stage) {
   commissionWriteDoneMask();
   commissionManualMask &= ~cleared;   // a staled stage is no longer satisfied, hand-set or otherwise
   commissionWriteManualMask();
-  if (commissionState == 2) commissionSetState(1);
+  if (commissionState == 2 && !commissionRequiredComplete()) commissionSetState(1);
 }
 
 // A tach rescale (RPMScalingFactor/PulleyRatio change) moves the engine-RPM axis every binned stage
@@ -1110,8 +1118,16 @@ void performDeepFactoryReset() {
     }
   }
 
+  // Console delivery window comes BEFORE the wipe: once NVS is erased, every ms until
+  // restart is a chance for a background task to re-persist something, so from the
+  // format onward we sprint to ESP.restart() with no delays.
+  queueConsoleMessage("DEEP FACTORY RESET: Wiping all settings and data, restarting...");
+  delay(1500);
+
   // Step 1: Unmount and reformat LittleFS (userdata partition - rings, logs, buffer files,
-  // vessel_info.json; user settings now live in NVS and are wiped in Step 2)
+  // vessel_info.json; user settings live in NVS and are wiped in Step 2). fsMutex is taken
+  // and deliberately NEVER released — any task that would re-create a file before the
+  // restart blocks on its timeout instead. The reboot clears the mutex.
   Serial.println("RESET: Acquiring FS mutex and unmounting LittleFS...");
   if (fsMutex) {
     xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000));  // Block other FS ops
@@ -1122,22 +1138,8 @@ void performDeepFactoryReset() {
   Serial.println("RESET: Formatting LittleFS...");
   if (LittleFS.format()) {
     Serial.println("RESET: LittleFS formatted successfully");
-    queueConsoleMessage("RESET: LittleFS formatted");
   } else {
-    Serial.println("RESET: WARNING - LittleFS format failed");
-    queueConsoleMessage("WARNING: LittleFS format failed - continuing anyway");
-  }
-
-  if (fsMutex) {
-    xSemaphoreGive(fsMutex);
-  }
-
-  // Remount using ensureLittleFS() so we respect the same partition label and flags as setup()
-  if (ensureLittleFS()) {
-    Serial.println("RESET: LittleFS remounted successfully");
-  } else {
-    Serial.println("RESET: WARNING - LittleFS remount failed");
-    queueConsoleMessage("WARNING: LittleFS remount failed");
+    Serial.println("RESET: WARNING - LittleFS format failed - continuing anyway");
   }
 
   // Step 2: Erase ALL NVS namespaces (storage, cloud, auth, update_req, timesync, etc.)
@@ -1146,10 +1148,8 @@ void performDeepFactoryReset() {
   esp_err_t nvs_err = nvs_flash_erase();
   if (nvs_err == ESP_OK) {
     Serial.println("RESET: All NVS namespaces erased successfully");
-    queueConsoleMessage("RESET: All NVS data erased");
   } else {
     Serial.printf("RESET: WARNING - NVS erase failed: %s\n", esp_err_to_name(nvs_err));
-    queueConsoleMessage("WARNING: NVS erase failed - continuing anyway");
   }
   nvs_err = nvs_flash_init();
   if (nvs_err != ESP_OK) {
@@ -1158,12 +1158,12 @@ void performDeepFactoryReset() {
     Serial.println("RESET: NVS flash reinitialized");
   }
 
-  // Step 3: Recreate all defaults from hardcoded values
-  Serial.println("RESET: Reinitializing settings with defaults...");
-  InitSystemSettings();
-  Serial.println("RESET: InitSystemSettings() complete");
+  // NO InitSystemSettings() here. RAM still holds the user's live values, and its
+  // create-if-missing re-seed would write all of them straight back into the freshly
+  // erased NVS — the bug that made settings survive this reset. The reboot below
+  // reruns setup() with pristine compile-time defaults instead.
 
-  // Step 4: Restore preserved authToken so cloud account survives the wipe
+  // Step 3: Restore preserved authToken so cloud account survives the wipe
   if (savedToken[0] != '\0') {
     nvs_handle_t h;
     if (nvs_open("cloud", NVS_READWRITE, &h) == ESP_OK) {
@@ -1171,21 +1171,15 @@ void performDeepFactoryReset() {
       if (e == ESP_OK) e = nvs_commit(h);
       nvs_close(h);
       if (e == ESP_OK) {
-        authToken = String(savedToken);
-        isRegistered = true;
         Serial.println("RESET: authToken restored - cloud account preserved");
-        queueConsoleMessage("RESET: Cloud registration preserved");
       } else {
         Serial.printf("RESET: WARNING - authToken restore failed: %s\n", esp_err_to_name(e));
-        queueConsoleMessage("WARNING: Cloud token restore failed - contact support");
       }
     }
   }
 
-  queueConsoleMessage("DEEP FACTORY RESET: Complete! Restarting now...");
   Serial.println("=== DEEP FACTORY RESET COMPLETE - RESTARTING ===\n");
   Serial.flush();
-  delay(1500);  // Give SSE message time to reach client
   ESP.restart();
 }
 
@@ -3257,8 +3251,9 @@ bool buildConfigPayload() {
     offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "%s\"%llu\"", i ? "," : "", (unsigned long long)g_ovTel.timeMs[i]);
   offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "]}");
 
-  // Control Accuracy numbers since the last reset (≈one day — these auto-reset right after this
-  // upload succeeds, so each daily snapshot is one independent measurement of loop performance).
+  // Control Accuracy numbers since the last MANUAL reset. The post-upload auto-reset is disabled
+  // (see the upload-success branch below), so consecutive daily snapshots are a RUNNING TOTAL, not
+  // independent one-day samples — differencing two rows is what isolates a day.
   // CLOUD CONTRACT: like every state key, these are spread into the device_state_daily INSERT —
   // the 6 columns (acc_cur_rms_a, acc_cur_peak_a, acc_volt_rms_mv, acc_volt_peak_mv,
   // acc_therm_rms_f, acc_therm_peak_f) MUST exist in device_state_daily before this firmware ships,
@@ -3424,10 +3419,9 @@ done_headers_cfg:
   bool success = (httpCode == 200);
   if (success) {
     queueConsoleMessage("Config snapshot uploaded");
-    // Tumbling window: start the next Control Accuracy measurement fresh so each daily snapshot is
-    // one independent sample. Reset only AFTER a confirmed upload — never lose unreported data.
-    // false = keep any live episode: it carries across the boundary and commits into the new window.
-    resetAccuracyScores(false);
+    // Control Accuracy counters accumulate until a manual /resetAccuracyScores — the daily
+    // post-upload auto-reset is disabled so the displayed window matches what the UI copy promises.
+    // resetAccuracyScores(false);
   } else if (httpCode > 0) {
     snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Config upload failed HTTP %d", httpCode);
     queueConsoleMessage(messageBuffer);
@@ -3909,7 +3903,7 @@ static volatile bool faPendingMatrixClear = false;  // set by /get handler (Core
 // ADMISSION (spec §10): a window folds only if it was genuinely steady — the IExcessTau low-pass passes
 // slow current ramps straight through, so a ramping window would record the RAMP size (10–20 A) as
 // "ripple" and peak-hold it forever. Gates: min sample count, no protection clamp, command travel
-// within limit, per-detector 300 ms-EMA drift within limit, same-RPM-bin (cell fold only). NO wizard
+// within limit, per-detector 300 ms-EMA drift within limit, same-RPM-bin (table fold only). NO wizard
 // relaxation — a steady-state quantity cannot be measured while ramping; the wizard's instructed
 // pauses are the admission windows. Live readouts: ROLL_RIPCMDEXC/RIPALTEXC/RIPBATTEXC on the Diag page.
 #define FILT_RIPPLE_ADM_TC 0.300f      // admission-EMA time constant (s) — heavy enough that belt ripple averages out of it, so its window spread measures operating-point drift, not ripple. Matches Path A's 300 ms precedent. NOT the measurement filter.
@@ -3925,7 +3919,7 @@ float ripDriftPct = 5.0f;       // % of window-mean alt current — command-trav
 // ramp rejects. Design-time constants, not knobs — they set the SHAPE of the test, not an operating point.
 #define RIP_STAT_K 0.25f           // mean-shift tolerance as a fraction of that sensor's full-window filtered pk-pk. A linear ramp shifts the half-means by 0.50×pk-pk → rejected with 2× margin; a ≥2-cycle hunt shifts them <0.1×pk-pk → admitted with 2.5× margin.
 #define RIP_RPM_STAT_FLOOR 10.0f   // RPM — mean-shift floor for the RPM stationarity test (tach jitter tolerance)
-#define RIP_CROSS_MIN 4            // cell fold only — min crossings of the measurement EMA about its 300 ms baseline per window. A one-shot transient crosses ~2×; real ripple/hunt crosses constantly. Ring exempt (median-of-8 already robust; must not starve the wizard hold).
+#define RIP_CROSS_MIN 4            // table fold only — min crossings of the measurement EMA about its 300 ms baseline per window. A one-shot transient crosses ~2×; real ripple/hunt crosses constantly. Ring exempt (median-of-8 already robust; must not starve the wizard hold).
 uint32_t g_ripAltAdmitCount = 0;   // windows that passed ALL alt-fold gates (throughput readout, CSV2; not persisted)
 uint32_t g_ripBattAdmitCount = 0;  // same for the battery detector
 
@@ -3989,7 +3983,7 @@ static bool filtRippleWinProt = false;                          // any protectio
 static uint32_t filtRippleWinN = 0;
 static uint32_t filtRippleLastMs = 0, filtRippleWinStartMs = 0;
 static bool filtRippleArmed = false;   // false until the first sample seeds the EMAs (seed, don't measure)
-// Crossings tally — GATE for the cell fold (≥ RIP_CROSS_MIN) and recorded into the commit forensics ring:
+// Crossings tally — GATE for the table fold (≥ RIP_CROSS_MIN) and recorded into the commit forensics ring:
 // how many times the fast measurement EMA crossed its slow (300 ms) baseline within the window. A one-shot
 // transient crosses ~twice; sustained oscillation many times.
 static uint16_t altFiltCross = 0, battFiltCross = 0;

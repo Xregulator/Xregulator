@@ -950,12 +950,12 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…8=Stress test, 9=finished
+  CSV3_commissionPhase,         // current wizard phase: 0=Prep…8=Stress test, 9=finished
   CSV3_commissionDoneMask,      // per-stage completion bitmask (bit i = stage i done)
-  CSV3_cvHelpersEnabled,        // master switch: asymmetric KiDown unwind + slope-aware integrator bleed (1=on)
+  CSV3_cvHelpersEnabled,        // master switch: asymmetric KiDown unwind + CV D term (1=on)
   CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
   CSV3_coldChargeLockoutEnable, // cold-charge lockout master on/off (1=on)
-  CSV3_cvGainMode,              // CV gain mode: 0=Manual, 1=Auto (lambda-based)
+  CSV3_cvGainMode,              // CV gain mode: 0=Manual, 1=Auto (α/K anchored)
   CSV3_cvPlantK,                // measured plant gain K (V/A); ×10000
   CSV3_cvComputedKp,            // Auto-computed Kp (12V-equiv); ×100
   CSV3_cvComputedKi,            // Auto-computed Ki (12V-equiv); ×100
@@ -1006,7 +1006,7 @@ enum Csv3Index {
   CSV3_fdDrainRpmHi,           // drain-vs-RPM line: highest tested RPM (lookup clamps here)
   CSV3_HardOCEnable,           // Group 0 hard over-current trip enable (0/1)
   CSV3_IExcessEnable,          // Group 3 iExcess detectors enable (0/1, gates CV + bulk)
-  CSV3_BattLimitEnable,        // Group 4 battery limit + load dump enable (0/1)
+  CSV3_BattLimitEnable,        // Group 4 battery charge-current ceiling enable (0/1)
   CSV3_CvKdExcessMode,         // CV D-term response shape (1 = slope excess over the tolerance line, 0 = legacy full-slope latch)
   CSV3_CvStressDropV,          // stress-test target headroom below settled idle (V 12V-equiv ×100, class-scaled at use)
   CSV3_CvStressFailBandV,      // stress-test stability fail band (V 12V-equiv ×100, class-scaled at use)
@@ -1015,6 +1015,9 @@ enum Csv3Index {
   CSV3_cvWindDownEnable,       // commanded-target wind-down governor master switch (0/1)
   CSV3_cvWindDownRate,         // wind-down shed rate (fraction of MaxTableValue per second); ×1000
   CSV3_cvWindDownStopV,        // wind-down stop margin above commanded target (V real per-bus, class-scaled at store); ×1000
+  CSV3_LoadDumpEnable,         // Group 5 load dump enable (0/1)
+  CSV3_loadServeBoostEnable,   // load-serve Ki boost toward measured house loads (0/1, shunt-gated)
+  CSV3_reseedCorrEnable,       // demand-corrected reseed: load-drop subtraction + rapid-refire ratchet (0/1)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1812,7 +1815,7 @@ void setupServer() {
     Serial.println("\n=== FACTORY RESET INITIATED FROM WEB ===");
     queueConsoleMessage("FACTORY RESET: Initiated from web interface");
     request->send(200, "text/plain", "OK");  // Respond before blocking restart
-    performDeepFactoryReset();  // Unmounts+reformats LittleFS, erases all NVS, reinits, restarts
+    performDeepFactoryReset();  // Reformats LittleFS, erases all NVS, restarts; defaults re-seed at boot
   });
 
   server.on("/thermallog.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -1829,6 +1832,12 @@ void setupServer() {
     state.linePos = 0;
     thermalLogPaused = true;
     thermalLogPausedAtMs = millis();
+    // Abrupt client teardown (Safari) never reaches the clean-completion unpause — release on
+    // disconnect, token-guarded so a stale keep-alive closing late can't unfreeze a newer transfer.
+    uint32_t dlTok = ++thermalLogDlToken;
+    request->onDisconnect([dlTok]() {
+      if (dlTok == thermalLogDlToken) thermalLogPaused = false;
+    });
     AsyncWebServerResponse *response = request->beginChunkedResponse(
       "text/csv",
       [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
@@ -1997,6 +2006,11 @@ void setupServer() {
 
     pidLogPaused = true;
     pidLogPausedAtMs = millis();
+    // Same Safari abrupt-teardown release as /thermallog.csv.
+    uint32_t dlTok = ++pidLogDlToken;
+    request->onDisconnect([dlTok]() {
+      if (dlTok == pidLogDlToken) pidLogPaused = false;
+    });
 
     AsyncWebServerResponse *response = request->beginChunkedResponse(
       "text/csv",
@@ -2165,6 +2179,59 @@ void setupServer() {
       });
 
     response->addHeader("Content-Disposition", "attachment");
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
+  // ── Console history: device-side source of truth for the Download Logs console file ──
+  // Tab-separated lines: epoch \t millis \t message. Client formats timestamps (pre-2020 epoch =
+  // clock unsynced at queue time → shows relative uptime instead). Entries memcpy'd under
+  // consoleMux so a concurrent append can't tear a line; no pause flag — the ring has no
+  // tick-driven writer to freeze.
+  server.on("/consolehist.txt", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!consoleHist || consoleHistCount == 0) {
+      request->send(200, "text/plain", "");
+      return;
+    }
+    struct ChDLState {
+      int count; int oldest; int row; bool done; int lineLen; int linePos;
+      char line[CONSOLE_MSG_LEN + 48];
+    };
+    ChDLState state;
+    memset(&state, 0, sizeof(state));
+    portENTER_CRITICAL(&consoleMux);
+    state.count = consoleHistCount;
+    state.oldest = (consoleHistHead - consoleHistCount + CONSOLE_HIST_SIZE) % CONSOLE_HIST_SIZE;
+    portEXIT_CRITICAL(&consoleMux);
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "text/plain",
+      [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+        if (state.done) return 0;
+        size_t written = 0;
+        while (written < maxLen) {
+          if (state.linePos >= state.lineLen) {
+            if (state.row >= state.count) {
+              state.done = true;
+              return written;
+            }
+            int idx = (state.oldest + state.row) % CONSOLE_HIST_SIZE;
+            ConsoleHistEntry e;
+            portENTER_CRITICAL(&consoleMux);
+            memcpy(&e, &consoleHist[idx], sizeof(ConsoleHistEntry));
+            portEXIT_CRITICAL(&consoleMux);
+            state.lineLen = snprintf(state.line, sizeof(state.line), "%lld\t%lu\t%s\n",
+                                     (long long)e.epoch, (unsigned long)e.ms, e.msg);
+            state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
+            state.linePos = 0;
+            state.row++;
+          }
+          size_t canSend = min(maxLen - written, (size_t)(state.lineLen - state.linePos));
+          memcpy(buf + written, state.line + state.linePos, canSend);
+          written += canSend;
+          state.linePos += (int)canSend;
+        }
+        return written;
+      });
     response->addHeader("Cache-Control", "no-cache");
     request->send(response);
   });
@@ -2716,7 +2783,7 @@ void setupServer() {
 
     uint32_t cnt = (uint32_t)cvLogCount;
     uint32_t entrySize = (uint32_t)sizeof(CvLogEntry);
-    float kp = (float)VoltageKp_active;  // gains ACTUALLY in effect (Manual or Auto-λ, 12V-block normalized) — not the raw manual VoltageKp, which the loop ignores in Auto mode / on 24-48V
+    float kp = (float)VoltageKp_active;  // gains ACTUALLY in effect (Manual or Auto α/K, 12V-block normalized) — not the raw manual VoltageKp, which the loop ignores in Auto mode / on 24-48V
     float ki = (float)VoltageKi_active;
     uint32_t interval = (uint32_t)VoltageLoopInterval;
 
@@ -2756,6 +2823,11 @@ void setupServer() {
 
     cvLogPaused = true;
     cvLogPausedAtMs = millis();
+    // Same Safari abrupt-teardown release as /thermallog.csv.
+    uint32_t dlTok = ++cvLogDlToken;
+    request->onDisconnect([dlTok]() {
+      if (dlTok == cvLogDlToken) cvLogPaused = false;
+    });
 
     AsyncWebServerResponse *response = request->beginChunkedResponse(
       "application/octet-stream",
@@ -3612,7 +3684,7 @@ void setupServer() {
       settingRemove(NK_commissionSnap);     // commit the new tune (no snapshot ⇒ reboot won't revert)
       settingRemove(NK_commissionStepSnap); // run over: drop the in-flight step baseline too
       commissionClearMinPctBackup();        // discard the Min% backup too — the new floors stay
-      commissionRecomputeState();           // COMMISSIONED if every stage done, else IN_PROGRESS (partial)
+      commissionRecomputeState();           // COMMISSIONED if every required stage done (stress test optional), else IN_PROGRESS (partial)
       commissionSetPhase(COMMISSION_STAGE_COUNT);  // wizard pass finished (= one past the last step)
       // Browser wall clock, not the device soft clock (which can be unset at sea). A garbage stamp is
       // rejected rather than written, because a far-future epoch would silence the age prompt forever.
@@ -3630,9 +3702,10 @@ void setupServer() {
       settingsDirty = true;
       queueConsoleMessageF("Commissioning: pass finished — %s",
                            commissionDoneMask >= COMMISSION_ALL_DONE ? "all steps complete, device COMMISSIONED"
+                           : commissionRequiredComplete()            ? "device COMMISSIONED (stress test skipped — it's an optional reference check)"
                                                                      : "partial — some steps still pending");
     }
-    // Wizard heartbeat: persist the furthest phase reached so the tab checklist survives
+    // Wizard heartbeat: persist the current wizard phase so the tab checklist survives
     // a page reload / a different client. Clamped 0..COMMISSION_STAGE_COUNT (last value = finished).
     // Does not change commissionState.
     if (request->hasParam("commissionPhase")) {
@@ -5496,6 +5569,18 @@ void setupServer() {
       settingWrite(NK_cvRecovEnable, String((int)cvRecovEnable).c_str());
       queueConsoleMessageF("CV recovery refill: %s", cvRecovEnable ? "ON" : "OFF — recovery pace scales with post-cut error");
     }
+    if (request->hasParam("loadServeBoostEnable")) {  // load-serve Ki boost toward the measured house loads (shunt-gated)
+      foundParameter = true;
+      loadServeBoostEnable = (uint8_t)(request->getParam("loadServeBoostEnable")->value().toInt() ? 1 : 0);
+      settingWrite(NK_loadServeBoostEnable, String((int)loadServeBoostEnable).c_str());
+      queueConsoleMessageF("Load pickup boost: %s", loadServeBoostEnable ? "ON" : "OFF — load pickup pace scales with voltage error only");
+    }
+    if (request->hasParam("reseedCorrEnable")) {  // demand-corrected reseed: measured load-drop subtraction + rapid-refire ratchet escalation
+      foundParameter = true;
+      reseedCorrEnable = (uint8_t)(request->getParam("reseedCorrEnable")->value().toInt() ? 1 : 0);
+      settingWrite(NK_reseedCorrEnable, String((int)reseedCorrEnable).c_str());
+      queueConsoleMessageF("Smart reseed: %s", reseedCorrEnable ? "ON" : "OFF — every release restores the plain seed fraction");
+    }
     if (request->hasParam("cvRecovSec")) {  // retired timed-window knob — writes the inert global (UI field removed)
       foundParameter = true;
       cvRecovSec = clamp_f(request->getParam("cvRecovSec")->value().toFloat(), 0.5f, 30.0f);
@@ -6123,7 +6208,14 @@ void setupServer() {
       inputMessage = request->getParam("BattLimitEnable")->value();
       BattLimitEnable = inputMessage.toInt() != 0;
       settingWrite(NK_BattLimitEnable, String((int)BattLimitEnable).c_str());
-      queueConsoleMessageF("Group 4 (battery limit + load dump): %s", BattLimitEnable ? "ENABLED" : "DISABLED");
+      queueConsoleMessageF("Group 4 (battery charge current limit): %s", BattLimitEnable ? "ENABLED" : "DISABLED");
+    }
+    if (request->hasParam("LoadDumpEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("LoadDumpEnable")->value();
+      LoadDumpEnable = inputMessage.toInt() != 0;
+      settingWrite(NK_LoadDumpEnable, String((int)LoadDumpEnable).c_str());
+      queueConsoleMessageF("Group 5 (load dump): %s", LoadDumpEnable ? "ENABLED" : "DISABLED");
     }
     if (request->hasParam("OutputPIDSigSrc")) {
       foundParameter = true;
@@ -7155,9 +7247,10 @@ void setupServer() {
                       i > 0 ? "," : "",
                       tuningBode[i].freqHz, tuningBode[i].gain, tuningBode[i].phaseDeg);
     }
-    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"done\":%d,\"coh\":%.3f,\"railed\":%d}",
+    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"done\":%d,\"coh\":%.3f,\"railed\":%d,\"fs\":%.1f}",
                     tuningSweepActive ? 1 : 0, tuningSweepDone ? 1 : 0,
-                    tuningSweepWorstCoh, tuningSweepDutyRailed ? 1 : 0);
+                    tuningSweepWorstCoh, tuningSweepDutyRailed ? 1 : 0,
+                    tuningSweepFsHz > 0.0f ? tuningSweepFsHz : ch1SampleHz());
     request->send(200, "application/json", buf);
   });
 
@@ -7177,11 +7270,12 @@ void setupServer() {
     // "aborted" = protection-abort latch (systemIDAbortRequested), reported independently of "active":
     // a protection cut leaves systemIDActive set until systemID_tick clears it, and that tick is gated
     // out during the fault/lockout, so the plant-fit poller would otherwise wait the full 240s timeout.
-    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"ready\":%d,\"aborted\":%d,\"amp\":%.1f}",
+    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"ready\":%d,\"aborted\":%d,\"amp\":%.1f,\"fs\":%.1f}",
                     active ? 1 : 0,
                     (systemIDResultsReady && systemIDTestType == 1) ? 1 : 0,
                     systemIDAbortRequested ? 1 : 0,
-                    SystemIDStepAmplitude);
+                    SystemIDStepAmplitude,
+                    systemIDFsHz > 0.0f ? systemIDFsHz : ch1SampleHz());
     request->send(200, "application/json", buf);
   });
 
@@ -7259,12 +7353,12 @@ void setupServer() {
     request->send(200, "application/json", buf);
   });
 
-  // CV stress-test status + result (wizard stage 8 and the Diag standalone modal poll this; the
+  // CV stress-test status + result (wizard stage 8 and the Tuning ▸ Stress Test standalone modal poll this; the
   // poll itself stamps the browser-alive deadman inside cvStressJsonBuild).
   server.on("/cvstress.json", HTTP_GET, [](AsyncWebServerRequest *request) {
-    std::shared_ptr<char> bufPtr((char *)ps_malloc(1280), [](char *p) { if (p) free(p); });
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(1344), [](char *p) { if (p) free(p); });
     if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
-    cvStressJsonBuild(bufPtr.get(), 1280);
+    cvStressJsonBuild(bufPtr.get(), 1344);
     request->send(200, "application/json", bufPtr.get());
   });
 
@@ -8848,7 +8942,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -9190,7 +9284,10 @@ void SendWifiData() {
                                SafeInt(cvRecovKiMax, 100),
                                (int)cvWindDownEnable,
                                SafeInt(cvWindDownRate, 1000),
-                               SafeInt(cvWindDownStopV, 1000));
+                               SafeInt(cvWindDownStopV, 1000),
+                               (int)LoadDumpEnable,
+                               (int)loadServeBoostEnable,
+                               (int)reseedCorrEnable);
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

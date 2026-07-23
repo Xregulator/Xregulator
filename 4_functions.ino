@@ -1704,13 +1704,13 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvHelpersEnabled = settingRead(NK_cvHelpersEnabled).toInt() != 0;
   }
-  // ── CV gain-mode system (Auto λ-based vs Manual) + measured plant ──
+  // ── CV gain-mode system (Auto α/K plant-anchored vs Manual) + measured plant ──
   if (!settingExists(NK_cvGainMode)) {
     settingWrite(NK_cvGainMode, String((int)cvGainMode).c_str());
   } else {
     cvGainMode = (uint8_t)settingRead(NK_cvGainMode).toInt();
   }
-  // CV crossover ω_c — NVS key renamed cvOmega → cvCrossover (§F.3). Mint-new-key + migrate: adopt the old
+  // CV crossover ω_c (retired/inert — auto gain is now α/K) — NVS key renamed cvOmega → cvCrossover (§F.3). Mint-new-key + migrate: adopt the old
   // value if present, folding in the misnamed-0.286 → 0.20 default fix (else ~24 % hot under the exact
   // magnitude formula), write the new key, and remove the orphaned old one. Dev-units-only window.
   if (settingExists(NK_cvCrossover)) {
@@ -1785,6 +1785,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_cvRecovEnable, String((int)cvRecovEnable).c_str());
   } else {
     cvRecovEnable = (uint8_t)settingRead(NK_cvRecovEnable).toInt();
+  }
+  if (!settingExists(NK_loadServeBoostEnable)) {
+    settingWrite(NK_loadServeBoostEnable, String((int)loadServeBoostEnable).c_str());
+  } else {
+    loadServeBoostEnable = (uint8_t)settingRead(NK_loadServeBoostEnable).toInt();
+  }
+  if (!settingExists(NK_reseedCorrEnable)) {
+    settingWrite(NK_reseedCorrEnable, String((int)reseedCorrEnable).c_str());
+  } else {
+    reseedCorrEnable = (uint8_t)settingRead(NK_reseedCorrEnable).toInt();
   }
   // cvRecovSec / cvRecovEmaxV: retired timed-window knobs — seeds kept so the NVS keys stay stable (never repurpose)
   if (!settingExists(NK_cvRecovSec)) {
@@ -2227,6 +2237,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_BattLimitEnable, String((int)BattLimitEnable).c_str());
   } else {
     BattLimitEnable = settingRead(NK_BattLimitEnable).toInt() != 0;
+  }
+  if (!settingExists(NK_LoadDumpEnable)) {
+    settingWrite(NK_LoadDumpEnable, String((int)LoadDumpEnable).c_str());
+  } else {
+    LoadDumpEnable = settingRead(NK_LoadDumpEnable).toInt() != 0;
   }
   if (!settingExists(NK_OutputPIDSigSrc)) {
     settingWrite(NK_OutputPIDSigSrc, String(OutputPIDSigSrc).c_str());

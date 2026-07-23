@@ -106,11 +106,11 @@ float clamp_f(float x, float lo, float hi) {
 // The old λ/SIMC fit (cvPlantTau, cvPlantL, cvLambdaMult) is RETIRED: a real step test showed the
 // loop is stability-robust (86–95° phase margin even at the "disaster" gains), so neither phase
 // margin nor a precise τ/L fit binds. The only per-install unknown that matters is the DC gain
-// K_dc (cvPlantK, settled ΔV/ΔI). Set a deliberately slow target crossover and scale Kp ∝ 1/K_dc;
+// K_dc (cvPlantK, settled ΔV/ΔI). Anchor Kp = α/K to the ~0.6 s horizon the loop reacts on (Kp ∝ 1/K_dc);
 // this stays well below the polarization pole (~0.7 rad/s) and the dead-time limit, so we never
-// need to measure them. ω_target/ρ are bench-tuned by disturbance-rejection (no protection trips), NOT
-// to match any prior hand tune — they are the user-adjustable settings cvCrossover / cvPiZero (Tuning ▸
-// Voltage; defaults 0.20 / 0.70). cvPlantTau/cvPlantL were fully removed 2026-07-03 (NVS keys
+// need to measure them. α/ρ are bench-tuned by disturbance-rejection (no protection trips), NOT
+// to match any prior hand tune — they are the user-adjustable settings cvAlpha / cvPiZero (Tuning ▸
+// Voltage; defaults 0.05 / 0.50). cvPlantTau/cvPlantL were fully removed 2026-07-03 (NVS keys
 // retired — see 2_functions.ino); the fit confidence record lives in the cvfit.csv download.
 
 // computeCvTempScale — battery-temperature gain derate factor (see the globals block in Xregulator.ino).
@@ -223,7 +223,7 @@ void applyCcOutputLimits() {
 // (NK_BatteryVoltage — authoritative; vessel_info.json is only a mirror), then rescales the PERSISTED
 // charge-voltage profile by newV/oldV (Bulk/Float/Absorption/Rebulk/Target/Charged/alarms), the
 // volt-domain protection/helper margins and V/s rates (OV margins, disagreement threshold, iExcess
-// arm margin, fast-rise headroom, slope-bleed thresh/prox, target ramps, rest-settle gate, CV wave
+// arm margin, fast-rise headroom, CV D-term arm/deadband thresholds, target ramps, rest-settle gate, CV wave
 // amplitude, alt-health Vbus band), re-derives
 // the hard-shutdown trip (newBulk + 0.5×class) and refreshes the INA228 hardware OV limit. Writing the
 // class and the rescaled profile to NVS in the SAME call (synchronously) keeps them atomic: if
@@ -496,6 +496,20 @@ uint32_t nextFastOvLockoutMs(uint32_t nowMs) {
   return (ms > 10000u) ? 10000u : ms;
 }
 
+// Adaptive tach-lie lockout ladder: 15s, 30s, 60s, then 120s cap; 10 min with no trip resets.
+// Tiers are long relative to fast-OV because every retry burns ~3s of field drain producing
+// nothing; buildTickSnapshot releases the lockout early on a rev-up or signal drop, so a real
+// engine never waits out the timer. RAM-only by design — a reboot restarts the ladder.
+uint32_t nextTachLieLockoutMs(uint32_t nowMs) {
+  static uint32_t lastFireMs = 0;
+  static uint8_t fireCount = 0;
+  if (lastFireMs != 0 && (uint32_t)(nowMs - lastFireMs) > 600000u) fireCount = 0;
+  lastFireMs = nowMs;
+  uint32_t ms = 15000u << fireCount;
+  if (fireCount < 3u) fireCount++;
+  return (ms > 120000u) ? 120000u : ms;
+}
+
 /**
  * applyImmediateCut - Shared state reset for all immediate GPIO4 cut paths.
  * Every cut path leaves identical state: GPIO4 LOW, PWM 0, PID manual,
@@ -513,6 +527,17 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
     activeCollapseDelay = nextFastOvLockoutMs(tick.nowMs);
     queueConsoleMessageF("Fast-OV lockout %.1fs (adaptive: 0.5s-10s ladder, resets after 60s clean)",
                          activeCollapseDelay / 1000.0f);
+  }
+  // Tach-lie: same pattern — arm the escalating lockout here, latch the trip RPM so the
+  // buildTickSnapshot early-release can tell a real rev-up from the phantom's noise band.
+  // dutyCycle still holds the pre-cut value at this point (zeroed below the alreadyCut return).
+  if (reason == REASON_TACH_IMPLAUSIBLE && fieldCollapseTime == 0) {
+    fieldCollapseTime = tick.nowMs;
+    activeCollapseDelay = nextTachLieLockoutMs(tick.nowMs);
+    tachLieTripRpm = RPM;
+    tachLieLockoutArmed = true;
+    queueConsoleMessageF("RPM signal implausible: %d RPM with %.0f%% field and %.1fA output - lockout %.1fs (rev-up or signal drop releases early)",
+                         (int)RPM, dutyCycle, MeasuredAmps, activeCollapseDelay / 1000.0f);
   }
   if (alreadyCut) return;  // hardware already cut — skip logging, don't spam
   apply_pwm_float(0.0f);
@@ -791,9 +816,11 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
 
   if ((mode == MODE_CRITICAL_RAMP || mode == MODE_WARNING_RAMP_AND_LOCKOUT) && fieldCollapseTime == 0) {
     fieldCollapseTime = tick.nowMs;
-    activeCollapseDelay = (reason == REASON_RPM_TOO_LOW)      ? RPM_RECOVERY_DELAY
-                        : (reason == REASON_FAST_OVERVOLTAGE) ? nextFastOvLockoutMs(tick.nowMs)
-                                                              : FIELD_COLLAPSE_DELAY;
+    activeCollapseDelay = (reason == REASON_RPM_TOO_LOW)       ? RPM_RECOVERY_DELAY
+                        : (reason == REASON_FAST_OVERVOLTAGE)  ? nextFastOvLockoutMs(tick.nowMs)
+                        : (reason == REASON_TACH_IMPLAUSIBLE)  ? nextTachLieLockoutMs(tick.nowMs)
+                                                               : FIELD_COLLAPSE_DELAY;
+    if (reason == REASON_TACH_IMPLAUSIBLE) { tachLieTripRpm = RPM; tachLieLockoutArmed = true; }
     // Spam guard: with the engine off the temp feed ages past the 20s staleness threshold, so this
     // cut/restart cycle repeats every cooldown (~2s). Announce a new reason immediately, then throttle
     // to one heartbeat per minute so a genuinely new fault never gets buried under the idle loop.
@@ -1050,7 +1077,7 @@ void commitCVTuningRecord() {
   rec.iExcessFires = cvTuningScore.iExcessFires;
   rec.loadDumpFires = cvTuningScore.loadDumpFires;
   rec.hardOcFires = cvTuningScore.hardOcFires;
-  rec.voltageKp = VoltageKp_active;  // gain actually in effect (Manual or Auto-λ, normalized)
+  rec.voltageKp = VoltageKp_active;  // gain actually in effect (Manual or Auto α/K, normalized)
   rec.voltageKi = VoltageKi_active;
   rec.setpointRiseRate = SetpointRiseRate;
   rec.setpointFallRate = SetpointFallRate;
@@ -1122,9 +1149,10 @@ static bool accBindingReady(uint32_t &bindingStartMs, bool binding, uint32_t now
 
 // Zero all accumulators. clearLive=true (manual Reset button) also discards the live excursion
 // stopwatches and the live thermal containment session — the next scored second costs a fresh
-// ACC_SETTLE_THERMAL_MS. The daily auto-reset passes false: an in-progress excursion or containment
-// session carries WHOLE into the new window (counted there, out-of-band time preserved), so a
-// failure spanning midnight lands in the next day's row rather than being erased.
+// ACC_SETTLE_THERMAL_MS. clearLive=false carries an in-progress excursion or containment session
+// WHOLE into the new window (counted there, out-of-band time preserved), so a failure spanning
+// midnight lands in the next day's row rather than being erased — that was the daily auto-reset's
+// mode, and with that reset disabled the false path currently has no live caller.
 void resetAccuracyScores(bool clearLive) {
   accCur4 = {};
   accVolt4 = {};
@@ -1333,7 +1361,9 @@ void commitSysidSweepRecord() {
     }
   }
   float wp = 0.0f, wpf = 0.0f;
+  const float fAlias = sweepAliasLimitHz();
   for (int i = 0; i < systemIDBodeCount; i++) {
+    if (fAlias > 0.5f && systemIDBode[i].freqHz > fAlias) continue;  // aliased point — its lag is noise
     float ap = fabsf(systemIDBode[i].phaseDeg);
     if (ap > wp) { wp = ap; wpf = systemIDBode[i].freqHz; }
   }
@@ -1433,8 +1463,10 @@ void commitTuningSweepRecord() {
     }
   }
   float pk = 0.0f, pkf = 0.0f, wp = 0.0f, wpf = 0.0f;
+  const float fAlias = sweepAliasLimitHz();
   for (int i = 0; i < tuningBodeCount; i++) {
     if (tuningBode[i].gain > pk) { pk = tuningBode[i].gain; pkf = tuningBode[i].freqHz; }
+    if (fAlias > 0.5f && tuningBode[i].freqHz > fAlias) continue;  // aliased point — its lag is noise
     float ap = fabsf(tuningBode[i].phaseDeg);
     if (ap > wp) { wp = ap; wpf = tuningBode[i].freqHz; }
   }
@@ -1494,13 +1526,23 @@ void thermalAccuracyScore_tick(uint32_t nowMs, float dtSec) {
   }
 }
 
+// OV-episode window: any Group 1/2 hard fire within the last 30s. Observed relapse periods are
+// 1-3s (longest gap 12.8s, 18:31 07-22 AGM), so 30s brackets a whole train with margin while
+// staying invisible to normal operation.
+static uint32_t g_ovEpisodeLastFireMs = 0;
+static uint32_t g_ovEpisodeStartMs = 0;   // first fire of the current episode — freshness fence for cvSteadyHoldEma
+static inline bool ovEpisodeActive() {
+  return g_ovEpisodeLastFireMs != 0 && (uint32_t)(millis() - g_ovEpisodeLastFireMs) < 30000u;
+}
+
 // Recovery P-boost multiplier — error-scheduled CV proportional authority. Returns 1× at/above
 // target (shortfall≤0) and ramps linearly to cvRecovBoostMax at cvRecovBoostErrV (×class) of
-// shortfall. Not gated to protection events — any below-target error is boosted; the payoff case
-// is climbing out of a post-protection voltage hole, self-disarming to 1× at target before it can
-// re-fire the OV that tripped. Scales only the P term; cv_I and the D trim are untouched.
+// shortfall. Forced 1× inside an OV episode: the post-cut hole below target is created by the
+// cut itself, and boosting the climb out of it re-fires the trip on a stiff-topped lead-acid
+// plant (pTerm 25-37A vs a ~19A hold, 18:31 07-22). Outside an episode any below-target error
+// is boosted (load-serve holes). Scales only the P term; cv_I and the D trim are untouched.
 static inline float cvRecovBoostMult(float shortfallV) {
-  if (!cvRecovBoostEnable || shortfallV <= 0.0f) return 1.0f;
+  if (!cvRecovBoostEnable || shortfallV <= 0.0f || ovEpisodeActive()) return 1.0f;
   float span = cvRecovBoostErrV * ((float)BATTERY_VOLTAGE / 12.0f);
   float frac = (span > 0.01f) ? (shortfallV / span) : 1.0f;
   if (frac > 1.0f) frac = 1.0f;
@@ -1659,9 +1701,20 @@ void AdjustFieldLearnMode() {
   // unified flag.
   static float preEventCvI = 0.0f;
   static float preEventIcv = 0.0f;  // commanded current at the same snapshot — recovery goal is max(cv_I, Icv)
+  static float preEventLoadEma = 0.0f;  // ~2s EMA of house-load amps (MeasuredAmps − Bcur) while unclamped — demand-drop reference for the release reseed (shunt only)
+  static uint32_t preEventLoadMs = 0;   // 0 = EMA unseeded
   if (!g_fastOvClampActive) {
     preEventCvI = cv_I;  // refresh while no protection is clamping
-    preEventIcv = Icv;
+    // Min against the unboosted P+I reconstruction: a boost-inflated climb must not become the
+    // next fire's refill goal (36-50A goals vs a ~19A hold, 18:31 07-22).
+    preEventIcv = fminf(Icv, VoltageKp_active * fmaxf(ChargingVoltageTarget - IBV, 0.0f) + cv_I);
+    if (HAS_BATT_SHUNT) {
+      float loadsNow = MeasuredAmps - Bcur;
+      float dtL = (preEventLoadMs == 0) ? 0.0f : fminf((float)(uint32_t)(currentMillis - preEventLoadMs), 500.0f);
+      preEventLoadEma = (preEventLoadMs == 0) ? loadsNow
+                                              : preEventLoadEma + (dtL / (2000.0f + dtL)) * (loadsNow - preEventLoadEma);
+      preEventLoadMs = currentMillis;
+    }
   }
   // Post-protection integrator refill (deficit-gated rate law). While active, UP-integration of
   // cv_I runs at VoltageKi_active × M, M = 1 + (cvRecovKiMax−1)·(remaining deficit / deficit at
@@ -1671,20 +1724,34 @@ void AdjustFieldLearnMode() {
   // old timed window's error cap is unnecessary. A premise-void backstop survives (see the
   // termination block): satHi freezes cv_I whenever Icv rails at the goal ceiling, so if the
   // pre-trip current stops holding the target the deficit could never heal and the ceiling
-  // would cap CV at the stale pre-trip current forever. Icv stays ceilinged at
+  // would cap CV at the stale pre-trip current forever. A second exit ends the window once the
+  // bus has HELD ≈target ~1s (recovered exit) — without it the window latches whenever the plant
+  // heals needing less current than the goal. Icv stays ceilinged at
   // recovCvGoal for the life of the refill: the pre-trip current held the target, so commanding
-  // more on the way back can only overshoot. Goal basis is max(cvSteadyHoldEma, preEventIcv) —
+  // more on the way back can only overshoot. Goal basis is max(cvSteadyHoldEma, preEventIcv) −
+  // the measured demand drop at the fire (see the rising-edge capture) —
   // the EMA is the current that actually holds the target, immune to the overshoot droop and
   // release-gap re-samples that drag the raw snapshot to ~half the hold (21A vs 39A,
   // cvlog_20260718_1117); stale-EMA fallback is preEventCvI. Any new fire cancels the refill —
   // the mid-heal cv_I becomes the next reseed base (de-escalation ratchet).
   static bool recovActive = false;
-  static float recovCvGoal = 0.0f;    // max(cvSteadyHoldEma, preEventIcv) snapshot at release — heal target AND the Icv ceiling
+  static float recovCvGoal = 0.0f;    // max(cvSteadyHoldEma, preEventIcv) − demandDropA snapshot at release — heal target AND the Icv ceiling
   static float recovDeficit0 = 0.5f;  // recovCvGoal − cv_I at release (floored 0.5A) — normalizes the Ki-boost taper
-  static uint32_t recovStartMs = 0;     // release stamp — the premise-void exit arms 2 s later (field-lag gap right after release has the ceiling pinned on a briefly-flat bus)
+  static uint32_t recovStartMs = 0;     // release stamp — the premise-void + recovered exits arm 2 s later (field-lag gap right after release has the ceiling pinned on a briefly-flat bus)
   static uint8_t recovStarveTicks = 0;  // consecutive PI ticks the goal ceiling is pinned with the bus low + not rising
+  static uint8_t recovHeldTicks = 0;    // consecutive PI ticks the bus has held ≈target — the "recovered" exit; without it the window latches as a stale ceiling whenever the plant heals needing less current than the goal (13:56 07-22 zombie)
   static float recovSlopeEma = 0.0f;    // ~1s EMA of cvDSlope for the premise-void exit — raw per-tick slope is ripple-fakeable
-  static float cvSteadyHoldEma = 0.0f;  // slow EMA of cv_I during clean CV near target = true holding current; recovCvGoal basis, immune to overshoot droop + flutter-gap re-sampling
+  static float demandDropA = 0.0f;      // house-load amps that left the bus at the fire (rising-edge loads vs preEventLoadEma) — subtracted from reseed base AND goal, else the refill restores a current the event proved unwanted
+  static uint8_t rapidReFires = 0;      // consecutive re-fires <1.5s after release — proof the seed is still high; escalates the reseed ratchet ×0.85^n
+  static uint32_t lastReleaseMs = 0;
+  static bool recovWalking = false;     // starve backstop engaged: the goal ceiling walks up at a bounded rate instead of releasing in one step (a one-tick release steps the command by the whole P+I surplus — 25-30A steps re-fired immediately, 18:31 07-22)
+  static bool loadServeActive = false;    // load-serve Ki boost (loadServeBoostEnable): measured demand (loads + battery intake) exceeds cv_I with the bus low → boost up-integration toward it. e=K×ΔI hides a 35A load behind ~0.25V on lithium, so plain Ki serves it in ~30s; the old battery-discharge trigger never held — the P-boost parks Bcur near 0 within ~0.3s (16:24 07-22 log)
+  static float loadServeGoal = 0.0f;      // loadsNow + battIntakeEma snapshot at engagement — taper reference and the healed-exit target
+  static float loadServeDeficit0 = 0.5f;  // loadServeGoal − cv_I at engagement (floored 0.5A) — normalizes the taper like recovDeficit0
+  static uint8_t loadServeTicks = 0;      // consecutive PI ticks of sustained demand deficit before engaging (chatter guard)
+  static float cvSteadyHoldEma = 0.0f;  // slow EMA of cv_I during clean CV near target = true holding current; recovCvGoal basis, immune to overshoot droop and flutter-gap re-sampling; shifted down by demandDropA at a fire (its premise dies with the departed load)
+  static uint32_t cvSteadyHoldMs = 0;   // last clean-window EMA update — goal basis trusts the EMA only if this postdates the episode's first fire (a pre-episode EMA can remember a departed load: 55A goal vs ~12A plant, 18:33 07-22 no-shunt)
+  static float battIntakeEma = 0.0f;    // slow EMA of Bcur in the same clean-CV window = battery's charging share at target; reseed floor + the loadServeGoal intake term (shunt only)
   // Post-protection fast-rise window — opened by the falling-edge handler below.
   // 0 = window inactive. Gated again at slew site by FastSetpointRiseWindowMs cap
   // and FastSetpointRiseHeadroomV vs ChargingVoltageTarget.
@@ -1826,6 +1893,11 @@ void AdjustFieldLearnMode() {
   static bool g_fastOvHardActive_prev = false;
   if (g_fastOvHardActive && !g_fastOvHardActive_prev) {
     g_fastOvHardCount++;  // rising-edge only — count each new hard FastOV activation
+    if (!ovEpisodeActive()) {
+      g_ovEpisodeStartMs = currentMillis;
+      queueConsoleMessage("OV episode: recovery P-boost paused until 30s after the last fire");
+    }
+    g_ovEpisodeLastFireMs = currentMillis;
     // Collapse inner PID integrator on hard OV onset. fastOvCap already drives
     // setpoint to near-zero on this tick; without this, a wound-up integrator
     // resists the setpoint collapse and grinds duty down at ~40%/s instead of
@@ -2970,7 +3042,8 @@ void AdjustFieldLearnMode() {
         // INA228 noise is alternating-sign (high/low/high/low) — two consecutive same-direction crossings
         // cannot be measurement noise. Tier 1 catches hard-switched FET disconnects; tiers 2/3 catch
         // relay-contact events spread over multiple samples.
-        // Gate: voltageControlActive (= !inIdleStage; bulk/absorption/float/TVMode/MaintainMode) and fast INA228 reads active (5ms cadence).
+        // Gate: LoadDumpEnable (Group 5 toggle — the only disarm; global protections toggle does not apply),
+        // voltageControlActive (= !inIdleStage; bulk/absorption/float/TVMode/MaintainMode) and fast INA228 reads active (5ms cadence).
         // On detection: snaps cv_I = 0 on rising edge and collapses setpointLimited + fastOvCurrentCap to 0.
         // Recovery: AW bleed drives recovery naturally — same path as fastOV.
         {
@@ -2982,7 +3055,7 @@ void AdjustFieldLearnMode() {
           static int ldCount1 = 0;  // consecutive samples above LoadDumpDtThresh1
           static int ldCount2 = 0;  // consecutive samples above LoadDumpDtThresh
           static int ldCount3 = 0;  // consecutive samples above LoadDumpDtThresh3
-          if (BattLimitEnable && voltageControlActive && inaFastModeActive && HAS_BATT_SHUNT) {  // no shunt → dBcur/dt is noise; fast-OV dV/dt is the load-dump backstop
+          if (LoadDumpEnable && voltageControlActive && inaFastModeActive && HAS_BATT_SHUNT) {  // no shunt → dBcur/dt is noise; fast-OV dV/dt is the load-dump backstop
             if (g_dBcur_dt > LoadDumpDtThresh1) {
               ldCount1++;
             } else {
@@ -3231,8 +3304,9 @@ void AdjustFieldLearnMode() {
         // BOTH the CV PI error AND the *relative* over-voltage protections read. A commanded DROP
         // (absorption→float, manual lower) collapses in one tick through the dead band far above
         // battery voltage — the field is already saturated (current-limited) there, so the target's
-        // value is inert — then glides the final approach at vTgtRampDn so fast-OV / iExcess don't
-        // trip as measured converges on the new target.
+        // value is inert — then glides the final approach at vTgtRampDn, BUS-PACED (descent holds while
+        // getFiltV lags more than CV_TGT_PACE_LEAD_V behind the reference) so the gliding reference can
+        // never outrun delivery and open the measured-vs-target gap to the OV margin.
         //   Protections still fire at the same speed relative to whatever the target currently is —
         //   this only limits how fast the target itself may move. The ABSOLUTE backstops are fully
         //   independent of the target: AlternatorHardShutdownV (software hard-cut) and the INA228
@@ -3273,7 +3347,17 @@ void AdjustFieldLearnMode() {
             ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, fastFloor);
           }
           float step = (cvRampDn > 0.0f) ? (cvRampDn * actualDtSec) : 1.0e9f;
-          ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, ChargingVoltageTarget - step);
+          float tgtDn = ChargingVoltageTarget - step;
+          // Bus-paced floor: a fixed glide outruns delivery on a soft plant (lithium 7.5 mV/A bench:
+          // 150 mV/s glide vs 68 mV/s achievable bus opened the gap to the G2 margin — 4 fires,
+          // 2026-07-22 131Drop log). Hold the descent while the bus lags more than the lead. Pace on
+          // getFiltV, never g_ovIbvFilt: ripple troughs on the comparator's own signal would ratchet
+          // the floor down and crests re-open the gap. Tests keep their deliberate target trajectories.
+          if (!cvManualTest && !g_autoTestActive) {
+            float paceFloor = getFiltV() - CV_TGT_PACE_LEAD_V * ((float)BATTERY_VOLTAGE / 12.0f);
+            tgtDn = fminf(fmaxf(tgtDn, paceFloor), ChargingVoltageTarget);
+          }
+          ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, tgtDn);
         }
         if (cvWaveExitWindDown &&
             (!voltageControlActive || ChargingVoltageTarget <= ChargingVoltageTargetReq + 0.001f)) {
@@ -3294,7 +3378,7 @@ void AdjustFieldLearnMode() {
           // cvRiseGovEnable=0 (Voltage tab Test Limiters) disarms the rise clamp → the integrator sees the
           // full up-step and can wind up into an OV trip; falls were already instant. For A/B study.
           if ((cvRiseGovEnable || g_autoTestActive) && ChargingVoltageTarget > voltageTargetSlewed + 0.01f) {
-            float icvHi_gov = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
+            float icvHi_gov = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // alternator command ceiling in CV
             float e_needed = (icvHi_gov - cv_I) / VoltageKp_active;
             e_needed = fmaxf(e_needed, 0.02f * ((float)BATTERY_VOLTAGE / 12.0f));  // min target lead, per-cell-scaled
             voltageTargetSlewed = fminf(ChargingVoltageTarget,
@@ -3337,9 +3421,31 @@ void AdjustFieldLearnMode() {
           // unified flag — every supervisor has voted by the time we reach this point.
           if (voltageControlActive && g_fastOvClampActive && !fastOvClampActive) {
             g_ovClampRiseMs = 0;  // episode ended — disarm the tau timer until the next rising edge stamps it
-            float icvHi_seed = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
-            cv_I = clamp_f(preEventCvI * ReseedFrac, 0.0f, icvHi_seed);
+            float icvHi_seed = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // alternator command ceiling in CV
+            // Demand-drop correction + rapid-refire escalation: preEventCvI is the wrong restore
+            // target when the fire was CAUSED by load leaving the bus (13:56 07-22: 8-fire train
+            // shedding 5%/cycle from a 50A seed toward an 18A plant). Subtract the measured load
+            // drop; each re-fire <1.5s after release proves the seed is still high. Base floored at
+            // the battery's charging share: a load departure can never justify reseeding below what
+            // the battery alone was taking at target (the floor sits inside fracEff, so the ×0.85^n
+            // de-escalation ratchet still dies out on a persistent cause).
+            float fracEff = fmaxf(ReseedFrac * powf(0.85f, (float)rapidReFires), 0.2f);
+            float intakeFloor = fminf(fmaxf(battIntakeEma, 0.0f), preEventCvI);
+            cv_I = clamp_f(fmaxf(preEventCvI - demandDropA, intakeFloor) * fracEff, 0.0f, icvHi_seed);
+            if (demandDropA > 0.0f || rapidReFires > 0) {
+              queueConsoleMessageF("CV reseed %.0fA: measured load drop -%.0fA, rapid re-fire x%u",
+                                   cv_I, demandDropA, (unsigned)rapidReFires);
+            }
+            if (demandDropA > 0.0f && HAS_BATT_SHUNT) {
+              // Consume the correction: snap the slow loads EMA to present loads so a rapid re-fire
+              // measures only NEW departures. Without this the same drop subtracts twice — the
+              // 16:25 07-22 double-dump re-subtracted 42A from the already-corrected 40A base,
+              // reseeding a perfect seed to zero and turning a 3s recovery into 28s.
+              preEventLoadEma = MeasuredAmps - Bcur;
+              preEventLoadMs = currentMillis;
+            }
             cv_I_track = cv_I;
+            lastReleaseMs = currentMillis;
             awSeedProtectStartMs = currentMillis;     // engage seed-protection window
             postProtectRiseStartMs = currentMillis;   // open fast-rise window (closed by either time cap or voltage gate at slew site)
             // Field-side floor reseed: the clamp ran with the tach floor dropped (governor site),
@@ -3354,11 +3460,22 @@ void AdjustFieldLearnMode() {
             }
             if (cvRecovEnable) {
               recovActive = true;
-              float holdBasis = (cvSteadyHoldEma > 0.5f) ? cvSteadyHoldEma : preEventCvI;  // EMA is the true hold; fall back to raw snapshot if CV never settled
-              recovCvGoal = clamp_f(fmaxf(holdBasis, preEventIcv), 0.0f, icvHi_seed);  // snapshot NOW — preEvent* refresh to post-seed values next tick
+              recovWalking = false;
+              // EMA is the true hold — but only when re-validated by a clean settled window SINCE
+              // this episode's first fire; otherwise it can remember a departed load and the refill
+              // re-inflates every lap. Stale (or never-settled) → preEventCvI, which self-converges
+              // with the reseed ratchet.
+              bool holdFresh = (cvSteadyHoldEma > 0.5f)
+                               && cvSteadyHoldMs != 0
+                               && (int32_t)(cvSteadyHoldMs - g_ovEpisodeStartMs) > 0;
+              float holdBasis = holdFresh ? cvSteadyHoldEma : preEventCvI;
+              // Goal drops by the measured demand too — else the refill drives cv_I right back to the
+              // departed-load current and re-fires. Floored at the reseed so the deficit stays ≥0.
+              recovCvGoal = clamp_f(fmaxf(holdBasis, preEventIcv) - demandDropA, cv_I, icvHi_seed);  // snapshot NOW — preEvent* refresh to post-seed values next tick
               recovDeficit0 = fmaxf(recovCvGoal - cv_I, 0.5f);
               recovStartMs = currentMillis;
               recovStarveTicks = 0;
+              recovHeldTicks = 0;
               recovSlopeEma = 0.0f;
             }
           }
@@ -3374,6 +3491,23 @@ void AdjustFieldLearnMode() {
             bool tachSuspect = (g_lastProtClampMs != 0)
                                && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS + 2000UL);
             g_ovClampRpm = tachSuspect ? -1.0f : RPM;
+            // Demand-drop capture — at the rising edge the field hasn't moved yet, so a jump in
+            // (loads EMA − loads now) is load that left the bus, not the cut's own doing. Deadband
+            // 5A: Bcur+MeasuredAmps tick noise; below that a train can't sustain anyway. A delivery
+            // overshoot (alternator surge into the battery) raises Bcur AND MeasuredAmps equally,
+            // so it cancels out of the loads difference and never shaves a benign reseed.
+            demandDropA = 0.0f;
+            if (reseedCorrEnable && HAS_BATT_SHUNT && preEventLoadMs != 0) {
+              demandDropA = preEventLoadEma - (MeasuredAmps - Bcur);
+              if (demandDropA < 5.0f) demandDropA = 0.0f;
+              // The hold EMA's premise (this current holds target) died with the departed load —
+              // correct it now, or the release goal re-aims the refill at the pre-drop hold.
+              if (demandDropA > 0.0f) cvSteadyHoldEma = fmaxf(cvSteadyHoldEma - demandDropA, 0.0f);
+            }
+            rapidReFires = (reseedCorrEnable && lastReleaseMs != 0
+                            && (uint32_t)(currentMillis - lastReleaseMs) < 1500UL)
+                             ? (uint8_t)((rapidReFires < 20) ? rapidReFires + 1 : 20)
+                             : 0;
             recovActive = false;  // a new fire cancels the refill; the mid-heal cv_I becomes the next reseed base (de-escalation ratchet)
           }
           g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
@@ -3542,8 +3676,6 @@ void AdjustFieldLearnMode() {
               if (currentMillis - lastKdTrimMs > 1000) {
                 g_cvKdCount++;
                 g_ovTel.kdEventCount++;
-                queueConsoleMessageF("CV D term #%lu: %.2f V/s slope, %.1f A trim, %.2f V under target",
-                                     (unsigned long)g_cvKdCount, cvDSlope, kdTrim, voltageTargetSlewed - g_cvKdFiltV);
               }
               lastKdTrimMs = currentMillis;
               g_kdTrimThisTick = kdTrim;         // captured for cvLog; cleared by cvLog_tick after logging
@@ -3573,32 +3705,93 @@ void AdjustFieldLearnMode() {
               float aH = (float)g_voltLoopActualIntervalMs / (1500.0f + (float)g_voltLoopActualIntervalMs);
               cvSteadyHoldEma = (cvSteadyHoldEma < 0.5f) ? cv_I
                                                          : cvSteadyHoldEma + aH * (cv_I - cvSteadyHoldEma);
+              cvSteadyHoldMs = currentMillis;
+              // Battery's charging share at target — same clean window, but not while a load-serve
+              // boost holds the bus low with Bcur parked near 0 (would drag the share toward zero).
+              if (HAS_BATT_SHUNT && !loadServeActive) {
+                battIntakeEma += aH * (Bcur - battIntakeEma);
+              }
             }
-            // Refill ends when the deficit is healed (or the existing cancels: new fire, CV
-            // exit/re-entry). The goal ceiling on icvHi lifts with it. Premise-void backstop:
+            // Refill ends when the deficit is healed OR the bus has held ≈target ~1s (or the
+            // existing cancels: new fire, CV exit/re-entry). The goal ceiling on icvHi lifts
+            // with it. Premise-void backstop:
             // healing needs cv_I to rise, but satHi freezes cv_I the whole time Icv rails at the
             // goal ceiling — so if the pre-trip current no longer holds the target (load/plant
             // changed since the trip) the refill would latch and cap CV at the stale pre-trip
             // current forever. Signature: full goal commanded, bus still low and not rising.
+            // The backstop WALKS the goal up rather than dropping the ceiling: a one-tick release
+            // steps the command by the whole P+I surplus and re-fires on a stiff-topped plant.
             if (recovActive) {
               float aSt = (float)g_voltLoopActualIntervalMs / (1000.0f + (float)g_voltLoopActualIntervalMs);
               recovSlopeEma += aSt * (cvDSlope - recovSlopeEma);
               bool starved = (Icv >= recovCvGoal - 0.05f) && (e > 0.0f) && (recovSlopeEma <= 0.0f)
                              && ((uint32_t)(currentMillis - recovStartMs) > 2000UL);
               recovStarveTicks = starved ? (uint8_t)(recovStarveTicks + 1) : 0;
-              if (cv_I >= recovCvGoal - 0.5f) {
+              // Recovered exit — bus holding within normal steady-hold jitter of target for ~1s means
+              // the climb is over, whatever the amp deficit says. Without it the window latches as a
+              // stale ceiling whenever the plant heals needing less current than the goal (battery
+              // filled during the event, load gone, target dropped) and ambushes the next disturbance.
+              bool heldAtTarget = (e <= 0.025f * ((float)BATTERY_VOLTAGE / 12.0f))
+                                  && ((uint32_t)(currentMillis - recovStartMs) > 2000UL);
+              recovHeldTicks = heldAtTarget ? (uint8_t)(recovHeldTicks + 1) : 0;
+              if (cv_I >= recovCvGoal - 0.5f || recovHeldTicks >= 10) {
                 recovActive = false;
-              } else if (recovStarveTicks >= 5) {
-                recovActive = false;
-                queueConsoleMessage("CV recovery: pre-trip current no longer holds the target — ceiling released");
+                recovWalking = false;
+              } else if (!recovWalking && recovStarveTicks >= 5) {
+                recovWalking = true;
+                queueConsoleMessage("CV recovery: pre-trip current no longer holds the target — walking the ceiling up");
               }
+              if (recovActive && recovWalking) {
+                float ceilNow = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);
+                // 5A/s + 10%-of-ceiling/s: scale-invariant, ~10A/s on a 50A machine. Held-at-target
+                // exit stops the walk at the true hold; clearing the alternator ceiling means there
+                // is nothing left to release.
+                recovCvGoal += (5.0f + 0.10f * ceilNow) * ((float)g_voltLoopActualIntervalMs * 0.001f);
+                if (recovCvGoal >= ceilNow) {
+                  recovActive = false;
+                  recovWalking = false;
+                }
+              }
+            }
+            // Load-serve boost engagement. Trigger on the measured demand itself: amps that hold
+            // target = present house loads + the battery's charging share at target (battIntakeEma).
+            // When that exceeds cv_I with the bus meaningfully low, up-integration runs at the
+            // refill's boosted rate toward the snapshot goal and exits when the deficit heals or the
+            // bus reaches target. The old battery-discharge trigger (Bcur < −5A × 5 ticks, release
+            // Bcur > −2A) never engaged in practice: the P-boost serves the initial hole in ~0.3s,
+            // after which the battery parks near 0A while the bus hangs 0.2V low for 30s (16:24
+            // 07-22 log — longest discharge streak 3 ticks). Sensor lies stay bounded by
+            // construction: the boost multiplies integration of the VOLTAGE error, so at target it
+            // pushes nothing regardless of what the goal claims. Defers to the post-protection
+            // refill (its goal ceiling wins); worst case (load removed mid-boost) is one G2 fire
+            // caught by the demand-drop reseed. inaFastModeActive = Bcur live at control rate (same
+            // gate as Load Dump). 10A deficit + 0.05V/class error + 2 ticks: beyond the correlated
+            // iMeas/Bcur ripple in the loads difference, and 200ms is field-lag scale anyway.
+            if (loadServeBoostEnable && HAS_BATT_SHUNT && inaFastModeActive && !recovActive
+                && !fastOvClampActive && !TuningMode && !batteryHealthTestActive
+                && MaintainMode == 0 && !zeroFloatActive) {
+              float servNeedA = (MeasuredAmps - Bcur) + fmaxf(battIntakeEma, 0.0f);
+              bool servDeficit = (servNeedA - cv_I > 10.0f)
+                                 && (e > 0.05f * ((float)BATTERY_VOLTAGE / 12.0f));
+              loadServeTicks = servDeficit ? (uint8_t)((loadServeTicks < 200) ? loadServeTicks + 1 : 200) : 0;
+              if (!loadServeActive && loadServeTicks >= 2) {
+                loadServeActive = true;
+                loadServeGoal = clamp_f(servNeedA, 0.0f, clamp_f(icvCeil, 0.0f, (float)MaxTableValue));
+                loadServeDeficit0 = fmaxf(loadServeGoal - cv_I, 0.5f);
+                queueConsoleMessageF("CV load pickup: demand %.0fA (loads %.0fA + battery %.0fA) vs cv_I %.0fA — boosting toward %.0fA",
+                                     servNeedA, MeasuredAmps - Bcur, fmaxf(battIntakeEma, 0.0f), cv_I, loadServeGoal);
+              }
+              if (loadServeActive && (cv_I >= loadServeGoal - 0.5f || e <= 0.0f)) loadServeActive = false;
+            } else {
+              loadServeActive = false;
+              loadServeTicks = 0;
             }
             float dtSec = (prevVoltageLoopMs == 0)
                             ? ((float)VoltageLoopInterval / 1000.0f)
                             : ((float)(currentMillis - prevVoltageLoopMs) / 1000.0f);
             dtSec = constrain(dtSec, 0.001f, 0.5f);
 
-            float icvHi = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
+            float icvHi = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // alternator command ceiling in CV
             // Recovery ceiling — never command more than the pre-trip current. Folded into icvHi (not a
             // late fminf on Icv) so satHi anti-windup stops cv_I integrating against it.
             if (recovActive) icvHi = fminf(icvHi, recovCvGoal);
@@ -3628,6 +3821,8 @@ void AdjustFieldLearnMode() {
               float KiUp = VoltageKi_active;
               if (recovActive) {
                 KiUp *= 1.0f + (cvRecovKiMax - 1.0f) * clamp_f((recovCvGoal - cv_I) / recovDeficit0, 0.0f, 1.0f);
+              } else if (loadServeActive) {
+                KiUp *= 1.0f + (cvRecovKiMax - 1.0f) * clamp_f((loadServeGoal - cv_I) / loadServeDeficit0, 0.0f, 1.0f);
               }
               float dI = (e >= 0.0f ? KiUp : KiDown) * e * dtSec;
 
@@ -3674,7 +3869,7 @@ void AdjustFieldLearnMode() {
         // position, not an integral: zeroed on CV entry, recomputed from the present slope each tick.
         {
           float e_now = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on per-tick proportional (governor output)
-          float icvHi_tick = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
+          float icvHi_tick = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // alternator command ceiling in CV
           if (recovActive) icvHi_tick = fminf(icvHi_tick, recovCvGoal);    // same pre-trip-current ceiling as the PI path
           if (!enteringCV) {
             float boost_now = cvRecovBoostMult(e_now);  // recovery P-boost; 1× at/above target
@@ -4704,6 +4899,7 @@ const char *reasonToString(FieldEventReason r) {
     case REASON_CURRENT_STALE: return "CURRENT_STALE";
     case REASON_BATTERY_TOO_COLD: return "Battery too cold to charge";
     case REASON_COMMISSION_REST: return "Commissioning idle (field resting)";
+    case REASON_TACH_IMPLAUSIBLE: return "TACH_IMPLAUSIBLE";
 
     default: return "UNKNOWN";
   }
@@ -4738,6 +4934,13 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
 
   // PRIORITY 3: RPM GATE (field must be cut when engine is not running)
   if (tick.rpmBelowMinimum) {
+    return MODE_CRITICAL_RAMP;
+  }
+
+  // PRIORITY 3.2: TACH-LIE PLAUSIBILITY (tach claims running, field driven hard, zero output —
+  // the RPM signal is noise or the alternator is dead; either way charging is impossible).
+  // Immediate cut via shouldImmediatelyCutGPIO4 + escalating lockout. Mirrors selectFieldEventReason.
+  if (tick.tachImplausible) {
     return MODE_CRITICAL_RAMP;
   }
 
@@ -4816,6 +5019,9 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
 
   // Priority 3: RPM gate
   if (tick.rpmBelowMinimum) return REASON_RPM_TOO_LOW;
+
+  // Priority 3.2: Tach-lie plausibility — mirrors selectFieldControlMode.
+  if (tick.tachImplausible) return REASON_TACH_IMPLAUSIBLE;
 
   // Priority 3.5: Cold-charge lockout (opt-in lithium protection). Mirrors selectFieldControlMode.
   if (tick.batteryTooCold) return REASON_BATTERY_TOO_COLD;
@@ -4958,6 +5164,7 @@ bool shouldImmediatelyCutGPIO4(FieldEventReason reason) {
   if (reason == REASON_INA_OVERVOLTAGE) return true;
   if (reason == REASON_HARD_OVERCURRENT) return true;
   if (reason == REASON_RPM_TOO_LOW) return true;
+  if (reason == REASON_TACH_IMPLAUSIBLE) return true;  // tach already garbage; every energized second is pure battery drain
   // Stale current must cut here: a dead CH1 means ch1FreshFlag never sets, so
   // AdjustFieldLearnMode returns at its freshness gate before the ramp-down /
   // settle-cut path ever runs — without this the field freezes at last duty.
@@ -5120,8 +5327,6 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
                              && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS)
                              && chargingEnabledLocal
                              && (RPM <= 0.0f));
-  tick.rpmBelowMinimum = (!tick.ignoreRPM && !rpmDropoutGrace && RPM < (float)MinRPMForField);
-
   // Engine confirmed stopped: RPM held at exactly 0 for >= RPM_ZERO_CUT_MS. RPM is already
   // floored to 0 below 100 in ReadAnalogInputs, so RPM <= 0 means a true zero. Skipped when
   // IgnoreRPM is set (no trustworthy RPM signal). Drives the immediate-cut override below.
@@ -5131,6 +5336,24 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     rpmZeroSinceMs = 0;
   }
   tick.engineFullyStopped = (!rpmDropoutGrace && rpmZeroSinceMs != 0 && (currentMillis - rpmZeroSinceMs) >= RPM_ZERO_CUT_MS);
+
+  // Engine-restart confirmation: a confirmed stop arms rpmRestartPending; RPM must then hold
+  // >= MinRPMForField for RPM_RESTART_CONFIRM_MS before the RPM gate releases, so a lone noise
+  // blip (or a phantom's first seconds) can't re-energize the field. Grace-masked dropouts never
+  // arm it — only a true zero-hold stop does. Real starts pass through the dwell unnoticed
+  // beyond the ~2 s charging delay.
+  if (tick.engineFullyStopped) rpmRestartPending = true;
+  if (!tick.ignoreRPM && RPM >= (float)MinRPMForField) {
+    if (rpmAboveMinSinceMs == 0) rpmAboveMinSinceMs = currentMillis;
+    if (rpmRestartPending && (uint32_t)(currentMillis - rpmAboveMinSinceMs) >= RPM_RESTART_CONFIRM_MS) {
+      rpmRestartPending = false;
+      queueConsoleMessageF("Engine restart confirmed (RPM=%d held %.1fs)", (int)RPM, RPM_RESTART_CONFIRM_MS / 1000.0f);
+    }
+  } else {
+    rpmAboveMinSinceMs = 0;
+  }
+  tick.rpmBelowMinimum = (!tick.ignoreRPM && !rpmDropoutGrace
+                          && (RPM < (float)MinRPMForField || rpmRestartPending));
 
   // Temperature selection
   bool tempFromAlt = (TempSource == 0);
@@ -5255,6 +5478,33 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     tick.currentDataStale = curStale;
   }
 
+  // Tach-lie plausibility: tach claims running + field driven hard + zero alternator output,
+  // held TACH_LIE_DWELL_MS. Impossible with a live alternator above cut-in, so the RPM signal
+  // is noise (field-PWM coupling sustains it — the 2026-07-22 phantom runaway) or the alternator
+  // is dead; both mean the field is pure battery drain. A real below-cut-in idle can trip this
+  // too — harmless (zero output foregone) and the rev-up early release below frees it instantly.
+  // MANUAL mode stays unrestricted by design; a stale current sensor can't fake the zero.
+  // Commissioning sweeps (field curve/knee, SystemID, τ drain) hold high duty with zero output
+  // below the onset knee ON PURPOSE — the lie signature exactly — so an active or pending sweep
+  // is exempt (07-22 bench: idle knee sweep aborted TACH_IMPLAUSIBLE at 743 RPM / 30% field).
+  {
+    bool sweepDrivingField = (fieldCurveActive != 0) || (systemIDActive != 0) || (fieldCutActive != 0)
+                             || fieldCurveRequested || systemIDRequested || fieldCutRequested
+                             || fieldCutCcActive;
+    bool tachLieNow = chargingEnabledLocal && !tick.manualMode && !tick.ignoreRPM
+                      && !sweepDrivingField
+                      && !tick.currentDataStale
+                      && RPM >= (float)MinRPMForField
+                      && dutyCycle >= TACH_LIE_MIN_DUTY_PCT
+                      && fabsf(MeasuredAmps) < TACH_LIE_MAX_AMPS;
+    if (tachLieNow) {
+      if (tachLieSinceMs == 0) tachLieSinceMs = currentMillis;
+    } else {
+      tachLieSinceMs = 0;
+    }
+    tick.tachImplausible = (tachLieSinceMs != 0 && (uint32_t)(currentMillis - tachLieSinceMs) >= TACH_LIE_DWELL_MS);
+  }
+
   // Voltage validation
   tick.voltagePlausible = isVoltageSensorPlausible();
   tick.voltageDisagreementCritical = isVoltageDisagreementCritical();
@@ -5288,6 +5538,25 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   } else {
     static bool suppressLoggedThisCycle = false;
     suppressLoggedThisCycle = false;  // reset for next OV event
+  }
+
+  // Tach-lie lockout early release: the phantom dying (RPM below the field minimum) or a real
+  // rev-up (RPM well above the latched trip value — sustained noise stays in its band, a throttle
+  // change doesn't) both end the standoff; don't make a real engine wait out the timer. A false
+  // release just re-trips in TACH_LIE_DWELL_MS and the ladder escalates, so churn stays bounded.
+  if (tachLieLockoutArmed) {
+    if (fieldCollapseTime == 0) {
+      tachLieLockoutArmed = false;  // lockout expired naturally elsewhere
+    } else if (!tick.ignoreRPM) {
+      bool signalDropped = (RPM < (float)MinRPMForField);
+      bool realRevUp = (RPM > tachLieTripRpm * 1.5f);
+      if (signalDropped || realRevUp) {
+        fieldCollapseTime = 0;
+        tachLieLockoutArmed = false;
+        queueConsoleMessageF("Tach-lie lockout released early (%s, RPM=%d)",
+                             signalDropped ? "signal dropped" : "rev-up detected", (int)RPM);
+      }
+    }
   }
 
   // Lockout
@@ -6003,7 +6272,7 @@ void saveKneeLearnState() {
 }
 
 // ── Min%-floor snapshot for the commissioning ABORT path ──────────────────────
-// The pre-commissioning tune snapshot (commissionSnapshot) covers gains/filters/thresholds but
+// The pre-commissioning tune snapshot (NK_commissionSnap, staged by cxStartPersistBegin) covers gains/filters/thresholds but
 // NOT the Min% floor table, which the wizard's Min% floor step (stage 7) rewrites. These three back up / restore / clear
 // the persistent Min% state (minDutyTable + the knee tracker: floor, knee, frozen) as parallel
 // "bk_*" blobs in the "learning" namespace so an abort (or a reboot mid-run) reverts Min% too.
@@ -6637,7 +6906,7 @@ void pidLog_tick(uint32_t nowMs) {
   e.innerKp = (float)PidKp;  // inner output-current PID
   e.innerKi = (float)PidKi;
   e.innerKd = (float)PidKd;
-  e.voltageKp = (float)VoltageKp_active;  // outer voltage loop — gain actually in effect (Manual or Auto-λ)
+  e.voltageKp = (float)VoltageKp_active;  // outer voltage loop — gain actually in effect (Manual or Auto α/K)
   e.voltageKi = (float)VoltageKi_active;
 
   e.battV_filt = IBV_filtered;

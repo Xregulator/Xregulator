@@ -2491,6 +2491,21 @@ void ch1_compute_stats() {
   ch1_over2x_at = ch1AtOver2x;
 }
 
+// Effective alternator-current sample rate (Hz). Every swept-sine measurement is capped by this,
+// not by how fast the control tick or the sine generator runs — CH1 is where new information
+// enters. 0 before the first read.
+float ch1SampleHz() {
+  float avgMs = (ch1_avg_2m > 0.5f) ? ch1_avg_2m : ch1_avg_at;
+  return (avgMs > 0.5f) ? (1000.0f / avgMs) : 0.0f;
+}
+
+// Highest sweep frequency worth driving: 3 samples/cycle. Above it the lock-in reports the
+// alias instead of the plant — repeatably, so it reads as a real high-frequency feature.
+float sweepAliasLimitHz() {
+  float fs = ch1SampleHz();
+  return (fs > 0.0f) ? (fs / 3.0f) : 0.0f;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Inner Current PID Firing Interval — field-on-gated clone of ch1_record/_compute_stats.
 // Called once per normal control tick (field driven). Globals live in Xregulator.ino.
@@ -3040,6 +3055,15 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     if (curTestType == 1) {
       float fLo = fmaxf(0.1f, systemIDSineFreqStart);
       float fHi = fmaxf(fLo + 0.1f, systemIDSineFreqEnd);
+      // 24 samples/cycle off sysIDBuffer only re-reads the same held CH1 value — the sensor,
+      // not the sampler, sets what this sweep can resolve.
+      systemIDFsHz = ch1SampleHz();
+      float fAlias = sweepAliasLimitHz();
+      if (fAlias > 0.5f && fHi > fAlias) {
+        queueConsoleMessageF("SystemID sweep: top trimmed %.1f→%.1f Hz — current sensor only samples at %.0f Hz",
+                             fHi, fAlias, systemIDFsHz);
+        fHi = fmaxf(fLo + 0.1f, fAlias);
+      }
       for (int i = 0; i < SYSID_SINE_NPOINTS; i++) {
         float frac = (float)i / (float)(SYSID_SINE_NPOINTS - 1);
         sineFreq[i] = fLo * powf(fHi / fLo, frac);
@@ -3282,6 +3306,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   // to ~0. gain = output A per %duty; phase = output lag in degrees.
   if (phase == SYSID_PROCESSING && curTestType == 1) {
     systemIDBodeCount = 0;
+    float prevLagDeg = 0.0f;   // anchors the ±180° unwrap; lag only grows across a sweep
     for (int p = 0; p < SYSID_SINE_NPOINTS; p++) {
       float f = sineFreq[p];
       uint32_t segStart = sineSegStartMs[p];
@@ -3323,6 +3348,11 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         float B = 2.0f * (float)sqrt(I * I + Q * Q) / (float)n;   // output amplitude (A)
         gain = B / SystemIDStepAmplitude;                         // A per %duty
         phaseDeg = atan2f(-(float)Q, (float)I) * 180.0f / (float)M_PI;  // output lag (deg)
+        // Unfold atan2's ±180° branch cut — the dashboard fits dead time off this number, and a
+        // folded point carries the largest ω weight in that fit.
+        while (phaseDeg < prevLagDeg - 180.0f) phaseDeg += 360.0f;
+        while (phaseDeg > prevLagDeg + 180.0f) phaseDeg -= 360.0f;
+        prevLagDeg = phaseDeg;
       }
       systemIDBode[p].freqHz    = f;
       systemIDBode[p].gainApPct = gain;
@@ -4308,6 +4338,8 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
   static double   sAmpsSin, sAmpsCos, sAmps, sSin, sCos, sAmpsSq;
   static uint32_t nAcc;
   static float    gMaxSeen;   // peak |gain| seen so far this sweep — gates which points feed worst-coherence
+  static double   sFsSamples, sFsWindowMs;  // sweep-wide totals — their ratio is the measured tick rate
+  static float    prevLagDeg;               // last point's unwrapped lag, anchors the ±180 unwrap
   static float    freqList[TUNING_SWEEP_NPOINTS];
   static bool     tuningEaseActive = false;   // post-sweep setpoint ease-down
   static uint32_t tuningEaseStartMs = 0;
@@ -4321,9 +4353,16 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
       tuningSweepRequested = false;
       float fLo = fmaxf(0.1f, tuningSweepStart);
       float fHi = fmaxf(fLo + 0.1f, tuningSweepEnd);
+      float fAlias = sweepAliasLimitHz();
+      if (fAlias > 0.5f && fHi > fAlias) {
+        queueConsoleMessageF("Tuning sine sweep: top trimmed %.1f→%.1f Hz — current sensor only samples at %.0f Hz",
+                             fHi, fAlias, ch1SampleHz());
+        fHi = fmaxf(fLo + 0.1f, fAlias);
+      }
       for (int i = 0; i < TUNING_SWEEP_NPOINTS; i++)
         freqList[i] = fLo * powf(fHi / fLo, (float)i / (float)(TUNING_SWEEP_NPOINTS - 1));
       segIdx = 0; segStarted = false; tuningBodeCount = 0;
+      sFsSamples = 0.0; sFsWindowMs = 0.0; prevLagDeg = 0.0f; tuningSweepFsHz = 0.0f;
       tuningSweepActive = true; tuningSweepDone = false; tuningEaseActive = false;
       // Reset whole-sweep run-condition trackers (captured into the record at commit).
       tuningSweepBaseA = baseA; tuningSweepAmpA = ampA;
@@ -4393,6 +4432,10 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
       sAmpsSq += (double)measAmps * measAmps;   // for per-point coherence
     }
     if (tElapsed >= accEndMs) {
+      // Samples actually landed per whole-cycle window = the live control-tick rate. Measured
+      // rather than assumed: it sets the alias limit and is served to the dashboard fit.
+      sFsSamples += (double)nAcc; sFsWindowMs += (double)((float)nCyc * periodMs);
+      if (sFsWindowMs > 1.0) tuningSweepFsHz = (float)(sFsSamples * 1000.0 / sFsWindowMs);
       float gain = 0.0f, phaseDeg = 0.0f;
       if (nAcc > 0 && ampA > 0.01f) {
         double meanA = sAmps / (double)nAcc;
@@ -4401,6 +4444,11 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
         float B = 2.0f * (float)sqrt(Ic * Ic + Qc * Qc) / (float)nAcc;
         gain = B / ampA;                                              // measured / reference
         phaseDeg = atan2f(-(float)Qc, (float)Ic) * 180.0f / (float)M_PI;  // output lag (deg)
+        // atan2 folds at ±180°; lag only grows across a sweep, so re-add the turns. Unfolded, a
+        // >180° point plots as a cliff and drags the dashboard's dead-time fit negative.
+        while (phaseDeg < prevLagDeg - 180.0f) phaseDeg += 360.0f;
+        while (phaseDeg > prevLagDeg + 180.0f) phaseDeg -= 360.0f;
+        prevLagDeg = phaseDeg;
         // Coherence: fraction of the measured AC power explained by the drive-frequency sinusoid.
         // fitted power = B²/2; total AC power = variance of measAmps. Low = noisy/unreliable point.
         double varA = sAmpsSq / (double)nAcc - meanA * meanA;
