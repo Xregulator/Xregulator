@@ -2010,7 +2010,7 @@ void AdjustFieldLearnMode() {
   static uint32_t recovStartMs = 0;     // release stamp — the premise-void + recovered exits arm 2 s later (field-lag gap right after release has the ceiling pinned on a briefly-flat bus)
   static uint8_t recovStarveTicks = 0;  // consecutive PI ticks the goal ceiling is pinned with the bus low + not rising
   static uint8_t recovHeldTicks = 0;    // consecutive PI ticks the bus has held ≈target — the "recovered" exit; without it the window latches as a stale ceiling whenever the plant heals needing less current than the goal (13:56 07-22 zombie)
-  static float recovSlopeEma = 0.0f;    // ~1s EMA of cvDSlope for the premise-void exit — raw per-tick slope is ripple-fakeable
+  static float recovVRefEma = 0.0f;     // ~3s EMA of the filtered bus — the walk's "not rising" test is a delta above this reference; a slope-EMA sign gate ripple-starved the walk to 7% duty / 0.11 A/s (21:36 07-24, no-shunt load stuck 1.7V low ~9 min)
   static float demandDropA = 0.0f;      // house-load amps that left the bus at the fire (rising-edge loads vs preEventLoadEma) — subtracted from reseed base AND goal, else the refill restores a current the event proved unwanted
   static uint8_t rapidReFires = 0;      // consecutive re-fires <1.5s after release — proof the seed is still high; rebases the next seed on lastSeedA ×0.7
   static uint32_t lastReleaseMs = 0;
@@ -3802,7 +3802,7 @@ void AdjustFieldLearnMode() {
               recovStartMs = currentMillis;
               recovStarveTicks = 0;
               recovHeldTicks = 0;
-              recovSlopeEma = 0.0f;
+              recovVRefEma = getFiltV();
             }
           }
           // Unified-flag rising-edge counter — counts every distinct activation of
@@ -4065,10 +4065,17 @@ void AdjustFieldLearnMode() {
             // The backstop WALKS the goal up rather than dropping the ceiling: a one-tick release
             // steps the command by the whole P+I surplus and re-fires on a stiff-topped plant.
             if (recovActive) {
-              float aSt = (float)g_voltLoopActualIntervalMs / (1000.0f + (float)g_voltLoopActualIntervalMs);
-              recovSlopeEma += aSt * (cvDSlope - recovSlopeEma);
+              float aRef = (float)g_voltLoopActualIntervalMs / (3000.0f + (float)g_voltLoopActualIntervalMs);
+              recovVRefEma += aRef * (getFiltV() - recovVRefEma);
+              // "Not rising" = bus still within 0.05V×class of the ~3s reference — a DELTA, not a
+              // per-tick slope sign: idle ripple (±0.09 V/s on a flat bus) flips a slope EMA and
+              // resets the 5-tick resume gate, starving the walk to ~7% duty (0.11 A/s vs 1.5
+              // design) — a ~43A no-shunt load then holds the bus 1.7V low for ~9 min (21:36 07-24).
+              // A genuine answer still pauses within a tick: field-lag-rate rises clear the
+              // threshold in ~30 ms.
+              bool busAnswering = (getFiltV() - recovVRefEma) >= 0.05f * ((float)BATTERY_VOLTAGE / 12.0f);
               bool delivering = (setpointLimited - g_pidI_filtered) < fmaxf(5.0f, 0.15f * setpointLimited);
-              bool starved = delivering && (Icv >= recovCvGoal - 0.05f) && (e > 0.0f) && (recovSlopeEma <= 0.0f)
+              bool starved = delivering && (Icv >= recovCvGoal - 0.05f) && (e > 0.0f) && !busAnswering
                              && ((uint32_t)(currentMillis - recovStartMs) > 2000UL);
               recovStarveTicks = starved ? (uint8_t)(recovStarveTicks + 1) : 0;
               // Recovered exit — bus holding within normal steady-hold jitter of target for ~1s means

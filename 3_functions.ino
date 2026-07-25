@@ -5599,10 +5599,19 @@ void setupServer() {
     // ── CV gain-mode system: mode toggle, λ multiplier, and (bench) hand-entered plant ──
     if (request->hasParam("cvGainMode")) {
       foundParameter = true;
-      cvGainMode = (uint8_t)(request->getParam("cvGainMode")->value().toInt() != 0 ? 1 : 0);
-      settingWrite(NK_cvGainMode, String((int)cvGainMode).c_str());
-      recomputeCvGains();
-      queueConsoleMessageF("CV gain mode: %s", cvGainMode ? "AUTO (lambda-based)" : "MANUAL");
+      inputMessage = request->getParam("cvGainMode")->value();
+      // Strict "0"/"1" only: toInt("") decodes as 0 = Manual, silently swapping the fitted gains for the
+      // typed fallbacks (07-24 unexplained flip). Client IP makes any future flip attributable.
+      if (inputMessage == "0" || inputMessage == "1") {
+        cvGainMode = (uint8_t)(inputMessage == "1" ? 1 : 0);
+        settingWrite(NK_cvGainMode, String((int)cvGainMode).c_str());
+        recomputeCvGains();
+        queueConsoleMessageF("CV gain mode: %s (set by %s)", cvGainMode ? "AUTO (lambda-based)" : "MANUAL",
+                             request->client()->remoteIP().toString().c_str());
+      } else {
+        queueConsoleMessageF("CV gain mode: malformed value '%s' from %s IGNORED - gain source unchanged",
+                             inputMessage.c_str(), request->client()->remoteIP().toString().c_str());
+      }
     }
     if (request->hasParam("cvAlpha")) {  // CV auto-gain aggressiveness α — Kp = α / measured stiffness K
       foundParameter = true;
