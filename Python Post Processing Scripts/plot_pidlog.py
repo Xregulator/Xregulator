@@ -212,17 +212,21 @@ else:
 df["pid_saturation"] = (df["pidUnsatOutput"] - df["pidOutput"]).abs()
 df["duty_clamp"]     = (df["dutyRequest"] - df["dutyApplied"]).abs()
 
-# Gain label from first non-null row — supports both old (gainKp) and new (innerKp) column names
-def _first_val(cols):
+# Gain label — supports both old (gainKp) and new (innerKp) column names. innerKp/Ki/Kd are the
+# EFFECTIVE gains handed to the PID, so innerKi moves whenever the oscillation damper derates:
+# report the span, never row 1 alone, or a mid-log derate reads as a constant gain.
+def _gain_label(cols):
     for c in cols:
         if c in df.columns:
-            v = df[c].dropna()
-            if not v.empty: return float(v.iloc[0])
-    return float("nan")
-kp_inner = _first_val(["innerKp", "gainKp"])
-ki_inner = _first_val(["innerKi", "gainKi"])
-kd_inner = _first_val(["innerKd", "gainKd"])
-inner_label = f"Output Current PID  Kp={kp_inner:.4g}  Ki={ki_inner:.4g}  Kd={kd_inner:.4g}"
+            v = pd.to_numeric(df[c], errors="coerce").dropna()
+            if v.empty: continue
+            lo, hi = float(v.min()), float(v.max())
+            return f"{lo:.4g}" if (hi - lo) <= 1e-4 * max(abs(hi), 1.0) else f"{lo:.4g}->{hi:.4g}"
+    return "n/a"
+kp_inner = _gain_label(["innerKp", "gainKp"])
+ki_inner = _gain_label(["innerKi", "gainKi"])
+kd_inner = _gain_label(["innerKd", "gainKd"])
+inner_label = f"Output Current PID  Kp={kp_inner}  Ki={ki_inner}  Kd={kd_inner}"
 print(f"Gains: {inner_label}")
 
 def _to_int(col):

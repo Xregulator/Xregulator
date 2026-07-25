@@ -1393,14 +1393,14 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Manual Field PWM (%) (<span id="ManualDutyTarget_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Direct
-                        PWM duty cycle (0–100%) applied to the field winding when Manual mode is active. Has no effect
-                        in PID mode. Use with caution — Manual mode bypasses many thermal, voltage, and current
-                        protections.</span></span>
+                        PWM duty cycle applied to the field winding when Manual mode is active, 0–100% in steps of
+                        0.01. Has no effect in PID mode. Use with caution — Manual mode bypasses many thermal,
+                        voltage, and current protections.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="ManualDutyTarget" type="number" step="1" min="0" max="100" />
+                      <input name="ManualDutyTarget" type="number" step="0.01" min="0" max="100" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -2969,6 +2969,22 @@
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
                         <input name="cvRecovBoostErrV" type="number" step="0.05" min="0.1" max="5" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span>
+                      Recovery Boost — Dead Area Below Target (V) (<span id="cvRecovBoostFloorV_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A no-boost zone just below target. While the voltage shortfall is inside this zone the boost stays fully off (1×), so ordinary ripple and small wobbles never see boosted gain — at low engine speed that extra gain can otherwise sustain a slow see-saw wander around the target. Past the zone the boost ramps up smoothly from nothing, reaching full strength at the shortfall set above. Entered per 12 V; scales automatically on 24 V and 48 V systems. Larger keeps the boost out of more of the normal regulation band, but shallow dips inside the zone recover at normal, unboosted speed; 0 boosts from the first hint of shortfall.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="cvRecovBoostFloorV" type="number" step="0.05" min="0" max="5" />
                         <span class="protections-unit">V</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
@@ -8186,6 +8202,182 @@
                     </form>
                   </div>
                 </div>
+
+                <hr />
+                <details style="margin-top: 6px;">
+                <summary class="emergency-section-title" style="cursor: pointer; margin-bottom: 0;">Protection Actuation Tests</summary>
+                <div style="font-size: 12px; opacity: 0.85; margin: 10px 0;">Deliberately trigger a field collapse to reproduce an electrical fault in a controlled way. The normal Live Data plots, CSV, and Console capture the transient. One test runs at a time.</div>
+
+                <div class="emergency-section-title" style="font-size: 14px;">1. Manual Bench Testing</div>
+                <div style="font-size: 12px; opacity: 0.85; margin-bottom: 8px;">For a manually-set field on the bench (Manual Field driving a power resistor). Hard-cuts the field you already set — no auto-energize. Turn Manual Field ON first; Ignore RPM is fine. In manual mode the regulator's own lockout is bypassed, so the cut duration below is what sets the off-time. Set the values, then press Fire.</div>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Cut duration (ms) (<span id="protTestCutMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">How long the field-enable line is held open (a true hard cut) before your manual field is restored. In manual mode the regulator's adaptive lockout ladder is bypassed, so this fixed hold gives a clean, repeatable off-time. On release the field ramps back up at Duty Ramp Rate.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="protTestCutMs" type="number" step="10" min="20" max="10000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Repeats (<span id="protTestReps_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">How many cut / restore cycles to run (1-20). Applies to both the manual cut and the auto Ladder Walk below.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="protTestReps" type="number" step="1" min="1" max="20" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Gap between cuts (ms) (<span id="protTestGapMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">For repeated cuts, how long the field is left restored (energized) between cuts so it can ramp back before the next one — set it longer than the field takes to recover.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="protTestGapMs" type="number" step="50" min="100" max="20000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Manual field hard cut:</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Fires immediately. Drives the field-enable line open (the same hard chop as a fast over-voltage cut) against the field you set manually, holds it for the cut duration, then restores your manual field and ramps it back at Duty Ramp Rate. Requires Manual Field ON. Works with Ignore RPM on.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input type="hidden" name="protTestStart" value="5">
+                      <input onclick="submitMessage()" type="submit" value="Fire Manual Cut" class="btn-danger" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="emergency-section-title" style="font-size: 14px;">2. Engine Running (auto mode)</div>
+                <div style="font-size: 12px; opacity: 0.85; margin-bottom: 8px;">For a running engine in AUTO mode. Each Fire button first ramps the field up to the test current through the real current loop, holds until it settles, then triggers the protection. Refuses to start unless in AUTO with charging enabled and RPM above Min RPM For Field, so it can never chop into a dead field.</div>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Test current (A) (<span id="protTestAmps_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">The field is driven up until the alternator delivers this output current (through the real current loop) and held until settled before the selected protection fires, so there is always real field current to collapse. "auto" picks a moderate level at fire time; enter 0 to return to auto.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="protTestAmps" type="number" step="1" min="0" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Instant field cut (hard over-voltage path):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Fires immediately. The field-enable output is driven low instantly (open driver) and the field freewheels through the flyback diode, then the adaptive lockout ladder arms — identical to a genuine fast over-voltage event. This is the prime suspect for a hardware electrical problem: it is the same instant chop shared by the fast over-voltage, low-RPM, implausible-tach, hard over-current, critical-temperature, and stale-sensor cuts.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input type="hidden" name="protTestStart" value="1">
+                      <input onclick="submitMessage()" type="submit" value="Fire Instant Cut" class="btn-danger" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Load-dump collapse:</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Fires immediately. The field-enable output stays on but the commanded current snaps to zero and the inner current-loop integrator is dumped — the fastest commanded field collapse (duty driven to the minimum-duty floor). Electrically distinct from the instant cut above, which opens the driver entirely.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input type="hidden" name="protTestStart" value="2">
+                      <input onclick="submitMessage()" type="submit" value="Fire Load-Dump" class="btn-danger" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Graceful ramp-to-zero:</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Fires immediately. Eases the field down at the normal protection ramp rate (Duty Ramp Rate) instead of chopping it — the clean control case. If the instant cut or load-dump reproduces the fault but this does not, the electrical problem is in the abrupt collapse, not the shutdown itself. Stands in for the softer warning ramps: cold-charge lockout, temperature warning, and voltage-disagreement.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input type="hidden" name="protTestStart" value="3">
+                      <input onclick="submitMessage()" type="submit" value="Fire Graceful Ramp" class="btn-secondary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Ladder walk (repeated cuts):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Fires immediately. Fires the instant cut, waits out the lockout, lets the field re-energize, and repeats (uses the Repeats value above) — climbing the adaptive lockout ladder (about 0.5 s escalating to 10 s, 3 cuts per rung; set Repeats to 16 to walk every rung up to the 10 s cap). Exposes the re-energize (restart) transient at each rung.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input type="hidden" name="protTestStart" value="4">
+                      <input onclick="submitMessage()" type="submit" value="Fire Ladder Walk" class="btn-danger" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label">Abort running test:</div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input type="hidden" name="protTestCancel" value="1">
+                      <input onclick="submitMessage()" type="submit" value="Abort" class="btn-secondary" />
+                    </form>
+                  </div>
+                </div>
+                </details>
               </div>
             </details>
 

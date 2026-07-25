@@ -1165,6 +1165,8 @@ int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) 
 #define FIELDCUT_EASE_MS    1500.0f  // ease duty back to the pre-test operating point on exit — gentle re-engagement can't trip a protection
 #define FIELDCUT_MIN_BASE_A 5.0f     // baseline-above-floor must clear this or there is no decay to fit
 #define FIELDCUT_RPM_GRACE_MS 6000UL // keep masking the RPM gates this long after a run: the cut starves the LM2907 pickup, which spikes/false-zeros/ramps garbage for ~4.6 s while its front end re-biases (see reference_lm2907_frontend_final). The RPM reported per run (fieldCutRpm) is latched during the HOLD, before the cut corrupts the tach.
+#define PROT_LOADDUMP_HOLD_MS   1500UL   // manual load-dump test: hold field collapsed at MinDuty this long before easing back
+#define PROT_RECOVER_TIMEOUT_MS 30000UL  // manual ladder-walk test: abort if a cut never lands or its lockout never clears
 #define FIELDCUT_FAST_N     10000    // one full fast-channel ring copy (500 ms @ 20 kSPS), int16 mV
 #define FIELDCUT_PLOT_N     220      // decimated decay points served to the wizard plot
 struct FieldCutSample { uint32_t tMs; float amps; };
@@ -1194,6 +1196,24 @@ float *fcPlotMs = nullptr, *fcPlotA = nullptr;     // PSRAM — decimated decay 
 int    fcPlotN = 0;
 uint32_t fieldCutLastEndMs = 0;                    // cooldown guard
 char  fieldCutAbortMsg[48] = {0};                  // human reason text on a failed/aborted run
+// ── Manual protection-trigger test (Settings → Emergency & Troubleshooting) ────────────────
+// Reproduces each field-collapse waveform on demand so an electrical fault can be provoked in a
+// controlled bench run. Reuses the field-decay energize handoff (protTestCcActive) to bring the
+// field to protTestCmdA through the real current loop, then fires the REAL executor for the mode.
+// Set only from /get?protTestStart, gated by AUTO / RPM / charging / no-other-test.
+volatile bool protTestRequested = false;           // /get?protTestStart — pending start
+volatile bool protTestAbortRequested = false;      // /get?protTestCancel
+volatile bool protTestCutPending = false;          // mode 1/4: pre-gate fires applyImmediateCut(fast-OV) next tick
+volatile bool protTestManualCutActive = false;     // mode 5: hold GPIO4 open (true hard cut) — gates the field-enable HIGH in AdjustField
+uint8_t  protTestActive = 0;                        // 0=idle, 1=running (UI/guards)
+uint8_t  protTestMode = 0;                          // 1=instant cut, 2=load-dump, 3=graceful ramp, 4=ladder walk, 5=manual bench cut
+bool     protTestCcActive = false;                  // energize phase: real current loop drives field to protTestCmdA (modes 1-4 only)
+float    protTestCmdA = 0.0f;                        // energize target alternator output current (A) — modes 1-4; 0 = auto-seed at fire
+uint8_t  protTestReps = 1;                           // ladder-walk / manual repeat count
+uint8_t  protTestRepDone = 0;                        // cuts fired so far (UI)
+uint16_t protTestCutMs = 500;                        // mode 5: hard-cut hold time (ms)
+uint16_t protTestGapMs = 1000;                       // mode 5: field-restored gap between repeated cuts (ms)
+uint32_t protTestLastEndMs = 0;                      // cooldown guard
 // Commissioned field DRAIN time (ms): the measured command→10%-of-output time (≈ dead-time + 2.3 L/R
 // time constants). Since 07-20 the wizard measures one drain per Min%-floor speed and stores the
 // fitted drain-vs-RPM LINE as two endpoints (fdDrain* below); this scalar is kept as the WORST-CASE
@@ -1396,7 +1416,7 @@ const int MAX_SAFE_FREQUENCY = 25000;  // Below core loss and EMI concerns
 // Field box IS the cap; set it to 99 for full duty. A duty-RATIO proxy (no field-current sensor).
 float MaxDuty = 99.0;
 float MinDuty = 1.0;       // field-duty floor: inner-PID outMin + soft-clamp decay floor. Compile-time default only — overwritten from NVS (voltage-scaled) at boot; per-RPM onset floor lives in rpmMinDutyTable.
-int ManualDutyTarget = 4;  // example manual override value
+float ManualDutyTarget = 4.0f;  // manual-mode field duty %, 0.01 resolution (open-loop plant tests need sub-1% steps)
 int InvertAltAmps = 0;     // change sign of alternator amp reading
 int InvertBattAmps = 0;    // change sign of battery amp reading
 int BatteryShuntPresent = 1;  // 1 = INA228 battery shunt fitted (default). 0 = no battery-current sensor: Bcur meaningless, every battery-current consumer takes its safe/off branch and the UI hides those features.
@@ -2460,9 +2480,11 @@ uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not c
 // ungated and a stopping engine can't sit with an energized field faking tach readings.
 #define PROT_RPM_GRACE_MS 5000
 // Tach-lie plausibility cut: tach claims the engine is running while the field is driven hard and
-// the alternator makes nothing — physically impossible above cut-in speed, so the RPM signal is
-// noise (field-PWM coupling / LM2907 re-bias) or the alternator is dead. Either way the field is
-// pure battery drain: immediate cut + escalating lockout (nextTachLieLockoutMs). The 2026-07-22
+// the alternator makes nothing — physically impossible above cut-in speed. Cause is one of: RPM
+// signal noise (field-PWM coupling / LM2907 re-bias), a dead alternator, or an open field drive
+// where the commanded field delivers no current (ON/OFF switch off, field wire loose, gate-drive/
+// Q3 fault). The first two drain the battery through the field; the open-drive case does not, but
+// the immediate cut + escalating lockout (nextTachLieLockoutMs) is correct for all three. The 2026-07-22
 // runaway: phantom ~950 RPM sustained 99% duty at -0.4 A output indefinitely — no RPM-only gate
 // can catch it because the phantom sits above MinRPMForField and below the 1000-RPM lone-jump bar.
 #define TACH_LIE_MIN_DUTY_PCT 25.0f  // applied duty at/above which a live alternator above cut-in always makes >TACH_LIE_MAX_AMPS
@@ -3226,8 +3248,8 @@ volatile bool manualCommitCVTuningRequested = false; // set by UI commit button
 // (steady dwell — earns nothing toward the graded number). Band exits run an excursion
 // stopwatch (count + out-of-band seconds → mean recovery time, dilution-immune); damaging-
 // side exposure and worst peak are RECORDED unconditionally within valid time (facts about
-// what the battery/alternator experienced, separate from graded blame). Auto-reset after
-// each successful config-snapshot upload; manual Reset also discards live stopwatches.
+// what the battery/alternator experienced, separate from graded blame). Reset only by a manual
+// Reset (the post-upload auto-reset is disabled — see buildConfigPayload); that Reset also discards live stopwatches.
 // Accumulators are DOUBLE on purpose: a float32 running sum silently STOPS growing once
 // it passes ~a day of accumulated time (per-tick dt rounds below the float ULP).
 struct AccLoopV4 {
@@ -3434,7 +3456,7 @@ volatile float PidKp_active = 0.579f;  // DERIVED duty-space gain the PID uses (
 volatile float PidKi_active = 5.150f;  // DERIVED duty-space Ki.
 volatile float PidKd_active = 0.0f;  // DERIVED duty-space Kd.
 // --- Voltage (CV) PID ---
-// ── CV gain-mode system (Auto λ-based vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
+// ── CV gain-mode system (Auto α/K vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
 // VoltageKp/VoltageKi below are the MANUAL gains (12V-equivalent space). The control loop never reads
 // them directly — it reads VoltageKp_active/VoltageKi_active, which recomputeCvGains() derives from the
 // selected mode and bakes the 12V-block normalization (×12/BATTERY_VOLTAGE) into.
@@ -3703,7 +3725,7 @@ enum FieldEventReason : uint8_t {
   REASON_FAST_OVERVOLTAGE,         // absolute OV ceiling — fires in ALL modes incl. MANUAL (live per-tick, immediate cut)
   REASON_BATTERY_TOO_COLD,         // board temp (battery proxy) below MinChargeTempF — cold-charge lockout (opt-in, lithium protection)
   REASON_COMMISSION_REST,          // commissioning idle-rest hold between guided steps (not a fault)
-  REASON_TACH_IMPLAUSIBLE          // tach claims running, field driven hard, zero alternator output — RPM signal is noise or alternator dead
+  REASON_TACH_IMPLAUSIBLE          // field driven hard, zero alternator output while tach claims running — open field drive (ON/OFF/wiring/gate-drive), dead alternator, or false RPM (tach noise)
 };
 
 // ==================== TICK SNAPSHOT STRUCT ====================
@@ -3801,6 +3823,7 @@ float cvRecovKiMax = 5.0f;   // refill Ki multiplier at the moment of release (M
 uint8_t cvRecovBoostEnable = 1;   // master switch for the recovery P-boost. DEFAULT ON — seen live at 3×/1.5V (2026-07-20 G2 recovery, ~2.4× in the valley); 4×/0.6V untested — turn off if a faster climb re-trips OV on the approach
 float   cvRecovBoostMax    = 4.0f;  // P-gain multiplier at ≥ cvRecovBoostErrV of shortfall; 1.0 = no boost, taper is linear from 1× at target. Clamp [1,8]
 float   cvRecovBoostErrV   = 0.6f;  // shortfall (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use) at which the boost reaches cvRecovBoostMax. Clamp [0.1,5]
+float   cvRecovBoostFloorV = 0.2f;  // dead area (V, per-12V-block — scaled ×class at use): no boost within this shortfall, ramp starts at 1× from its edge. Keeps boost gain out of small-signal regulation (the 07-24 0.7 Hz idle wander was boost-sustained). Clamp [0,5]; 0 = boost from zero shortfall
 bool    g_autoTestActive  = false;  // set per control-loop tick: an automated/guided test owns the limiters now (commissioning / battery-health DCIR / resonance / system-ID). While true the four user limiter toggles above are inert so a stray user setting can't corrupt a measurement; each test's own built-in slew behavior governs.
 const float TEST_ENTRY_RATE_A = 8.0f;  // A/s — FIXED, conservative ramp rate for an automated test's transition up from the rest floor and back down (NOT the user's SetpointRiseRate/FallRate, which a user could set aggressively). Used by DCIR, the resonance check, and the TuningMode entry ramp so a test never slams the field coming on/off. Current-domain, so no bus-voltage scaling.
 const float CVPF_ENTRY_RATE_A = 50.0f; // A/s — cvpf current-PID phase setpoint rate; the measured edges are direct-duty, so this only paces the practice run

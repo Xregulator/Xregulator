@@ -1022,6 +1022,11 @@ enum Csv3Index {
   CSV3_HuntGovEnable,          // hunt-governor (oscillation damper) master switch (0/1)
   CSV3_ReseedFracNoShunt,      // no-shunt recovery seed fraction (×100)
   CSV3_CvRecovClimbRate,       // recovery climb floor rate, fraction of MaxTableValue/s (×100)
+  CSV3_protTestCutMs,          // protection-test manual hard-cut hold (ms)
+  CSV3_protTestGapMs,          // protection-test gap between repeated cuts (ms)
+  CSV3_protTestReps,           // protection-test repeat count
+  CSV3_protTestAmps,           // protection-test energize target current (A); 0 = auto-seed at fire
+  CSV3_cvRecovBoostFloorV,     // recovery P-boost dead area below target (V per 12V block); ×1000
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -3368,6 +3373,7 @@ void setupServer() {
                                  : resTestActive ? "Resonance current-check"
                                  : (fieldCurveActive != 0) ? "Field curve"
                                  : (fieldCutActive != 0) ? "Field cut"
+                                 : (protTestActive != 0) ? "Protection test"
                                  : cvStressActive ? "CV stress test" : nullptr;
       if (sysMode == SYS_MODE_MANUAL) {
         queueConsoleMessage("SystemID: start blocked — not allowed in manual mode (duty is fixed; test cannot drive the field)");
@@ -3440,6 +3446,7 @@ void setupServer() {
                          : resTestActive ? "Resonance current-check"
                          : (fieldCurveActive != 0) ? "Field curve"
                          : (fieldCutActive != 0) ? "Field cut"
+                         : (protTestActive != 0) ? "Protection test"
                          : cvStressActive ? "CV stress test" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Field curve: start blocked — only allowed in AUTO mode");
@@ -3473,6 +3480,7 @@ void setupServer() {
                          : resTestActive ? "Resonance current-check"
                          : (fieldCurveActive != 0) ? "Field curve"
                          : (fieldCutActive != 0) ? "Field cut"
+                         : (protTestActive != 0) ? "Protection test"
                          : cvStressActive ? "CV stress test" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Field cut: start blocked — only allowed in AUTO mode");
@@ -3494,6 +3502,92 @@ void setupServer() {
       queueConsoleMessage("Field cut: abort requested via web UI");
     }
 
+    // ── Protection Actuation Tests (Settings → Emergency & Troubleshooting) ──
+    //   Value setters (Set buttons): store into the globals; Fire uses the stored values. Independent
+    //   ifs so each Set form (which carries only its own param) is handled on its own.
+    if (request->hasParam("protTestCutMs")) {
+      protTestCutMs = (uint16_t)constrain(request->getParam("protTestCutMs")->value().toInt(), 20, 10000);
+      foundParameter = true;
+      queueConsoleMessageF("Protection test: cut duration = %u ms", protTestCutMs);
+    }
+    if (request->hasParam("protTestGapMs")) {
+      protTestGapMs = (uint16_t)constrain(request->getParam("protTestGapMs")->value().toInt(), 100, 20000);
+      foundParameter = true;
+      queueConsoleMessageF("Protection test: gap = %u ms", protTestGapMs);
+    }
+    if (request->hasParam("protTestReps")) {
+      protTestReps = (uint8_t)constrain(request->getParam("protTestReps")->value().toInt(), 1, 20);
+      foundParameter = true;
+      queueConsoleMessageF("Protection test: repeats = %u", protTestReps);
+    }
+    if (request->hasParam("protTestAmps")) {
+      float ptAmps = request->getParam("protTestAmps")->value().toFloat();
+      protTestCmdA = (ptAmps < 5.0f) ? 0.0f : constrain(ptAmps, 5.0f, 100.0f);  // 0 = auto-seed at fire, and the only way BACK to auto
+      foundParameter = true;
+      if (protTestCmdA == 0.0f) queueConsoleMessage("Protection test: test current = auto (picked at fire)");
+      else queueConsoleMessageF("Protection test: test current = %.0f A", protTestCmdA);
+    }
+    //   Fire buttons: trigger a run using the stored values. mode 1=instant cut, 2=load-dump,
+    //   3=graceful ramp, 4=ladder walk (all AUTO + live-field gated), 5=manual bench cut (Manual Field).
+    if (request->hasParam("protTestStart")) {
+      foundParameter = true;
+      int mode = request->getParam("protTestStart")->value().toInt();
+      const char *busy = (systemIDActive != 0) ? "Plant Delay test"
+                         : TuningMode ? "Current tuning"
+                         : CVTuningMode ? "Voltage tuning"
+                         : cvPlantFitActive ? "Voltage Control Autotuning"
+                         : batteryHealthTestActive ? "Battery health test"
+                         : resTestActive ? "Resonance current-check"
+                         : (fieldCurveActive != 0) ? "Field curve"
+                         : (fieldCutActive != 0) ? "Field cut"
+                         : cvStressActive ? "CV stress test" : nullptr;
+      if (mode < 1 || mode > 5) {
+        queueConsoleMessage("Protection test: start blocked — invalid mode");
+      } else if (protTestActive != 0) {
+        queueConsoleMessage("Protection test: already running");
+      } else if (busy != nullptr) {
+        queueConsoleMessageF("Protection test: start blocked — %s is active", busy);
+      } else if ((millis() - protTestLastEndMs) < 5000UL) {
+        queueConsoleMessage("Protection test: start ignored (cooldown)");
+      } else if (mode == 5) {
+        // Manual bench cut: uses the field the user already set (Manual Field into a resistor). No
+        // AUTO / RPM gate — Ignore RPM is expected during bench work. Charging must be on: without it
+        // there is no manual field to cut, and the queued request would fire later when it came on.
+        if (ManualFieldToggle != 1) {
+          queueConsoleMessage("Protection test: manual cut blocked — turn Manual Field ON first");
+        } else if (!chargingEnabled) {
+          queueConsoleMessage("Protection test: manual cut blocked — turn charging (On/Off) on first");
+        } else {
+          protTestMode = 5;
+          protTestRepDone = 0;
+          protTestAbortRequested = false;
+          protTestRequested = true;
+          queueConsoleMessageF("Protection test: manual hard cut requested — %u ms x%u (gap %u ms)",
+                               protTestCutMs, protTestReps, protTestGapMs);
+        }
+      } else if (sysMode != SYS_MODE_AUTO) {
+        queueConsoleMessage("Protection test: start blocked — engine-running tests need AUTO mode (use Manual Bench Testing instead)");
+      } else if (!chargingEnabled) {
+        queueConsoleMessage("Protection test: start blocked — charging must be enabled (engine running, On/Off on)");
+      } else if (RPM < (float)MinRPMForField) {
+        queueConsoleMessageF("Protection test: start blocked — RPM %d below Min RPM For Field (%d); raise engine speed",
+                             (int)RPM, MinRPMForField);
+      } else {
+        protTestMode = (uint8_t)mode;
+        if (protTestCmdA < 5.0f) protTestCmdA = (SystemIDStabilizeAmps >= 5.0f) ? SystemIDStabilizeAmps : 30.0f;
+        protTestRepDone = 0;
+        protTestAbortRequested = false;
+        protTestRequested = true;
+        queueConsoleMessageF("Protection test: mode %d requested at %.0f A%s", mode, protTestCmdA,
+                             mode == 4 ? " (ladder walk)" : "");
+      }
+    }
+    if (request->hasParam("protTestCancel")) {
+      foundParameter = true;
+      protTestAbortRequested = true;
+      queueConsoleMessage("Protection test: abort requested via web UI");
+    }
+
     // ── Min% onset-knee sweep (commissioning stage 7) ───────────────────────
     // Reuses the field-curve ramp in onset-stop mode (stops at first current). Each completed
     // sweep is committed as an anchor; applyKneeCurve fits the Min% column across the anchors.
@@ -3509,6 +3603,7 @@ void setupServer() {
                          : resTestActive ? "Resonance current-check"
                          : (fieldCurveActive != 0) ? "Field curve"
                          : (fieldCutActive != 0) ? "Field cut"
+                         : (protTestActive != 0) ? "Protection test"
                          : cvStressActive ? "CV stress test" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Min% knee: start blocked — only allowed in AUTO mode");
@@ -3976,8 +4071,8 @@ void setupServer() {
     if (request->hasParam("ManualDutyTarget")) {
       foundParameter = true;
       inputMessage = request->getParam("ManualDutyTarget")->value();
-      settingWrite(NK_ManualDutyTarget, inputMessage.c_str());
-      ManualDutyTarget = inputMessage.toInt();
+      ManualDutyTarget = constrain(inputMessage.toFloat(), 0.0f, 100.0f);
+      settingWrite(NK_ManualDutyTarget, String(ManualDutyTarget, 2).c_str());
     }
     if (request->hasParam("socInfoAvailable")) {
       foundParameter = true;
@@ -5633,6 +5728,12 @@ void setupServer() {
       settingWrite(NK_cvRecovBoostErrV, String(cvRecovBoostErrV, 3).c_str());
       queueConsoleMessageF("CV recovery P-boost full-boost shortfall: %.2f V", cvRecovBoostErrV);
     }
+    if (request->hasParam("cvRecovBoostFloorV")) {  // dead area (V per 12V block): no boost within this shortfall of target
+      foundParameter = true;
+      cvRecovBoostFloorV = clamp_f(request->getParam("cvRecovBoostFloorV")->value().toFloat(), 0.0f, 5.0f);
+      settingWrite(NK_cvRecovBoostFloorV, String(cvRecovBoostFloorV, 3).c_str());
+      queueConsoleMessageF("CV recovery P-boost dead area: %.2f V", cvRecovBoostFloorV);
+    }
     if (request->hasParam("dutySlewEnable")) {  // master switch for field duty slew (1=on, 0=instant)
       foundParameter = true;
       dutySlewEnable = (uint8_t)(request->getParam("dutySlewEnable")->value().toInt() ? 1 : 0);
@@ -5733,8 +5834,9 @@ void setupServer() {
     if (request->hasParam("resTest")) {
       foundParameter = true;
       bool arm = (request->getParam("resTest")->value().toInt() != 0);
-      if (arm && cvStressActive) {
-        queueConsoleMessage("Resonance current-check: start blocked — CV stress test is active");
+      if (arm && (cvStressActive || protTestActive != 0)) {
+        queueConsoleMessageF("Resonance current-check: start blocked — %s is active",
+                             cvStressActive ? "CV stress test" : "Protection test");
       } else if (arm) { resTestActive = true; resTestReleasing = false; }
       // Release = DEFERRED: keep the field under test-control (OV still suppressed) and let the loop wind the
       // current down to ~0 first; it drops resTestActive itself once the field is down (6_functions.ino), so
@@ -8975,7 +9077,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -8984,7 +9086,7 @@ void SendWifiData() {
                                SafeInt(SwitchingFrequency),
                                SafeInt(yyMin),
                                SafeInt(FieldAdjustmentInterval),
-                               SafeInt(ManualDutyTarget),
+                               SafeInt(ManualDutyTarget, 100),
                                SafeInt(SwitchControlOverride),
                                SafeInt(waveAmplitude),
                                SafeInt(CurrentThreshold, 100),
@@ -9323,7 +9425,12 @@ void SendWifiData() {
                                (int)reseedCorrEnable,
                                (int)HuntGovEnable,
                                SafeInt(ReseedFracNoShunt, 100),
-                               SafeInt(CvRecovClimbRate, 100));
+                               SafeInt(CvRecovClimbRate, 100),
+                               SafeInt(protTestCutMs),
+                               SafeInt(protTestGapMs),
+                               SafeInt(protTestReps),
+                               SafeInt(protTestCmdA),
+                               SafeInt(cvRecovBoostFloorV, 1000));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

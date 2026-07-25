@@ -869,9 +869,9 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TemperatureLimitF = settingRead(NK_TemperatureLimitF).toInt();
   }
   if (!settingExists(NK_ManualDutyTarget)) {
-    settingWrite(NK_ManualDutyTarget, String(ManualDutyTarget).c_str());
+    settingWrite(NK_ManualDutyTarget, String(ManualDutyTarget, 2).c_str());
   } else {
-    ManualDutyTarget = settingRead(NK_ManualDutyTarget).toInt();
+    ManualDutyTarget = settingRead(NK_ManualDutyTarget).toFloat();
   }
   if (!settingExists(NK_capLimitMode)) {
     settingWrite(NK_capLimitMode, String(capLimitMode).c_str());
@@ -1832,6 +1832,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvRecovBoostErrV = settingRead(NK_cvRecovBoostErrV).toFloat();
   }
+  if (!settingExists(NK_cvRecovBoostFloorV)) {
+    settingWrite(NK_cvRecovBoostFloorV, String(cvRecovBoostFloorV, 3).c_str());
+  } else {
+    cvRecovBoostFloorV = settingRead(NK_cvRecovBoostFloorV).toFloat();
+  }
   if (!settingExists(NK_dutySlewEnable)) {
     settingWrite(NK_dutySlewEnable, String((int)dutySlewEnable).c_str());
   } else {
@@ -2131,7 +2136,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   if (settingExists(NK_commissionState)) {
     commissionState = (uint8_t)settingRead(NK_commissionState).toInt();
   }
-  // Furthest commissioning phase reached (default 0 = Prep). Drives the tab checklist.
+  // Current commissioning phase (default 0 = Prep; moves backward on Back). Drives the tab checklist.
   if (settingExists(NK_commissionPhase)) {
     commissionPhase = (uint8_t)settingRead(NK_commissionPhase).toInt();
   }

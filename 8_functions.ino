@@ -746,6 +746,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "cvRecovBoostEnable", NK_cvRecovBoostEnable, 1 },
   { "cvRecovBoostMax", NK_cvRecovBoostMax, 1 },
   { "cvRecovBoostErrV", NK_cvRecovBoostErrV, 1 },
+  { "cvRecovBoostFloorV", NK_cvRecovBoostFloorV, 1 },
   { "dutySlewEnable", NK_dutySlewEnable, 1 },
   { "testSlewMode", NK_testSlewMode, 1 },
   { "cvTestSlewMode", NK_cvTestSlewMode, 1 },
@@ -1385,7 +1386,7 @@ bool bhStartTest() {
   if (!bhSamples || !bhResults){ bhAbortReason = "buffers unallocated";      return false; }
   if (RPM < 100)               { bhAbortReason = "engine not running";       return false; }
   if (sysMode != SYS_MODE_AUTO){ bhAbortReason = "must be in AUTO mode";     return false; }   // generator only runs in the AUTO control path
-  if (TuningMode || CVTuningMode || systemIDActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || resTestActive || cvStressActive) { bhAbortReason = "another test active"; return false; }
+  if (TuningMode || CVTuningMode || systemIDActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || resTestActive || cvStressActive || protTestActive) { bhAbortReason = "another test active"; return false; }
   if (BatteryCurrentSource != 0 || !HAS_BATT_SHUNT){ bhAbortReason = "needs INA228 battery shunt"; return false; }
   if (bhNumEdges < 3) bhNumEdges = 3;
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
@@ -1789,7 +1790,7 @@ bool cvpfStartTest(float diMaxReq) {
   if (!cvpfBuf)                 { cvpfAbortMsg = "buffer unallocated";     return false; }
   if (RPM < 100)                { cvpfAbortMsg = "engine not running";     return false; }
   if (sysMode != SYS_MODE_AUTO) { cvpfAbortMsg = "must be in AUTO mode";   return false; }
-  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvStressActive) {
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvStressActive || protTestActive) {
     cvpfAbortMsg = "another test active"; return false;
   }
   cvpfBufCount = 0; cvpfSampleLastMs = 0;
@@ -1928,7 +1929,7 @@ bool cvStressStartTest() {
   if (cvStressActive)           { cvStressAbortMsg = "already running";      return false; }
   if (RPM < 100)                { cvStressAbortMsg = "engine not running";   return false; }
   if (sysMode != SYS_MODE_AUTO) { cvStressAbortMsg = "must be in AUTO mode"; return false; }
-  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvPlantFitActive) {
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || protTestActive) {
     cvStressAbortMsg = "another test active"; return false;
   }
   if (millis() - cvsLastEndMs < 2000UL) { cvStressAbortMsg = "cooling down — retry in a moment"; return false; }

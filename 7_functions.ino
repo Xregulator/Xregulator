@@ -3995,6 +3995,234 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 }
 
 // ============================================================
+// protTest_tick() — manual protection-trigger test (Settings → Emergency & Troubleshooting)
+//
+// Reproduces each field-collapse waveform on demand to hunt an electrical fault (a suspected field
+// cut). Same mutex family + duty-override contract as fieldCut_tick: returns TRUE only while it OWNS
+// duty (via dutyOut); returns FALSE during the energize ramp (the protTestCcActive branch in
+// AdjustField drives the real current PID to protTestCmdA) and during the mode-1/4 pre-gate cut +
+// ladder recovery. NO capture — the normal CSV / cvlog / console telemetry records the transient.
+//   mode 1 instant cut : arms protTestCutPending → the pre-gate fires applyImmediateCut(fast-OV)
+//   mode 2 load-dump    : owns duty at MinDuty + dumps the inner PID integrator (fastest commanded collapse)
+//   mode 3 graceful     : owns duty, ramps down at DutyRampRate (the clean control case)
+//   mode 4 ladder walk  : the mode-1 cut repeated protTestReps× — each climbs the fast-OV lockout ladder
+// Guards (AUTO / RPM / charging / no other test) live in the /protTestStart handler, not here.
+// ============================================================
+bool protTest_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
+  static uint8_t  phase = 0;          // 0=idle 1=ramp/settle 2=fire-active 3=ease-out 5=ladder recovery wait
+  static uint32_t phaseStartMs = 0;
+  static float    entryDuty = 1.0f;   // pre-test operating duty — eased back to on exit
+  static float    freezeDuty = 0.0f;  // applied duty at settle (mode-3 ramp start)
+  static float    ptPreSetpoint = 0.0f;
+  static float    ampsEma = 0.0f;
+  static uint32_t inBandSinceMs = 0;
+  static bool     ptCutSeen = false;  // mode 4: has the armed cut actually landed yet
+
+  // ── Abort ──
+  if (phase != 0 && protTestAbortRequested) {
+    protTestAbortRequested = false;
+    protTestCcActive = false;
+    protTestCutPending = false;
+    protTestManualCutActive = false;   // release the manual hard-cut hold — never leave the field open on abort
+    if (protTestMode == 2) g_loadDumpActive = false;   // mode-2 sets it for the hold; the real detector (which would clear it) is bypassed while the test owns duty
+    queueConsoleMessage("Protection test: aborted");
+    protTestActive = 0; protTestLastEndMs = millis();
+    phase = 0; dutyOut = entryDuty;
+    return false;
+  }
+
+  // ── IDLE: wait for the /protTestStart trigger (do NOT touch dutyOut) ──
+  if (phase == 0) {
+    // Cancel must beat a queued start: this tick can be starved (shutdown/lockout path) between the
+    // start request and the first idle tick, so a pending request is abortable before it ever runs.
+    if (protTestAbortRequested) { protTestAbortRequested = false; protTestRequested = false; return false; }
+    if (!protTestRequested) return false;
+    protTestRequested = false;
+    protTestCutPending = false;
+    entryDuty = (dutyOut > 1.0f) ? dutyOut : 1.0f;
+    ptPreSetpoint = setpointLimited;
+    ampsEma = ampsRaw; inBandSinceMs = 0; ptCutSeen = false;
+    protTestRepDone = 0;
+    protTestActive = 1;
+    if (protTestMode == 5) {
+      // Manual bench cut: the field is ALREADY set by the user (Manual Field into a resistor). No
+      // energize ramp — go straight to the hard-cut hold against the field they dialed in.
+      protTestCcActive = false;
+      phase = 6; phaseStartMs = nowMs;
+      queueConsoleMessageF("Protection test: MANUAL hard cut — %u ms x%u (gap %u ms)", protTestCutMs, protTestReps, protTestGapMs);
+      return false;
+    }
+    protTestCmdA = constrain(protTestCmdA, 5.0f, 100.0f);
+    protTestCcActive = true;   // hand the setpoint to the real current loop (branch in AdjustField)
+    phase = 1; phaseStartMs = nowMs;
+    queueConsoleMessageF("Protection test mode %u: ramping to %.0f A through the current loop", protTestMode, protTestCmdA);
+    return false;
+  }
+
+  // ── RAMP/SETTLE: the protTestCcActive branch slews the setpoint to protTestCmdA and the real PID
+  //   drives duty. Watch for the measured current to sit in-band FIELDCUT_SETTLE_MS, then fire. ──
+  if (phase == 1) {
+    ampsEma += 0.05f * (ampsRaw - ampsEma);
+    bool arrived = fabsf(setpointLimited - protTestCmdA) < 0.5f;
+    float band = fmaxf(3.0f, 0.08f * protTestCmdA);
+    bool inBand = arrived && fabsf(ampsEma - protTestCmdA) < band;
+    if (inBand) { if (inBandSinceMs == 0) inBandSinceMs = nowMs; }
+    else inBandSinceMs = 0;
+    bool settled = inBand && (nowMs - inBandSinceMs >= FIELDCUT_SETTLE_MS);
+    if (!settled && (nowMs - phaseStartMs >= FIELDCUT_SETTLE_TIMEOUT_MS)) {
+      if (ampsEma >= FIELDCUT_MIN_BASE_A) {
+        settled = true;
+        queueConsoleMessageF("Protection test: %.0f A not reachable here — firing at %.1f A", protTestCmdA, ampsEma);
+      } else {
+        protTestCcActive = false;
+        queueConsoleMessage("Protection test: aborted — no charging output; raise RPM and retry");
+        protTestActive = 0; protTestLastEndMs = millis(); phase = 0;
+        return false;
+      }
+    }
+    if (!settled) return false;
+
+    // ── FIRE: field is settled at target. Diverge by mode. ──
+    freezeDuty = lastAppliedDuty;
+    protTestCcActive = false;
+    setpointLimited = ptPreSetpoint;   // the bumpless-resume snapshot must capture the pre-test value
+
+    if (protTestMode == 1) {
+      protTestCutPending = true;       // pre-gate fires the fast-OV cut next tick
+      queueConsoleMessageF("Protection test: INSTANT FIELD CUT armed at %.1f A (fast-OV path + adaptive lockout)", ampsEma);
+      protTestActive = 0; protTestLastEndMs = millis(); phase = 0;
+      return false;
+    }
+    if (protTestMode == 4) {
+      protTestCutPending = true;
+      protTestRepDone++;
+      ptCutSeen = false;
+      queueConsoleMessageF("Protection test: ladder cut %u/%u armed at %.1f A", protTestRepDone, protTestReps, ampsEma);
+      if (protTestRepDone >= protTestReps) { protTestActive = 0; protTestLastEndMs = millis(); phase = 0; return false; }
+      phase = 5; phaseStartMs = nowMs;   // wait for the cut to land + lockout to clear, then re-energize
+      return false;
+    }
+    if (protTestMode == 2) {
+      // Load-dump collapse: own duty at MinDuty and dump the inner PID integrator — the real load-dump
+      // signature (fastest commanded field collapse; GPIO4 stays HIGH, not a hard open).
+      currentPID.ResetIntegratorTo(0.0);
+      g_loadDumpCount++;
+      g_loadDumpActive = true;
+      queueConsoleMessageF("Protection test: LOAD-DUMP collapse from %.1f%% — duty->MinDuty, inner PID reset", freezeDuty);
+      phase = 2; phaseStartMs = nowMs;
+      dutyOut = MinDuty;
+      return true;
+    }
+    // mode 3 graceful ramp-to-zero (the clean control case)
+    queueConsoleMessageF("Protection test: GRACEFUL RAMP-DOWN from %.1f%% at %.0f%%/s", freezeDuty, DutyRampRate);
+    phase = 2; phaseStartMs = nowMs;
+    dutyOut = freezeDuty;
+    return true;
+  }
+
+  // ── FIRE-ACTIVE: mode 2 holds MinDuty; mode 3 ramps duty down at DutyRampRate ──
+  if (phase == 2) {
+    if (protTestMode == 2) {
+      dutyOut = MinDuty;
+      if (nowMs - phaseStartMs >= PROT_LOADDUMP_HOLD_MS) {
+        g_loadDumpActive = false;
+        phase = 3; phaseStartMs = nowMs;
+      }
+      return true;
+    }
+    float sec = (float)(nowMs - phaseStartMs) / 1000.0f;
+    float d = freezeDuty - DutyRampRate * sec;
+    if (d <= MinDuty) {
+      dutyOut = MinDuty;
+      phase = 3; phaseStartMs = nowMs;
+      return true;
+    }
+    dutyOut = d;
+    return true;
+  }
+
+  // ── EASE-OUT: ramp MinDuty → entryDuty so re-engagement can't itself trip a protection ──
+  if (phase == 3) {
+    float frac = (float)(nowMs - phaseStartMs) / FIELDCUT_EASE_MS;
+    if (frac >= 1.0f) {
+      protTestActive = 0; protTestLastEndMs = millis();
+      phase = 0; dutyOut = entryDuty;
+      return false;
+    }
+    dutyOut = MinDuty + (entryDuty - MinDuty) * frac;
+    return true;
+  }
+
+  // ── LADDER RECOVERY WAIT (mode 4): wait out the armed cut + its lockout, then re-energize ──
+  // Only normal-path ticks reach this function: from the cut landing until the ladder lockout
+  // expires, AdjustField takes the shutdown path (MODE_LOCKOUT_RAMP) and never calls protTest_tick,
+  // so gpio4IsLow / fieldCollapseTime are NEVER observably true here. Detect the fire by the
+  // pre-gate having CONSUMED protTestCutPending — the first tick that runs after that consumption
+  // is by definition post-recovery.
+  if (phase == 5) {
+    if (nowMs - phaseStartMs >= PROT_RECOVER_TIMEOUT_MS) {
+      queueConsoleMessage("Protection test: aborted — ladder recovery timed out");
+      protTestCutPending = false;
+      protTestActive = 0; protTestLastEndMs = millis(); phase = 0;
+      return false;
+    }
+    if (!ptCutSeen) {
+      if (protTestCutPending) return false;   // still armed — pre-gate found the field already low
+      ptCutSeen = true;
+    }
+    if (fieldCollapseTime == 0 && !gpio4IsLow) {
+      // lockout cleared and the field can re-energize — re-arm the ramp for the next rung
+      protTestCcActive = true;
+      ampsEma = ampsRaw; inBandSinceMs = 0;
+      phase = 1; phaseStartMs = nowMs;
+      queueConsoleMessageF("Protection test: re-energizing for ladder cut %u/%u", protTestRepDone + 1, protTestReps);
+    }
+    return false;
+  }
+
+  // ── MANUAL HARD-CUT HOLD (mode 5, phase 6): hold the field-enable line open for protTestCutMs
+  //   against the field the user already set. protTestManualCutActive gates the enable HIGH in
+  //   AdjustField; here we also command PWM 0 and own duty (return true). ──
+  if (phase == 6) {
+    if (!protTestManualCutActive) {
+      protTestManualCutActive = true;
+      digitalWrite(4, LOW);            // immediate cut on the entry tick; the gate holds it thereafter
+      gpio4IsLow = true;
+      protTestRepDone++;
+      queueConsoleMessageF("Protection test: manual hard cut %u/%u — field open %u ms", protTestRepDone, protTestReps, protTestCutMs);
+    }
+    dutyOut = 0.0f;
+    if (nowMs - phaseStartMs >= protTestCutMs) {
+      protTestManualCutActive = false;   // release — the gate re-enables the field; manual duty ramps back at DutyRampRate
+      if (protTestRepDone >= protTestReps) {
+        protTestActive = 0; protTestLastEndMs = millis(); phase = 0;
+        queueConsoleMessage("Protection test: manual cut sequence complete");
+        return false;
+      }
+      phase = 7; phaseStartMs = nowMs;   // gap: let the field ramp back up before the next cut
+    }
+    return true;
+  }
+
+  // ── MANUAL GAP (mode 5, phase 7): field restored, wait protTestGapMs, then cut again ──
+  if (phase == 7) {
+    if (ManualFieldToggle != 1) {
+      // The start guard only checks Manual Field ON; turning it off mid-sequence must not leave the
+      // remaining cuts firing into whatever mode the system fell into.
+      queueConsoleMessage("Protection test: manual cut sequence aborted — Manual Field turned off");
+      protTestActive = 0; protTestLastEndMs = millis(); phase = 0;
+      return false;
+    }
+    if (nowMs - phaseStartMs >= protTestGapMs) {
+      phase = 6; phaseStartMs = nowMs;
+    }
+    return false;   // normal manual control drives the field back up during the gap
+  }
+
+  return false;
+}
+
+// ============================================================
 // fieldCurve_tick() — auto-commissioning Phase 1a field-% sweep
 //
 // Quasi-static duty→amps ramp. Like systemID_tick it returns true while active and

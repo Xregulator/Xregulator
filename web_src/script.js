@@ -2633,6 +2633,11 @@ const CSV3_FIELDS = [
     "HuntGovEnable",                 // oscillation damper master switch (0/1)
     "ReseedFracNoShunt",             // no-shunt recovery seed fraction (×100)
     "CvRecovClimbRate",              // recovery climb floor rate, fraction of MaxTableValue/s (×100)
+    "protTestCutMs",                 // protection-test manual hard-cut hold (ms)
+    "protTestGapMs",                 // protection-test gap between repeated cuts (ms)
+    "protTestReps",                  // protection-test repeat count
+    "protTestAmps",                  // protection-test energize target current (A); 0 = auto-seed at fire
+    "cvRecovBoostFloorV",            // recovery P-boost dead area below target (V per 12V block); ×1000
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5615,7 +5620,7 @@ function updateAllEchosOptimized(data) {
         { key: 'SwitchingFrequency', id: 'SwitchingFrequency_echo', transform: v => v },
         { key: 'yyMin', id: 'yyMin_echo', transform: v => v },
         { key: 'FieldAdjustmentInterval', id: 'FieldAdjustmentInterval_echo', transform: v => v },
-        { key: 'ManualDutyTarget', id: 'ManualDutyTarget_echo', transform: v => v },
+        { key: 'ManualDutyTarget', id: 'ManualDutyTarget_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SwitchControlOverride', id: 'SwitchControlOverride_echo', transform: v => v == 1 ? 'Override' : 'Normal' },
         { key: 'OnOff', id: 'OnOff_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'ManualFieldToggle', id: 'ManualFieldToggle_echo', transform: v => v === 0 ? 1 : 0 },
@@ -5774,6 +5779,7 @@ function updateAllEchosOptimized(data) {
         { key: 'cvRecovBoostEnable', id: 'cvRecovBoostEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'cvRecovBoostMax',   id: 'cvRecovBoostMax_echo',   transform: v => (v / 100).toFixed(2) },
         { key: 'cvRecovBoostErrV',  id: 'cvRecovBoostErrV_echo',  transform: v => (v / 1000).toFixed(2) },
+        { key: 'cvRecovBoostFloorV', id: 'cvRecovBoostFloorV_echo', transform: v => (v / 1000).toFixed(2) },
         { key: 'dutySlewEnable',    id: 'dutySlewEnable_cv_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'testSlewMode',      id: 'testSlewMode_echo',      transform: v => v == 0 ? 'Off' : v == 1 ? 'Default' : 'Custom' },
         { key: 'cvTestSlewMode',    id: 'cvTestSlewMode_echo',    transform: v => v == 0 ? 'Off' : v == 1 ? 'Default' : 'Custom' },
@@ -5790,6 +5796,10 @@ function updateAllEchosOptimized(data) {
         { key: 'reseedCorrEnable',  id: 'reseedCorrEnable_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'ReseedFracNoShunt', id: 'ReseedFracNoShunt_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'CvRecovClimbRate',  id: 'CvRecovClimbRate_echo',  transform: v => (v / 100).toFixed(2) },
+        { key: 'protTestCutMs',     id: 'protTestCutMs_echo',     transform: v => v },
+        { key: 'protTestGapMs',     id: 'protTestGapMs_echo',     transform: v => v },
+        { key: 'protTestReps',      id: 'protTestReps_echo',      transform: v => v },
+        { key: 'protTestAmps',      id: 'protTestAmps_echo',      transform: v => v == 0 ? 'auto' : v },
         { key: 'HuntGovEnable',     id: 'HuntGovEnable_echo',     transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'cvHelpersEnabled',  id: 'cvHelpersEnabled_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'coldChargeLockoutEnable', id: 'coldChargeLockoutEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
@@ -8293,7 +8303,7 @@ function fieldOffReasonText(reasonCode) {
         case 16: return 'overvoltage lockout';
         case 17: return 'too cold to charge';
         case 18: return 'commissioning — field resting';
-        case 19: return 'RPM signal not trusted (field was on, alternator made no current)';
+        case 19: return 'field on but no alternator output — check field wiring, ON/OFF switch, or alternator (may be a false RPM signal)';
         // 0 NONE (transient), 11 MANUAL (shown as its own status word) — no OFF annotation
         default: return '';
     }
@@ -16518,6 +16528,16 @@ async function downloadLogs() {
     // Diagnostics snapshot (frozen dashboard state) as JSON.
     saveLogFile(`snapshot_${ts}${sfx}.json`, JSON.stringify(getDiagnosticsSnapshot(), null, 2), 'application/json');
 
+    // Vessel Info — the one-time config a log cannot be read without (voltage class, alternator size,
+    // bank Ah + chemistry). The cloud relay already ships it; the local bundle did not, so every
+    // ×12/BATTERY_VOLTAGE conversion had to be guessed offline.
+    const vesselRaw = await fetchLogText('/vessel_info.json');
+    wizardHb();
+    saveLogFile(`vesselinfo_${ts}${sfx}.json`,
+        vesselRaw != null ? vesselRaw
+                          : '{"error":"/vessel_info.json download FAILED after retry — data was NOT retrieved"}',
+        'application/json');
+
     setTimeout(() => {
         fetch(buildURL('/resetlogs'), { method: 'POST' })
             .catch(err => console.warn('Log reset failed:', err));
@@ -18313,8 +18333,15 @@ function cvBinToCsv(d, csv3) {
     lines.push(
         `# Toggles: cvHelpersEnabled=${fmtRaw(c.cvHelpersEnabled, 0)} cvRiseGovEnable=${fmtRaw(c.cvRiseGovEnable, 0)} HuntGovEnable=${fmtRaw(c.HuntGovEnable, 0)}`
     );
+    // Tach calibration is hand-entered per install, so the rpm column carries an unknown scale error.
+    // Recording it stops a later reader deriving pulley ratios or shaft orders from logged rpm (07-24).
     lines.push(
-        `# Recovery: cvRecovEnable=${fmtRaw(c.cvRecovEnable, 0)} cvRecovKiMax=${fmtDiv(c.cvRecovKiMax, 100, 1)} ReseedFrac=${fmtDiv(c.ReseedFrac, 100, 2)} ReseedFracNoShunt=${fmtDiv(c.ReseedFracNoShunt, 100, 2)} CvRecovClimbRate=${fmtDiv(c.CvRecovClimbRate, 100, 2)}/s cvRecovBoostEnable=${fmtRaw(c.cvRecovBoostEnable, 0)} cvRecovBoostMax=${fmtDiv(c.cvRecovBoostMax, 100, 2)}x cvRecovBoostErrV=${fmtDiv(c.cvRecovBoostErrV, 1000, 2)}V loadServeBoostEnable=${fmtRaw(c.loadServeBoostEnable, 0)} reseedCorrEnable=${fmtRaw(c.reseedCorrEnable, 0)}`
+        `# Tach: RPMScalingFactor=${fmtRaw(c.RPMScalingFactor, 0)} PulleyRatio=${fmtDiv(c.PulleyRatio, 100, 2)}` +
+        ` — both set by hand at commissioning against the boat's own gauge; the rpm column is INDICATIVE.` +
+        ` Never infer a shaft/rotor order or a pulley ratio from logged rpm.`
+    );
+    lines.push(
+        `# Recovery: cvRecovEnable=${fmtRaw(c.cvRecovEnable, 0)} cvRecovKiMax=${fmtDiv(c.cvRecovKiMax, 100, 1)} ReseedFrac=${fmtDiv(c.ReseedFrac, 100, 2)} ReseedFracNoShunt=${fmtDiv(c.ReseedFracNoShunt, 100, 2)} CvRecovClimbRate=${fmtDiv(c.CvRecovClimbRate, 100, 2)}/s cvRecovBoostEnable=${fmtRaw(c.cvRecovBoostEnable, 0)} cvRecovBoostMax=${fmtDiv(c.cvRecovBoostMax, 100, 2)}x cvRecovBoostErrV=${fmtDiv(c.cvRecovBoostErrV, 1000, 2)}V cvRecovBoostFloorV=${fmtDiv(c.cvRecovBoostFloorV, 1000, 2)}V loadServeBoostEnable=${fmtRaw(c.loadServeBoostEnable, 0)} reseedCorrEnable=${fmtRaw(c.reseedCorrEnable, 0)}`
     );
     lines.push(
         `# capReason codes: 0=none(unclamped) 1=KHard_G1(predictive) 2=KHard_G2(measured) 3=iExcess 4=loadDump 5=iExcessBulk(current-control phase)`
@@ -23725,8 +23752,8 @@ const COMMISSION_STEPS = [
 let cxLastState = 0;   // remembered from the last CSV3 frame, for the clear/restart confirm text
 
 // Render the whole Commissioning tab status block: badge + overall line + step checklist (with
-// per-step run checkboxes) + clear/restart button. Driven by persisted state (0/1/2), furthest
-// phase reached (0..9, 9 = finished), and the per-stage done bitmask (bit i = stage i complete).
+// per-step run checkboxes) + clear/restart button. Driven by persisted state (0/1/2), current
+// phase (0..9, 9 = finished; moves backward on Back), and the per-stage done bitmask (bit i = stage i complete).
 function renderCommissionStatus(state, phase, mask, manual) {
     cxLastState = state;
     cxLastPhase = phase;

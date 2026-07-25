@@ -295,6 +295,7 @@ bool fsRemove(const char *path) {
 #define NK_cvRecovBoostEnable "cvRcvBoostEn"
 #define NK_cvRecovBoostMax "cvRcvBoostMax"
 #define NK_cvRecovBoostErrV "cvRcvBoostErrV"
+#define NK_cvRecovBoostFloorV "cvRcvBoostFlrV"
 #define NK_loadServeBoostEnable "loadServeBoost"
 #define NK_HuntGovEnable "HuntGovEn"
 #define NK_reseedCorrEnable "reseedCorrEn"
