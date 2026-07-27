@@ -1812,13 +1812,8 @@ void setupServer() {
 
 
   server.on("/factoryReset", HTTP_POST, [](AsyncWebServerRequest *request) {
-    if (!request->hasParam("password", true)) {
-      request->send(400, "text/plain", "Missing password");
-      return;
-    }
-    String password = request->getParam("password", true)->value();
-    if (!validatePassword(password.c_str())) {
-      request->send(403, "text/plain", "FAIL");
+    if (!settingsArmActive()) {
+      request->send(403, "text/plain", "Settings not armed");
       return;
     }
     Serial.println("\n=== FACTORY RESET INITIATED FROM WEB ===");
@@ -2694,14 +2689,14 @@ void setupServer() {
   });
 
   // Load CSV (import a shared/saved polar): POST the BEFRONT1 sail+motor pair as the raw body to
-  // /perfUploadFront?password=XXX. The body handler accumulates chunks into perfUploadBuf; the
-  // request handler (runs once the body is complete) password-gates, then perfUploadFrontCsv()
+  // /perfUploadFront. The body handler accumulates chunks into perfUploadBuf; the
+  // request handler (runs once the body is complete) arm-gates, then perfUploadFrontCsv()
   // replaces both fronts and applies the user's chosen mode (?fixed=1 freeze / 0 learn) + persists.
   // Same ingest path as cloud-sync/Load-saved.
   server.on("/perfUploadFront", HTTP_POST,
     [](AsyncWebServerRequest *request) {
-      if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
-        perfUploadBuf = ""; request->send(403, "text/plain", "Forbidden"); return;
+      if (!settingsArmActive()) {
+        perfUploadBuf = ""; request->send(403, "text/plain", "Settings not armed"); return;
       }
       if (perfUploadBuf.length() < 8 || perfUploadBuf.indexOf("BEFRONT1") < 0) {
         perfUploadBuf = ""; request->send(400, "text/plain", "No BEFRONT1 data in upload"); return;
@@ -2721,13 +2716,13 @@ void setupServer() {
       perfUploadBuf.concat((const char *)data, len);
     });
 
-  // Load CSV (alternator health): POST the BEFRONT1 front as the raw body to /altUploadFront?password=XXX.
+  // Load CSV (alternator health): POST the BEFRONT1 front as the raw body to /altUploadFront.
   // Mirrors /perfUploadFront. ?fixed=1 freeze (local only) / 0 learn (adopt to cloud, tagged). The
-  // request handler password-gates once the body is complete, then altUploadFrontCsv() applies it.
+  // request handler arm-gates once the body is complete, then altUploadFrontCsv() applies it.
   server.on("/altUploadFront", HTTP_POST,
     [](AsyncWebServerRequest *request) {
-      if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
-        altUploadBuf = ""; request->send(403, "text/plain", "Forbidden"); return;
+      if (!settingsArmActive()) {
+        altUploadBuf = ""; request->send(403, "text/plain", "Settings not armed"); return;
       }
       if (altUploadBuf.length() < 8 || altUploadBuf.indexOf("BEFRONT1") < 0) {
         altUploadBuf = ""; request->send(400, "text/plain", "No BEFRONT1 data in upload"); return;
@@ -2748,10 +2743,10 @@ void setupServer() {
     });
 
   // Config Sharing — export the cloneable settings set as one JSON blob (for download
-  // or cloud submission). Password-gated like the upload endpoints.
+  // or cloud submission). Arm-gated like the upload endpoints.
   server.on("/exportConfig", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
-      request->send(403, "text/plain", "Forbidden"); return;
+    if (!settingsArmActive()) {
+      request->send(403, "text/plain", "Settings not armed"); return;
     }
     request->send(200, "application/json", exportConfigJson());
   });
@@ -2762,8 +2757,8 @@ void setupServer() {
   // (suppress with ?noReboot=1). Mirrors /perfUploadFront's body-accumulator pattern.
   server.on("/importConfig", HTTP_POST,
     [](AsyncWebServerRequest *request) {
-      if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
-        importConfigBuf = ""; request->send(403, "text/plain", "Forbidden"); return;
+      if (!settingsArmActive()) {
+        importConfigBuf = ""; request->send(403, "text/plain", "Settings not armed"); return;
       }
       if (importConfigBuf.length() < 2) {
         importConfigBuf = ""; request->send(400, "text/plain", "Empty body"); return;
@@ -3048,7 +3043,7 @@ void setupServer() {
              (long long)CommissionEpoch, commissionAgeAck ? 1 : 0, commissionChangeFlag ? 1 : 0);
     request->send(200, "application/json", buf);
   });
-  // Deliberately NOT behind the /get password gate: the age prompt fires on a cold app open, when
+  // Deliberately NOT behind the settings arm gate: the age prompt fires on a cold app open, when
   // settings are normally still locked, and a 403 there would silently un-silence it every session.
   // These two flags carry no control authority — the worst a caller can do is mute a maintenance nag.
   server.on("/recommissionAck", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -3063,15 +3058,8 @@ void setupServer() {
     request->send(200, "application/json", "{\"ok\":true}");
   });
   server.on("/saveVesselInfo", HTTP_POST, [](AsyncWebServerRequest *request) {
-    // Password check
-    if (!request->hasParam("password", true)) {
-      request->send(401, "application/json", "{\"success\":false,\"error\":\"No password\"}");
-      return;
-    }
-    String password = request->getParam("password", true)->value();
-    password.trim();
-    if (!validatePassword(password.c_str())) {
-      request->send(401, "application/json", "{\"success\":false,\"error\":\"Invalid password\"}");
+    if (!settingsArmActive()) {
+      request->send(401, "application/json", "{\"success\":false,\"error\":\"Settings not armed\"}");
       return;
     }
     // Get JSON data
@@ -3258,7 +3246,7 @@ void setupServer() {
       }
     }
 
-    // === SAFETY: Allow field OFF without password ===
+    // === SAFETY: Allow field OFF without arming ===
     if (request->hasParam("OnOff")) {
       int requestedState = request->getParam("OnOff")->value().toInt();
       if (requestedState == 0) {
@@ -3266,15 +3254,17 @@ void setupServer() {
         OnOff = 0;
         settingWrite(NK_OnOff, "0");
         stateRevision++;
-        queueConsoleMessage("FIELD OFF: Safety override (no password required)");
+        queueConsoleMessage("FIELD OFF: Safety override (no arming required)");
         request->send(200, "text/plain", "0");
         return;
       }
-      // If turning ON, fall through to password check below
+      // If turning ON, fall through to arm check below
     }
 
-    if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
-      request->send(403, "text/plain", "Forbidden");
+    if (!settingsArmActive()) {
+      // Console line so a rejected write is visible — a stale/replayed URL lands here silently.
+      queueConsoleMessage("Settings write REJECTED: not armed (press Enable Settings Changes first)");
+      request->send(403, "text/plain", "Settings not armed");
       return;
     }
 
@@ -4246,7 +4236,7 @@ void setupServer() {
     if (request->hasParam("OnOff")) {
       // NOTE: OnOff==0 already caused an early return above, so this
       // branch only runs for OnOff==1 (or any non-zero value) after
-      // password validation has passed.
+      // the arm check has passed.
       foundParameter = true;
       inputMessage = request->getParam("OnOff")->value();
       settingWrite(NK_OnOff, inputMessage.c_str());
@@ -6743,50 +6733,26 @@ void setupServer() {
     request->send(200, "text/plain", inputMessage);
   });
 
-  server.on("/setPassword", HTTP_POST, [](AsyncWebServerRequest *request) {
-    if (!request->hasParam("password", true) || !request->hasParam("newpassword", true)) {
-      request->send(400, "text/plain", "Missing fields");
-      return;
+  // Settings arm gate (replaced /setPassword + /checkPassword). ?arm=1 opens the 30-min
+  // write window, ?arm=0 closes it, no param just reports state — the dashboard polls this
+  // to restore/expire its unlocked UI, so a reload while armed comes back unlocked.
+  server.on("/armSettings", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("arm")) {
+      bool arm = request->getParam("arm")->value().toInt() != 0;
+      if (arm) {
+        settingsArmed = true;
+        settingsArmedAtMs = millis();
+        queueConsoleMessage("Settings ARMED: changes accepted for 30 min");
+      } else if (settingsArmed) {
+        settingsArmed = false;
+        queueConsoleMessage("Settings locked");
+      }
     }
-    String password = request->getParam("password", true)->value();
-    String newPassword = request->getParam("newpassword", true)->value();
-    password.trim();
-    newPassword.trim();
-    if (newPassword.length() == 0) {
-      request->send(400, "text/plain", "Empty new password");
-      return;
-    }
-    // Validate the existing admin password first
-    if (!validatePassword(password.c_str())) {
-      request->send(403, "text/plain", "FAIL");  // Wrong password
-      return;
-    }
-    // Create the hash first (before taking lock)
-    char hash[65] = { 0 };
-    sha256(newPassword.c_str(), hash);
-    // Save the plaintext password and hash (NVS settings namespace)
-    settingWrite(NK_password, newPassword.c_str());
-    if (!settingWrite(NK_passwordHash, hash)) {
-      request->send(500, "text/plain", "Failed to save password");
-      return;
-    }
-    // Update RAM copy
-    strncpy(requiredPassword, newPassword.c_str(), sizeof(requiredPassword) - 1);
-    strncpy(storedPasswordHash, hash, sizeof(storedPasswordHash) - 1);
-    request->send(200, "text/plain", "OK");
-  });
-  server.on("/checkPassword", HTTP_POST, [](AsyncWebServerRequest *request) {
-    if (!request->hasParam("password", true)) {
-      request->send(400, "text/plain", "Missing password");
-      return;
-    }
-    String password = request->getParam("password", true)->value();
-    password.trim();
-    if (validatePassword(password.c_str())) {
-      request->send(200, "text/plain", "OK");
-    } else {
-      request->send(403, "text/plain", "FAIL");
-    }
+    bool active = settingsArmActive();
+    unsigned long remainSec = active ? (SETTINGS_ARM_TIMEOUT_MS - (millis() - settingsArmedAtMs)) / 1000UL : 0;
+    char out[48];
+    snprintf(out, sizeof(out), "{\"armed\":%d,\"remainSec\":%lu}", active ? 1 : 0, remainSec);
+    request->send(200, "application/json", out);
   });
 
   // Explicit routes for all static web assets — served directly, never hit onNotFound
@@ -6926,13 +6892,11 @@ void setupServer() {
   // lastPhone*Ms freshness timestamps. Partial submissions are OK — send only
   // the fields you have.
   server.on("/set_phone_data", HTTP_GET, [](AsyncWebServerRequest *request) {
-    // Time sync (epochMs) needs NO password: adopting the client's clock is benign and is the
-    // PRIMARY time source on NMEA-less boats in AP mode (browser or app), where the device has
-    // no other clock. GPS injection (lat/lon) overrides navigation data, so it still requires auth.
-    bool authed = request->hasParam("password") &&
-                  strcmp(request->getParam("password")->value().c_str(), requiredPassword) == 0;
+    // Deliberately NOT arm-gated: this is background telemetry (clients push every ~30-60s
+    // whether or not settings are armed), and phone GPS/time are backup sources a LAN client
+    // is trusted to provide. NMEA always outranks phone GPS, and range checks reject garbage.
     bool acceptedGps = false, acceptedTime = false;
-    if (authed && request->hasParam("lat") && request->hasParam("lon")) {
+    if (request->hasParam("lat") && request->hasParam("lon")) {
       // Use strtod + endptr (not String::toDouble — that silently returns 0.0
       // for unparseable input, so "lat=NaN&lon=42" would pass as (0.0, 42)).
       const char *latStr = request->getParam("lat")->value().c_str();
@@ -6975,9 +6939,8 @@ void setupServer() {
 
   // Cloud Features
   server.on("/checkRegistration", HTTP_POST, [](AsyncWebServerRequest *request) {
-    // Check password
-    if (!request->hasParam("password", true) || strcmp(request->getParam("password", true)->value().c_str(), requiredPassword) != 0) {
-      request->send(403, "text/plain", "Forbidden");
+    if (!settingsArmActive()) {
+      request->send(403, "text/plain", "Settings not armed");
       return;
     }
 
@@ -7097,9 +7060,8 @@ void setupServer() {
   });
   // Cloud Features
   server.on("/registerProfile", HTTP_POST, [](AsyncWebServerRequest *request) {
-    // Check password
-    if (!request->hasParam("password", true) || strcmp(request->getParam("password", true)->value().c_str(), requiredPassword) != 0) {
-      request->send(403, "text/plain", "Forbidden");
+    if (!settingsArmActive()) {
+      request->send(403, "text/plain", "Settings not armed");
       return;
     }
     String deviceUID = String(device_id_hex);
@@ -7193,8 +7155,8 @@ void setupServer() {
   });
 
   server.on("/updateProfile", HTTP_POST, [](AsyncWebServerRequest *request) {
-    if (!request->hasParam("password", true) || strcmp(request->getParam("password", true)->value().c_str(), requiredPassword) != 0) {
-      request->send(403, "text/plain", "Forbidden");
+    if (!settingsArmActive()) {
+      request->send(403, "text/plain", "Settings not armed");
       return;
     }
 
@@ -7261,8 +7223,8 @@ void setupServer() {
 
   // Delete All Data endpoint
   server.on("/deleteAllData", HTTP_POST, [](AsyncWebServerRequest *request) {
-    if (!request->hasParam("password", true) || strcmp(request->getParam("password", true)->value().c_str(), requiredPassword) != 0) {
-      request->send(403, "text/plain", "Forbidden");
+    if (!settingsArmActive()) {
+      request->send(403, "text/plain", "Settings not armed");
       return;
     }
 

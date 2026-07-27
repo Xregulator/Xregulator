@@ -146,10 +146,7 @@ function updateAllTempUnitLabels() {
 function setTempUnit(unit) {
     displayTempUnit = unit;
     updateAllTempUnitLabels();
-    const pw = document.querySelector('.password_field');
-    const pwVal = pw ? pw.value : '';
-    const url = `/get?displayTempUnit=${unit}&password=${encodeURIComponent(pwVal)}`;
-    fetch(url).catch(() => {});
+    fetch(`/get?displayTempUnit=${unit}`).catch(() => {});
 }
 
 // Convert a form input value from display unit back to °F before GET submission.
@@ -1095,9 +1092,9 @@ function fetchKneeLearnState(){
     }).catch(()=>{});
 }
 async function resetKneeLearn(){
-    if (!currentAdminPassword) { xAlert("Please unlock settings first"); return; }
+    if (!settingsUnlocked) { xAlert("Please unlock settings first"); return; }
     if (!await xConfirm("Reset all learned Min% floors to factory defaults?")) return;
-    const params = new URLSearchParams({ password: currentAdminPassword, ResetKneeLearn: '1' });
+    const params = new URLSearchParams({ ResetKneeLearn: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(()=>{ setTimeout(fetchKneeLearnState, 400); })
         .catch(()=>{});
@@ -1128,9 +1125,9 @@ function fetchZeroLogState(){
     }).catch(()=>{});
 }
 async function resetZeroLog(){
-    if (!currentAdminPassword) { xAlert("Please unlock settings first"); return; }
+    if (!settingsUnlocked) { xAlert("Please unlock settings first"); return; }
     if (!await xConfirm("Erase the zero-drift log and start a fresh session?")) return;
-    const params = new URLSearchParams({ password: currentAdminPassword, ResetZeroLog: '1' });
+    const params = new URLSearchParams({ ResetZeroLog: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(()=>{ setTimeout(fetchZeroLogState, 400); })
         .catch(()=>{});
@@ -1211,19 +1208,19 @@ function updateAltHealth() {
 
 // Simulator Off(0)/On(1) — segmented toggle in Setup, parallels Vessel Performance's perfSimMode.
 function altSetSim(v){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSimMode='+(v?1:0)),{},5000).catch(()=>{});
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
+  fetchWithTimeout(buildURL('/get?altSimMode='+(v?1:0)),{},5000).catch(()=>{});
 }
 // Reference Source: My History (0) | Uploaded File (1). INDEPENDENT of Pause. Selecting Uploaded
 // defaults Pause = ON firmware-side (spec §4.3); the user can flip Continue afterward.
 function altSetSource(src){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSource='+(src?1:0)),{},5000).catch(()=>{});
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
+  fetchWithTimeout(buildURL('/get?altSource='+(src?1:0)),{},5000).catch(()=>{});
 }
 // Pause / Continue Learning — independent of Reference Source (spec §4.1). Learning always writes My History.
 function altSetPaused(p){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altPaused='+(p?1:0)),{},5000).catch(()=>{});
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
+  fetchWithTimeout(buildURL('/get?altPaused='+(p?1:0)),{},5000).catch(()=>{});
 }
 // One-button health export: everything behind BOTH Charging System Health plots plus the yardstick,
 // in one file. Concatenates the reference surface (/altcurve.csv — a BEFRONT1 block, kept FIRST so the
@@ -1310,8 +1307,8 @@ function downloadRippleBundle(){
 // Every path carries the FULL config, hardware/calibration keys included; the import
 // diff checkboxes are the only place anything gets held back.
 function exportConfigDownload(){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)),{},10000)
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
+  fetchWithTimeout(buildURL('/exportConfig'),{},10000)
     .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
     .then(txt=>{
       const d=new Date(), p=n=>String(n).padStart(2,'0');
@@ -1367,7 +1364,7 @@ async function cfgDiffPreview(blobText, sourceLabel){
   let incoming;
   try{ incoming=JSON.parse(blobText); }catch(e){ xAlert('That is not a valid configuration file.'); return null; }
   if(!incoming || typeof incoming.config!=='object'){ xAlert('That file has no "config" section — not a regulator configuration.'); return null; }
-  const rFull=await fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)),{},10000);
+  const rFull=await fetchWithTimeout(buildURL('/exportConfig'),{},10000);
   if(!rFull.ok){ xAlert('Could not read the current configuration for comparison (HTTP '+rFull.status+').'); return null; }
   const fullJ=await rFull.json();
   const curFull=fullJ.config||{};
@@ -1430,14 +1427,14 @@ async function cfgDiffPreview(blobText, sourceLabel){
   return new Promise(res=>{ _cfgDiffResolve=res; });
 }
 function _cfgPostImport(bodyText){
-  fetchWithTimeout(buildURL('/importConfig?password='+encodeURIComponent(currentAdminPassword)),
+  fetchWithTimeout(buildURL('/importConfig'),
     {method:'POST',body:bodyText},12000)
     .then(r=>{ if(!r.ok){ return r.text().then(t=>{ throw new Error(t||('HTTP '+r.status)); }); } return r.json(); })
     .then(res=>xAlert('Applied '+res.applied+' settings. '+(res.reboot?'The regulator is rebooting — reconnect in ~30 s.':'')))
     .catch(e=>xAlert('Import failed: '+(e&&e.message?e.message:e)));
 }
 function importConfigFromFile(){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
   const inp=document.getElementById('importConfigFile');
   if(!inp || !inp.files || !inp.files.length){ xAlert('Choose a configuration file first.'); return; }
   const reader=new FileReader();
@@ -1450,13 +1447,13 @@ function importConfigFromFile(){
   reader.readAsText(inp.files[0]);
 }
 async function shareConfigToLibrary(){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
   const nameEl=document.getElementById('shareConfigName');
   const name=nameEl?nameEl.value.trim():'';
   try{
     const token=await ensureCloudToken();
     if(!token){ xAlert('This regulator is not registered for cloud features. Complete registration first.'); return; }
-    const r=await fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)),{},10000);
+    const r=await fetchWithTimeout(buildURL('/exportConfig'),{},10000);
     if(!r.ok) throw new Error('export HTTP '+r.status);
     const config=await r.json();
     const resp=await fetch(`${SUPABASE_URL}/functions/v1/submit-config`,{
@@ -1471,7 +1468,7 @@ async function shareConfigToLibrary(){
 // Import a health curve from a file in Downloads (BEFRONT1). Opens the native picker;
 // altUploadCsvFile() reads it and POSTs the raw text to /altUploadFront. Mirrors perfLoadCsv.
 function altLoadCsv(){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
   const inp=document.getElementById('alt-load-file'); if(inp){ inp.value=''; inp.click(); }   // freeze/learn is asked after the file is chosen
 }
 async function altUploadCsvFile(inp){
@@ -1483,7 +1480,7 @@ async function altUploadCsvFile(inp){
   rd.onload=function(){
     const txt=String(rd.result||'');
     if(txt.indexOf('BEFRONT1')<0){ xAlert('That file is not an alternator health (BEFRONT1) CSV.'); inp.value=''; return; }
-    fetchWithTimeout(buildURL('/altUploadFront?password='+encodeURIComponent(currentAdminPassword)+'&fixed='+(freeze?1:0)),{method:'POST',body:txt},10000)
+    fetchWithTimeout(buildURL('/altUploadFront?fixed='+(freeze?1:0)),{method:'POST',body:txt},10000)
       .then(r=>{ if(r.ok){ xAlert('Uploaded reference loaded — '+(freeze?'learning paused':'still learning My History')+'.'); if(typeof fetchAltTrend==='function') fetchAltTrend(); }
                  else { r.text().then(t=>xAlert('Import failed: '+(t||('HTTP '+r.status)))).catch(()=>xAlert('Import failed: HTTP '+r.status)); } })
       .catch(e=>xAlert('Import failed: '+(e&&e.message?e.message:e)));
@@ -1943,8 +1940,8 @@ let _perfPlotPending = false, _perfModelLastFetch = 0;
 function fetchPerfSchema(){ return fetch('/perfschema').then(r=>r.json()).then(j=>{ perfSchema=j; }).catch(()=>{}); }
 
 function perfSet(key, val){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&'+key+'='+val),{},5000).catch(()=>{});
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
+  fetchWithTimeout(buildURL('/get?'+key+'='+val),{},5000).catch(()=>{});
 }
 
 let perfView = 0;   // 0 = sailing, 1 = motoring (client-side display toggle)
@@ -2062,17 +2059,17 @@ function updatePerfControls(){
 }
 // Switching STW↔SOG invalidates every learned point → the firmware does a Clear-All. Warn first.
 async function perfSetSpeedSrc(v){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
   if((perfSettings.perfSpeedSrc|0) === v) return;
   if(!await xConfirm('Switching speed source (STW ↔ SOG) clears ALL learned boat-performance data — same as Clear All. Continue?')) return;
   perfSet('perfSpeedSrc', v);
 }
 // LEARNED↔FIXED reference toggle.
-function perfSetSource(src){ if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; } perfSet('perfSource', src?1:0); }
+function perfSetSource(src){ if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; } perfSet('perfSource', src?1:0); }
 // Import a boat polar from a file (a shared BEFRONT1 CSV, or a Download-CSV backup). Opens the
 // native file picker; perfUploadCsvFile() reads it and POSTs the raw text to /perfUploadFront.
 function perfLoadCsv(){
-  if(!currentAdminPassword){ xAlert('Please unlock settings first'); return; }
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
   const inp=document.getElementById('perf-load-file'); if(inp){ inp.value=''; inp.click(); }   // freeze/learn is asked after the file is chosen
 }
 async function perfUploadCsvFile(inp){
@@ -2083,7 +2080,7 @@ async function perfUploadCsvFile(inp){
   rd.onload=function(){
     const txt=String(rd.result||'');
     if(txt.indexOf('BEFRONT1')<0){ xAlert('That file is not a boat polar (BEFRONT1) CSV.'); inp.value=''; return; }
-    fetchWithTimeout(buildURL('/perfUploadFront?password='+encodeURIComponent(currentAdminPassword)+'&fixed='+(freeze?1:0)),{method:'POST',body:txt},10000)
+    fetchWithTimeout(buildURL('/perfUploadFront?fixed='+(freeze?1:0)),{method:'POST',body:txt},10000)
       .then(r=>{ if(r.ok){ xAlert('Polar imported — '+(freeze?'FIXED (learning paused)':'LEARNED (still refining from your sailing)')+'. The plot will refresh.'); fetchPerfCurve(); }
                  else { r.text().then(t=>xAlert('Import failed: '+(t||('HTTP '+r.status)))).catch(()=>xAlert('Import failed: HTTP '+r.status)); } })
       .catch(e=>xAlert('Import failed: '+(e&&e.message?e.message:e)));
@@ -2686,86 +2683,6 @@ let API_BASE_URL = IS_CAPACITOR ? (localStorage.getItem('xregDeviceBase') || 'ht
 const SUPABASE_URL = 'https://qnbekuaoweuteylitzvo.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFuYmVrdWFvd2V1dGV5bGl0enZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE5NzY1MzUsImV4cCI6MjA2NzU1MjUzNX0.k2S_kzkdAyN1Azs_7enxLun9LouB1bA_q7Sw8x1Cp0o';
 
-// ---------------------------------------------------------------
-// Biometric (Face ID / Touch ID) admin-password autofill — iOS Capacitor only
-// ---------------------------------------------------------------
-// Admin password is stored in the iOS Keychain behind a biometric gate.
-// Cold launch fires Face ID automatically; on success the password is
-// filled and the existing /checkPassword flow runs, so the user lands on
-// the unlocked dashboard without typing. Browser builds: full no-op.
-const BIO_SERVER_KEY = 'xreg-admin';
-const Bio = {
-    plugin() {
-        if (!IS_CAPACITOR) return null;
-        const p = window.Capacitor.Plugins && window.Capacitor.Plugins.NativeBiometric;
-        return p || null;
-    },
-    async available() {
-        const p = this.plugin();
-        if (!p) return false;
-        try {
-            const r = await p.isAvailable();
-            return !!(r && r.isAvailable);
-        } catch (e) { return false; }
-    },
-    async getSaved() {
-        // Returns the saved password or null. Skips the Face ID prompt
-        // entirely if nothing is saved yet — important for first-launch UX.
-        const p = this.plugin();
-        if (!p) return null;
-        try {
-            const saved = await p.isCredentialsSaved({ server: BIO_SERVER_KEY });
-            if (!saved || !saved.isSaved) return null;
-            await p.verifyIdentity({
-                reason: 'Unlock regulator settings',
-                title: 'X Regulator',
-                subtitle: 'Authenticate to unlock settings'
-            });
-            const c = await p.getCredentials({ server: BIO_SERVER_KEY });
-            return (c && c.password) ? c.password : null;
-        } catch (e) { return null; }
-    },
-    async save(password) {
-        const p = this.plugin();
-        if (!p || !password) return;
-        try {
-            await p.setCredentials({
-                username: 'admin',
-                password: String(password),
-                server: BIO_SERVER_KEY
-            });
-        } catch (e) { /* non-fatal */ }
-    },
-    async clear() {
-        const p = this.plugin();
-        if (!p) return;
-        try { await p.deleteCredentials({ server: BIO_SERVER_KEY }); }
-        catch (e) { /* non-fatal */ }
-    }
-};
-
-// Flag tracks whether the in-flight /checkPassword attempt came from Face ID
-// autofill, so the Wrong-Password branch can drop a stale Keychain entry.
-let __bioAutofillInFlight = false;
-
-async function tryBiometricUnlock() {
-    if (!await Bio.available()) return;
-    const pw = await Bio.getSaved();
-    if (!pw) return;
-    const input = document.getElementById('admin_password');
-    if (!input || typeof setAdminPassword !== 'function') return;
-    input.value = pw;
-    __bioAutofillInFlight = true;
-    setAdminPassword();
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-    // Defer one tick so other init code registers first.
-    setTimeout(tryBiometricUnlock, 0);
-});
-
-
-
 if (typeof window.gpsManualOverride === 'undefined') {
     window.gpsManualOverride = false;
 }
@@ -2979,21 +2896,15 @@ async function getPhoneLocation() {
 }
 
 async function postPhoneDataToDevice() {
-    // Time (epochMs) is sent ALWAYS, with no password — it's the device's primary clock source
-    // on NMEA-less boats in AP mode (browser or app). GPS (lat/lon) overrides navigation data, so
-    // it's only sent once Settings is unlocked (and the firmware ignores lat/lon without auth).
-    const pwField = document.querySelector('.password_field');
-    const pw = pwField ? pwField.value : '';
-
+    // Both fields are trusted-LAN backup sources: epochMs is the device's primary clock on
+    // NMEA-less boats in AP mode, and GPS (lat/lon) is sent whenever a fix exists — NMEA
+    // always outranks it on the device, so no lock-state gating is needed.
     const params = new URLSearchParams();
     params.set('epochMs', String(Date.now()));
-    if (pw) {
-        params.set('password', pw);
-        const loc = await getPhoneLocation();
-        if (loc) {
-            params.set('lat', loc.latitude.toFixed(6));
-            params.set('lon', loc.longitude.toFixed(6));
-        }
+    const loc = await getPhoneLocation();
+    if (loc) {
+        params.set('lat', loc.latitude.toFixed(6));
+        params.set('lon', loc.longitude.toFixed(6));
     }
     try {
         await fetch(buildURL('/set_phone_data') + '?' + params.toString(), { method: 'GET' });
@@ -3010,43 +2921,9 @@ function startPhoneDataPoster() {
     phoneDataPosterTimer = setInterval(postPhoneDataToDevice, PHONE_DATA_POST_INTERVAL_MS);
 }
 
-// Kick off poster on page load. Function is safe to call before unlock —
-// it no-ops until the password field has a value.
+// Kick off poster on page load. Runs regardless of lock state — both fields
+// are trusted backup sources the device accepts unconditionally.
 document.addEventListener('DOMContentLoaded', startPhoneDataPoster);
-
-function setupDemoPasswordHandler() {
-    const passwordForm = document.querySelector('#settings-access-section form');
-    const passwordInput = document.getElementById('admin_password');
-    const lockStatus = document.getElementById('lock-status');
-
-    if (passwordForm && passwordInput) {
-        passwordForm.addEventListener('submit', function (e) {
-            e.preventDefault();
-
-            // Accept any non-empty password in demo mode
-            if (passwordInput.value.trim() !== '') {
-                if (lockStatus) {
-                    lockStatus.textContent = "Settings are Unlocked";
-                    lockStatus.className = "lock-status-unlocked";
-                }
-
-                const settingsAccess = document.getElementById('settings-access-section');
-                if (settingsAccess) {
-                    settingsAccess.style.display = 'none';
-                }
-
-                const settingsSection = document.getElementById('settings-section');
-                if (settingsSection) {
-                    settingsSection.classList.remove('locked');
-                }
-
-                console.log('[DEMO MODE] Password accepted (demo only)');
-            }
-
-            return false;
-        });
-    }
-}
 
 // ============================================================================
 // CRITICAL MOBILE FIXES (Required for iOS)
@@ -3508,7 +3385,6 @@ function enableDemoMode() {
     document.body.style.paddingTop = 'calc(40px + env(safe-area-inset-top))';
 
     startDemoData();
-    setupDemoPasswordHandler();
 
 }
 
@@ -4154,12 +4030,6 @@ async function loadAvailableVersions() {
     }
 }
 
-function getStoredPassword() {
-    // Get password from an existing form that already has it populated
-    const existingPasswordField = document.querySelector('.password_field');
-    return existingPasswordField ? existingPasswordField.value : '';
-}
-
 function displayAvailableVersions() {
     const versionList = document.getElementById('version-list');
     const versionLoading = document.getElementById('version-loading');
@@ -4188,13 +4058,6 @@ function displayAvailableVersions() {
         return;
     }
 
-    // Forms are rendered dynamically AFTER the user unlocks settings, so
-    // .password_field elements here won't get auto-populated by the unlock flow.
-    // Grab the current password value from any existing populated password_field
-    // and inject it directly into each version's form.
-    const existingPwField = document.querySelector('.password_field');
-    const passwordValue = existingPwField ? existingPwField.value : '';
-
     let html = '<div style="margin: 10px 0;">Click a version to update:</div>';
     sortedVersions.forEach(version => {
         const versionData = availableVersions[version];
@@ -4210,7 +4073,6 @@ function displayAvailableVersions() {
                         <span style="color: #888; font-size: 0.8em;">${size}</span>
                     </div>
                     <form action="${buildURL('/get')}" method="GET" target="hidden-form" onsubmit="confirmUpdate(this, '${version}'); return false;">
-                        <input type="hidden" name="password" class="password_field" value="${passwordValue}">
                         <input type="hidden" name="UpdateToVersion" value="${version}">
                         <input type="submit" value="Change to ${version}" class="btn-primary">
                     </form>
@@ -4225,7 +4087,6 @@ function displayAvailableVersions() {
 }
 
 function confirmUpdate(form, version) {
-    // Password is guaranteed to exist because button can only be clicked after unlock
     xConfirm(`ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, the web interface will be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI. The Software Update sub-tab in Cloud Features will then confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Orange/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`).then(confirmed => {
         if (!confirmed) return;
         kickOffAppWebUpdate(version);  // No-op in browser; in iOS app downloads matching web bundle in parallel
@@ -6001,7 +5862,7 @@ function submitMessage() {
 function handleAlternatorToggle(checkbox) {
     const isGoingOn = checkbox.checked;
     const checkboxId = checkbox.id;
-    const isLocked = !currentAdminPassword;
+    const isLocked = !settingsUnlocked;
 
     // Always allow turning OFF (safety feature)
     if (!isGoingOn) {
@@ -6019,20 +5880,14 @@ function handleAlternatorToggle(checkbox) {
 
     return handleUserToggle(checkboxId, 'OnOff', 'OnOff');
 }
-//something to do with passwords
-function togglePassword(inputId) {
-    const input = document.getElementById(inputId);
-    const checkbox = event.target;
-    input.type = checkbox.checked ? 'text' : 'password';
-}
-//password hiding stuff
 function hideSettingsAccess() {
     document.getElementById('settings-access-section').style.display = 'none';
 }
 function showSettingsAccess() {
     document.getElementById('settings-access-section').style.display = 'block';
 }
-function lockSettingsManually() {
+// UI half of relocking — also driven by syncArmState() when the device's 30-min window expires.
+function applySettingsLockUI() {
     const section = document.getElementById('settings-section');
     if (section) section.classList.add("locked");
     // DON'T lock the header control - we want to allow turning OFF the alternator
@@ -6044,7 +5899,11 @@ function lockSettingsManually() {
         lockStatus.textContent = "Settings are Locked";
         lockStatus.className = "lock-status-locked";
     }
-    currentAdminPassword = "";
+    settingsUnlocked = false;
+}
+function lockSettingsManually() {
+    if (!DEMO_MODE) fetch(buildURL('/armSettings?arm=0')).catch(() => {});
+    applySettingsLockUI();
 }
 // Touch support: tap once to show tooltip, tap elsewhere to hide, for tooltips tool tip tooltip tips
 document.addEventListener("click", function (e) {
@@ -6089,30 +5948,20 @@ function debounce(fn, delay) {
     };
 }
 
-// Admin password held in memory only (never persisted); the commented line below is a local-testing bypass.
-let currentAdminPassword = "";
-//let currentAdminPassword = "admin"; // TEMP: bypass for local testing
-
-
-function updatePasswordFields() {
-    const password = currentAdminPassword || document.getElementById("admin_password").value;
-    const passwordFields = document.querySelectorAll('.password_field');
-    passwordFields.forEach(field => {
-        field.value = password;
-    });
-}
+// Mirrors the device's settings-arm window (true while armed). Session-only; syncArmState()
+// keeps it honest against the device, so a reload while armed comes back unlocked.
+let settingsUnlocked = false;
 
 // ============================================
 // CLOUD FEATURES - Profile Management
 // ============================================
 
 async function initializeProfileTab() {
-    if (!currentAdminPassword) {
-        diagLog("No password, returning early");
+    if (!settingsUnlocked) {
+        diagLog("Settings locked, returning early");
         return;
     }
     const formData = new FormData();
-    formData.append('password', currentAdminPassword);
 
     // Show "Checking..." banner so the UI isn't blank while the cloud round-trip is in flight.
     const banner = document.getElementById('profile-loading-banner');
@@ -6299,7 +6148,6 @@ async function handleVesselInfoSave(event) {
 
     try {
         const formData = new FormData();
-        formData.append('password', currentAdminPassword);
         formData.append('vesselData', JSON.stringify(vesselData));
 
         const response = await fetchWithTimeout(buildURL('/saveVesselInfo'), {
@@ -6354,8 +6202,15 @@ async function handleVesselInfoSave(event) {
                 // modal and socSeedMaybeAutoOpen suppresses itself over that modal, so a SoC popup
                 // deferred until after the wizard opened would never appear this session.
                 .then(async () => {
+                    // /exportConfig is ~1-2 s of device time (every manifest key read from NVS), and the
+                    // prerequisites screen can't render without it. Start it now so it overlaps the SoC
+                    // wait instead of stalling on a blank screen after it. Safe here: nothing between this
+                    // point and that modal writes a prerequisite field (battery defaults already applied
+                    // and bails for Other, the only chemistry whose field set overlaps; the SoC popup
+                    // writes SocSeedAck / ManualSOCPoint only).
+                    if (result.firstSave === true) _commPrepPrefetch = commPrepFetchCfg();
                     for (let i = 0; i < 6; i++) {
-                        await new Promise(res => setTimeout(res, 1000));
+                        if (i) await new Promise(res => setTimeout(res, 1000));   // check before sleeping: a snapshot already on file costs nothing
                         _socSeedData = null;
                         await socSeedFetch();
                         if (_socSeedData && _socSeedData.snap) break;
@@ -6603,10 +6458,10 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
             prevBatt.volt !== Number(vessel.battery_voltage));
         if (!firstSave && !battChanged) return;
         if (type === 'other') { _battDefSkipNote('No recommendations are made for the Other battery type. Inspect every charge-stage and protection setting under Setup and adjust each one individually.'); return; }
-        if (!currentAdminPassword) return;
+        if (!settingsUnlocked) return;
 
         // Current values from the device (raw NVS strings)
-        const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword)), {}, 10000);
+        const r = await fetchWithTimeout(buildURL('/exportConfig'), {}, 10000);
         if (!r.ok) { _battDefSkipNote('Could not read the current device settings (HTTP ' + r.status + '), so the recommended battery defaults were skipped. Review them any time under Setup &rarr; Battery.'); return; }
         const cfg = (await r.json()).config || {};
         const battSrc = ('BatteryCurrentSource' in cfg) ? parseInt(cfg.BatteryCurrentSource, 10) : 0;  // 0 = INA228
@@ -6699,7 +6554,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         if (!picked.length) return;
 
         // One /get request — every hasParam block in the refactored handler processes independently
-        let url = '/get?password=' + encodeURIComponent(currentAdminPassword);
+        let url = '/get';
         for (const c of picked) url += '&' + c.param + '=' + encodeURIComponent(c.value);
         const ar = await fetchWithTimeout(buildURL(url), {}, 10000);
         const messageDiv = document.getElementById('vessel-info-message');
@@ -6743,6 +6598,7 @@ let _commPrepShuntInit = 1;      // BatteryShuntPresent at open (1 = INA228 fitt
 let _commPrepShuntPresent = 1;   // live shunt-present selection
 let _commPrepFloatInit = '';     // UseFloat at open (Other-only charge block); written only if the select changed
 let _commPrepRpmActive = false;  // deep-linked into the RPM editor from the wizard: suppress the live blue row highlight
+let _commPrepPrefetch = null;    // in-flight /exportConfig started during the SoC-seed wait, so the modal opens instantly
 
 const CP_BTN_GREEN = 'background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; border:none;';
 
@@ -6751,12 +6607,24 @@ function commPrepPaintCta() {
     if (start) start.style.cssText = 'border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em; ' + CP_BTN_GREEN;
 }
 
+function commPrepFetchCfg() {
+    if (!settingsUnlocked) return Promise.resolve(null);
+    return fetchWithTimeout(buildURL('/exportConfig'), {}, 10000)
+        .then(r => r.ok ? r.json() : null)
+        .catch(e => { diagLog('commissioning prerequisites config fetch failed:', e); return null; });
+}
+
 async function maybeShowCommPrereqs() {
     try {
-        if (!currentAdminPassword) return;
-        const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword)), {}, 10000);
-        if (!r.ok) return;
-        _commPrepCfg = (await r.json()).config || {};
+        if (!settingsUnlocked) return;
+        const pre = _commPrepPrefetch; _commPrepPrefetch = null;
+        const j = await (pre || commPrepFetchCfg());
+        if (!j) return;
+        // Same response also carries the RPM cap tables the NEXT screen needs, so hand them over
+        // rather than making openRpmCap re-fetch. The cap tables live in the "learning" namespace and
+        // nothing this screen writes can touch them, so the snapshot cannot go stale in between.
+        _rpmCapTablesPre = j.tables || null;
+        _commPrepCfg = j.config || {};
         commPrepRender(_commPrepCfg);
         document.getElementById('commprep-modal-overlay').style.display = 'flex';
         await new Promise(res => { _commPrereqResolve = res; });
@@ -6941,8 +6809,8 @@ async function commPrepFinish(start) {
     const changes = commPrepCollectChanges();
     _commPrepRpmActive = false;
     document.getElementById('commprep-modal-overlay').style.display = 'none';
-    if (changes.length && currentAdminPassword) {
-        let url = '/get?password=' + encodeURIComponent(currentAdminPassword);
+    if (changes.length && settingsUnlocked) {
+        let url = '/get';
         for (const c of changes) url += '&' + c.param + '=' + encodeURIComponent(c.value);
         try { await fetchWithTimeout(buildURL(url), {}, 10000); } catch (e) { diagLog('prerequisites submit failed:', e); }
     }
@@ -6968,16 +6836,20 @@ function commPrepClose() {
 let _rpmCap = null;         // { rpm:[10], lo:[10], hi:[10] (amps), unit:'amps'|'kw' }
 let _rpmCapNext = null;     // handoff after a Continue button: openRpmAlign (first install) or openCommissionModal (re-commission)
 let _rpmCapBack = null;     // ← Back target: reopen Prerequisites (first install), or null to hide Back (re-commission — no prior screen)
+let _rpmCapTablesPre = null; // tables handed over by the Prerequisites screen's /exportConfig; null → fetch our own
 
 async function openRpmCap(next, back) {
     _rpmCapNext = next || openRpmAlign;
     _rpmCapBack = back || null;
-    if (!currentAdminPassword) { _rpmCapNext(); return; }   // locked → can't write tables; skip ahead
-    let tables = {};
-    try {
-        const r = await fetchWithTimeout(buildURL('/exportConfig?password=' + encodeURIComponent(currentAdminPassword)), {}, 10000);
-        if (r.ok) tables = (await r.json()).tables || {};
-    } catch (e) { diagLog('charge-rate limits load failed:', e); }
+    if (!settingsUnlocked) { _rpmCapNext(); return; }   // locked → can't write tables; skip ahead
+    let tables = _rpmCapTablesPre || {};
+    _rpmCapTablesPre = null;   // one-shot: a ← Back and second Next re-reads from the device
+    if (!Object.keys(tables).length) {
+        try {
+            const r = await fetchWithTimeout(buildURL('/exportConfig'), {}, 10000);
+            if (r.ok) tables = (await r.json()).tables || {};
+        } catch (e) { diagLog('charge-rate limits load failed:', e); }
+    }
     const arr = k => String(tables[k] || '').split(',').map(s => parseFloat(s));
     const rpm = arr('rpmPoints'), hi = arr('capTable'), lo = arr('capTableLo');
     _rpmCap = {
@@ -7054,8 +6926,8 @@ function rpmCapSetUnit(unit) {
 // charge-rate mode, then hand off to tach alignment. mode: 0 = Low, 1 = High.
 async function rpmCapContinue(mode) {
     const s = _rpmCap;
-    if (s && currentAdminPassword) {
-        let url = '/get?capBothSave=1&password=' + encodeURIComponent(currentAdminPassword);
+    if (s && settingsUnlocked) {
+        let url = '/get?capBothSave=1';
         for (let i = 0; i < 10; i++) {
             const hiKw = ampsToKW(s.hi[i]), loKw = ampsToKW(s.lo[i]);
             url += '&rpmTableRPMPoints' + i + '=' + (s.rpm[i] || 0);
@@ -7248,8 +7120,8 @@ async function socSeedMaybeAutoOpen() {
 function socSeedClose(finish) {
     document.getElementById('socseed-modal-overlay').style.display = 'none';
     // ✕ (or Finish while settings are locked) suppresses for this session only; Finish persists the ack
-    if (finish && currentAdminPassword) {
-        fetch(buildURL('/get?SocSeedAck=1&password=' + encodeURIComponent(currentAdminPassword))).catch(() => { });
+    if (finish && settingsUnlocked) {
+        fetch(buildURL('/get?SocSeedAck=1')).catch(() => { });
         if (_socSeedData) _socSeedData.ack = 1;
     } else {
         sessionStorage.setItem('socSeedDismissed', '1');
@@ -7263,7 +7135,7 @@ async function socSeedApplySoc() {
     const v = parseFloat(inp.value);
     if (!isFinite(v) || v < 0 || v > 100) { msg.style.color = '#fca5a5'; msg.textContent = 'Enter a value from 0 to 100 %.'; return; }
     try {
-        const r = await fetchWithTimeout(buildURL('/get?ManualSOCPoint=' + encodeURIComponent(v) + '&password=' + encodeURIComponent(currentAdminPassword)), {}, 8000);
+        const r = await fetchWithTimeout(buildURL('/get?ManualSOCPoint=' + encodeURIComponent(v)), {}, 8000);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         document.getElementById('socseed-result-pct').textContent = Math.round(v) + ' %';
         msg.style.color = '#2ec4b6'; msg.textContent = 'State of charge set to ' + v + ' %. The charge counter restarted from this value.';
@@ -7342,7 +7214,7 @@ function socSeedRender(s) {
         }
     }
 
-    const unlocked = !!currentAdminPassword;
+    const unlocked = !!settingsUnlocked;
     const override = '<div style="margin-top:16px; padding-top:12px; border-top:1px solid #333;">'
         + '<div style="font-size:11px; font-weight:600; letter-spacing:0.06em; color:#777; text-transform:uppercase;">Manual override</div>'
         + '<div style="display:flex; gap:8px; align-items:center; margin-top:6px;">'
@@ -7353,7 +7225,7 @@ function socSeedRender(s) {
         + ' style="background:#2a2a2a; color:#bbb; font-weight:600; font-size:13px; border:1px solid #444; border-radius:5px; padding:8px 16px; cursor:pointer;' + (unlocked ? '' : ' opacity:0.45; cursor:default;') + '">Set SOC</button></div>'
         + '<div id="socseed-override-msg" style="font-size:11px; color:#777; margin-top:6px;">'
         + (unlocked ? 'If you know the true state of charge, set it here &mdash; the charge counter (coulomb counter) restarts from this value.'
-            : 'Unlock settings (admin password) to set a value.') + '</div></div>';
+            : 'Unlock settings to set a value.') + '</div></div>';
 
     const foot = '<div style="margin-top:14px; padding-top:10px; border-top:1px solid #333; font-size:11px; color:#777;">This is a one-time starting estimate. From here SOC tracks measured amp-hours in and out, and it self-corrects over time: every detected full charge re-anchors SOC to 100&nbsp;%, and deep discharges followed by a rest let the regulator measure the bank\'s true usable capacity.</div>';
 
@@ -7379,17 +7251,15 @@ function populateProfileForm(profile) {
 function handleProfileUpdate(event) {
     event.preventDefault();
 
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
         return;
     }
 
-    updatePasswordFields();
 
     const form = document.getElementById('profile-form');
     const messageDiv = document.getElementById('profile-message');
     const formData = new FormData(form);
-    formData.append('password', currentAdminPassword);
 
     const deviceUidSpan = document.getElementById('profile-device-uid');
     if (deviceUidSpan) {
@@ -7420,7 +7290,7 @@ function handleProfileUpdate(event) {
             }, 8000);
         })
         // Text-first parse: cloud sends JSON {success,error} on 4xx/409, but the firmware
-        // can also reply with plain text (403 "Forbidden" on bad password, empty body on
+        // can also reply with plain text (403 "Settings not armed" while locked, empty body on
         // 502/503). Reading text and tolerating a parse failure surfaces every error path
         // instead of throwing a misleading "Network error" on non-JSON replies.
         .then(response => response.text().then(text => {
@@ -7451,7 +7321,7 @@ function handleProfileUpdate(event) {
 
 // Handle delete all data button
 async function handleDeleteAllData() {
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
         return;
     }
@@ -7466,9 +7336,7 @@ async function handleDeleteAllData() {
         return;
     }
 
-    updatePasswordFields();
     const formData = new FormData();
-    formData.append('password', currentAdminPassword);
 
     fetchWithTimeout(buildURL('/deleteAllData'), {
         method: 'POST',
@@ -7689,10 +7557,9 @@ function commitTuningScore() {
     const status = document.getElementById('tuningCommitStatus');
     if (btn) btn.disabled = true;
     if (status) status.textContent = 'Sending…';
-    const pw = currentAdminPassword || '';
-    // Note: r.ok must be checked — firmware returns 403 when the dashboard is
-    // locked (empty/wrong password) before the commit flag is ever set.
-    fetch(buildURL('/get?commitTuningScore=1&password=' + encodeURIComponent(pw)))
+    // Note: r.ok must be checked — firmware returns 403 while settings are
+    // locked before the commit flag is ever set.
+    fetch(buildURL('/get?commitTuningScore=1'))
         .then(r => {
             if (!r.ok) {
                 if (btn) btn.disabled = false;
@@ -7816,10 +7683,9 @@ function commitCVTuningScore() {
     const status = document.getElementById('cvTuningCommitStatus');
     if (btn) btn.disabled = true;
     if (status) status.textContent = 'Sending…';
-    const pw = currentAdminPassword || '';
-    // Note: r.ok must be checked — firmware returns 403 when the dashboard is
-    // locked (empty/wrong password) before the commit flag is ever set.
-    fetch(buildURL('/get?commitCVTuningScore=1&password=' + encodeURIComponent(pw)))
+    // Note: r.ok must be checked — firmware returns 403 while settings are
+    // locked before the commit flag is ever set.
+    fetch(buildURL('/get?commitCVTuningScore=1'))
         .then(r => {
             if (!r.ok) {
                 if (btn) btn.disabled = false;
@@ -7841,8 +7707,7 @@ function commitCVTuningScore() {
 function restartCVTest() {
     const status = document.getElementById('cvTuningCommitStatus');
     if (status) status.textContent = 'Restarting…';
-    const pw = currentAdminPassword || '';
-    fetch(buildURL('/get?restartCVTest=1&password=' + encodeURIComponent(pw)))
+    fetch(buildURL('/get?restartCVTest=1'))
         .then(r => {
             if (!r.ok) {
                 if (status) status.textContent = (r.status === 403)
@@ -8315,8 +8180,8 @@ function fieldOffReasonUpdate(fieldActiveStatus, reasonCode) {
     if (!el) return;
     const isOff = !(fieldActiveStatus >= 1 && fieldActiveStatus <= 4);   // 0/undefined = OFF; 1-4 have their own words
     const txt = isOff ? fieldOffReasonText(reasonCode) : '';
-    if (txt) { el.textContent = txt; el.style.display = 'block'; }
-    else { el.textContent = ''; el.style.display = 'none'; }
+    if (txt) { el.textContent = txt; el.classList.add('show'); }
+    else el.classList.remove('show');   // text kept so the opacity fade-out reads
 }
 
 // Short charge-stage label from getChargeStageDisplayCode() (firmware enum 0..7).
@@ -9200,7 +9065,7 @@ async function loadConfigSharingInIframe() {
 function _configShareHandleMessage(e) {
     if (e.origin !== 'https://supabase-nine-ashy.vercel.app') return;
     if (!e.data || e.data.type !== 'LOAD_CONFIG_TO_DEVICE' || !e.data.config) return;
-    if (!currentAdminPassword) { xAlert('Please unlock settings first'); return; }
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
     const label = e.data.name ? ('"' + e.data.name + '"') : 'this shared configuration';
     const txt = JSON.stringify(e.data.config);
     cfgDiffPreview(txt, label)
@@ -9243,7 +9108,7 @@ function handleResetLatch() {
 
 //Factory Reset Logic
 async function factoryReset() {
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("You must be logged in to perform a factory reset.");
         return;
     }
@@ -9262,7 +9127,6 @@ async function factoryReset() {
     button.style.backgroundColor = '#6c757d';
 
     const formData = new FormData();
-    formData.append("password", currentAdminPassword);
 
     fetchWithTimeout(buildURL("/factoryReset"), {
         method: "POST",
@@ -9323,12 +9187,11 @@ function updateInlineStatus(isConnected) {
 
 //Reset buttons
 function resetParameter(parameterName) {
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
         return;
     }
 
-    updatePasswordFields();
 
     const hiddenInput = document.getElementById(parameterName);
     const button = document.getElementById(parameterName + '_button');
@@ -9349,7 +9212,7 @@ function resetParameter(parameterName) {
 // within seconds. Does NOT fix a stuck-forever absorption caused by a broken tail exit (steady load /
 // no shunt) — call that out in the warning so the button isn't mistaken for that fix.
 async function restartChargeCycle() {
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
         return;
     }
@@ -9362,7 +9225,6 @@ async function restartChargeCycle() {
         "tail current never tapered (a steady house load, or no battery shunt), this will NOT fix it — " +
         "it will re-enter absorption. In that case adjust Tail Current or the Absorption Timeout instead."
     )) return;
-    updatePasswordFields();
     submitSimpleParam('RestartChargeCycle', 1);
 }
 
@@ -9775,12 +9637,11 @@ function attachYAxisEdit(u, cfgs) {
 }
 
 // Persist a Y-axis range to the regulator (same params the settings forms use).
-// Settings are password-gated — while the dashboard is locked the new range
+// Settings writes are arm-gated — while the dashboard is locked the new range
 // still applies, it just stays local to this browser session.
 function sendYAxisSetting(params) {
-    if (!currentAdminPassword) return;
+    if (!settingsUnlocked) return;
     const q = new URLSearchParams(params);
-    q.set('password', currentAdminPassword);
     fetchWithTimeout(buildURL('/get?' + q.toString()), {}, 5000).catch(() => { });
 }
 
@@ -10890,141 +10751,77 @@ flex-wrap: wrap;
 }
 
 
-function setAdminPassword() {
-    const button = document.getElementById('admin_password_set');
-    const input = document.getElementById('admin_password');
-    const msg = document.getElementById('admin_password_msg');
+// UI half of unlocking — also driven by syncArmState() when another client (or a reload
+// while armed) finds the device already armed.
+function applySettingsUnlockUI() {
+    settingsUnlocked = true;
+    const section = document.getElementById('settings-section');
+    if (section) section.classList.remove("locked");
+    document.querySelector('.permanent-header').classList.remove('locked');  // remove this bullshit probably
+
+    const headerControl = document.querySelector('.alternator-control');
+    if (headerControl) headerControl.classList.remove("locked");
+
+    const lockStatus = document.getElementById('lock-status');
+    if (lockStatus) {
+        lockStatus.textContent = "Settings are Unlocked";
+        lockStatus.className = "lock-status-unlocked";
+    }
+    hideSettingsAccess();
+}
+
+// The Unlock Settings button — arms the device's 30-min settings write window (the arm
+// state lives in firmware, so stale/replayed URLs from other tabs stay rejected while locked).
+function armSettings() {
+    const button = document.getElementById('settings_arm_btn');
+    const msg = document.getElementById('settings_arm_msg');
     const warning = document.getElementById('unlock-warning');
     if (warning) warning.style.display = 'none';
-    const password = input.value;
 
-    if (!password) {
-        msg.textContent = "Missing Password";
-        msg.style.color = "#00a19a";
-        setTrackedTimeout(() => { msg.textContent = ""; }, 2000);
-        return false;
-    }
+    if (DEMO_MODE) { applySettingsUnlockUI(); return false; }
 
-    button.disabled = true;
-
-    const formData = new FormData();
-    formData.append("password", password);
-
-    fetchWithTimeout(buildURL("/checkPassword"), {
-        method: "POST",
-        body: formData
-    }, 8000)
+    if (button) button.disabled = true;
+    fetchWithTimeout(buildURL('/armSettings?arm=1'), {}, 8000)
         .then(response => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return response.text();
+            return response.json();
         })
-        .then(text => {
-            if (text.trim() === "OK") {
-
-                currentAdminPassword = password;
-                const section = document.getElementById('settings-section');
-                if (section) section.classList.remove("locked");
-                document.querySelector('.permanent-header').classList.remove('locked');  // remove this bullshit probably
-
-                const headerControl = document.querySelector('.alternator-control');
-                if (headerControl) headerControl.classList.remove("locked");
-
-                const lockStatus = document.getElementById('lock-status');
-                if (lockStatus) {
-                    lockStatus.textContent = "Settings are Unlocked";
-                    lockStatus.className = "lock-status-unlocked";
-                }
-
-                updatePasswordFields();
-                msg.textContent = "Password Accepted";
-                msg.style.color = "#00a19a";
-
-                hideSettingsAccess();
-
-                // Save (or refresh) the Keychain copy so the next cold launch
-                // unlocks via Face ID. No-op outside Capacitor iOS.
-                Bio.save(password).catch(() => { });
-            }
-
-
-            else {
-                msg.textContent = "Wrong Password";
-                msg.style.color = "#00a19a";
-
-                // If this attempt came from a Face ID autofill, the saved
-                // password is stale (e.g. user changed it via System Settings
-                // on another device). Drop the Keychain copy so the user can
-                // type the new one and re-save.
-                if (__bioAutofillInFlight) {
-                    Bio.clear().catch(() => { });
-                }
-            }
-            __bioAutofillInFlight = false;
-            input.value = "";
-            setTrackedTimeout(() => { msg.textContent = ""; button.disabled = false; }, 2000);
+        .then(j => {
+            if (j && j.armed) applySettingsUnlockUI();
+            if (button) button.disabled = false;
         })
         .catch(err => {
-            msg.textContent = "Error";
-            msg.style.color = "#00a19a";
-            setTrackedTimeout(() => { msg.textContent = ""; button.disabled = false; }, 2000);
+            if (msg) {
+                msg.textContent = "Error - no response from device";
+                msg.style.color = "#00a19a";
+                setTrackedTimeout(() => { msg.textContent = ""; }, 2000);
+            }
+            if (button) button.disabled = false;
         });
 
     return false;
 }
 
-function setNewPassword() {
-    const button = document.getElementById('newpassword_set');
-    const input = document.getElementById('newpassword');
-    const msg = document.getElementById('newpassword_msg');
-    const currentPassword = currentAdminPassword;
-
-    if (!currentPassword || !input.value) {
-        msg.textContent = "Missing fields";
-        msg.style.color = "#00a19a";
-        setTrackedTimeout(() => { msg.textContent = ""; }, 2000);
-        return false;
-    }
-
-    button.disabled = true;
-
-    const formData = new FormData();
-    formData.append("password", currentPassword);
-    formData.append("newpassword", input.value);
-
-    fetchWithTimeout(buildURL("/setPassword"), {
-        method: "POST",
-        body: formData
-    }, 8000)
-        .then(response => {
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return response.text();
+// Keep the UI's lock state honest against the device: unlock after a reload into a
+// still-armed window, relock when the 30-min window expires or another client disarms.
+function syncArmState() {
+    if (DEMO_MODE) return;
+    fetch(buildURL('/armSettings'))
+        .then(r => r.ok ? r.json() : null)
+        .then(j => {
+            if (!j) return;
+            if (j.armed && !settingsUnlocked) applySettingsUnlockUI();
+            else if (!j.armed && settingsUnlocked) applySettingsLockUI();
         })
-        .then(text => {
-            if (text.trim() === "OK") {
-                msg.textContent = "Password Changed";
-                msg.style.color = "#00a19a";
-
-                // Keep the Keychain copy in sync so next cold launch's Face ID
-                // unlock uses the new password.
-                Bio.save(input.value).catch(() => { });
-            } else {
-                msg.textContent = "Wrong Password";
-                msg.style.color = "#00a19a";
-            }
-            input.value = "";
-            setTrackedTimeout(() => { msg.textContent = ""; button.disabled = false; }, 2000);
-        })
-        .catch(err => {
-            msg.textContent = "Error";
-            msg.style.color = "#00a19a";
-            setTrackedTimeout(() => { msg.textContent = ""; button.disabled = false; }, 2000);
-        });
-
-    return false; // prevent form submit
+        .catch(() => {});
 }
+document.addEventListener('DOMContentLoaded', () => {
+    syncArmState();
+    setInterval(syncArmState, 30000);
+});
 
 function triggerWeatherUpdate() {
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
         return;
     }
@@ -11034,7 +10831,6 @@ function triggerWeatherUpdate() {
     }
 
     const formData = new FormData();
-    formData.append("password", currentAdminPassword);
     formData.append("TriggerWeatherUpdate", "1");
 
     fetchWithTimeout(buildURL("/get?" + new URLSearchParams(formData).toString()), {}, 8000)
@@ -11083,12 +10879,8 @@ function updateGPSDisplay(lat, lon) {
 
 // Cap mode uses same pending/revision system as checkboxes
 async function submitCapLimitModeImmediately(desiredValue) {
-    const passwordField = document.querySelector('.password_field');
-    const password = passwordField ? passwordField.value : '';
-
     const params = new URLSearchParams();
     params.set('capLimitMode', String(desiredValue));
-    if (password) params.set('password', password);
 
     return fetchWithTimeout(buildURL(`/get?${params.toString()}`), {
         method: 'GET',
@@ -11302,15 +11094,15 @@ function updateTogglesFromData(data) {
 // timestamp holds the telemetry echo from clobbering the just-clicked pill for a few seconds.
 let _testSlewModePendMs = 0;
 function setTestSlewMode(v) {
-    if (!currentAdminPassword) { xAlert('Please unlock settings first'); return; }
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
     _testSlewModePendMs = Date.now() + 3000;
-    fetchWithTimeout(buildURL('/get?password=' + encodeURIComponent(currentAdminPassword) + '&testSlewMode=' + encodeURIComponent(v)), {}, 5000).catch(() => {});
+    fetchWithTimeout(buildURL('/get?testSlewMode=' + encodeURIComponent(v)), {}, 5000).catch(() => {});
 }
 let _cvTestSlewModePendMs = 0;
 function setCvTestSlewMode(v) {
-    if (!currentAdminPassword) { xAlert('Please unlock settings first'); return; }
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
     _cvTestSlewModePendMs = Date.now() + 3000;
-    fetchWithTimeout(buildURL('/get?password=' + encodeURIComponent(currentAdminPassword) + '&cvTestSlewMode=' + encodeURIComponent(v)), {}, 5000).catch(() => {});
+    fetchWithTimeout(buildURL('/get?cvTestSlewMode=' + encodeURIComponent(v)), {}, 5000).catch(() => {});
 }
 
 function handleUserToggle(checkboxId, hiddenInputId, dataKey) {
@@ -11518,14 +11310,11 @@ let currentCapMode = 'amps'; // tracks active mode; updated by setCapMode()
 
 let currentChargeRateMode = 'high'; // tracks active mode; updated by setChargeRateMode()
 
-// Throws on any non-OK response: the firmware answers 403 on a missing/stale password, which fetch()
+// Throws on any non-OK response: the firmware answers 403 while settings are locked, which fetch()
 // treats as success — swallowing that once left a wizard run silently in High (2026-07-20 incident).
 async function submitChargeRateModeImmediately(desiredValue) {
-    const passwordField = document.querySelector('.password_field');
-    const password = currentAdminPassword || (passwordField ? passwordField.value : '');
     const params = new URLSearchParams();
     params.set('HiLow', String(desiredValue));
-    if (password) params.set('password', password);
     const r = await fetchWithTimeout(buildURL(`/get?${params.toString()}`), { method: 'GET', cache: 'no-store' }, 4000);
     if (!r.ok) throw new Error('rejected (HTTP ' + r.status + ')');
     return r;
@@ -11574,11 +11363,9 @@ function updateTripleBtn(prefix, val) {
 }
 
 function submitSimpleParam(paramName, val, extra) {
-    const pw = (document.querySelector('.password_field') || {}).value || '';
     const params = new URLSearchParams();
     params.set(paramName, String(val));
     if (extra) for (const k in extra) params.set(k, String(extra[k]));
-    if (pw) params.set('password', pw);
     fetchWithTimeout(buildURL('/get?' + params.toString()), { method: 'GET', cache: 'no-store' }, 4000)
         .catch(err => diagLog(paramName + ' submit failed: ' + err));
 }
@@ -11780,7 +11567,7 @@ function syncHeaderStrip() {
     const hdr = document.querySelector('.permanent-header');
     if (!hdr || !hdr.classList.contains('header-collapsed')) return;
     const unlock = document.getElementById('hcs-unlock');
-    if (unlock) unlock.style.display = (currentAdminPassword === "") ? 'inline-flex' : 'none';
+    if (unlock) unlock.style.display = settingsUnlocked ? 'none' : 'inline-flex';
     const copy = (fromId, toId) => {
         const from = document.getElementById(fromId);
         const to = document.getElementById(toId);
@@ -11817,8 +11604,8 @@ function stripExpandToUnlock(ev) {
     if (ev) ev.stopPropagation();
     const hdr = document.querySelector('.permanent-header');
     if (hdr && hdr.classList.contains('header-collapsed')) toggleHeaderCollapse();
-    const pw = document.getElementById('admin_password');
-    if (pw) requestAnimationFrame(() => pw.focus());
+    const btn = document.getElementById('settings_arm_btn');
+    if (btn) requestAnimationFrame(() => btn.focus());
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -12552,7 +12339,7 @@ window.addEventListener("load", function () {
                 }
             }
 
-            if (currentAdminPassword === "") {
+            if (!settingsUnlocked) {
                 document.getElementById('settings-section').classList.add("locked");
             }
 
@@ -14311,7 +14098,6 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("BatteryShuntPresent_checkbox").checked = (document.getElementById("BatteryShuntPresent").value === "1");
     document.getElementById("IgnitionOverride_checkbox").checked = (document.getElementById("IgnitionOverride").value === "1");
     document.getElementById("TempSource_checkbox").checked = (document.getElementById("TempSource").value === "1");
-    document.getElementById("admin_password").addEventListener("change", updatePasswordFields);
     document.getElementById("timeAxisModeChanging_checkbox").checked = (document.getElementById("timeAxisModeChanging").value === "1");
     document.getElementById("weatherModeEnabled_checkbox").checked = (document.getElementById("weatherModeEnabled").value === "1");
     // TuningMode has no checkbox anymore — the unified Begin/Stop Test button reflects it via updateTuningModeUI().
@@ -14379,12 +14165,12 @@ function resetDisplayValuesAndCaches(ids) {
 }
 
 function handleResetPerfCounters() {
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
         return;
     }
 
-    const params = new URLSearchParams({ password: currentAdminPassword, ResetPerfCounters: '1' });
+    const params = new URLSearchParams({ ResetPerfCounters: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(() => {
             const ids = [
@@ -14414,8 +14200,8 @@ function handleResetPerfCounters() {
 }
 
 function handleResetAccelSession() {
-    if (!currentAdminPassword) { xAlert("Please unlock settings first"); return; }
-    const params = new URLSearchParams({ password: currentAdminPassword, ResetAccelSession: '1' });
+    if (!settingsUnlocked) { xAlert("Please unlock settings first"); return; }
+    const params = new URLSearchParams({ ResetAccelSession: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(() => {
             const ids = [
@@ -14430,9 +14216,9 @@ function handleResetAccelSession() {
 }
 
 async function handleResetAccelLifetime() {
-    if (!currentAdminPassword) { xAlert("Please unlock settings first"); return; }
+    if (!settingsUnlocked) { xAlert("Please unlock settings first"); return; }
     if (!await xConfirm("Reset ALL lifetime motion stats? This clears max heel/pitch, slam records, and capsize/pitchpole counts from the device's saved memory. Cannot be undone.")) return;
-    const params = new URLSearchParams({ password: currentAdminPassword, ResetAccelLifetime: '1' });
+    const params = new URLSearchParams({ ResetAccelLifetime: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(() => {
             const ids = [
@@ -14535,7 +14321,7 @@ function resizeLivePlotsOnShow() {
 }
 
 function showMainTab(tabName) {
-    if (tabName === 'cloudfeatures' && !currentAdminPassword) {
+    if (tabName === 'cloudfeatures' && !settingsUnlocked) {
         xAlert('Please unlock settings first to access Cloud Features');
         return;
     }
@@ -15139,14 +14925,12 @@ function setupInputValidation() {
 }
 //Dynamic adjustment factors
 function resetDynamicShuntGain() {
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
         return;
     }
-    updatePasswordFields();
 
     const formData = new FormData();
-    formData.append("password", currentAdminPassword);
     formData.append("ResetDynamicShuntGain", "1");
 
     fetchWithTimeout(buildURL("/get?" + new URLSearchParams(formData).toString()), {}, 8000)
@@ -15157,14 +14941,12 @@ function resetDynamicShuntGain() {
 }
 
 function resetDynamicAltZero() {
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
         return;
     }
-    updatePasswordFields();
 
     const formData = new FormData();
-    formData.append("password", currentAdminPassword);
     formData.append("ResetDynamicAltZero", "1");
 
     fetchWithTimeout(buildURL("/get?" + new URLSearchParams(formData).toString()), {}, 8000)
@@ -15536,7 +15318,7 @@ function abSegSelectClick(btn) {
     if (hidden) hidden.value = btn.dataset.val;
     syncSegmentedSelect(name, btn.dataset.val);
     const form = btn.closest('form');
-    if (form) { updatePasswordFields(); form.submit(); }
+    if (form) { form.submit(); }
 }
 
 // ==================== PID TUNING PLOT (SEPARATE SYSTEM) ====================
@@ -18748,12 +18530,11 @@ function turnOffActiveTest() {
     const test = _testPanelCurrentTest;
     if (!test) return;
     if (test === 'sysid') { abortSystemIDTest(); return; }
-    const pw = currentAdminPassword;
-    if (!pw) { xAlert('Enter your password first.'); return; }
+    if (!settingsUnlocked) { xAlert('Unlock settings first.'); return; }
     const paramMap = { curr: 'TuningMode', cv: 'CVTuningMode' };
     const param = paramMap[test];
     if (!param) return;
-    fetchWithTimeout(buildURL('/get?' + param + '=0&password=' + encodeURIComponent(pw)), {}, 4000)
+    fetchWithTimeout(buildURL('/get?' + param + '=0'), {}, 4000)
         .then(r => {
             if (!r.ok) return;
             // Mirror the OFF into checkbox + hidden form input only after the device confirms. The hidden
@@ -18925,9 +18706,7 @@ function syncSysidTestTypeUI(v) {
 }
 function setSysidTestType(v) {
     syncSysidTestTypeUI(v);
-    const pw = document.querySelector('.password_field');
-    const pwVal = pw ? pw.value : '';
-    fetch(buildURL(`/get?systemIDTestType=${v}&password=${encodeURIComponent(pwVal)}`)).catch(() => {});
+    fetch(buildURL(`/get?systemIDTestType=${v}`)).catch(() => {});
 }
 
 function syncTuningWaveformUI(v) {
@@ -18942,9 +18721,7 @@ function syncTuningWaveformUI(v) {
 }
 function setTuningWaveform(v) {
     syncTuningWaveformUI(v);
-    const pw = document.querySelector('.password_field');
-    const pwVal = pw ? pw.value : '';
-    fetch(buildURL(`/get?tuningWaveform=${v}&password=${encodeURIComponent(pwVal)}`)).catch(() => {});
+    fetch(buildURL(`/get?tuningWaveform=${v}`)).catch(() => {});
 }
 
 // ── Tuning→Current closed-loop sine (Stage 2) ──
@@ -18992,7 +18769,7 @@ function _setTestBtnRunning(running) {
 // arm the generator and run continuously until Stop; 2 sine sweep arms then fires the closed-loop
 // frequency sweep. Pressing again while running (Stop Test) disarms.
 function tuningToggleTest() {
-    if (!currentAdminPassword) { xAlert("Please unlock settings first."); return; }
+    if (!settingsUnlocked) { xAlert("Please unlock settings first."); return; }
     // Already running → this press is a Stop.
     if (parseInt(getField("TuningMode") ?? 0) === 1) { tuningStopTest(); return; }
 
@@ -19003,7 +18780,6 @@ function tuningToggleTest() {
         return;
     }
 
-    const pw = encodeURIComponent(currentAdminPassword);
     const waveform = parseInt(getField("tuningWaveform_sel") ?? 0);  // 0 square / 1 sine manual / 2 sine sweep
     const statusEl = document.getElementById('tuning-sweep-status');
 
@@ -19014,20 +18790,20 @@ function tuningToggleTest() {
 
     if (waveform === 2) {
         if (statusEl) statusEl.textContent = 'Arming…';
-        fetch(buildURL("/get?TuningMode=1&password=" + pw))
-            .then(() => _startTuningSweepNow(pw))
+        fetch(buildURL("/get?TuningMode=1"))
+            .then(() => _startTuningSweepNow())
             .catch(err => { if (statusEl) statusEl.textContent = 'Arm failed: ' + err; _setTestBtnRunning(false); });
     } else {
         if (statusEl) statusEl.textContent = 'Running…';
-        fetch(buildURL("/get?TuningMode=1&password=" + pw))
+        fetch(buildURL("/get?TuningMode=1"))
             .catch(err => { if (statusEl) statusEl.textContent = 'Start failed: ' + err; _setTestBtnRunning(false); });
     }
 }
 
 // Fire the sweep and poll /tuningbode until it completes. Assumes the generator is already armed.
-function _startTuningSweepNow(pw) {
+function _startTuningSweepNow() {
     const statusEl = document.getElementById('tuning-sweep-status');
-    fetch(buildURL("/get?startTuningSweep=1&password=" + pw))
+    fetch(buildURL("/get?startTuningSweep=1"))
         .then(r => {
             if (!r.ok) { if (statusEl) statusEl.textContent = 'Start failed (HTTP ' + r.status + ')'; return; }
             if (statusEl) statusEl.textContent = 'Sweep running…';
@@ -19050,7 +18826,7 @@ function _startTuningSweepNow(pw) {
                             // A completed sweep is a finished test (unlike square/sine-manual, which stay
                             // armed until the user presses Stop).
                             setPendingToggleValue('TuningMode', 'TuningMode', 0);
-                            fetch(buildURL("/get?TuningMode=0&password=" + pw)).catch(() => {});
+                            fetch(buildURL("/get?TuningMode=0")).catch(() => {});
                             _setTestBtnRunning(false);
                             renderTuningBode(data);
                         }
@@ -19059,7 +18835,7 @@ function _startTuningSweepNow(pw) {
                 if (waited > 180000) {
                     clearInterval(tuningBodePollTimer); tuningBodePollTimer = null;
                     setPendingToggleValue('TuningMode', 'TuningMode', 0);
-                    fetch(buildURL("/get?TuningMode=0&password=" + pw)).catch(() => {});
+                    fetch(buildURL("/get?TuningMode=0")).catch(() => {});
                     _setTestBtnRunning(false);
                     if (statusEl) statusEl.textContent = 'Timed out.';
                 }
@@ -19070,9 +18846,8 @@ function _startTuningSweepNow(pw) {
 
 // Stop the current test by disarming the generator — works for square, sine-manual, and a running sweep.
 function tuningStopTest() {
-    const pw = encodeURIComponent(currentAdminPassword || '');
     setPendingToggleValue('TuningMode', 'TuningMode', 0);
-    fetch(buildURL("/get?TuningMode=0&password=" + pw)).catch(() => {});
+    fetch(buildURL("/get?TuningMode=0")).catch(() => {});
     if (tuningBodePollTimer) { clearInterval(tuningBodePollTimer); tuningBodePollTimer = null; }
     const statusEl = document.getElementById('tuning-sweep-status');
     if (statusEl) statusEl.textContent = 'Stopped.';
@@ -19148,7 +18923,7 @@ function renderTuningBode(data) {
 }
 
 function openSystemIDModal() {
-    if (!currentAdminPassword) {
+    if (!settingsUnlocked) {
         xAlert("Please unlock settings first.");
         return;
     }
@@ -19352,7 +19127,6 @@ function confirmSystemIDStart() {
     if (sysidPreflightInterval) { clearInterval(sysidPreflightInterval); sysidPreflightInterval = null; }
 
     const formData = new URLSearchParams();
-    formData.append("password", currentAdminPassword);
     formData.append("startSystemID", "1");
 
     fetchWithTimeout(buildURL("/get?" + formData.toString()), {}, 8000)
@@ -19378,7 +19152,6 @@ function confirmSystemIDStart() {
 function abortSystemIDTest() {
     if (sysidPollInterval) { clearInterval(sysidPollInterval); sysidPollInterval = null; }
     const formData = new URLSearchParams();
-    formData.append("password", currentAdminPassword || '');   // abort is password-free (safety): firmware exempts cancelSystemID
     formData.append("cancelSystemID", "1");
     fetchWithTimeout(buildURL("/get?" + formData.toString()), {}, 5000)
         .then(() => console.log("SystemID: abort sent"))
@@ -19722,7 +19495,7 @@ function showSysidBodeResults() {
                 sysidFitKp = fit.Kp;
                 sysidFitKi = fit.Ki;
                 // Persist the fitted tau on the device + refresh the actionable-disturbance readout.
-                if (currentAdminPassword) cxGet('systemIDPlantTauMs=' + Math.round(fit.tauMs));
+                if (settingsUnlocked) cxGet('systemIDPlantTauMs=' + Math.round(fit.tauMs));
                 updatePlantTauReadout(fit.tauMs);
                 const tcFast = Math.max(1, Math.round(fit.tauMs / 3));
                 const tcSlow = Math.max(1, Math.round(fit.tauMs));
@@ -20059,7 +19832,7 @@ function commissionPrimaryAction() {
 // at the end, or the network dropped between the last step and Finish). Sends commissionDone=1 to
 // persist the new tune and flip the badge to COMMISSIONED — without reopening the wizard or reverting.
 function commissionCommitUncommitted() {
-    if (!currentAdminPassword) { xAlert('Unlock settings first (enter the admin password).'); return; }
+    if (!settingsUnlocked) { xAlert('Unlock settings first.'); return; }
     cxGet('commissionDone=1').then(() => {
         cxLastState = 2;
         renderCommissionStatus(2, CX_PHASES.length, cxLastMask);   // phase=length clears the ▶ marker
@@ -20325,14 +20098,13 @@ function cxShowTab(main, sub) {
   } catch (e) { /* tab not present — non-fatal */ }
 }
 
-// Every commissioning write goes through here so the admin password is always attached.
+// Every commissioning write goes through here (single /get chokepoint).
 function cxGet(params) {
-    const pw = encodeURIComponent(currentAdminPassword || '');
-    return fetch(buildURL('/get?' + params + '&password=' + pw));
+    return fetch(buildURL('/get?' + params));
 }
 
 function openCommissionModal() {
-    if (!currentAdminPassword) { xAlert('Unlock settings first (enter the admin password).'); return; }
+    if (!settingsUnlocked) { xAlert('Unlock settings first.'); return; }
     // In-session resume: if a flow is already underway, reopen exactly where it was.
     if (!cx) cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false, handled: {} };
     if (!cx.handled) cx.handled = {};   // stage → 'skip' | 'manual' for this session's Finish summary
@@ -20395,7 +20167,7 @@ function cxGoto(phase) {
     cx.phase = phase;
     // Persist the current phase (moves backward on Back) so the checklist survives a page reload /
     // other clients, and so the firmware re-baselines the in-flight step snapshot on each step entry.
-    if (currentAdminPassword) cxGet('commissionPhase=' + phase).catch(() => { });
+    if (settingsUnlocked) cxGet('commissionPhase=' + phase).catch(() => { });
     commissionRender();
     // Open each phase at the top: the panel is one scroll box and a tall step (Stress Test)
     // would otherwise inherit the prior phase's scroll offset and land mid/bottom.
@@ -20560,7 +20332,7 @@ function cxStart() {
 // never silently clamped. Reuses the cx-rpma-* controls and their handlers below.
 let _rpmAlignTimer = null;
 function openRpmAlign() {
-    if (!currentAdminPassword) { openCommissionModal(); return; }   // can't write settings while locked → skip straight to the wizard
+    if (!settingsUnlocked) { openCommissionModal(); return; }   // can't write settings while locked → skip straight to the wizard
     document.getElementById('rpmalign-modal-overlay').style.display = 'flex';
     rpmAlignRender();
     if (_rpmAlignTimer) clearInterval(_rpmAlignTimer);
@@ -20706,7 +20478,7 @@ async function rpmScaleFormSubmit(form) {
     let r = null;
     try {
         r = await fetchWithTimeout(buildURL('/get?RPMScalingFactor=' + n
-            + '&password=' + encodeURIComponent(currentAdminPassword || '')), {}, 8000);
+           ), {}, 8000);
     } catch (e) { r = null; }
     if (!r || !r.ok) {
         await xAlert(r && r.status === 409
@@ -21063,7 +20835,7 @@ function cxPlantStart(wide) {
                             if (fit.ok) {
                                 sysidFitTauMs = fit.tauMs; sysidFitKp = fit.Kp; sysidFitKi = fit.Ki;
                                 // Persist the fitted tau on the device + refresh the actionable-disturbance readout.
-                                if (currentAdminPassword) cxGet('systemIDPlantTauMs=' + Math.round(fit.tauMs));
+                                if (settingsUnlocked) cxGet('systemIDPlantTauMs=' + Math.round(fit.tauMs));
                                 updatePlantTauReadout(fit.tauMs);
                             }
                             cx.plantRunning = false; commissionRender();
@@ -23572,11 +23344,10 @@ function cxRenderStress(b) {
 // ── Standalone modal (Setup ▸ Alternator ▸ Tuning ▸ Stress Test) — bhw-style shell ──
 let cvsD = null;   // { pane:'pre'|'run'|'done', renderedPane, j, poll }
 function cvsGet(params) {
-    const pw = encodeURIComponent(currentAdminPassword || '');
-    return fetch(buildURL('/get?' + params + '&password=' + pw));
+    return fetch(buildURL('/get?' + params));
 }
 function cvsOpen() {
-    if (!currentAdminPassword) { xAlert('Unlock settings first (enter the admin password).'); return; }
+    if (!settingsUnlocked) { xAlert('Unlock settings first.'); return; }
     if (!cvsD) cvsD = { pane: 'pre', renderedPane: null, j: null, poll: null };
     cvsD.renderedPane = null;
     document.getElementById('cvs-modal-overlay').style.display = 'block';
@@ -23854,7 +23625,7 @@ function renderCommissionStatus(state, phase, mask, manual) {
 // snapshot to revert (it was discarded on Finish), so the current good tune simply stays as the
 // new starting point and is snapshotted again when the fresh run begins.
 async function commissionClearAndRestart() {
-    if (!currentAdminPassword) { xAlert('Unlock settings first (enter the admin password).'); return; }
+    if (!settingsUnlocked) { xAlert('Unlock settings first.'); return; }
     const msg = (cxLastState === 2)
         ? 'Clear the commissioned mark and start the setup wizard over?\n\nThe wizard restarts from the beginning, using your current settings as the starting point. Nothing is permanently changed until you finish — use "Abort and revert all" to restore your starting settings at any point. Closing the wizard with the X just pauses it and keeps your progress so you can resume later.'
         : 'Clear commissioning progress and revert all settings to the pre-commissioning snapshot, then start over?';
@@ -23873,13 +23644,12 @@ async function commissionClearAndRestart() {
 }
 
 function applySysidBodeFilters() {
-    if (!currentAdminPassword) { xAlert("Please unlock settings first."); return; }
+    if (!settingsUnlocked) { xAlert("Please unlock settings first."); return; }
     if (sysidFitTauMs <= 0) { xAlert("No plant fit available — re-run the sweep."); return; }
     const tcFast = encodeURIComponent(Math.max(1, Math.round(sysidFitTauMs / 3)));
     const tcSlow = encodeURIComponent(Math.max(1, Math.round(sysidFitTauMs)));
-    const pw = encodeURIComponent(currentAdminPassword);
-    fetch(buildURL("/get?OutputPIDFilterTC=" + tcFast + "&password=" + pw))
-        .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tcSlow + "&password=" + pw)))
+    fetch(buildURL("/get?OutputPIDFilterTC=" + tcFast))
+        .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tcSlow)))
         .then(() => { console.log("Filters set from τ: PID=" + tcFast + "ms, voltage=" + tcSlow + "ms"); closeSystemIDModal(); })
         .catch(err => console.error("Filter set from τ failed:", err));
 }
@@ -23887,19 +23657,18 @@ function applySysidBodeFilters() {
 // "Apply PID seed" — write the IMC starting Kp/Ki to the current loop. A starting point;
 // the user refines with the square-wave tuner. Kd left untouched (PI seed).
 function applySysidPidSeed() {
-    if (!currentAdminPassword) { xAlert("Please unlock settings first."); return; }
+    if (!settingsUnlocked) { xAlert("Please unlock settings first."); return; }
     if (!(sysidFitKp > 0)) { xAlert("No PID seed available — re-run the sweep."); return; }
-    const pw = encodeURIComponent(currentAdminPassword);
     const kp = encodeURIComponent(sysidFitKp.toFixed(4));
     const ki = encodeURIComponent(sysidFitKi.toFixed(4));
-    fetch(buildURL("/get?PidKp=" + kp + "&password=" + pw))
-        .then(() => fetch(buildURL("/get?PidKi=" + ki + "&password=" + pw)))
+    fetch(buildURL("/get?PidKp=" + kp))
+        .then(() => fetch(buildURL("/get?PidKi=" + ki)))
         .then(() => { console.log("PID seed applied: Kp=" + kp + ", Ki=" + ki); closeSystemIDModal(); })
         .catch(err => console.error("PID seed apply failed:", err));
 }
 
 function applySystemIDResults() {
-    if (!currentAdminPassword) { xAlert("Please unlock settings first."); return; }
+    if (!settingsUnlocked) { xAlert("Please unlock settings first."); return; }
     // PID feedback gets plant/3 to preserve phase margin inside the control loop.
     // Voltage smoothing gets the full plant delay because its consumers run on
     // slower (seconds) timescales; the CV D term's dV/dt has its own separate filter.
@@ -23907,9 +23676,8 @@ function applySystemIDResults() {
     const tcSlow = Math.max(1, Math.round(sysidSuggestedTC));
     const tcFastEnc = encodeURIComponent(tcFast);
     const tcSlowEnc = encodeURIComponent(tcSlow);
-    const pw = encodeURIComponent(currentAdminPassword);
-    fetch(buildURL("/get?OutputPIDFilterTC=" + tcFastEnc + "&password=" + pw))
-        .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tcSlowEnc + "&password=" + pw)))
+    fetch(buildURL("/get?OutputPIDFilterTC=" + tcFastEnc))
+        .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tcSlowEnc)))
         .then(() => {
             console.log("Filter TCs updated: PID=" + tcFast + "ms, Voltage=" + tcSlow + "ms");
             closeSystemIDModal();
@@ -23918,13 +23686,11 @@ function applySystemIDResults() {
 }
 
 
-// Auto-login via URL parameter for local automation (e.g. SwiftBar shortcut)
+// Auto-unlock via URL parameter for local automation (e.g. SwiftBar shortcut). Param name
+// kept from the password era so existing shortcuts still work; any value arms.
 window.addEventListener('load', function () {
   const autopass = new URLSearchParams(window.location.search).get('autopass');
-  if (autopass) {
-    const el = document.getElementById('admin_password');
-    if (el) { el.value = autopass; setAdminPassword(); }
-  }
+  if (autopass) armSettings();
 });
 
 // Live Data → Diag checkpoint pills (C1–C4) — same pattern as the Protections filter below,
@@ -24802,8 +24568,6 @@ window.addEventListener('load', function () {
     if (_ltFreshTimerId == null) {
       _ltFreshTimerId = (typeof setTrackedInterval === 'function' ? setTrackedInterval : setInterval)(ltUpdateFreshness, 5000);
     }
-    const clr = document.getElementById('dashboard-crosshair-clear');
-    if (clr && !clr._ltWired) { clr._ltWired = true; clr.addEventListener('click', () => { ltPinnedTime = null; ltRedrawMarkers(); ltUpdateCrosshairIndicator(); }); }
     return !!ltWindowPref;
   }
 
@@ -24825,8 +24589,7 @@ window.addEventListener('load', function () {
     return [Math.max(loSec, dataLo - pad), Math.min(hiSec, dataHi + pad)];
   }
 
-  // ---- Markers: live-edge "now" line + a tap-to-pin crosshair synced across charts ----
-  let ltPinnedTime = null;   // pinned crosshair time (sec); null = none
+  // ---- Marker: live-edge "now" line ----
   function ltDrawMarkers(u) {
     const ctx = u.ctx, xmin = u.scales.x.min, xmax = u.scales.x.max;
     const vline = (tSec, color, dash) => {
@@ -24838,19 +24601,10 @@ window.addEventListener('load', function () {
       ctx.restore();
     };
     vline(Math.floor(Date.now() / 1000), 'rgba(244,67,54,0.55)', [4, 3]);   // live edge "now"
-    vline(ltPinnedTime, 'rgba(60,60,60,0.85)', []);                          // pinned crosshair
-  }
-  function ltRedrawMarkers() { ltCharts.forEach(c => { try { c.plot.redraw(false); } catch (e) {} }); }
-  function ltUpdateCrosshairIndicator() {
-    const ind = document.getElementById('dashboard-crosshair-indicator');
-    const txt = document.getElementById('dashboard-crosshair-time');
-    if (!ind || !txt) return;
-    if (ltPinnedTime == null) { ind.style.display = 'none'; txt.textContent = '—'; }
-    else { ind.style.display = 'inline-block'; txt.textContent = (typeof _brushFormatTime === 'function') ? _brushFormatTime(ltPinnedTime * 1000) : new Date(ltPinnedTime * 1000).toLocaleString(); }
   }
 
   // Build one chart ONCE (empty); ltRenderAll feeds it binned data. drag-x zoom →
-  // re-bins ALL charts (synced); dbl-click resets the range; click pins a crosshair.
+  // re-bins ALL charts (synced); dbl-click resets the range.
   // Bottom legend shows live values at the cursor (setCursor hook).
   function buildLtChart(id, spec) {
     const el = document.getElementById(id);
@@ -25036,10 +24790,6 @@ window.addEventListener('load', function () {
     })));
 
     if (document.body.classList.contains('dark-mode') && typeof updateUplotTheme === 'function') updateUplotTheme(plot);
-    plot.over.addEventListener('click', () => {   // tap to pin a crosshair time across all charts
-      const idx = plot.cursor.idx;
-      if (idx != null && plot.data[0]) { ltPinnedTime = plot.data[0][idx]; ltRedrawMarkers(); ltUpdateCrosshairIndicator(); }
-    });
     el.addEventListener('dblclick', () => { if (ltFullRange) ltRenderAll(ltFullRange[0], ltFullRange[1]); });
     if (!el._ltRO) {
       el._ltRO = new ResizeObserver(debounce(() => plot.setSize({ width: el.clientWidth, height: 300 }), 500));
@@ -26069,11 +25819,11 @@ function faUpdatePauseBtn(value) {
     }
 }
 function faAnomPauseToggle() {
-    if (!currentAdminPassword) { xAlert('Please unlock settings first'); return; }
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
     const next = _faAnomPause ? 0 : 1;
     pendingToggles.set('faAnomPause', { desiredValue: next, baseRev: lastSeenRev });
     faUpdatePauseBtn(next);
-    fetchWithTimeout(buildURL('/get?password=' + encodeURIComponent(currentAdminPassword) + '&faAnomPause=' + next), {}, 5000).then(() => {}).catch(() => {});
+    fetchWithTimeout(buildURL('/get?faAnomPause=' + next), {}, 5000).then(() => {}).catch(() => {});
 }
 // Live Oscilloscope: Raw and Filtered are independent show/hide toggles (depress/return per
 // click) — any combination including both traces at once or neither. Each button drives its
@@ -26469,8 +26219,7 @@ function bhWhen(epoch) {
 let bhw = null;   // { pane:'pre'|'run'|'done', renderedPane, startedAt, j, poll }
 
 function bhwGet(params) {
-  const pw = encodeURIComponent(currentAdminPassword || '');
-  return fetch(buildURL('/get?' + params + '&password=' + pw));
+  return fetch(buildURL('/get?' + params));
 }
 // Live precheck snapshot — RPM/voltage/alt-current off CSV1 (via cxLive), AUTO bit off CSV2
 // thermalFlags, battery shunt + Bcur off CSV3/CSV1.
@@ -26840,8 +26589,7 @@ function submitCapOcv() {
   if (!tb) return;
   const vals = [];
   for (let i = 0; i < tb.children.length; i++) { const el = document.getElementById('capOcv_' + i); if (el) vals.push(Number(el.value).toFixed(3)); }
-  const pw = document.querySelector('.password_field');
-  fetch(buildURL('/get?capOcv=' + encodeURIComponent(vals.join(',')) + '&password=' + encodeURIComponent(pw ? pw.value : '')))
+  fetch(buildURL('/get?capOcv=' + encodeURIComponent(vals.join(','))))
     .then(() => setTimeout(pollBatteryHealth, 500)).catch(() => { });
 }
 function loadCapOcvPreset(type) {

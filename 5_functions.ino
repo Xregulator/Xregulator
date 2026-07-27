@@ -3928,78 +3928,15 @@ void ensurePreferredBootPartition() {
     events.send("Boot: ota_0 invalid, using factory partition", "console", millis());
   }
 }
-void sha256(const char *input, char *outputBuffer) {
-  byte shaResult[32];
-  mbedtls_md_context_t ctx;
-  const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-
-  mbedtls_md_init(&ctx);
-  mbedtls_md_setup(&ctx, info, 0);
-  mbedtls_md_starts(&ctx);
-  mbedtls_md_update(&ctx, (const unsigned char *)input, strlen(input));
-  mbedtls_md_finish(&ctx, shaResult);
-  mbedtls_md_free(&ctx);
-
-  for (int i = 0; i < 32; ++i) {
-    sprintf(outputBuffer + (i * 2), "%02x", shaResult[i]);
+// Lazy-expiring check for the settings arm gate — every mutating endpoint calls this.
+bool settingsArmActive() {
+  if (!settingsArmed) return false;
+  if (millis() - settingsArmedAtMs > SETTINGS_ARM_TIMEOUT_MS) {
+    settingsArmed = false;
+    queueConsoleMessage("Settings auto-locked (30 min window expired)");
+    return false;
   }
-}
-
-void loadPasswordHash() {
-  // First try to load plaintext password (for auth). Values imported from the
-  // old files may carry a trailing newline (println) — trim handles both.
-  if (settingExists(NK_password)) {
-    String plain = settingRead(NK_password);
-    plain.trim();
-    strncpy(requiredPassword, plain.c_str(), sizeof(requiredPassword) - 1);
-    requiredPassword[sizeof(requiredPassword) - 1] = '\0';
-    Serial.println("Plaintext password loaded from NVS");
-  }
-  // Now load the hash (for future use)
-  if (settingExists(NK_passwordHash)) {
-    String hash = settingRead(NK_passwordHash);
-    hash.trim();
-    if (hash.length() > 0) {
-      strncpy(storedPasswordHash, hash.c_str(), sizeof(storedPasswordHash) - 1);
-      storedPasswordHash[sizeof(storedPasswordHash) - 1] = '\0';
-      Serial.println("Password hash loaded from NVS");
-      return;
-    }
-  }
-
-  // If we get here, no password keys exist - set defaults
-  strncpy(requiredPassword, "admin", sizeof(requiredPassword) - 1);
-  sha256("admin", storedPasswordHash);
-  Serial.println("No password stored, using default admin password");
-}
-
-void savePasswordHash() {
-  if (settingWrite(NK_passwordHash, storedPasswordHash)) {
-    Serial.println("Password hash saved to NVS");
-    queueConsoleMessage("Password hash saved");
-  } else {
-    Serial.println("Failed to save password hash to NVS");
-    queueConsoleMessage("Password hash save failed");
-  }
-}
-
-void savePasswordPlaintext(const char *password) {
-  if (settingWrite(NK_password, password)) {
-    Serial.println("Password saved to NVS");
-    queueConsoleMessage("Password saved");
-  } else {
-    Serial.println("Failed to save password to NVS");
-    queueConsoleMessage("Password save failed");
-  }
-}
-
-bool validatePassword(const char *password) {
-  if (!password) return false;
-
-  char hash[65] = { 0 };
-  sha256(password, hash);
-
-  return (strcmp(hash, storedPasswordHash) == 0);
+  return true;
 }
 // Mirror every queued message into the /consolehist.txt history ring (own indices, own short
 // critical section — never nested inside the queue's).

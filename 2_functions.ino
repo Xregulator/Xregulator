@@ -474,14 +474,14 @@ bool fsRemove(const char *path) {
 #define NK_xTime "xTime"
 #define NK_yyMax "yyMax"
 #define NK_yyMin "yyMin"
-// WiFi provisioning + interface password + IMU level calibration
+// WiFi provisioning + IMU level calibration
+// Retired admin-password keys "password"/"passwordHash" (arm-gate replaced the password,
+// 2026-07) may still hold orphaned values in fielded NVS — never repurpose those key strings.
 #define NK_ssid "ssid"
 #define NK_pass "pass"
 #define NK_apssid "apssid"
 #define NK_appass "appass"
 #define NK_first_config_done "firstconfigdone"
-#define NK_password "password"
-#define NK_passwordHash "passwordHash"
 #define NK_imu_zero "imu_zero"
 #define NK_imu_mnt_state "imu_mnt_state"
 
@@ -5261,7 +5261,7 @@ void faMatrixMaybeFlush() {
     ripTabFlush();
   }
   if (!faMatrix) return;
-  if (faPendingMatrixClear) {  // user-clicked (password-gated /get) — runs here on Core 1
+  if (faPendingMatrixClear) {  // user-clicked (arm-gated /get) — runs here on Core 1
     faPendingMatrixClear = false;
     memset(faMatrix, 0, sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);
     faCellsUsed = 0;
@@ -5285,7 +5285,7 @@ void faMatrixMaybeFlush() {
     }
     return;
   }
-  if (faPendingRebaseline) {  // user-clicked (password-gated /get) — clears the REFERENCE pages only
+  if (faPendingRebaseline) {  // user-clicked (arm-gated /get) — clears the REFERENCE pages only
     faPendingRebaseline = false;
     if (faFlip) {
       memset(faFlip, 0, sizeof(FaFlipPage) * FA_FLIP_BANDS);  // slots 0..FA_FLIP_BANDS-1 = reference bands; anomaly captures kept

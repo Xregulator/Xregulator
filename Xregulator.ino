@@ -746,9 +746,13 @@ const unsigned long WIFI_SCAN_CADENCE_MS = 2000;   // ~5-6 mA average while disc
 const unsigned long WIFI_JOIN_TIMEOUT_MS = 15000;  // assoc+DHCP wall clock before returning to seek
 const uint8_t WIFI_FULL_SWEEP_EVERY = 5;           // every Nth scan sweeps all channels (hotspot channel varies per session)
 
-//Security
-char requiredPassword[32] = "admin";  // Max password length = 31 chars     Password for access to change settings from browser
-char storedPasswordHash[65] = { 0 };
+// Settings arm gate — replaced the admin password (LAN clients are trusted; this is an
+// acknowledgment that settings may change, not authentication). RAM-only, so a reboot disarms.
+// While disarmed every mutating endpoint rejects, which permanently kills replayed/stale
+// settings URLs (the cvGainMode-flip class) without any password rotation.
+bool settingsArmed = false;
+unsigned long settingsArmedAtMs = 0;
+const unsigned long SETTINGS_ARM_TIMEOUT_MS = 30UL * 60UL * 1000UL;
 
 // ===== HEAP MONITORING =====
 int rawFreeHeap = 0;      // in bytes
@@ -5395,7 +5399,6 @@ void setup() {
   loadSystemIDLog();          // restore plant-delay (SystemID) records from LittleFS
   loadSysidSweepLog();        // restore Plant Delay sine-sweep history from LittleFS
   loadTuningSweepLog();       // restore Current closed-loop sine-sweep history from LittleFS
-  loadPasswordHash();
   // Check if we should wake WiFi for a pending OTA update
   nvs_handle_t wake_handle;
   if (nvs_open("update_req", NVS_READONLY, &wake_handle) == ESP_OK) {

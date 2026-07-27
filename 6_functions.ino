@@ -1775,7 +1775,7 @@ void thermalAccuracyScore_tick(uint32_t nowMs, float dtSec) {
   }
 }
 
-// OV-episode window: any Group 1/2 hard fire within the last 30s. Observed relapse periods are
+// OV-episode window: any hard protection clamp (Group 1/2 OV, iExcess CV/bulk, or Load Dump) within the last 30s. Observed relapse periods are
 // 1-3s (longest gap 12.8s, 18:31 07-22 AGM), so 30s brackets a whole train with margin while
 // staying invisible to normal operation.
 static uint32_t g_ovEpisodeLastFireMs = 0;
@@ -2012,7 +2012,7 @@ void AdjustFieldLearnMode() {
   static uint8_t recovHeldTicks = 0;    // consecutive PI ticks the bus has held ≈target — the "recovered" exit; without it the window latches as a stale ceiling whenever the plant heals needing less current than the goal (13:56 07-22 zombie)
   static float recovVRefEma = 0.0f;     // ~3s EMA of the filtered bus — the walk's "not rising" test is a delta above this reference; a slope-EMA sign gate ripple-starved the walk to 7% duty / 0.11 A/s (21:36 07-24, no-shunt load stuck 1.7V low ~9 min)
   static float demandDropA = 0.0f;      // house-load amps that left the bus at the fire (rising-edge loads vs preEventLoadEma) — subtracted from reseed base AND goal, else the refill restores a current the event proved unwanted
-  static uint8_t rapidReFires = 0;      // consecutive re-fires <1.5s after release — proof the seed is still high; rebases the next seed on lastSeedA ×0.7
+  static uint8_t rapidReFires = 0;      // consecutive re-fires <4s after release — proof the seed is still high; rebases the next seed on lastSeedA ×0.7
   static uint32_t lastReleaseMs = 0;
   static float lastSeedA = 0.0f;        // cv_I written at the last release — the rebase base on a rapid re-fire (preEventCvI regrows mid-train as the refill climbs: 22:17 07-22, 3 fires shedding only ~14%/cycle)
   static bool recovWalking = false;     // starve backstop engaged (announce-once latch): the goal ceiling walks up at a bounded rate instead of releasing in one step (a one-tick release steps the command by the whole P+I surplus — 25-30A steps re-fired immediately, 18:31 07-22). Engaged ≠ moving: the walk itself is re-gated every tick on recovStarveTicks

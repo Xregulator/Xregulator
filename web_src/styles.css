@@ -275,19 +275,67 @@ textarea {
   .prot-word .pw-short { display: inline; }
 }
 
-/* Why the field reads OFF — plain-English cause under the charge-stage badge (banner). Only shown
-   when field-status is OFF and the firmware reason is meaningful; muted amber so it reads as a note,
-   not an alarm. */
+/* Why the field reads OFF — plain-English cause. An OVERLAY (position:absolute, zero layout
+   height): showing/hiding it must never change header height, or the Alternator Enable toggle
+   below jumps while the reason flaps at the RPM threshold (banner-jump fix). Shown/hidden via
+   .show (opacity fade), never display — JS keeps the old text on hide so the fade-out reads.
+   Phone (<768px) anchors to the field cluster as halo'd ghost text; wide (≥768px) anchors to
+   the brand row as a one-line full-width tinted ribbon. pointer-events:none so taps pass
+   through to whatever it covers. */
 .field-off-reason {
-  display: block;
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
   font-size: 10px;
   letter-spacing: 0.02em;
-  line-height: 1.2;
-  margin-top: 1px;
-  font-weight: 500;
+  line-height: 1.25;
+  font-weight: 600;
   color: #c9922e;
-  max-width: 22ch;
-  white-space: normal;
+}
+
+.field-off-reason.show { opacity: 1; }
+
+@media (max-width: 767.98px) {
+  /* position:relative makes the cluster the note's containing block on phones only */
+  .header-field-cluster { position: relative; }
+  .field-off-reason {
+    top: 100%;
+    right: 0;
+    margin-top: 3px;
+    max-width: 34ch;
+    text-align: right;
+    white-space: normal;
+    text-shadow: 0 0 3px #ffffff, 0 0 6px #ffffff, 0 0 10px #ffffff;
+  }
+  .dark-mode .field-off-reason {
+    color: #e0b25c;
+    text-shadow: 0 0 3px #262626, 0 0 6px #262626, 0 0 10px #262626;
+  }
+}
+
+@media (min-width: 768px) {
+  .field-off-reason {
+    top: 100%;
+    left: 0;
+    right: 0;
+    margin-top: 1px;
+    padding: 2px 10px;
+    text-align: center;
+    color: #8a6414;
+    background: rgba(201, 146, 46, 0.12);
+    -webkit-backdrop-filter: blur(3px);
+    backdrop-filter: blur(3px);
+    border-bottom: 1px solid rgba(201, 146, 46, 0.25);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .dark-mode .field-off-reason {
+    color: #e0b25c;
+    background: rgba(201, 146, 46, 0.14);
+  }
 }
 
 /* BULK — aggressive charge → strong green */
@@ -1358,6 +1406,7 @@ input[type="submit"]:hover {
   justify-content: space-between;
   padding-bottom: 8px;
   border-bottom: 1px solid rgba(0, 161, 154, 0.15);
+  position: relative;   /* containing block for the #field-off-reason ribbon at ≥768px */
 }
 
 .header-wordmark {
@@ -1634,23 +1683,6 @@ input[type="submit"]:hover {
 }
 .dashboard-brush-snap-btn:hover { background: #fff; border-color: #888; }
 .dashboard-brush-snap-btn:active { background: #ddd; }
-#dashboard-crosshair-indicator {
-  margin-left: 10px;
-  background: rgba(255, 235, 153, 0.6);
-  border-radius: 3px;
-  padding: 1px 6px;
-  color: #444;
-}
-#dashboard-crosshair-clear {
-  margin-left: 4px;
-  padding: 0 5px;
-  background: transparent;
-  border: 1px solid #888;
-  border-radius: 3px;
-  cursor: pointer;
-  font-size: 11px;
-}
-#dashboard-crosshair-clear:hover { background: #fff; }
 @media (max-width: 600px) {
   #dashboard-brush-snap { margin-left: 0; margin-top: 2px; flex-basis: 100%; }
 }
