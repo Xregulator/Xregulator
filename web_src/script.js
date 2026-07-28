@@ -1373,7 +1373,8 @@ async function cfgDiffPreview(blobText, sourceLabel){
   let unchanged=0;
   // Read-only diagnostics/results the firmware exports but never applies on import — hide them
   // from the diff so they can't show as spurious "[object Object]" rows or no-op checkable rows.
-  const CFG_NONSETTING=new Set(['commissioning_results','cvComputedKp','cvComputedKi','cvComputedKd']);
+  // vesselSaved is the "form completed" sentinel, not a value — it is tier 3 anyway, so a row would never apply.
+  const CFG_NONSETTING=new Set(['commissioning_results','cvComputedKp','cvComputedKi','cvComputedKd','vesselSaved']);
   for(const k of Object.keys(incoming.config).sort()){
     if(CFG_NONSETTING.has(k)) continue;
     const nv=String(incoming.config[k]);
@@ -1396,7 +1397,9 @@ async function cfgDiffPreview(blobText, sourceLabel){
   const nChange=changed.length+tblChanged.length, nFresh=fresh.length+tblFresh.length;
   const sum=document.getElementById('cfgdiff-summary');
   const body=document.getElementById('cfgdiff-body');
-  const vNow=incoming.vessel&&incoming.vessel.battery_voltage;
+  // payload_v 3 blobs carry the voltage as the BatteryVoltage manifest key; older exported
+  // files still have the vessel{} TOC header.
+  const vNow=(incoming.config&&incoming.config.BatteryVoltage)||(incoming.vessel&&incoming.vessel.battery_voltage);
   sum.innerHTML='Loading <b>'+_cfgEsc(sourceLabel)+'</b>'+(incoming.fw_version?' (saved on firmware '+_cfgEsc(incoming.fw_version)+')':'')+'.<br>'
     +'<b>'+nChange+'</b> settings change, <b>'+nFresh+'</b> are new here, <b>'+unchanged+'</b> already match.'
     +'<br>Only checked rows are applied.'
@@ -2635,6 +2638,10 @@ const CSV3_FIELDS = [
     "protTestReps",                  // protection-test repeat count
     "protTestAmps",                  // protection-test energize target current (A); 0 = auto-seed at fire
     "cvRecovBoostFloorV",            // recovery P-boost dead area below target (V per 12V block); ×1000
+    "cvRecovDeepBandV",              // deep-recovery band (V per 12V block); ×1000
+    "cvRecovDeepMult",               // starve-walk rate multiplier at full depth; ×100
+    "cvRecovFlareBandV",             // arrival flare band (V per 12V block); ×1000
+    "cvRecovFlareFrac",              // arrival flare ceiling floor, fraction of recovery goal; ×100
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5641,6 +5648,10 @@ function updateAllEchosOptimized(data) {
         { key: 'cvRecovBoostMax',   id: 'cvRecovBoostMax_echo',   transform: v => (v / 100).toFixed(2) },
         { key: 'cvRecovBoostErrV',  id: 'cvRecovBoostErrV_echo',  transform: v => (v / 1000).toFixed(2) },
         { key: 'cvRecovBoostFloorV', id: 'cvRecovBoostFloorV_echo', transform: v => (v / 1000).toFixed(2) },
+        { key: 'cvRecovDeepBandV',  id: 'cvRecovDeepBandV_echo',  transform: v => (v / 1000).toFixed(2) },
+        { key: 'cvRecovDeepMult',   id: 'cvRecovDeepMult_echo',   transform: v => (v / 100).toFixed(1) },
+        { key: 'cvRecovFlareBandV', id: 'cvRecovFlareBandV_echo', transform: v => (v / 1000).toFixed(2) },
+        { key: 'cvRecovFlareFrac',  id: 'cvRecovFlareFrac_echo',  transform: v => (v / 100).toFixed(2) },
         { key: 'dutySlewEnable',    id: 'dutySlewEnable_cv_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'testSlewMode',      id: 'testSlewMode_echo',      transform: v => v == 0 ? 'Off' : v == 1 ? 'Default' : 'Custom' },
         { key: 'cvTestSlewMode',    id: 'cvTestSlewMode_echo',    transform: v => v == 0 ? 'Off' : v == 1 ? 'Default' : 'Custom' },
@@ -6458,7 +6469,10 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
             prevBatt.volt !== Number(vessel.battery_voltage));
         if (!firstSave && !battChanged) return;
         if (type === 'other') { _battDefSkipNote('No recommendations are made for the Other battery type. Inspect every charge-stage and protection setting under Setup and adjust each one individually.'); return; }
-        if (!settingsUnlocked) return;
+        // A successful /saveVesselInfo proves the device is armed (that endpoint is arm-gated);
+        // this tab's mirror can be stale after a reload. Re-sync and proceed — a genuinely
+        // unarmed device fails the /exportConfig below, which already shows a visible skip note.
+        if (!settingsUnlocked) syncArmState();
 
         // Current values from the device (raw NVS strings)
         const r = await fetchWithTimeout(buildURL('/exportConfig'), {}, 10000);
@@ -6554,8 +6568,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         if (!picked.length) return;
 
         // One /get request — every hasParam block in the refactored handler processes independently
-        let url = '/get';
-        for (const c of picked) url += '&' + c.param + '=' + encodeURIComponent(c.value);
+        const url = '/get?' + picked.map(c => c.param + '=' + encodeURIComponent(c.value)).join('&');
         const ar = await fetchWithTimeout(buildURL(url), {}, 10000);
         const messageDiv = document.getElementById('vessel-info-message');
         if (messageDiv) {
@@ -6608,7 +6621,6 @@ function commPrepPaintCta() {
 }
 
 function commPrepFetchCfg() {
-    if (!settingsUnlocked) return Promise.resolve(null);
     return fetchWithTimeout(buildURL('/exportConfig'), {}, 10000)
         .then(r => r.ok ? r.json() : null)
         .catch(e => { diagLog('commissioning prerequisites config fetch failed:', e); return null; });
@@ -6616,10 +6628,10 @@ function commPrepFetchCfg() {
 
 async function maybeShowCommPrereqs() {
     try {
-        if (!settingsUnlocked) return;
+        if (!settingsUnlocked) syncArmState();  // same stale-mirror case as the battery-defaults popup
         const pre = _commPrepPrefetch; _commPrepPrefetch = null;
         const j = await (pre || commPrepFetchCfg());
-        if (!j) return;
+        if (!j) { _battDefSkipNote('Could not read the current device settings, so the commissioning prerequisites screen was skipped. Those settings are all available under Setup.'); return; }
         // Same response also carries the RPM cap tables the NEXT screen needs, so hand them over
         // rather than making openRpmCap re-fetch. The cap tables live in the "learning" namespace and
         // nothing this screen writes can touch them, so the snapshot cannot go stale in between.
@@ -6810,8 +6822,7 @@ async function commPrepFinish(start) {
     _commPrepRpmActive = false;
     document.getElementById('commprep-modal-overlay').style.display = 'none';
     if (changes.length && settingsUnlocked) {
-        let url = '/get';
-        for (const c of changes) url += '&' + c.param + '=' + encodeURIComponent(c.value);
+        const url = '/get?' + changes.map(c => c.param + '=' + encodeURIComponent(c.value)).join('&');
         try { await fetchWithTimeout(buildURL(url), {}, 10000); } catch (e) { diagLog('prerequisites submit failed:', e); }
     }
     const r = _commPrereqResolve; _commPrereqResolve = null; if (r) r();
@@ -7265,12 +7276,8 @@ function handleProfileUpdate(event) {
     if (deviceUidSpan) {
         formData.append('deviceUID', deviceUidSpan.textContent);
     }
-
-    if (window.vesselInfo) {
-        Object.keys(window.vesselInfo).forEach(key => {
-            formData.append(key, window.vesselInfo[key]);
-        });
-    }
+    // Identity only — the firmware's /registerProfile & /updateProfile no longer read vessel
+    // fields; the cloud profile's vessel columns fill from the config snapshot.
 
     messageDiv.style.display = 'block';
     messageDiv.style.backgroundColor = '#e3f2fd';
@@ -16307,18 +16314,19 @@ async function downloadLogs() {
         + '\n\n=== This browser session ===\n'
         + (sessionText || '(no messages received in this browser session)') + '\n');
 
-    // Diagnostics snapshot (frozen dashboard state) as JSON.
-    saveLogFile(`snapshot_${ts}${sfx}.json`, JSON.stringify(getDiagnosticsSnapshot(), null, 2), 'application/json');
-
-    // Vessel Info — the one-time config a log cannot be read without (voltage class, alternator size,
-    // bank Ah + chemistry). The cloud relay already ships it; the local bundle did not, so every
-    // ×12/BATTERY_VOLTAGE conversion had to be guessed offline.
+    // Diagnostics snapshot (frozen dashboard state) as JSON, with the vessel record embedded —
+    // a log cannot be read without it (voltage class, alternator size, bank Ah + chemistry),
+    // and one file beats the separate vesselinfo_*.json this bundle used to add.
+    const snapObj = getDiagnosticsSnapshot();
     const vesselRaw = await fetchLogText('/vessel_info.json');
     wizardHb();
-    saveLogFile(`vesselinfo_${ts}${sfx}.json`,
-        vesselRaw != null ? vesselRaw
-                          : '{"error":"/vessel_info.json download FAILED after retry — data was NOT retrieved"}',
-        'application/json');
+    try {
+        snapObj.vessel_info = vesselRaw != null ? JSON.parse(vesselRaw)
+            : { error: '/vessel_info.json download FAILED after retry — data was NOT retrieved' };
+    } catch (e) {
+        snapObj.vessel_info = { error: '/vessel_info.json did not parse: ' + e.message };
+    }
+    saveLogFile(`snapshot_${ts}${sfx}.json`, JSON.stringify(snapObj, null, 2), 'application/json');
 
     setTimeout(() => {
         fetch(buildURL('/resetlogs'), { method: 'POST' })
@@ -18123,7 +18131,7 @@ function cvBinToCsv(d, csv3) {
         ` Never infer a shaft/rotor order or a pulley ratio from logged rpm.`
     );
     lines.push(
-        `# Recovery: cvRecovEnable=${fmtRaw(c.cvRecovEnable, 0)} cvRecovKiMax=${fmtDiv(c.cvRecovKiMax, 100, 1)} ReseedFrac=${fmtDiv(c.ReseedFrac, 100, 2)} ReseedFracNoShunt=${fmtDiv(c.ReseedFracNoShunt, 100, 2)} CvRecovClimbRate=${fmtDiv(c.CvRecovClimbRate, 100, 2)}/s cvRecovBoostEnable=${fmtRaw(c.cvRecovBoostEnable, 0)} cvRecovBoostMax=${fmtDiv(c.cvRecovBoostMax, 100, 2)}x cvRecovBoostErrV=${fmtDiv(c.cvRecovBoostErrV, 1000, 2)}V cvRecovBoostFloorV=${fmtDiv(c.cvRecovBoostFloorV, 1000, 2)}V loadServeBoostEnable=${fmtRaw(c.loadServeBoostEnable, 0)} reseedCorrEnable=${fmtRaw(c.reseedCorrEnable, 0)}`
+        `# Recovery: cvRecovEnable=${fmtRaw(c.cvRecovEnable, 0)} cvRecovKiMax=${fmtDiv(c.cvRecovKiMax, 100, 1)} ReseedFrac=${fmtDiv(c.ReseedFrac, 100, 2)} ReseedFracNoShunt=${fmtDiv(c.ReseedFracNoShunt, 100, 2)} CvRecovClimbRate=${fmtDiv(c.CvRecovClimbRate, 100, 2)}/s cvRecovBoostEnable=${fmtRaw(c.cvRecovBoostEnable, 0)} cvRecovBoostMax=${fmtDiv(c.cvRecovBoostMax, 100, 2)}x cvRecovBoostErrV=${fmtDiv(c.cvRecovBoostErrV, 1000, 2)}V cvRecovBoostFloorV=${fmtDiv(c.cvRecovBoostFloorV, 1000, 2)}V cvRecovDeepBandV=${fmtDiv(c.cvRecovDeepBandV, 1000, 2)}V cvRecovDeepMult=${fmtDiv(c.cvRecovDeepMult, 100, 1)}x cvRecovFlareBandV=${fmtDiv(c.cvRecovFlareBandV, 1000, 2)}V cvRecovFlareFrac=${fmtDiv(c.cvRecovFlareFrac, 100, 2)} loadServeBoostEnable=${fmtRaw(c.loadServeBoostEnable, 0)} reseedCorrEnable=${fmtRaw(c.reseedCorrEnable, 0)}`
     );
     lines.push(
         `# capReason codes: 0=none(unclamped) 1=KHard_G1(predictive) 2=KHard_G2(measured) 3=iExcess 4=loadDump 5=iExcessBulk(current-control phase)`

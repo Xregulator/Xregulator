@@ -670,7 +670,7 @@
                   style="flex: 1; padding:12px;font-size:16px;font-weight:bold;">
                 <!-- Tooltip shown only in "Update" mode (info already on file) — explains the cloud effect of a change. -->
                 <span id="vesselUpdateTooltip" class="tooltip" onclick="this.classList.toggle('active')" style="display:none;">
-                  <span class="tooltip-box">Saving writes to this regulator immediately, but your cloud profile, leaderboards, and fleet stats only change the next time you register or update your profile under Cloud Features -> Registration sub-tab. When that happens: general boat equipment/type changes may immediately move you into a new leaderboard group as if the new value had always applied. However, no calculations are re-done, so accel mounting position onlys affect data moving forward.</span>
+                  <span class="tooltip-box">Saving writes to this regulator immediately. If the device is registered for cloud features, the updated boat record also uploads on its own within about a minute (it waits for the alternator field to be off), so your cloud profile, leaderboards, and fleet stats follow automatically. General boat equipment/type changes may immediately move you into a new leaderboard group as if the new value had always applied. However, no calculations are re-done, so accel mounting position only affects data moving forward.</span>
                 </span>
               </div>
 
@@ -2890,6 +2890,66 @@
                       <div class="protections-edit-row">
                         <input name="cvRecovBoostFloorV" type="number" step="0.05" min="0" max="5" />
                         <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g5">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g5">G5</span>
+                      Deep Recovery Band (V) (<span id="cvRecovDeepBandV_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far below target the voltage must sit for a post-trip recovery to count as deep. Near target, recovery is deliberately cautious — the current climb crawls and pauses at any sign of the bus rising, because close to target a repeat trip is one overshoot away. Deeper than this band that caution is pure delay: nothing but missing current can hold the bus that far down, so the climb speeds up (by the multiplier below), stops pausing for slow creep, and the recovery boost stays available during the quiet window after a trip instead of switching off. Entered per 12 V; scales automatically on 24 V and 48 V systems. Smaller brings the fast behavior closer to target, which shortens deep recoveries but risks a repeat trip on the approach; very large means no recovery ever counts as deep and everything runs at the cautious near-target pace.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="cvRecovDeepBandV" type="number" step="0.05" min="0" max="5" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g5">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g5">G5</span>
+                      Deep Recovery — Climb Speed Multiplier (×) (<span id="cvRecovDeepMult_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much faster the post-trip current climb runs when the voltage is deep below target (past the Deep Recovery Band). The speed-up ramps in smoothly — none at the band edge, full multiplier at twice the band — and unwinds itself as the voltage closes in, so arrival at target always happens at the normal cautious pace. Higher shortens the time spent far below target after a repeat trip; too high can overshoot the true demand while the bus is still answering slowly, banking surplus current that has to be shed on arrival. 1 disables the speed-up entirely.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="cvRecovDeepMult" type="number" step="0.5" min="1" max="20" />
+                        <span class="protections-unit">×</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g5">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g5">G5</span>
+                      Recovery Arrival Flare — Band (V) (<span id="cvRecovFlareBandV_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The final approach zone of a post-trip recovery. A recovery climbs back toward the current that held the bus before the trip — but right after a trip the battery is often surface-charged and briefly needs less, so arriving at target still carrying the full pre-trip current can push the voltage over the trip line again. Within this many volts of target the restored-current ceiling tapers down (to the floor set below), like flaring a landing, so the bus arrives with roughly zero surplus and the normal loop re-adds the last few amps only if the load really wants them. Entered per 12 V; scales automatically on 24 V and 48 V systems. Wider starts the easing earlier, gentler but slower on the last stretch; 0 disables the flare and recovery arrives at full restored current.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="cvRecovFlareBandV" type="number" step="0.05" min="0" max="2" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2 g3 g5">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g5">G5</span>
+                      Recovery Arrival Flare — Floor (×) (<span id="cvRecovFlareFrac_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much of the restored current is still allowed at the moment the voltage reaches target, as a fraction of the recovery goal. The ceiling tapers from the full goal at the edge of the flare band down to this floor at target; the held-back remainder is not lost — the loop rebuilds it within a few seconds if the load genuinely draws it. Lower lands softer (more protection against a repeat trip on arrival) but leaves more current to rebuild afterward, so the voltage can dip briefly if a large load is still on; 1 disables the flare.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="cvRecovFlareFrac" type="number" step="0.01" min="0.5" max="1" />
+                        <span class="protections-unit">×</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>

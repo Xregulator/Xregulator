@@ -4262,7 +4262,7 @@ bool fieldOffSettled(uint32_t extraMs) {
 // First-boot SoC seed, deferred from loadNVSData() to the end of setup() so IBV holds a real
 // INA228 reading and BATTERY_TYPE / BATTERY_VOLTAGE / BatteryCapacity_Ah hold the vessel-info
 // values (all were still defaults/zero at loadNVSData time, which seeded 0% every fresh boot).
-// On a factory-fresh device (no vessel_info.json) it defers further: saveVesselInfoToFile()
+// On a factory-fresh device (Vessel Info never saved) it defers further: saveVesselInfoToNvs()
 // re-invokes it after the first Vessel Info save, so the estimate never runs on the compile-time
 // chemistry/capacity defaults. SOC holds the provisional 50% until then; that provisional state is
 // never persisted (saveNVSDataFull guard), so the deferral survives reboots before that save.
@@ -4584,7 +4584,7 @@ void loadNVSData() {
   nvs_get_blob(nvs_handle, "IMU_PitchMax", &imu_pitch_max_lifetime, &required_size);
   nvs_get_blob(nvs_handle, "IMU_SlamMax", &imu_slam_peak_lifetime, &required_size);
 
-  // imuMountOrientation loads from /vessel_info.json in InitSystemSettings.
+  // imuMountOrientation loads with the rest of the Vessel Info NVS record in InitSystemSettings.
   // CAPSIZE_THRESHOLD_DEG / PITCHPOLE_THRESHOLD_DEG / SLAM_THRESHOLD_G load from
   // their own NVS "settings" keys in InitSystemSettings (Pattern B).
 

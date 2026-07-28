@@ -1027,6 +1027,10 @@ enum Csv3Index {
   CSV3_protTestReps,           // protection-test repeat count
   CSV3_protTestAmps,           // protection-test energize target current (A); 0 = auto-seed at fire
   CSV3_cvRecovBoostFloorV,     // recovery P-boost dead area below target (V per 12V block); ×1000
+  CSV3_cvRecovDeepBandV,       // deep-recovery band (V per 12V block); ×1000
+  CSV3_cvRecovDeepMult,        // starve-walk rate multiplier at full depth; ×100
+  CSV3_cvRecovFlareBandV,      // arrival flare band (V per 12V block); ×1000
+  CSV3_cvRecovFlareFrac,       // arrival flare ceiling floor, fraction of recovery goal; ×100
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -3028,9 +3032,13 @@ void setupServer() {
   });
 
 
+  // Derived view of the Vessel Info NVS record — no longer a file. Deliberately ungated
+  // (unlike /exportConfig): the dashboard form and the Download Logs bundle both need it
+  // without arming settings. 404 until the form has been saved, which is what the client
+  // reads as "vessel info incomplete".
   server.on("/vessel_info.json", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (LittleFS.exists("/vessel_info.json")) {
-      request->send(LittleFS, "/vessel_info.json", "application/json");
+    if (settingExists(NK_vesselSaved)) {
+      request->send(200, "application/json", vesselInfoJson());
     } else {
       request->send(404, "application/json", "{\"error\":\"Vessel info not found\"}");
     }
@@ -3112,8 +3120,7 @@ void setupServer() {
     if (CommissionEpoch > 0 && (newBatteryVoltage != oldBatteryVoltage
                                 || BatteryCapacity_Ah != oldCapacityAh
                                 || BATTERY_TYPE != oldBatteryType)) {
-      commissionChangeFlag = true;
-      settingWrite(NK_cmChangeFlag, "1");
+      raiseRecommissionNag();
     }
     BATTERY_MAKE_MODEL = doc["battery_make_model"].as<String>();
     ALTERNATOR_BRAND_MODEL = doc["alternator_brand_model"].as<String>();
@@ -3129,8 +3136,8 @@ void setupServer() {
     IMU_DIST_BOW_FT = doc["imu_dist_bow_ft"];
     IMU_DIST_CL_FT = doc["imu_dist_cl_ft"];
     IMU_HEIGHT_WL_FT = doc["imu_height_wl_ft"];
-    // Defer file write to Core 1 — LittleFS open/write on Core 0 stalls SSE delivery.
-    // firstSave = !vesselInfoSaved: true across reboots until a vessel_info.json exists; the client
+    // Defer to Core 1 — the post-save applyChemistryOcvPreset/seedSocFromVoltage stall SSE delivery.
+    // firstSave = !vesselInfoSaved: true across reboots until the form has been saved once; the client
     // fires the battery-defaults proposal on it, immune to a stale pre-flash browser tab.
     bool firstSave = !vesselInfoSaved;
     pendingSaveVesselInfo = true;
@@ -4859,7 +4866,6 @@ void setupServer() {
       BatteryCapacity_Ah = constrain(inputMessage.toInt(), 1L, 100000L);  // reject 0 Ah — it divides-by-zero into SOC
       settingWrite(NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());
       PeukertRatedCurrent_A = BatteryCapacity_Ah / 20.0f;
-      updateVesselInfoField("battery_capacity_ah", BatteryCapacity_Ah);
       queueConsoleMessageF("Battery capacity set to: %d Ah", BatteryCapacity_Ah);
     }
     if (request->hasParam("ShuntResistanceMicroOhm")) {
@@ -5077,7 +5083,6 @@ void setupServer() {
       inputMessage = request->getParam("SolarWatts")->value();
       settingWrite(NK_SolarWatts, inputMessage.c_str());
       SolarWatts = inputMessage.toInt();
-      updateVesselInfoField("solar_watts", SolarWatts);
     }
     if (request->hasParam("performanceRatio")) {
       foundParameter = true;
@@ -5732,6 +5737,30 @@ void setupServer() {
       cvRecovBoostFloorV = clamp_f(request->getParam("cvRecovBoostFloorV")->value().toFloat(), 0.0f, 5.0f);
       settingWrite(NK_cvRecovBoostFloorV, String(cvRecovBoostFloorV, 3).c_str());
       queueConsoleMessageF("CV recovery P-boost dead area: %.2f V", cvRecovBoostFloorV);
+    }
+    if (request->hasParam("cvRecovDeepBandV")) {  // deep-recovery band (V per 12V block): beyond this shortfall the walk speeds up and episode boost stays live
+      foundParameter = true;
+      cvRecovDeepBandV = clamp_f(request->getParam("cvRecovDeepBandV")->value().toFloat(), 0.0f, 5.0f);
+      settingWrite(NK_cvRecovDeepBandV, String(cvRecovDeepBandV, 3).c_str());
+      queueConsoleMessageF("CV recovery deep band: %.2f V", cvRecovDeepBandV);
+    }
+    if (request->hasParam("cvRecovDeepMult")) {  // starve-walk rate multiplier at full depth
+      foundParameter = true;
+      cvRecovDeepMult = clamp_f(request->getParam("cvRecovDeepMult")->value().toFloat(), 1.0f, 20.0f);
+      settingWrite(NK_cvRecovDeepMult, String(cvRecovDeepMult, 1).c_str());
+      queueConsoleMessageF("CV recovery deep walk multiplier: %.1fx", cvRecovDeepMult);
+    }
+    if (request->hasParam("cvRecovFlareBandV")) {  // arrival flare band (V per 12V block): recovery ceiling tapers within this shortfall
+      foundParameter = true;
+      cvRecovFlareBandV = clamp_f(request->getParam("cvRecovFlareBandV")->value().toFloat(), 0.0f, 2.0f);
+      settingWrite(NK_cvRecovFlareBandV, String(cvRecovFlareBandV, 3).c_str());
+      queueConsoleMessageF("CV recovery arrival flare band: %.2f V", cvRecovFlareBandV);
+    }
+    if (request->hasParam("cvRecovFlareFrac")) {  // flare ceiling at target, fraction of the recovery goal
+      foundParameter = true;
+      cvRecovFlareFrac = clamp_f(request->getParam("cvRecovFlareFrac")->value().toFloat(), 0.5f, 1.0f);
+      settingWrite(NK_cvRecovFlareFrac, String(cvRecovFlareFrac, 2).c_str());
+      queueConsoleMessageF("CV recovery arrival flare floor: %.2f of goal", cvRecovFlareFrac);
     }
     if (request->hasParam("dutySlewEnable")) {  // master switch for field duty slew (1=on, 0=instant)
       foundParameter = true;
@@ -7065,32 +7094,12 @@ void setupServer() {
       return;
     }
     String deviceUID = String(device_id_hex);
-    DynamicJsonDocument doc(2048);
+    // Identity only — the vessel record reaches user_profiles via the config snapshot
+    // (update-config-snapshot projects the settings jsonb), never via registration.
+    DynamicJsonDocument doc(512);
     doc["device_uid"] = deviceUID;
-    // User account info
     doc["username"] = request->getParam("username", true)->value();
     doc["email"] = request->getParam("email", true)->value();
-    // Vessel info (17 fields)
-    doc["boat_length_ft"] = request->getParam("boat_length_ft", true)->value().toFloat();
-    // Guarded: old vessel_info.json predating these fields won't carry them, so a profile
-    // update from a stale RAM cache would null-deref an unguarded getParam.
-    doc["boat_displacement_lbs"] = request->hasParam("boat_displacement_lbs", true) ? request->getParam("boat_displacement_lbs", true)->value().toFloat() : 0.0f;
-    doc["boat_type"] = request->getParam("boat_type", true)->value();
-    doc["boat_make_model"] = request->getParam("boat_make_model", true)->value();
-    doc["boat_year"] = request->getParam("boat_year", true)->value().toInt();
-    doc["home_port"] = request->getParam("home_port", true)->value();
-    doc["engine_make"] = request->getParam("engine_make", true)->value();
-    doc["engine_hp"] = request->getParam("engine_hp", true)->value().toInt();
-    doc["battery_voltage"] = request->getParam("battery_voltage", true)->value().toInt();
-    doc["battery_capacity_ah"] = request->getParam("battery_capacity_ah", true)->value().toInt();
-    doc["battery_type"] = request->getParam("battery_type", true)->value();
-    doc["battery_make_model"] = request->hasParam("battery_make_model", true) ? request->getParam("battery_make_model", true)->value() : String("");
-    doc["alternator_brand_model"] = request->getParam("alternator_brand_model", true)->value();
-    doc["solar_watts"] = request->getParam("solar_watts", true)->value().toInt();
-    doc["imu_mount_orientation"] = request->getParam("imu_mount_orientation", true)->value().toInt();
-    doc["imu_dist_bow_ft"] = request->getParam("imu_dist_bow_ft", true)->value().toFloat();
-    doc["imu_dist_cl_ft"] = request->getParam("imu_dist_cl_ft", true)->value().toFloat();
-    doc["imu_height_wl_ft"] = request->getParam("imu_height_wl_ft", true)->value().toFloat();
     String payload;
     serializeJson(doc, payload);
     Serial.println("=== REGISTRATION REQUEST ===");
@@ -7147,6 +7156,9 @@ void setupServer() {
               Serial.println("REGISTER: HTTPS queue full - version/forced check deferred to next boot");
             }
           }
+          // Fill the new profile's vessel columns now — registration is identity-only, the
+          // snapshot's settings jsonb is what carries the vessel record to the cloud.
+          configSnapshotRequested = true;
         }
       }
     }
@@ -7168,35 +7180,12 @@ void setupServer() {
 
     String deviceUID = String(device_id_hex);
 
-    DynamicJsonDocument doc(2048);
+    // Identity only — vessel data rides the config snapshot, same as /registerProfile.
+    DynamicJsonDocument doc(512);
     doc["device_uid"] = deviceUID;
     doc["token"] = token;
-
-    // User account info
     doc["username"] = request->getParam("username", true)->value();
     doc["email"] = request->getParam("email", true)->value();
-
-    // Vessel info (17 fields)
-    doc["boat_length_ft"] = request->getParam("boat_length_ft", true)->value().toFloat();
-    // Guarded: old vessel_info.json predating these fields won't carry them, so a profile
-    // update from a stale RAM cache would null-deref an unguarded getParam.
-    doc["boat_displacement_lbs"] = request->hasParam("boat_displacement_lbs", true) ? request->getParam("boat_displacement_lbs", true)->value().toFloat() : 0.0f;
-    doc["boat_type"] = request->getParam("boat_type", true)->value();
-    doc["boat_make_model"] = request->getParam("boat_make_model", true)->value();
-    doc["boat_year"] = request->getParam("boat_year", true)->value().toInt();
-    doc["home_port"] = request->getParam("home_port", true)->value();
-    doc["engine_make"] = request->getParam("engine_make", true)->value();
-    doc["engine_hp"] = request->getParam("engine_hp", true)->value().toInt();
-    doc["battery_voltage"] = request->getParam("battery_voltage", true)->value().toInt();
-    doc["battery_capacity_ah"] = request->getParam("battery_capacity_ah", true)->value().toInt();
-    doc["battery_type"] = request->getParam("battery_type", true)->value();
-    doc["battery_make_model"] = request->hasParam("battery_make_model", true) ? request->getParam("battery_make_model", true)->value() : String("");
-    doc["alternator_brand_model"] = request->getParam("alternator_brand_model", true)->value();
-    doc["solar_watts"] = request->getParam("solar_watts", true)->value().toInt();
-    doc["imu_mount_orientation"] = request->getParam("imu_mount_orientation", true)->value().toInt();
-    doc["imu_dist_bow_ft"] = request->getParam("imu_dist_bow_ft", true)->value().toFloat();
-    doc["imu_dist_cl_ft"] = request->getParam("imu_dist_cl_ft", true)->value().toFloat();
-    doc["imu_height_wl_ft"] = request->getParam("imu_height_wl_ft", true)->value().toFloat();
 
     String payload;
     serializeJson(doc, payload);
@@ -9048,7 +9037,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -9401,7 +9390,11 @@ void SendWifiData() {
                                SafeInt(protTestGapMs),
                                SafeInt(protTestReps),
                                SafeInt(protTestCmdA),
-                               SafeInt(cvRecovBoostFloorV, 1000));
+                               SafeInt(cvRecovBoostFloorV, 1000),
+                               SafeInt(cvRecovDeepBandV, 1000),
+                               SafeInt(cvRecovDeepMult, 100),
+                               SafeInt(cvRecovFlareBandV, 1000),
+                               SafeInt(cvRecovFlareFrac, 100));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;
@@ -9565,81 +9558,108 @@ void debugStackBeforeHTTPS(const char *functionName) {
 }
 
 
-void updateVesselInfoField(const char *fieldName, int value) {
-  if (!littleFSMounted && !ensureLittleFS()) return;
-  if (!fsMutex || xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
-    Serial.println("updateVesselInfoField: mutex timeout");
-    return;
-  }
-
-  if (!LittleFS.exists("/vessel_info.json")) {
-    xSemaphoreGive(fsMutex);
-    return;
-  }
-
-  File file = LittleFS.open("/vessel_info.json", "r");
-  if (!file) {
-    xSemaphoreGive(fsMutex);
-    return;
-  }
-
-  String jsonStr = file.readString();
-  file.close();
-
-  DynamicJsonDocument doc(1024);
-  deserializeJson(doc, jsonStr);
-  doc[fieldName] = value;
-
-  file = LittleFS.open("/vessel_info.json", "w");
-  if (file) {
-    serializeJson(doc, file);
-    file.close();
-  }
-  xSemaphoreGive(fsMutex);
+// One nvs handle + ONE commit for the whole record — 19 settingWrite() calls would be 19
+// separate flash commits. compare-first mirrors settingWrite so an unchanged field costs nothing.
+static void vesselNvsSet(nvs_handle_t h, const char *key, const char *val) {
+  char cur[128];
+  size_t len = sizeof(cur);
+  if (nvs_get_str(h, key, cur, &len) == ESP_OK && strcmp(cur, val) == 0) return;
+  nvs_set_str(h, key, val);
 }
 
-// Called from Core 1 main loop via pendingSaveVesselInfo flag — not safe to call on Core 0
-void saveVesselInfoToFile() {
-  if (!fsMutex || xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
-    Serial.println("saveVesselInfoToFile: mutex timeout");
+// One-time fold of the pre-NVS /vessel_info.json into NVS; the file is deleted after.
+// Remove once no device can still be running a build that wrote that file.
+void migrateVesselInfoFile() {
+  if (settingExists(NK_vesselSaved)) return;
+  if (!littleFSMounted && !ensureLittleFS()) return;
+  if (!LittleFS.exists("/vessel_info.json")) return;
+  File file = LittleFS.open("/vessel_info.json", "r");
+  if (!file) return;
+  DynamicJsonDocument doc(4096);
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  if (error) {
+    Serial.printf("Vessel info migration: JSON parse failed: %s\n", error.c_str());
     return;
   }
-  DynamicJsonDocument doc(1024);
-  doc["boat_length_ft"]         = BOAT_LENGTH_FT;
-  doc["boat_displacement_lbs"]  = BOAT_DISPLACEMENT_LBS;
-  doc["boat_type"]              = BOAT_TYPE;
-  doc["boat_make_model"]        = BOAT_MAKE_MODEL;
-  doc["boat_year"]              = BOAT_YEAR;
-  doc["home_port"]              = HOME_PORT;
-  doc["engine_make"]            = ENGINE_MAKE;
-  doc["engine_hp"]              = ENGINE_HP;
-  doc["battery_voltage"]        = BATTERY_VOLTAGE;
-  doc["battery_capacity_ah"]    = BatteryCapacity_Ah;
-  doc["battery_type"]           = BATTERY_TYPE;
-  doc["battery_make_model"]     = BATTERY_MAKE_MODEL;
-  doc["alternator_brand_model"] = ALTERNATOR_BRAND_MODEL;
-  doc["solar_watts"]            = SolarWatts;
-  doc["imu_mount_orientation"]  = imuMountOrientation;
-  doc["regulator_mount_loc"]    = regulatorMountLoc;
-  doc["imu_dist_bow_ft"]        = IMU_DIST_BOW_FT;
-  doc["imu_dist_cl_ft"]         = IMU_DIST_CL_FT;
-  doc["imu_height_wl_ft"]       = IMU_HEIGHT_WL_FT;
-  File file = LittleFS.open("/vessel_info.json", "w");
-  if (file) {
-    serializeJson(doc, file);
-    file.close();
+  nvs_handle_t h;
+  if (nvs_open(SETTINGS_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+  vesselNvsSet(h, NK_boatLenFt,      String((float)(doc["boat_length_ft"] | 0.0f), 2).c_str());
+  vesselNvsSet(h, NK_boatDispLbs,    String((float)(doc["boat_displacement_lbs"] | 0.0f), 0).c_str());
+  vesselNvsSet(h, NK_boatType,       (const char *)(doc["boat_type"] | "monohull"));
+  vesselNvsSet(h, NK_boatMakeModel,  (const char *)(doc["boat_make_model"] | ""));
+  vesselNvsSet(h, NK_boatYear,       String((int)(doc["boat_year"] | 2025)).c_str());
+  vesselNvsSet(h, NK_homePort,       (const char *)(doc["home_port"] | ""));
+  vesselNvsSet(h, NK_engineMake,     (const char *)(doc["engine_make"] | ""));
+  vesselNvsSet(h, NK_engineHp,       String((int)(doc["engine_hp"] | 0)).c_str());
+  vesselNvsSet(h, NK_batteryType,    (const char *)(doc["battery_type"] | "lifepo4"));
+  vesselNvsSet(h, NK_battMakeModel,  (const char *)(doc["battery_make_model"] | ""));
+  vesselNvsSet(h, NK_altBrandModel,  (const char *)(doc["alternator_brand_model"] | ""));
+  vesselNvsSet(h, NK_imuMountOrient, String((int)(doc["imu_mount_orientation"] | 0)).c_str());
+  vesselNvsSet(h, NK_regMountLoc,    String((int)(doc["regulator_mount_loc"] | 0)).c_str());
+  vesselNvsSet(h, NK_imuDistBowFt,   String((float)(doc["imu_dist_bow_ft"] | 0.0f), 2).c_str());
+  vesselNvsSet(h, NK_imuDistClFt,    String((float)(doc["imu_dist_cl_ft"] | 0.0f), 2).c_str());
+  vesselNvsSet(h, NK_imuHtWlFt,      String((float)(doc["imu_height_wl_ft"] | 0.0f), 2).c_str());
+  // The three shared keys are normally already in NVS and authoritative there; only seed them
+  // if this device predates them, never let the file's stale mirror overwrite a live value.
+  if (!settingExists(NK_BatteryVoltage))      vesselNvsSet(h, NK_BatteryVoltage,      String((int)(doc["battery_voltage"] | 12)).c_str());
+  if (!settingExists(NK_BatteryCapacity_Ah))  vesselNvsSet(h, NK_BatteryCapacity_Ah,  String((int)(doc["battery_capacity_ah"] | 300)).c_str());
+  if (!settingExists(NK_SolarWatts))          vesselNvsSet(h, NK_SolarWatts,          String((int)(doc["solar_watts"] | 0)).c_str());
+  vesselNvsSet(h, NK_vesselSaved, "1");
+  // One commit for the whole record: either every key lands or none does, so a power cut
+  // here leaves the file intact and the migration simply re-runs next boot.
+  esp_err_t e = nvs_commit(h);
+  nvs_close(h);
+  if (e != ESP_OK) {
+    Serial.printf("Vessel info migration: NVS commit failed: %d\n", (int)e);
+    return;
   }
-  xSemaphoreGive(fsMutex);
+  bool held = (fsMutex && xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000)) == pdTRUE);
+  LittleFS.remove("/vessel_info.json");   // unconditional: a lingering file would never be retried
+  if (held) xSemaphoreGive(fsMutex);
+  Serial.println("Vessel info migrated from LittleFS to NVS");
+}
 
-  // Mirror duplicated fields into their standalone settings keys so the next
-  // boot's standalone-load doesn't overwrite the vesselData values in RAM.
-  // The reverse direction (standalone /get handlers → vessel_info.json) is
-  // handled by updateVesselInfoField().
-  settingWrite(NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());
-  settingWrite(NK_SolarWatts,         String(SolarWatts).c_str());
+// Called from Core 1 main loop via pendingSaveVesselInfo flag — applyChemistryOcvPreset() and
+// seedSocFromVoltage() below are not safe to run on Core 0 alongside SSE delivery.
+void saveVesselInfoToNvs() {
+  nvs_handle_t h;
+  if (nvs_open(SETTINGS_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+    Serial.println("saveVesselInfoToNvs: nvs_open failed");
+    return;
+  }
+  vesselNvsSet(h, NK_boatLenFt,          String(BOAT_LENGTH_FT, 2).c_str());
+  vesselNvsSet(h, NK_boatDispLbs,        String(BOAT_DISPLACEMENT_LBS, 0).c_str());
+  vesselNvsSet(h, NK_boatType,           BOAT_TYPE.c_str());
+  vesselNvsSet(h, NK_boatMakeModel,      BOAT_MAKE_MODEL.c_str());
+  vesselNvsSet(h, NK_boatYear,           String((int)BOAT_YEAR).c_str());
+  vesselNvsSet(h, NK_homePort,           HOME_PORT);
+  vesselNvsSet(h, NK_engineMake,         ENGINE_MAKE.c_str());
+  vesselNvsSet(h, NK_engineHp,           String((int)ENGINE_HP).c_str());
+  vesselNvsSet(h, NK_BatteryVoltage,     String((int)BATTERY_VOLTAGE).c_str());
+  vesselNvsSet(h, NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());
+  vesselNvsSet(h, NK_batteryType,        BATTERY_TYPE.c_str());
+  vesselNvsSet(h, NK_battMakeModel,      BATTERY_MAKE_MODEL.c_str());
+  vesselNvsSet(h, NK_altBrandModel,      ALTERNATOR_BRAND_MODEL.c_str());
+  vesselNvsSet(h, NK_SolarWatts,         String(SolarWatts).c_str());
+  vesselNvsSet(h, NK_imuMountOrient,     String((int)imuMountOrientation).c_str());
+  vesselNvsSet(h, NK_regMountLoc,        String((int)regulatorMountLoc).c_str());
+  vesselNvsSet(h, NK_imuDistBowFt,       String(IMU_DIST_BOW_FT, 2).c_str());
+  vesselNvsSet(h, NK_imuDistClFt,        String(IMU_DIST_CL_FT, 2).c_str());
+  vesselNvsSet(h, NK_imuHtWlFt,          String(IMU_HEIGHT_WL_FT, 2).c_str());
+  vesselNvsSet(h, NK_vesselSaved, "1");
+  esp_err_t e = nvs_commit(h);
+  nvs_close(h);
+  if (e != ESP_OK) {
+    Serial.printf("saveVesselInfoToNvs: commit failed: %d\n", (int)e);
+    return;
+  }
 
   vesselInfoSaved = true;
   applyChemistryOcvPreset();  // chemistry-match the rested-voltage curve before the seed reads it
   seedSocFromVoltage();  // factory-fresh path: seed was deferred until real chemistry/capacity existed
+  // Refresh the cloud's user_profiles vessel projection on Save, not at the next boot/24 h
+  // backstop — the snapshot's settings jsonb is the only carrier of the vessel record.
+  configSnapshotRequested = true;
 }
 

@@ -149,7 +149,7 @@ bool fsRemove(const char *path) {
 #define NK_BatteryCOffset "BatteryCOffset"
 #define NK_BatteryCapacity_Ah "BatteryCapctyAh"
 #define NK_BatteryCurrentSource "BatteryCrrntSrc"
-#define NK_BatteryVoltage "BatteryVoltage"   // 12/24/48 nominal bank class — authoritative copy lives in NVS (vessel_info.json is a mirror)
+#define NK_BatteryVoltage "BatteryVoltage"   // 12/24/48 nominal bank class
 #define NK_Beta "Beta"
 #define NK_BulkVoltage "BulkVoltage"
 #define NK_CAPSIZE_THRESHOLD_DEG "CAPSIZETHRESHOL"
@@ -296,6 +296,10 @@ bool fsRemove(const char *path) {
 #define NK_cvRecovBoostMax "cvRcvBoostMax"
 #define NK_cvRecovBoostErrV "cvRcvBoostErrV"
 #define NK_cvRecovBoostFloorV "cvRcvBoostFlrV"
+#define NK_cvRecovDeepBandV "cvRcvDeepBandV"
+#define NK_cvRecovDeepMult "cvRcvDeepMult"
+#define NK_cvRecovFlareBandV "cvRcvFlareBndV"
+#define NK_cvRecovFlareFrac "cvRcvFlareFrac"
 #define NK_loadServeBoostEnable "loadServeBoost"
 #define NK_HuntGovEnable "HuntGovEn"
 #define NK_reseedCorrEnable "reseedCorrEn"
@@ -511,6 +515,29 @@ bool fsRemove(const char *path) {
 #define NK_kneeDutyTolPct  "kneeDutyTolPct"
 #define NK_ZeroLogEnable   "ZeroLogEnable"   // Zero-drift characterization log master toggle
 #define NK_lastAppldCfgId  "lastAppldCfgId"  // id of the last admin-pushed config applied (reboot-loop guard)
+
+// Vessel Info. Was /vessel_info.json on LittleFS; moved into NVS so the boat's identity,
+// geometry and chemistry survive a formatOnFail and ride the manifest export like every
+// other setting. The JSON is now a derived view (vesselInfoJson()), not the store.
+// NK_vesselSaved is the "user has completed Vessel Info" sentinel — tier 3, so an imported
+// config can never assert it on a device that never filled the form.
+#define NK_boatLenFt       "boatLenFt"
+#define NK_boatDispLbs     "boatDispLbs"
+#define NK_boatType        "boatType"
+#define NK_boatMakeModel   "boatMakeModel"
+#define NK_boatYear        "boatYear"
+#define NK_homePort        "homePort"
+#define NK_engineMake      "engineMake"
+#define NK_engineHp        "engineHp"
+#define NK_batteryType     "batteryType"
+#define NK_battMakeModel   "battMakeModel"
+#define NK_altBrandModel   "altBrandModel"
+#define NK_imuMountOrient  "imuMountOrient"
+#define NK_regMountLoc     "regMountLoc"
+#define NK_imuDistBowFt    "imuDistBowFt"
+#define NK_imuDistClFt     "imuDistClFt"
+#define NK_imuHtWlFt       "imuHtWlFt"
+#define NK_vesselSaved     "vesselSaved"
 
 #define SETTINGS_NVS_NAMESPACE "settings"
 
@@ -1128,8 +1155,8 @@ void performDeepFactoryReset() {
   queueConsoleMessage("DEEP FACTORY RESET: Wiping all settings and data, restarting...");
   delay(1500);
 
-  // Step 1: Unmount and reformat LittleFS (userdata partition - rings, logs, buffer files,
-  // vessel_info.json; user settings live in NVS and are wiped in Step 2). fsMutex is taken
+  // Step 1: Unmount and reformat LittleFS (userdata partition - rings, logs, buffer files;
+  // user settings AND Vessel Info live in NVS and are wiped in Step 2). fsMutex is taken
   // and deliberately NEVER released — any task that would re-create a file before the
   // restart blocks on its timeout instead. The reboot clears the mutex.
   Serial.println("RESET: Acquiring FS mutex and unmounting LittleFS...");
@@ -3165,7 +3192,9 @@ bool buildConfigPayload() {
     // payload_v = ingest payload schema version; bump when this body's shape changes.
     // Edge fn destructures named keys so it ignores this; present for version tracing.
     // v2 adds state.ov_telemetry (lifetime OV histogram + counters → device_statistics jsonb).
-    "\"payload_v\":2,"
+    // v3 nests settings.tables (RPM/fuel tables) so the daily settings jsonb equals the full
+    // /exportConfig record, and update-config-snapshot projects the vessel keys → user_profiles.
+    "\"payload_v\":3,"
     "\"settings\":",
     device_id_hex, authToken.c_str(), timestampStr);
   if (offset < 0 || offset >= CONFIG_PAYLOAD_SIZE) return false;
@@ -3175,9 +3204,14 @@ bool buildConfigPayload() {
   // sharing CONFIG_MANIFEST (8_functions.ino) with /exportConfig — one source of truth,
   // so the fleet config snapshot can never drift behind the dashboard as settings are
   // added. update-config-snapshot stores it verbatim as one jsonb column (no per-key DB).
+  // tables{} nests INSIDE settings (like commissioning_results) so the cloud record is the
+  // complete boat with zero cloud schema change.
   {
     String cfgObj = manifestConfigObject();
+    cfgObj.remove(cfgObj.length() - 1);   // reopen the object to append the tables section
     offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "%s", cfgObj.c_str());
+    String tblObj = exportTablesObject();
+    offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), ",\"tables\":%s}", tblObj.c_str());
   }
 
   // ─── State ─────────────────────────────────────────────────────────────────

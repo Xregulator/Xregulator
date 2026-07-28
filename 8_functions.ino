@@ -747,6 +747,10 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "cvRecovBoostMax", NK_cvRecovBoostMax, 1 },
   { "cvRecovBoostErrV", NK_cvRecovBoostErrV, 1 },
   { "cvRecovBoostFloorV", NK_cvRecovBoostFloorV, 1 },
+  { "cvRecovDeepBandV", NK_cvRecovDeepBandV, 1 },
+  { "cvRecovDeepMult", NK_cvRecovDeepMult, 1 },
+  { "cvRecovFlareBandV", NK_cvRecovFlareBandV, 1 },
+  { "cvRecovFlareFrac", NK_cvRecovFlareFrac, 1 },
   { "dutySlewEnable", NK_dutySlewEnable, 1 },
   { "testSlewMode", NK_testSlewMode, 1 },
   { "cvTestSlewMode", NK_cvTestSlewMode, 1 },
@@ -958,6 +962,29 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "ripFitAlt", NK_ripFitAlt, 1 },
   { "slpFitAlt", NK_slpFitAlt, 1 },
   { "imu_zero", NK_imu_zero, 1 },
+  // Vessel Info. Param names match the /vessel_info.json view so the blob reads the same
+  // either place. battery_voltage / battery_capacity_ah / solar_watts are NOT repeated here —
+  // they are already BatteryVoltage / BatteryCapacity_Ah / SolarWatts above.
+  // Tier 3 for the physical-mount set: adopting another boat's orientation or IMU distances
+  // yields silently-wrong heel/pitch math rather than an obvious error, and a raw
+  // settingWrite import would bypass the imuMountState invalidation /saveVesselInfo does.
+  { "boat_length_ft", NK_boatLenFt, 1 },
+  { "boat_displacement_lbs", NK_boatDispLbs, 1 },
+  { "boat_type", NK_boatType, 1 },
+  { "boat_make_model", NK_boatMakeModel, 1 },
+  { "boat_year", NK_boatYear, 1 },
+  { "home_port", NK_homePort, 1 },
+  { "engine_make", NK_engineMake, 1 },
+  { "engine_hp", NK_engineHp, 1 },
+  { "battery_type", NK_batteryType, 1 },
+  { "battery_make_model", NK_battMakeModel, 1 },
+  { "alternator_brand_model", NK_altBrandModel, 1 },
+  { "imu_mount_orientation", NK_imuMountOrient, 3 },
+  { "regulator_mount_loc", NK_regMountLoc, 3 },
+  { "imu_dist_bow_ft", NK_imuDistBowFt, 3 },
+  { "imu_dist_cl_ft", NK_imuDistClFt, 3 },
+  { "imu_height_wl_ft", NK_imuHtWlFt, 3 },
+  { "vesselSaved", NK_vesselSaved, 3 },
 };
 static const size_t CONFIG_MANIFEST_COUNT = sizeof(CONFIG_MANIFEST)/sizeof(CONFIG_MANIFEST[0]);
 
@@ -1182,25 +1209,47 @@ String exportTablesObject() {
   return j;
 }
 
-// Build the shareable config blob: fw_version + vessel metadata (for the cloud
-// table-of-contents) + the manifest "config" object + the RPM "tables" object.
-// payload_v 2 = tables section added; older firmware ignores unknown sections, so
-// blobs remain cross-rev compatible both ways.
+// Build the shareable config blob: fw_version + the manifest "config" object + the RPM
+// "tables" object. payload_v 3 = the vessel{} TOC header is GONE — the vessel fields are
+// ordinary manifest keys inside config{}, and the cloud (submit-config) reads them there.
+// Older firmware ignores unknown sections, so blobs remain cross-rev compatible both ways.
+// Derived view of the Vessel Info NVS record, served at /vessel_info.json. Built from the live
+// globals rather than re-reading NVS so it always matches what the loops are running. Numbers stay
+// JSON numbers — the dashboard form tests `!== undefined` and radio-selects on a numeric compare,
+// so a quoted "0" orientation would fail to select. The same 19 fields are also in the manifest
+// half of /exportConfig; this is the ungated, form-shaped view of them.
+String vesselInfoJson() {
+  String j;
+  j.reserve(768);
+  j = "{\"boat_length_ft\":";           j += String(BOAT_LENGTH_FT, 2);
+  j += ",\"boat_displacement_lbs\":";   j += String(BOAT_DISPLACEMENT_LBS, 0);
+  j += ",\"boat_type\":";               cfgAppendJsonStr(j, BOAT_TYPE);
+  j += ",\"boat_make_model\":";         cfgAppendJsonStr(j, BOAT_MAKE_MODEL);
+  j += ",\"boat_year\":";               j += String((unsigned)BOAT_YEAR);
+  j += ",\"home_port\":";               cfgAppendJsonStr(j, String(HOME_PORT));
+  j += ",\"engine_make\":";             cfgAppendJsonStr(j, ENGINE_MAKE);
+  j += ",\"engine_hp\":";               j += String((unsigned)ENGINE_HP);
+  j += ",\"battery_voltage\":";         j += String((unsigned)BATTERY_VOLTAGE);
+  j += ",\"battery_capacity_ah\":";     j += String(BatteryCapacity_Ah);
+  j += ",\"battery_type\":";            cfgAppendJsonStr(j, BATTERY_TYPE);
+  j += ",\"battery_make_model\":";      cfgAppendJsonStr(j, BATTERY_MAKE_MODEL);
+  j += ",\"alternator_brand_model\":";  cfgAppendJsonStr(j, ALTERNATOR_BRAND_MODEL);
+  j += ",\"solar_watts\":";             j += String(SolarWatts);
+  j += ",\"imu_mount_orientation\":";   j += String((unsigned)imuMountOrientation);
+  j += ",\"regulator_mount_loc\":";     j += String((unsigned)regulatorMountLoc);
+  j += ",\"imu_dist_bow_ft\":";         j += String(IMU_DIST_BOW_FT, 2);
+  j += ",\"imu_dist_cl_ft\":";          j += String(IMU_DIST_CL_FT, 2);
+  j += ",\"imu_height_wl_ft\":";        j += String(IMU_HEIGHT_WL_FT, 2);
+  j += "}";
+  return j;
+}
+
 String exportConfigJson() {
   String j;
-  j.reserve(20480);   // vessel + config (manifest + commissioning-result blobs) + tables
+  j.reserve(20480);   // config (manifest + commissioning-result blobs) + tables
   j = "{\"fw_version\":\"";
   j += FIRMWARE_VERSION;
-  j += "\",\"payload_v\":2,\"vessel\":{";
-  j += "\"boat_make_model\":";        cfgAppendJsonStr(j, BOAT_MAKE_MODEL);
-  j += ",\"engine_make\":";           cfgAppendJsonStr(j, ENGINE_MAKE);
-  j += ",\"engine_hp\":";             j += String((unsigned)ENGINE_HP);
-  j += ",\"battery_voltage\":";       j += String((unsigned)BATTERY_VOLTAGE);
-  j += ",\"battery_capacity_ah\":";   j += String(BatteryCapacity_Ah);
-  j += ",\"battery_type\":";          cfgAppendJsonStr(j, BATTERY_TYPE);
-  j += ",\"battery_make_model\":";    cfgAppendJsonStr(j, BATTERY_MAKE_MODEL);
-  j += ",\"alternator_brand_model\":";cfgAppendJsonStr(j, ALTERNATOR_BRAND_MODEL);
-  j += "},\"config\":";
+  j += "\",\"payload_v\":3,\"config\":";
   j += manifestConfigObject();
   j += ",\"tables\":";
   j += exportTablesObject();
@@ -1314,10 +1363,25 @@ static int applyImportTables(const char *body) {
 // "tables" section are written — anything else in the body is ignored by construction.
 // Returns count applied, or -1 if the body has no "config" object. settingWrite is
 // compare-first so unchanged values cost no flash. Caller reboots so the new set loads cleanly.
+// Battery class / capacity / chemistry moved → the commissioned tune no longer describes the
+// bank. One write path for the nag, shared by /saveVesselInfo (RAM compare) and
+// applyImportConfig (NVS-string compare); each caller keeps its own change detection.
+void raiseRecommissionNag() {
+  commissionChangeFlag = true;
+  settingWrite(NK_cmChangeFlag, "1");
+}
+
 int applyImportConfig(const char *body) {
   if (!body) return -1;
   const char *cfg = strstr(body, "\"config\"");
   if (!cfg) return -1;   // malformed / wrong shape — reject, don't half-apply
+  // Voltage class, capacity and chemistry all move the CV plant gain the commissioning fit
+  // measured, so the stored tune no longer describes the bank. /saveVesselInfo raises the
+  // re-commission nag on these three; an import writes NVS raw and reboots, so it has to
+  // detect the same change itself or the nag is silently skipped.
+  String preClass = settingRead(NK_BatteryVoltage);
+  String preCap   = settingRead(NK_BatteryCapacity_Ah);
+  String preChem  = settingRead(NK_batteryType);
   int applied = 0;
   for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
     if (CONFIG_MANIFEST[i].tier == 3) continue;   // export-only: this device's own history, never adopted
@@ -1325,6 +1389,13 @@ int applyImportConfig(const char *body) {
     if (cfgJsonExtract(cfg, CONFIG_MANIFEST[i].param, val)) {
       if (settingWrite(CONFIG_MANIFEST[i].nvsKey, val.c_str())) applied++;
     }
+  }
+  // Only nag once a pass has actually been finished (epoch stamped) — a fresh device has
+  // nothing to invalidate, and every key looks "changed" there because none existed.
+  if (CommissionEpoch > 0 && (settingRead(NK_BatteryVoltage)     != preClass
+                              || settingRead(NK_BatteryCapacity_Ah) != preCap
+                              || settingRead(NK_batteryType)        != preChem)) {
+    raiseRecommissionNag();
   }
   // Registry knobs — generic import mirroring the export side.
   // Macro for the same auto-prototype reason as the emit.

@@ -469,15 +469,14 @@ void applyCcOutputLimits() {
 // applyNominalVoltageChange — single entry point for a system-voltage class change (12/24/48 V),
 // triggered from the Vessel Info save (BATTERY_VOLTAGE is the sole source of truth). Call AFTER
 // setting BATTERY_VOLTAGE = newV. When the class actually changes it persists the new class to NVS
-// (NK_BatteryVoltage — authoritative; vessel_info.json is only a mirror), then rescales the PERSISTED
+// (NK_BatteryVoltage), then rescales the PERSISTED
 // charge-voltage profile by newV/oldV (Bulk/Float/Absorption/Rebulk/Target/Charged/alarms), the
 // volt-domain protection/helper margins and V/s rates (OV margins, disagreement threshold, iExcess
 // arm margin, fast-rise headroom, CV D-term arm/deadband thresholds, target ramps, rest-settle gate, CV wave
 // amplitude, alt-health Vbus band), re-derives
 // the hard-shutdown trip (newBulk + 0.5×class) and refreshes the INA228 hardware OV limit. Writing the
-// class and the rescaled profile to NVS in the SAME call (synchronously) keeps them atomic: if
-// vessel_info.json (LittleFS, formatOnFail) is ever lost, NVS still holds a consistent
-// class+profile pair, so the overvoltage trips can't strand at the wrong voltage. It always re-derives
+// class and the rescaled profile to NVS in the SAME call (synchronously) keeps them atomic — a reboot
+// mid-change can never strand the overvoltage trips at the wrong voltage. It always re-derives
 // both control loops' normalized gains. It also rescales the field-duty knobs (knee margin/step/
 // maxfloor + DutyRampRate + DutySlowRampRate + MaxDuty/Max Field % + MinDuty + alt-health duty
 // band/floor) and the amp-per-volt gain KHard
@@ -1790,20 +1789,39 @@ static inline bool ovEpisodeActive() {
 // to cvRecovBoostMax at cvRecovBoostErrV (×class) of shortfall. The dead area keeps boost gain
 // out of small-signal regulation: the 07-24 0.7 Hz idle wander (shortfalls ≤0.16 V) was
 // boost-sustained — measured outer gain 12.9 vs 8.5 A/V configured lifted loop gain 0.6→0.99.
-// Forced 1× inside an OV episode: the post-cut hole below target is created by the
-// cut itself, and boosting the climb out of it re-fires the trip on a stiff-topped lead-acid
-// plant (pTerm 25-37A vs a ~19A hold, 18:31 07-22). Outside an episode any below-target error
-// past the dead area is boosted (load-serve holes). Scales only the P term; cv_I and the D trim
-// are untouched.
+// Inside an OV episode the whole ramp SLIDES UP to start at cvRecovDeepBandV (×class), same
+// width: the post-cut hole below target is created by the cut itself, and boosting the climb
+// NEAR target re-fires the trip on a stiff-topped lead-acid plant (pTerm 25-37A vs a ~19A hold,
+// 18:31 07-22) — but every observed re-fire happened at/above target, so a bus still deeper than
+// the band cannot be that echo and keeps the boost (the 07-25 flat-off held a bus 2V low at 1×).
+// Outside an episode any below-target error past the dead area is boosted (load-serve holes).
+// Scales only the P term; cv_I and the D trim are untouched.
 static inline float cvRecovBoostMult(float shortfallV) {
-  if (!cvRecovBoostEnable || shortfallV <= 0.0f || ovEpisodeActive()) return 1.0f;
+  if (!cvRecovBoostEnable || shortfallV <= 0.0f) return 1.0f;
   float cls = (float)BATTERY_VOLTAGE / 12.0f;
   float floorV = cvRecovBoostFloorV * cls;
+  float fullV = cvRecovBoostErrV * cls;
+  if (ovEpisodeActive()) {
+    float shift = cvRecovDeepBandV * cls - floorV;
+    if (shift > 0.0f) { floorV += shift; fullV += shift; }
+  }
   if (shortfallV <= floorV) return 1.0f;
-  float span = cvRecovBoostErrV * cls;
-  float frac = (shortfallV - floorV) / fmaxf(span - floorV, 0.01f);
+  float frac = (shortfallV - floorV) / fmaxf(fullV - floorV, 0.01f);
   if (frac > 1.0f) frac = 1.0f;
   return 1.0f + (cvRecovBoostMax - 1.0f) * frac;
+}
+
+// Arrival flare — recovery-ceiling taper over the last cvRecovFlareBandV (×class) of shortfall,
+// from the full goal at the band edge down to cvRecovFlareFrac×goal at target. Both 07-25
+// recovery re-fires arrived at target carrying the full pre-trip current into a surface-charged
+// battery — ~7-10A of surplus the PI could not shed in the 0.6s the last 0.6V took. The flare
+// lands with ~zero surplus; the PI re-adds the held-back amps at its own pace if truly needed.
+// Continuous at the band edge; returns the plain goal when disabled (band 0 / frac 1).
+static inline float cvRecovFlaredCeil(float goalA, float shortfallV) {
+  float band = cvRecovFlareBandV * ((float)BATTERY_VOLTAGE / 12.0f);
+  if (band <= 0.001f || shortfallV >= band) return goalA;
+  float frac = fmaxf(shortfallV, 0.0f) / band;
+  return goalA * (cvRecovFlareFrac + (1.0f - cvRecovFlareFrac) * frac);
 }
 
 void AdjustFieldLearnMode() {
@@ -4067,15 +4085,25 @@ void AdjustFieldLearnMode() {
             if (recovActive) {
               float aRef = (float)g_voltLoopActualIntervalMs / (3000.0f + (float)g_voltLoopActualIntervalMs);
               recovVRefEma += aRef * (getFiltV() - recovVRefEma);
-              // "Not rising" = bus still within 0.05V×class of the ~3s reference — a DELTA, not a
+              float clsRec = (float)BATTERY_VOLTAGE / 12.0f;
+              float shortfallF = voltageTargetSlewed - getFiltV();
+              // "Not rising" = bus still within the answer band of the ~3s reference — a DELTA, not a
               // per-tick slope sign: idle ripple (±0.09 V/s on a flat bus) flips a slope EMA and
               // resets the 5-tick resume gate, starving the walk to ~7% duty (0.11 A/s vs 1.5
               // design) — a ~43A no-shunt load then holds the bus 1.7V low for ~9 min (21:36 07-24).
               // A genuine answer still pauses within a tick: field-lag-rate rises clear the
-              // threshold in ~30 ms.
-              bool busAnswering = (getFiltV() - recovVRefEma) >= 0.05f * ((float)BATTERY_VOLTAGE / 12.0f);
+              // threshold in ~30 ms. The band WIDENS below cvRecovDeepBandV of shortfall: a fixed
+              // 0.05V×class band read a 23 mV/s battery-driven creep 1.8V below target as
+              // "answering" and froze the ceiling at 47.9A for 10s (12:45 07-25 stuck) — at that
+              // depth only a hard takeoff is an answer; near target the original band is unchanged.
+              float busAnswerV = (0.05f + 0.08f * fmaxf(0.0f, shortfallF / clsRec - cvRecovDeepBandV)) * clsRec;
+              bool busAnswering = (getFiltV() - recovVRefEma) >= busAnswerV;
               bool delivering = (setpointLimited - g_pidI_filtered) < fmaxf(5.0f, 0.15f * setpointLimited);
-              bool starved = delivering && (Icv >= recovCvGoal - 0.05f) && (e > 0.0f) && !busAnswering
+              // Rail test against the FLARED ceiling (the one Icv was actually clamped to last
+              // tick), 1A slack: the flare moves with ripple (~26A/V of goal-60 slope), so an
+              // exact-rail compare would flicker the 5-tick resume gate inside the flare band.
+              bool starved = delivering && (Icv >= cvRecovFlaredCeil(recovCvGoal, shortfallF) - 1.0f)
+                             && (e > 0.0f) && !busAnswering
                              && ((uint32_t)(currentMillis - recovStartMs) > 2000UL);
               recovStarveTicks = starved ? (uint8_t)(recovStarveTicks + 1) : 0;
               // Recovered exit — bus holding within normal steady-hold jitter of target for ~1s means
@@ -4106,8 +4134,15 @@ void AdjustFieldLearnMode() {
                 // and "valley not yet backfilled" are the SAME observable — at this rate the bus
                 // resolves which one it is before the walk can add meaningful surplus. Held-at-
                 // target exit stops the walk at the true hold; clearing the alternator ceiling
-                // means there is nothing left to release.
-                recovCvGoal += (0.5f + 0.010f * ceilNow) * ((float)g_voltLoopActualIntervalMs * 0.001f);
+                // means there is nothing left to release. That ambiguity only exists NEAR target:
+                // beyond cvRecovDeepBandV of shortfall no surface-charge valley explains the
+                // level — the ceiling is simply below demand — so the rate ramps to
+                // ×cvRecovDeepMult at 2× the band (12:45 07-25: 0.74A/s avg against a 30A
+                // collapsed-goal deficit held the bus 2V low for 45s). Continuous at the band
+                // edge; the widened answer band above keeps a genuine takeoff pausing it.
+                float walkMult = 1.0f + (cvRecovDeepMult - 1.0f)
+                                 * clamp_f((shortfallF / clsRec - cvRecovDeepBandV) / fmaxf(cvRecovDeepBandV, 0.05f), 0.0f, 1.0f);
+                recovCvGoal += walkMult * (0.5f + 0.010f * ceilNow) * ((float)g_voltLoopActualIntervalMs * 0.001f);
                 if (recovCvGoal >= ceilNow) {
                   recovActive = false;
                   recovWalking = false;
@@ -4153,9 +4188,10 @@ void AdjustFieldLearnMode() {
             dtSec = constrain(dtSec, 0.001f, 0.5f);
 
             float icvHi = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // alternator command ceiling in CV
-            // Recovery ceiling — never command more than the pre-trip current. Folded into icvHi (not a
-            // late fminf on Icv) so satHi anti-windup stops cv_I integrating against it.
-            if (recovActive) icvHi = fminf(icvHi, recovCvGoal);
+            // Recovery ceiling — never command more than the pre-trip current, flared down over the
+            // last cvRecovFlareBandV of approach. Folded into icvHi (not a late fminf on Icv) so
+            // satHi anti-windup stops cv_I integrating against it.
+            if (recovActive) icvHi = fminf(icvHi, cvRecovFlaredCeil(recovCvGoal, e));
             float icvLo = 0.0f;
 
             // cvDSlope + kdTrim (g_cvKdTrimLive) are computed once per output tick above (sliding window);
@@ -4268,7 +4304,7 @@ void AdjustFieldLearnMode() {
         {
           float e_now = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on per-tick proportional (governor output)
           float icvHi_tick = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // alternator command ceiling in CV
-          if (recovActive) icvHi_tick = fminf(icvHi_tick, recovCvGoal);    // same pre-trip-current ceiling as the PI path
+          if (recovActive) icvHi_tick = fminf(icvHi_tick, cvRecovFlaredCeil(recovCvGoal, e_now));    // same flared pre-trip-current ceiling as the PI path
           if (!enteringCV) {
             float boost_now = cvRecovBoostMult(e_now);  // recovery P-boost; 1× at/above target
             g_cvPTerm = VoltageKp_active * boost_now * e_now;  // P contribution to Icv, live (CSV1 P/I/D plot) — reflects the boost

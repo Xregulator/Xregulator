@@ -746,71 +746,36 @@ Serial.println("BMP388 found");
 void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, create them and populate with the hardcoded values
   // (the one-time LittleFS-to-NVS import sweep runs earlier, in setup(), before the alt/perf registry loaders)
 
-  // Load vessel info from LittleFS (stream parse; no malloc)
-  if (LittleFS.exists("/vessel_info.json")) {
-    File file = LittleFS.open("/vessel_info.json", "r");
-    if (file) {
-      size_t size = file.size();
-      Serial.printf("vessel_info.json size=%u bytes\n", (unsigned)size);
+  // Vessel Info lives in NVS (CONFIG_MANIFEST) so it survives a LittleFS formatOnFail and
+  // exports/imports like every other setting. This must run before the NK_BatteryVoltage
+  // block below, which reads the class the migration seeds.
+  migrateVesselInfoFile();
+  if (settingExists(NK_vesselSaved)) {
+    BOAT_LENGTH_FT         = settingRead(NK_boatLenFt).toFloat();
+    BOAT_DISPLACEMENT_LBS  = settingRead(NK_boatDispLbs).toFloat();
+    // The three defaults below are meaningful (chemistry drives the OCV preset, boat type
+    // drives the perf model), so an empty key keeps the compile-time value rather than ""
+    String s = settingRead(NK_boatType);          if (s.length()) BOAT_TYPE = s;
+    BOAT_MAKE_MODEL        = settingRead(NK_boatMakeModel);
+    int y = settingRead(NK_boatYear).toInt();     if (y > 0) BOAT_YEAR = (uint16_t)y;
+    strncpy(HOME_PORT, settingRead(NK_homePort).c_str(), sizeof(HOME_PORT) - 1);
+    HOME_PORT[sizeof(HOME_PORT) - 1] = '\0';
+    ENGINE_MAKE            = settingRead(NK_engineMake);
+    ENGINE_HP              = (uint16_t)settingRead(NK_engineHp).toInt();
+    s = settingRead(NK_batteryType);              if (s.length()) BATTERY_TYPE = s;
+    BATTERY_MAKE_MODEL     = settingRead(NK_battMakeModel);
+    ALTERNATOR_BRAND_MODEL = settingRead(NK_altBrandModel);
+    // Unclamped, an out-of-range value indexes past axisRemap[] and wild-reads through src[]
+    imuMountOrientation    = (uint8_t)constrain(settingRead(NK_imuMountOrient).toInt(), 0, IMU_ORIENT_COUNT - 1);
+    regulatorMountLoc      = (uint8_t)constrain(settingRead(NK_regMountLoc).toInt(), 0, 1);
+    IMU_DIST_BOW_FT        = settingRead(NK_imuDistBowFt).toFloat();
+    IMU_DIST_CL_FT         = settingRead(NK_imuDistClFt).toFloat();
+    IMU_HEIGHT_WL_FT       = settingRead(NK_imuHtWlFt).toFloat();
 
-      DynamicJsonDocument doc(4096);
-      DeserializationError error = deserializeJson(doc, file);
-      file.close();
-
-      if (!error) {
-        BOAT_LENGTH_FT = doc["boat_length_ft"] | 0.0f;
-        BOAT_DISPLACEMENT_LBS = doc["boat_displacement_lbs"] | 0.0f;
-
-        const char *boat_type = doc["boat_type"] | "monohull";
-        BOAT_TYPE = boat_type;
-
-        const char *make_model = doc["boat_make_model"] | "";
-        BOAT_MAKE_MODEL = make_model;
-
-        BOAT_YEAR = doc["boat_year"] | 2025;
-
-        if (doc.containsKey("home_port") && !doc["home_port"].isNull()) {
-          const char *homePortStr = doc["home_port"] | "";
-          strncpy(HOME_PORT, homePortStr, sizeof(HOME_PORT) - 1);
-          HOME_PORT[sizeof(HOME_PORT) - 1] = '\0';
-        } else {
-          HOME_PORT[0] = '\0';
-        }
-
-        const char *engine_make = doc["engine_make"] | "";
-        ENGINE_MAKE = engine_make;
-
-        ENGINE_HP = doc["engine_hp"] | 0;
-        BATTERY_VOLTAGE = doc["battery_voltage"] | 12;
-        BatteryCapacity_Ah = doc["battery_capacity_ah"] | 300;
-
-        const char *battery_type = doc["battery_type"] | "lifepo4";
-        BATTERY_TYPE = battery_type;
-
-        const char *battery_make_model = doc["battery_make_model"] | "";
-        BATTERY_MAKE_MODEL = battery_make_model;
-
-        const char *alt_brand = doc["alternator_brand_model"] | "";
-        ALTERNATOR_BRAND_MODEL = alt_brand;
-
-        SolarWatts = doc["solar_watts"] | 0;
-        // Unclamped, an out-of-range value indexes past axisRemap[] and wild-reads through src[]
-        imuMountOrientation = (uint8_t)constrain((int)(doc["imu_mount_orientation"] | 0), 0, IMU_ORIENT_COUNT - 1);
-        regulatorMountLoc = doc["regulator_mount_loc"] | 0;
-        IMU_DIST_BOW_FT = doc["imu_dist_bow_ft"] | 0.0f;
-        IMU_DIST_CL_FT = doc["imu_dist_cl_ft"] | 0.0f;
-        IMU_HEIGHT_WL_FT = doc["imu_height_wl_ft"] | 0.0f;
-
-        vesselInfoSaved = true;
-        Serial.println("Vessel info loaded from LittleFS");
-      } else {
-        Serial.printf("Vessel info JSON parse failed: %s\n", error.c_str());
-      }
-    } else {
-      Serial.println("Vessel info: open failed");
-    }
+    vesselInfoSaved = true;
+    Serial.println("Vessel info loaded from NVS");
   } else {
-    Serial.println("Vessel info: /vessel_info.json missing");
+    Serial.println("Vessel info: never saved");
   }
 
   // Load IMU zero/level calibration (separate from vessel_info so a profile
@@ -840,7 +805,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   installId = settingRead(NK_InstallId);
 
   if (settingExists(NK_BatteryCapacity_Ah)) BatteryCapacity_Ah = settingRead(NK_BatteryCapacity_Ah).toInt();
-  // Choke point for every ingress (vessel JSON, /get, and applyImportConfig which writes NVS raw then reboots).
+  // Choke point for every ingress (Vessel Info save, /get, and applyImportConfig which writes NVS raw then reboots).
   // 0 Ah zeroes the full-charge tail threshold (TailCurrent × capacity), so absorption would never end.
   BatteryCapacity_Ah = constrain(BatteryCapacity_Ah, 1, 100000);
   settingWrite(NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());   // compare-first: heals a bad import
@@ -878,19 +843,15 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     capLimitMode = constrain(settingRead(NK_capLimitMode).toInt(), 0, 1);
   }
-  // System voltage class (12/24/48) — NVS (NK_BatteryVoltage) is the AUTHORITATIVE source of truth.
-  // vessel_info.json (parsed into BATTERY_VOLTAGE above) is only a mirror, used here ONLY to
-  // migrate pre-existing devices on the first boot after this key was introduced. Keeping the class in
-  // the same store as the rescaled charge profile is what prevents an overvoltage-trip mismatch if
-  // LittleFS (formatOnFail) ever loses vessel_info.json. The CV/CC gain normalization
-  // (recomputeCv/CcGains, called at the end of this function) divides by BATTERY_VOLTAGE.
+  // System voltage class (12/24/48). The CV/CC gain normalization (recomputeCv/CcGains, called
+  // at the end of this function) divides by BATTERY_VOLTAGE, so a zero here is fatal.
   if (!settingExists(NK_BatteryVoltage)) {
-    if (BATTERY_VOLTAGE != 12 && BATTERY_VOLTAGE != 24 && BATTERY_VOLTAGE != 48) BATTERY_VOLTAGE = 12;  // validate the mirror before seeding
-    settingWrite(NK_BatteryVoltage, String((int)BATTERY_VOLTAGE).c_str());  // migrate: seed NVS from the vessel-JSON mirror
+    if (BATTERY_VOLTAGE != 12 && BATTERY_VOLTAGE != 24 && BATTERY_VOLTAGE != 48) BATTERY_VOLTAGE = 12;
+    settingWrite(NK_BatteryVoltage, String((int)BATTERY_VOLTAGE).c_str());
   } else {
     int v = settingRead(NK_BatteryVoltage).toInt();
     if (v != 12 && v != 24 && v != 48) v = 12;  // reject corrupt NVS value (guards vNorm = 12/BATTERY_VOLTAGE div-by-zero/NaN)
-    BATTERY_VOLTAGE = (uint8_t)v;  // NVS wins over the vessel-JSON mirror
+    BATTERY_VOLTAGE = (uint8_t)v;
   }
   // First-creation class scaling. Every hardcoded default below is a 12V value; volt-domain seeds
   // scale ×(V/12), duty-domain seeds ×(12/V) — the same two domains applyNominalVoltageChange
@@ -1837,6 +1798,26 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvRecovBoostFloorV = settingRead(NK_cvRecovBoostFloorV).toFloat();
   }
+  if (!settingExists(NK_cvRecovDeepBandV)) {
+    settingWrite(NK_cvRecovDeepBandV, String(cvRecovDeepBandV, 3).c_str());
+  } else {
+    cvRecovDeepBandV = settingRead(NK_cvRecovDeepBandV).toFloat();
+  }
+  if (!settingExists(NK_cvRecovDeepMult)) {
+    settingWrite(NK_cvRecovDeepMult, String(cvRecovDeepMult, 1).c_str());
+  } else {
+    cvRecovDeepMult = settingRead(NK_cvRecovDeepMult).toFloat();
+  }
+  if (!settingExists(NK_cvRecovFlareBandV)) {
+    settingWrite(NK_cvRecovFlareBandV, String(cvRecovFlareBandV, 3).c_str());
+  } else {
+    cvRecovFlareBandV = settingRead(NK_cvRecovFlareBandV).toFloat();
+  }
+  if (!settingExists(NK_cvRecovFlareFrac)) {
+    settingWrite(NK_cvRecovFlareFrac, String(cvRecovFlareFrac, 2).c_str());
+  } else {
+    cvRecovFlareFrac = settingRead(NK_cvRecovFlareFrac).toFloat();
+  }
   if (!settingExists(NK_dutySlewEnable)) {
     settingWrite(NK_dutySlewEnable, String((int)dutySlewEnable).c_str());
   } else {
@@ -2345,7 +2326,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     FIELD_COLLAPSE_DELAY = settingRead(NK_FIELD_COLLAPSE_DELAY).toInt();
   }
   // IMU safety thresholds — user-set via form, persisted (Pattern B).
-  // imuMountOrientation rides on /vessel_info.json (separate path).
+  // imuMountOrientation rides on the Vessel Info record, written as one batch (separate path).
   if (!settingExists(NK_CAPSIZE_THRESHOLD_DEG)) {
     settingWrite(NK_CAPSIZE_THRESHOLD_DEG, String(CAPSIZE_THRESHOLD_DEG, 1).c_str());
   } else {
@@ -4478,7 +4459,7 @@ void executeGetPendingConfig() {
   // http.begin(client,url) pattern uses far more internal RAM (CLAUDE.md) and getString() can hang,
   // which made this call return -1 when contiguous RAM was tight (e.g. right after the registration
   // handshake). doCloudPOST adds the anon-key Bearer + Content-Type itself. Response holds the full
-  // config blob (exportConfigJson reserves 14 KB), so stage it in a 24 KB PSRAM scratch buffer,
+  // config blob (exportConfigJson reserves 20 KB), so stage it in a 24 KB PSRAM scratch buffer,
   // copy to the String the parsing below expects, and free the scratch immediately.
   String response;
   int httpCode = -1;

@@ -549,9 +549,9 @@ float imu_pitch_max_lifetime = 0;
 float imu_slam_peak_lifetime = 0;
 
 // --- MOUNTING ORIENTATION ---
-uint8_t imuMountOrientation = 0;  // 0-3, persisted via /vessel_info.json on LittleFS
+uint8_t imuMountOrientation = 0;  // 0-3, persisted in NVS with the rest of Vessel Info (NK_imuMountOrient)
 constexpr uint8_t IMU_ORIENT_COUNT = 4;  // must equal the axisRemap[] row count — static_assert in 4_functions.ino
-bool vesselInfoSaved = false;  // /vessel_info.json exists — until then IMU metrics and the first-boot SoC seed hold off (orientation/chemistry unknown)
+bool vesselInfoSaved = false;  // NK_vesselSaved exists — until then IMU metrics and the first-boot SoC seed hold off (orientation/chemistry unknown)
 
 // --- COMPLEMENTARY FILTER STATE ---
 float cf_heel = 0;   // Filtered heel angle
@@ -660,26 +660,13 @@ const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
 char *configPayloadBuffer;
 
 unsigned long lastConfigSnapshotTime = 0;
-unsigned long lastConfigSnapshotAttempt = 0;
-int configSnapshotRetryCount = 0;
+// Event-driven snapshot request: starts true so the first field-off window after boot uploads
+// one (the 24 h uptime timer alone never fires — RESTART_INTERVAL reboots at 12 h). Also set by
+// saveVesselInfoToNvs() and a successful /registerProfile, so the user_profiles vessel
+// projection (update-config-snapshot) is fresh on Save instead of next-boot. Cleared only when
+// a payload is actually queued, so a failed gate retries next pass.
+bool configSnapshotRequested = true;
 unsigned long queueDrainHoldStart = 0;  // millis() when we started waiting for queue to drain before low power; 0 = not waiting
-const unsigned long CONFIG_RETRY_DELAYS[] = {
-  5000,     // 5 sec
-  30000,    // 30 sec
-  60000,    // 1 min
-  70000,    // 70 sec
-  80000,    // 80 sec
-  90000,    // 90 sec
-  300000,   // 5 min
-  600000,   // 10 min
-  900000,   // 15 min
-  990000,   // 16.5 min
-  1800000,  // 30 min
-  3600000,  // 1 hour
-  7200000,  // 2 hours
-  18000000  // 5 hours
-};
-const int CONFIG_MAX_RETRIES = sizeof(CONFIG_RETRY_DELAYS) / sizeof(CONFIG_RETRY_DELAYS[0]);
 
 uint64_t chipid;
 int firmwareVersionInt = 0;
@@ -3828,6 +3815,10 @@ uint8_t cvRecovBoostEnable = 1;   // master switch for the recovery P-boost. DEF
 float   cvRecovBoostMax    = 4.0f;  // P-gain multiplier at ≥ cvRecovBoostErrV of shortfall; 1.0 = no boost, taper is linear from 1× at target. Clamp [1,8]
 float   cvRecovBoostErrV   = 0.6f;  // shortfall (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use) at which the boost reaches cvRecovBoostMax. Clamp [0.1,5]
 float   cvRecovBoostFloorV = 0.2f;  // dead area (V, per-12V-block — scaled ×class at use): no boost within this shortfall, ramp starts at 1× from its edge. Keeps boost gain out of small-signal regulation (the 07-24 0.7 Hz idle wander was boost-sustained). Clamp [0,5]; 0 = boost from zero shortfall
+float   cvRecovDeepBandV = 0.75f;  // deep-recovery band (V, per-12V-block — scaled ×class at use): shortfall beyond this is DEEP — the starve-walk speeds up (cvRecovDeepMult) with a widened pause band, and the OV-episode P-boost ramp slides up to start here instead of going flat-off. Every observed recovery re-fire happened ABOVE target, so depth below this band cannot be the echo the episode pause guards against (12:45 07-25 stuck: flat-off + 1.5A/s walk held the bus 2V low for 45s). Clamp [0,5]; set large (5) to disable deep mode entirely
+float   cvRecovDeepMult  = 5.0f;   // starve-walk rate multiplier at full depth (2× cvRecovDeepBandV of shortfall), ramping linearly from 1× at the band edge. Clamp [1,20]; 1 = walk at the near-target crawl everywhere
+float   cvRecovFlareBandV = 0.35f; // arrival flare band (V, per-12V-block — scaled ×class at use): within this shortfall the recovery ceiling tapers from the goal down to cvRecovFlareFrac×goal at target, landing with ~zero surplus instead of the full pre-trip current (both 07-25 re-fires arrived carrying ~7-10A of surplus into a surface-charged battery). Clamp [0,2]; 0 = no flare
+float   cvRecovFlareFrac = 0.85f;  // flare ceiling at zero shortfall, fraction of recovCvGoal — the PI re-adds the held-back amps at its own pace after arrival if the load truly needs them. Clamp [0.5,1]; 1 = no flare
 bool    g_autoTestActive  = false;  // set per control-loop tick: an automated/guided test owns the limiters now (commissioning / battery-health DCIR / resonance / system-ID). While true the four user limiter toggles above are inert so a stray user setting can't corrupt a measurement; each test's own built-in slew behavior governs.
 const float TEST_ENTRY_RATE_A = 8.0f;  // A/s — FIXED, conservative ramp rate for an automated test's transition up from the rest floor and back down (NOT the user's SetpointRiseRate/FallRate, which a user could set aggressively). Used by DCIR, the resonance check, and the TuningMode entry ramp so a test never slams the field coming on/off. Current-domain, so no bus-voltage scaling.
 const float CVPF_ENTRY_RATE_A = 50.0f; // A/s — cvpf current-PID phase setpoint rate; the measured edges are direct-duty, so this only paces the practice run
@@ -4005,6 +3996,7 @@ String kneeLearnStateJson();
 // Config Sharing (8_functions.ino) — export/import the cloneable settings set
 String manifestConfigObject();
 String exportConfigJson();
+String exportTablesObject();
 int applyImportConfig(const char *body);
 int doCloudPOST(const char *endpointPath, const char *payload, char *responseBuf, size_t responseBufSize);  // 3_functions.ino — lean raw-TLS POST
 
@@ -5816,7 +5808,7 @@ void loop() {
   }
   if (pendingSaveVesselInfo) {
     pendingSaveVesselInfo = false;
-    saveVesselInfoToFile();
+    saveVesselInfoToNvs();
   }
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
@@ -5915,7 +5907,7 @@ void loop() {
             }
             if (pendingSaveVesselInfo) {
               pendingSaveVesselInfo = false;
-              saveVesselInfoToFile();
+              saveVesselInfoToNvs();
             }
             shutdownNVSFlushDone = true;
             shutdownCloudDeadlineMs = millis() + 1800000;  // 30-min window: fieldOffSettled() gates fire at 60-75s after field off; 30 min gives full time for NTP, uploads, weather, and buffer drain
@@ -6157,9 +6149,13 @@ void loop() {
           }
         }
         
-        // Configuration Snapshot — requires field off for 70s. Sim mode (HardwarePresent=0):
+        // Configuration Snapshot — requires field off for 10s. Sim mode (HardwarePresent=0):
         // skip — never push fake stats/state/leaderboard data to the cloud.
-        if (hardwarePresent == 1 && fieldOffSettled(10000) && millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
+        // Fires on the 24 h backstop OR on configSnapshotRequested (boot / vessel save /
+        // registration), at most once per minute so a persistently-failing gate can't spin.
+        if (hardwarePresent == 1 && fieldOffSettled(10000)
+            && (millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL
+                || (configSnapshotRequested && millis() - lastConfigSnapshotTime >= 60000))) {
           lastConfigSnapshotTime = millis();
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered) {
             if (WiFi.RSSI() >= -80) {
@@ -6173,7 +6169,9 @@ void loop() {
                 if (req.payload) {
                   strncpy(req.payload, configPayloadBuffer, req.payloadCap - 1);
                   req.payload[req.payloadCap - 1] = '\0';
-                  if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+                  if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
+                    configSnapshotRequested = false;
+                  } else {
                     free(req.payload);
                     queueConsoleMessage("Config snapshot: HTTPS queue full, will retry next interval");
                   }
