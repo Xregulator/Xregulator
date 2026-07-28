@@ -1374,7 +1374,7 @@ async function cfgDiffPreview(blobText, sourceLabel){
   // Read-only diagnostics/results the firmware exports but never applies on import — hide them
   // from the diff so they can't show as spurious "[object Object]" rows or no-op checkable rows.
   // vesselSaved is the "form completed" sentinel, not a value — it is tier 3 anyway, so a row would never apply.
-  const CFG_NONSETTING=new Set(['commissioning_results','cvComputedKp','cvComputedKi','cvComputedKd','vesselSaved']);
+  const CFG_NONSETTING=new Set(['learned_state','commissioning_results','cvComputedKp','cvComputedKi','cvComputedKd','vesselSaved']);
   for(const k of Object.keys(incoming.config).sort()){
     if(CFG_NONSETTING.has(k)) continue;
     const nv=String(incoming.config[k]);
@@ -4096,9 +4096,16 @@ function displayAvailableVersions() {
 function confirmUpdate(form, version) {
     xConfirm(`ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, the web interface will be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI. The Software Update sub-tab in Cloud Features will then confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Orange/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`).then(confirmed => {
         if (!confirmed) return;
-        kickOffAppWebUpdate(version);  // No-op in browser; in iOS app downloads matching web bundle in parallel
-        showUpdateInProgressOverlay(version);  // Same modal the forced-update path shows
-        form.submit();
+        // UpdateToVersion is arm-gated in firmware (a stale/replayed update URL must never
+        // reboot the device); the OK click above is the acknowledgment, so arm just-in-time.
+        // The arm window is RAM-only and dies at the update reboot seconds later.
+        fetchWithTimeout(buildURL('/armSettings?arm=1'), {}, 8000)
+            .then(() => {
+                kickOffAppWebUpdate(version);  // No-op in browser; in iOS app downloads matching web bundle in parallel
+                showUpdateInProgressOverlay(version);  // Same modal the forced-update path shows
+                form.submit();
+            })
+            .catch(() => xAlert('Could not reach the device to start the update. Check the connection and try again.'));
     });
 }
 
@@ -4388,6 +4395,14 @@ function enableAllInputs() {
 async function triggerForcedUpdate(versionStr) {
     const confirmed = await xConfirm('The update begins about 7 seconds after you press OK and takes 2-3 minutes, including automatic reboots. Do not power-cycle the device or leave this page while it runs. When it finishes, hard-refresh this page (Cmd+Shift+R, or Ctrl+Shift+R on Windows) or it will keep showing the old cached interface. If it fails, retry on a stronger connection.', { title: 'Update firmware to ' + versionStr + '?', okText: 'OK', cancelText: 'Cancel' });
     if (confirmed) {
+        // UpdateToVersion is arm-gated in firmware; the OK click above is the acknowledgment,
+        // so arm just-in-time. The arm window is RAM-only and dies at the update reboot.
+        try {
+            await fetchWithTimeout(buildURL('/armSettings?arm=1'), {}, 8000);
+        } catch (e) {
+            xAlert('Could not reach the device to start the update. Check the connection and try again.');
+            return;
+        }
         kickOffAppWebUpdate(versionStr);  // No-op in browser; in iOS app downloads matching web bundle in parallel
         // showUpdateInProgressOverlay sets forcedUpdateInProgressUntil (suppresses the prompt modal
         // re-rendering on CSV2 ticks for 6 min) and renders "in progress" immediately so the user
@@ -5905,11 +5920,6 @@ function applySettingsLockUI() {
     // const headerControl = document.querySelector('.alternator-control');
     // if (headerControl) headerControl.classList.add("locked");
     showSettingsAccess();
-    const lockStatus = document.getElementById('lock-status');
-    if (lockStatus) {
-        lockStatus.textContent = "Settings are Locked";
-        lockStatus.className = "lock-status-locked";
-    }
     settingsUnlocked = false;
 }
 function lockSettingsManually() {
@@ -10769,11 +10779,6 @@ function applySettingsUnlockUI() {
     const headerControl = document.querySelector('.alternator-control');
     if (headerControl) headerControl.classList.remove("locked");
 
-    const lockStatus = document.getElementById('lock-status');
-    if (lockStatus) {
-        lockStatus.textContent = "Settings are Unlocked";
-        lockStatus.className = "lock-status-unlocked";
-    }
     hideSettingsAccess();
 }
 
@@ -10826,6 +10831,31 @@ document.addEventListener('DOMContentLoaded', () => {
     syncArmState();
     setInterval(syncArmState, 30000);
 });
+
+// Native settings submits land in the hidden-form iframe. A named iframe's second-and-later
+// navigations push joint session-history entries, so Back/Forward (and Firefox reloads, which
+// restore iframe URLs) would silently re-issue an old /get?... settings write. Recycling the
+// iframe after every response keeps each submit a FIRST navigation (history replace, never
+// push), so no stale settings URL can ever be replayed by browser navigation.
+(function recycleHiddenFormIframe() {
+    function watch(frame) {
+        frame.addEventListener('load', function () {
+            try {
+                const loc = frame.contentDocument && frame.contentDocument.location.href;
+                if (loc === 'about:blank') return;   // initial blank load, not a submit response
+            } catch (e) { /* cross-origin (Capacitor → device IP) = a real device response */ }
+            const fresh = document.createElement('iframe');
+            fresh.name = 'hidden-form';
+            fresh.style.display = 'none';
+            watch(fresh);
+            frame.insertAdjacentElement('afterend', fresh);
+            frame.remove();
+        });
+    }
+    const boot = () => { const f = document.querySelector('iframe[name="hidden-form"]'); if (f) watch(f); };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+    else boot();
+})();
 
 function triggerWeatherUpdate() {
     if (!settingsUnlocked) {
@@ -11575,6 +11605,10 @@ function syncHeaderStrip() {
     if (!hdr || !hdr.classList.contains('header-collapsed')) return;
     const unlock = document.getElementById('hcs-unlock');
     if (unlock) unlock.style.display = settingsUnlocked ? 'none' : 'inline-flex';
+    // .hcs-locked tells the CSS the unlock chip is occupying the row, which shifts every
+    // readout-reveal threshold right by the chip's width
+    const strip = document.getElementById('header-collapsed-strip');
+    if (strip) strip.classList.toggle('hcs-locked', !settingsUnlocked);
     const copy = (fromId, toId) => {
         const from = document.getElementById(fromId);
         const to = document.getElementById(toId);
@@ -11716,11 +11750,6 @@ window.addEventListener("load", function () {
     const settingsSection = document.getElementById('settings-section');
     if (settingsSection) {
         settingsSection.classList.add("locked");
-    }
-    const lockStatus = document.getElementById('lock-status');
-    if (lockStatus) {
-        lockStatus.textContent = "Settings are Locked";
-        lockStatus.className = "lock-status-locked";
     }
     if (localStorage.getItem('darkMode') === '1') {
         document.body.classList.add('dark-mode');
@@ -20054,7 +20083,7 @@ function cxFinePrint(phase) {
     case 5: return 'Sets the over-current trip line from the ripple measured in Step 5. The trip line is <code>Slope·current + CV base</code>, floored and capped: Slope is set to the measured ripple slope and CV base to ripple-at-idle + the Safety Margin, so the line runs parallel to the ripple that margin above it. The CC (current-limited) line runs the same slope, the CC offset above CV. Any current where the ripple would cross the line is shaded red. These are the exact G3 settings on Settings ▸ Alternator ▸ Protections — editing here writes them live. The second section sets the voltage-loop damper\'s deadband line the same way: slope = the measured rise-rate slope, base = the measured intercept + its own Safety Margin (V/s), clamped by its floor and ceiling — the Voltage-Rise Tolerance settings on Tuning ▸ Voltage. No fit yet (Step 5 skipped) → set them by hand.';
     case 6: return 'Measures how stiff the battery is — how many millivolts it moves per amp — at the <strong>voltage loop\'s own (~0.6 s) reaction timescale</strong>, so the loop\'s stability margin comes out the same on any battery (a multi-second reading is mostly slow diffusion "soak" and swings 2–3× between lithium, AGM and flooded banks). The wizard settles at a baseline current, sizes a safe test step (auto-reduced if the bank nears its over-voltage ceiling), runs a practice hold through the current loop to learn the two field settings, then fires <strong>4 abrupt field pulses</strong> and reads the settled voltage change 550–650 ms after each edge against the settled current change — median over the 8 edges, so a disturbed edge is thrown out instead of biasing the result. Measured at the battery shunt, or at the alternator sensor when no shunt is fitted (with loads held steady the two are equal). The gains follow as <strong>Kp = α ÷ stiffness</strong>, <strong>Ki = ρ × Kp</strong>, and the CV gain source switches to Auto on Apply. Keep all other battery loads constant during the test.';
     case 7: return 'Two measurements per held speed. First the onset knee: field ramps briefly until output current just begins. The onset follows a 1/RPM law, so the three points fit the whole Min% column, parked a margin below (and maintained automatically over alternator life when Automatic Min% Learning is on); above your highest captured RPM the floor is forced to zero, so the field can always shut fully off at speed. Then the field drain: the current loop ramps to the commissioned test level, the duty is frozen 5 s for a settled baseline, and the field steps to the exact floor a real over-voltage cut drives to (Min Duty) while the decay is recorded on the 20 kHz current channel (calibrated against the precision sensor during the same run). The stored number per speed is the measured time from field-off command until output falls to 10% of its pre-cut level — read directly off the trace, no model; the fitted time constant (τ = L/R) is reported as a cross-check. The drain time varies with engine speed, so the three points are fitted with a straight line, shifted up to sit at or above every measured point, and the over-voltage response reads it at your live speed — held constant beyond the tested range, never extrapolated. The engine-speed value for each point is captured before the cut (the cut scrambles the tach signal for a few seconds), and the tach gates are suspended during each run. Field at the cut floor cannot over-volt, so the drain runs are inherently safe.';
-    case 8: return 'This test provokes the over-voltage protection safely on a battery at any state of charge. It charges at idle until the battery voltage holds steady (within 0.10 V for 3 seconds) and has stopped settling upward (no more than 0.10 V of drift over 10 seconds, waited up to 30 seconds — a fresh-off-charge battery keeps creeping up for a while), then picks a constant-voltage target a set headroom below that — a level the alternator can definitely reach, close enough that real charging current keeps flowing — and parks the bus there (the headroom is adjustable as Target Headroom Below Idle on the Stress Test tuning tab). Skipping this step never blocks the COMMISSIONED badge — it writes no settings; it is a final reference check you can run any time. Settling onto that lower target happens at the voltage loop\'s own pace and is given up to 90 seconds; a voltage that is holding steady near the target — even a whisker short of it — when that wait runs out still arms the test, noted as a marginal stability grade. A voltage that keeps wobbling does not fail the test either: as long as the swing stays within the stability limit (adjustable on the same tab) the test carries on and reports the wobble as a marginal stability grade — only a swing beyond that limit, or a voltage that never comes near the target, stops the test. When you snap the throttle, the alternator briefly pushes the bus above that reachable target and the over-voltage protection fires; the test counts every protection event (rapid re-clamping counts as several — that chatter is itself a fault), measures how far the voltage overshoots and how deep it dips afterward, and times how long the loop takes to return to the target and hold it. Grades: protection-event count (1 ideal, 2 marginal, 3 or more a fail), any hard current-sensor cut (a fail), and recovery time (under 12 s good, over 20 s a fail). Overshoot and the recovery dip are reported for context but never fail the test. A gentle snap that never trips is a pass, with a note to snap harder if the engine allows. Voltage thresholds scale with system voltage class. The test ends itself once the voltage has settled back — you never end it early.';
+    case 8: return 'This test provokes the over-voltage protection safely on a battery at any state of charge. It charges at idle until the battery voltage holds steady (within 0.10 V for 3 seconds) and has stopped settling upward (no more than 0.10 V of drift over 10 seconds, waited up to 30 seconds — a fresh-off-charge battery keeps creeping up for a while), then picks a constant-voltage target a set headroom below that — a level the alternator can definitely reach, close enough that real charging current keeps flowing — and parks the bus there (the headroom is adjustable as Target Headroom Below Idle on the Stress Test tuning tab). Skipping this step never blocks the COMMISSIONED badge — it writes no settings; it is a final reference check you can run any time. Settling onto that lower target happens at the voltage loop\'s own pace and is given up to 90 seconds; a voltage that is holding steady near the target — even a whisker short of it — when that wait runs out still arms the test, noted as a marginal stability grade. A voltage that keeps wobbling does not fail the test either: as long as the swing stays within the stability limit (adjustable on the same tab) the test carries on and reports the wobble as a marginal stability grade — only a swing beyond that limit, or a voltage that never comes near the target, stops the test. When you snap the throttle, the alternator briefly pushes the bus above that reachable target and the over-voltage protection fires; the test counts every protection event (rapid re-clamping counts as several — that chatter is itself a fault), measures how far the voltage overshoots and how deep it dips afterward, and times how long the loop takes to return to the target and hold it (the recovery clock starts at the trip itself, so taking your time before snapping never shortens it). Grades: protection-event count (1 ideal, 2 marginal, 3 or more a fail), any hard current-sensor cut (a fail), and recovery time (under 12 s good, over 20 s a fail). Overshoot and the recovery dip are reported for context but never fail the test. A gentle snap that never trips is a pass, with a note to snap harder if the engine allows. Voltage thresholds scale with system voltage class. The test ends itself once the voltage has settled back — you never end it early.';
     default: return '';
   }
 }
@@ -20111,8 +20140,31 @@ function cxGet(params) {
     return fetch(buildURL('/get?' + params));
 }
 
+// ── Screen wake lock ──────────────────────────────────────────────────────────
+// Firmware tests carry a browser-poll deadman: a phone screen that sleeps mid-run aborts the
+// test as "connection lost". Hold a screen wake lock while the wizard or the standalone stress
+// modal is open. The OS drops the lock whenever the page hides — re-acquire on return.
+let _wakeLock = null, _wakeLockWant = false;
+function wakeLockWant(on) {
+    _wakeLockWant = on;
+    if (!navigator.wakeLock) return;
+    if (on && !_wakeLock) {
+        navigator.wakeLock.request('screen').then(w => {
+            _wakeLock = w;
+            w.addEventListener('release', () => { _wakeLock = null; });
+        }).catch(() => { _wakeLock = null; });
+    } else if (!on && _wakeLock) {
+        const w = _wakeLock; _wakeLock = null;
+        w.release().catch(() => { });
+    }
+}
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && _wakeLockWant) wakeLockWant(true);
+});
+
 function openCommissionModal() {
     if (!settingsUnlocked) { xAlert('Unlock settings first.'); return; }
+    wakeLockWant(true);
     // In-session resume: if a flow is already underway, reopen exactly where it was.
     if (!cx) cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false, handled: {} };
     if (!cx.handled) cx.handled = {};   // stage → 'skip' | 'manual' for this session's Finish summary
@@ -20134,6 +20186,7 @@ function closeCommissionModal() {
     // Pause ≠ abort: closing leaves the firmware state IN_PROGRESS and KEEPS cx so the flow
     // resumes on reopen. But never leave a test running, the device in closed-loop tuning, or the
     // relaxed matrix gate live — clean up whatever this session left active.
+    wakeLockWant(false);
     cxStopPoll();
     // Stop the idle-rest heartbeat and explicitly drop the hold, so a clean close resumes normal
     // charging immediately instead of waiting out the firmware's 5 s staleness timeout.
@@ -23167,14 +23220,17 @@ function cvsParseLast(s) {
              overV: v[13] / 100, valleyV: v[14] / 100, peakV: v[15] / 100, minV: v[16] / 100,
              rpmSlew: v[17], rpmMax: v[18], battA: v[19] / 10, targetV: (v[20] || 0) / 100, softStim: v[21] === 1,
              wobIdleV: (v[22] || 0) / 100, wobCvV: (v[23] || 0) / 100, wobPostV: (v[24] || 0) / 100,
-             stabBandV: (v[25] || 0) / 100, failBandV: (v[26] || 0) / 100, failPhase: v[27] || 0, stored: true };
+             stabBandV: (v[25] || 0) / 100, failBandV: (v[26] || 0) / 100, failPhase: v[27] || 0,
+             // Appended 2026-07-28; older blobs lack them — leave undefined so the card never renders a fake 0
+             armAltA: v.length >= 31 ? v[28] / 10 : undefined,
+             ccAvgA: v.length >= 31 ? v[29] / 10 : 0, ccRipA: v.length >= 31 ? v[30] / 10 : 0, stored: true };
 }
 // The graded verdict card. j = live JSON after DONE, or a cvsParseLast() object.
 function cvsResultsHtml(j) {
     if (!j) return '';
     const row = (label, val, g) => '<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid #2a2a2a;">' +
         '<span>' + label + '</span><span style="text-align:right;">' + val + (g !== undefined ? ' · ' + cvsChip(g) : '') + '</span></div>';
-    const cell = (k, v) => '<div style="background:#1c1c1c;border-radius:5px;padding:6px 8px;">' +
+    const cell = (k, v, wide) => '<div style="background:#1c1c1c;border-radius:5px;padding:6px 8px;' + (wide ? 'grid-column:1/-1;' : '') + '">' +
         '<div style="font-size:11px;color:#8a8a8a;">' + k + '</div>' +
         '<div style="font-size:15px;font-weight:600;color:#ddd;margin-top:1px;">' + v + '</div></div>';
     const overall = j.overall === 0 ? '<span style="color:#5a5;">PASS</span>' : j.overall === 1 ? '<span style="color:#c9a227;">MARGINAL</span>' : '<span style="color:#e05a4e;">FAIL</span>';
@@ -23185,10 +23241,14 @@ function cvsResultsHtml(j) {
     const stabBand = (j.stabBandV > 0 ? j.stabBandV : 0.10 * k).toFixed(2);
     const failBand = (j.failBandV > 0 ? j.failBandV : 0.25 * k).toFixed(2);
     if (j.outcome === 3) {
-        // The test never armed. failPhase 2 = the forced constant-voltage approach never reached the target (or wobbled past the fail band there); anything else (incl. legacy blobs without the field) = swinging beyond the fail band at idle.
-        h += '<div style="font-size:13px;color:#e0a0a0;">' + (j.failPhase === 2
+        // The test never armed. failPhase 3 = target unreachable (bank too stiff for the headroom — a setup condition, not a loop defect); 2 = the forced constant-voltage approach never reached the target (or wobbled past the fail band there); anything else (incl. legacy blobs without the field) = swinging beyond the fail band at idle.
+        h += '<div style="font-size:13px;color:#e0a0a0;">' + (j.failPhase === 3
+            ? 'The bank could not be pulled down by the requested Target Headroom: the loop shed all its charging current and the voltage still sat above the target. This is a property of a very large or very full bank — not a control fault. Reduce Target Headroom (Setup ▸ Alternator ▸ Tuning ▸ Stress Test) and re-run.'
+            : j.failPhase === 2
             ? 'The battery voltage never settled close enough to the test’s constant-voltage target, so the test could not arm. A voltage that had reached within ' + (0.15 * k).toFixed(2) + ' V of the target — even while still creeping — would have armed with a note; this run was farther away than that when the wait ran out (or was swinging more than ' + failBand + ' V there). Re-run the test; if it repeats, the voltage loop is approaching its target unusually slowly and the loop gains deserve a look (Setup ▸ Alternator ▸ Tuning).'
-            : 'The battery voltage was swinging more than ' + failBand + ' V, so the test could not run. A smaller wobble would have been reported and the test would have continued — this level of instability needs attention first. Let the battery settle at a steady idle charge and try again.') + '</div></div>';
+            : 'The battery voltage was swinging more than ' + failBand + ' V, so the test could not run. A smaller wobble would have been reported and the test would have continued — this level of instability needs attention first. Let the battery settle at a steady idle charge and try again.') + '</div>';
+        if (j.targetV > 0) h += '<div style="margin-top:6px;color:#8a8a8a;font-size:12.5px;">Target it was aiming for: ' + j.targetV.toFixed(2) + ' V.</div>';
+        h += '</div>';
         return h;
     }
     const preWob = Math.max(j.wobIdleV || 0, j.wobCvV || 0);
@@ -23213,14 +23273,17 @@ function cvsResultsHtml(j) {
                     : swingV > 0 ? swingV.toFixed(2) + ' V <span style="font-size:11px;font-weight:400;color:#8a8a8a;">/ ' + stabBand + '</span>'
                     : 'under ' + stabBand + ' V';
     h += '<div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:6px;">' +
+        cell('Test target voltage — voltage should return here', (j.targetV || 0).toFixed(2) + ' V', true) +
         cell((j.outcome === 2 ? 'Post-recovery swing' : 'Post-snap swing'), swingTile) +
         cell('Peak bus voltage', (j.peakV || 0).toFixed(2) + ' V') +
         cell('Overshoot', '+' + j.overV.toFixed(2) + ' V') +
         cell('Pre-test wobble', preWob > 0 ? preWob.toFixed(2) + ' V' : 'under ' + stabBand + ' V') +
         '</div>';
-    h += '<div style="margin-top:8px;color:#8a8a8a;font-size:12.5px;">Context: throttle rise ' + Math.round(j.rpmSlew) + ' RPM/s, peak ' + Math.round(j.rpmMax) + ' RPM · target ' + (j.targetV || 0).toFixed(2) + ' V' +
-         (j.outcome === 2 ? ' · valley −' + j.valleyV.toFixed(2) + ' V' : '') + (j.ix ? ' · current-limit ' + j.ix : '') + '.' +
+    h += '<div style="margin-top:8px;color:#8a8a8a;font-size:12.5px;">Context: throttle rise ' + Math.round(j.rpmSlew) + ' RPM/s, peak ' + Math.round(j.rpmMax) + ' RPM' +
+         (j.outcome === 2 ? ' · valley −' + j.valleyV.toFixed(2) + ' V' : '') + (j.ix ? ' · current-limit ' + j.ix : '') +
+         (j.ccAvgA > 0 ? ' · idle charge current avg ' + j.ccAvgA.toFixed(1) + ' A (swing ' + j.ccRipA.toFixed(1) + ' A)' : '') + '.' +
          (j.stored ? ' <em>(stored result)</em>' : '') + '</div>';
+    if (typeof j.armAltA === 'number' && j.armAltA < 2) h += '<div style="margin-top:4px;color:#c9a227;font-size:12.5px;">Standing current at arm was near zero (' + j.armAltA.toFixed(1) + ' A from the alternator) — the snap proved the protections fire and recover, but there was little charging current to shed. Typical of a very large or already-full bank: the easy case for voltage control.</div>';
     if (j.softStim) h += '<div style="margin-top:4px;color:#c9a227;font-size:12.5px;">Soft stimulus — the snap was gentle (under 1000 RPM/s). If the engine can rev faster, re-run with a harder snap; if not, this is a pass.</div>';
     h += '</div>';
     return h;
@@ -23356,6 +23419,7 @@ function cvsGet(params) {
 }
 function cvsOpen() {
     if (!settingsUnlocked) { xAlert('Unlock settings first.'); return; }
+    wakeLockWant(true);
     if (!cvsD) cvsD = { pane: 'pre', renderedPane: null, j: null, poll: null };
     cvsD.renderedPane = null;
     document.getElementById('cvs-modal-overlay').style.display = 'block';
@@ -23372,6 +23436,7 @@ function cvsOpen() {
     cvsD.poll = setInterval(cvsPollD, 800);
 }
 function cvsClose() {
+    wakeLockWant(false);
     if (cvsD) {
         if (cvsD.poll) { clearInterval(cvsD.poll); cvsD.poll = null; }
         if (cvsD.j && cvsD.j.active) cvsGet('cvStressCancel=1').catch(() => { });
@@ -23441,6 +23506,7 @@ function cvsRenderD() {
     if (!rebuild) { const el = document.getElementById('cvsPreLiveD'); if (el) el.innerHTML = cvsPreLive(); return; }
     const last = j ? cvsParseLast(j.last) : null;
     let h = '<p style="font-size:14.5px;line-height:1.5;">Provokes the over-voltage protection safely at any state of charge: it charges at idle until the battery settles (typically 10–45 s), parks the bus at a reachable constant-voltage target, and you snap the throttle to about half max RPM. Every protection stays fully active; the firmware grades the response and ends the run itself.</p>' +
+        '<p style="font-size:12.5px;color:#c9a227;margin:4px 0;">Switch off other charge sources (solar, shore charger) first — a source holding the bus up reads as protection chatter that is not the alternator\'s fault.</p>' +
         '<div id="cvsPreLiveD" style="font-size:13px;margin:6px 0;">' + cvsPreLive() + '</div>' +
         '<button onclick="cvsStartD()" class="btn-primary">Start stress test</button>';
     if (last) h += cvsResultsHtml(last);
@@ -23485,12 +23551,12 @@ function cxFinish() {
 }
 const CX_HELPFUL_HINTS_HTML =
     '<p style="font-size:15px; line-height:1.5; margin:0 0 4px;"><strong>Commissioning saved.</strong></p>' +
-    '<p style="font-size:13px; line-height:1.5; margin:0 0 12px; opacity:0.85;">Some helpful tips:</p>' +
+    '<p style="font-size:13px; line-height:1.5; margin:0 0 12px; opacity:0.85;">Some timely tips:</p>' +
     '<ul style="list-style:none; padding:0; margin:0; font-size:13px; line-height:1.6;">' +
-    '<li style="margin-bottom:12px;">Most installations should leave Alternator Enable toggled on permanently (in top right of screen). The regulator only drives the field and produces charging current when the ignition is on and engine speed is &gt; Min RPM (125 RPM by default), so there&rsquo;s no reason to disable it, and the net result is the behavior you&rsquo;d expect &mdash; the alternator just works when the engine is running.</li>' +
-    '<li style="margin-bottom:12px;">This regulator brain is unique in that it stays powered as long as it has battery power. Even with engine/ignition/field off, it keeps tracking battery state of charge, logging sailing and comfort data, etc.</li>' +
+    '<li style="margin-bottom:12px;">Leave Alternator Enable (in top right corner) toggled &ldquo;On&rdquo; permanently. The regulator only drives the field and produces charging current when the Ignition is on and engine speed is &gt; Min RPM (default 125).</li>' +
+    '<li style="margin-bottom:12px;">This regulator is unique in that it stays alive 24-7, even with engine/ignition/field off, to keep track of battery SOC, comfort metrics, etc. This mode is designed to minimize power draw.</li>' +
     '<li style="margin-bottom:12px;">To view this interface with Ignition Off:</li>' +
-    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Client Mode:</strong> regulator is accessible over WiFi, will wake up from a low-power doze when you access alternator.local or open the app.</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Client Mode:</strong> regulator remains accessible over WiFi, will wake up from a low-power doze when you access alternator.local or open the app.</li>' +
     '<li style="margin-bottom:0;"><strong style="color:#2ec4b6;">AP (Hotspot) Mode:</strong> regulator keeps WiFi up for about 30 minutes after shutdown, then powers WiFi down to save battery. Press the WiFi wake button to bring it back for five minutes at a time, or Ignition on.</li>' +
     '</ul>';
 // Terminal Helpful Hints page, drawn into the commissioning modal body after Finish. No per-phase
@@ -23695,10 +23761,17 @@ function applySystemIDResults() {
 
 
 // Auto-unlock via URL parameter for local automation (e.g. SwiftBar shortcut). Param name
-// kept from the password era so existing shortcuts still work; any value arms.
+// kept from the password era so existing shortcuts still work; any value arms. One-shot:
+// the param is stripped from the URL right away so refreshing/back-navigating this tab
+// later re-arms nothing — beyond this, arming only ever happens from the Unlock button.
 window.addEventListener('load', function () {
-  const autopass = new URLSearchParams(window.location.search).get('autopass');
-  if (autopass) armSettings();
+  const qs = new URLSearchParams(window.location.search);
+  if (qs.get('autopass')) {
+    armSettings();
+    qs.delete('autopass');
+    const rest = qs.toString();
+    history.replaceState(null, '', window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
+  }
 });
 
 // Live Data → Diag checkpoint pills (C1–C4) — same pattern as the Protections filter below,

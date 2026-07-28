@@ -370,6 +370,7 @@ bool fsRemove(const char *path) {
 #define NK_commissionManualMask "commissnManMsk" // per-stage set-by-hand bitmask (skip / mark-done-manually)
 #define NK_commissionSnap "commissnSnap"      // Phase-0 origin snapshot (explicit-abort full revert): positional CSV of the settings the flow writes
 #define NK_commissionStepSnap "commissnStepSnp" // in-flight step snapshot: scalars as of the current step's entry — reboot undoes only that step
+#define NK_cxLedgerSeq "cxLedgerSeq"          // commissioning-ledger monotonic event counter (persisted at flush; cloud dedupes on device_uid+seq)
 #define NK_cvStressLast "cvStressLast"        // last CV stress-test result (positional CSV, ver-prefixed); diagnostic record, not a tune input
 #define NK_T0_C "T0_C"
 #define NK_TailCurrent "TailCurrent"
@@ -745,6 +746,7 @@ void commissionSkipStage(int stage) {
   commissionManualMask |= (1 << stage);
   commissionWriteDoneMask();
   commissionWriteManualMask();
+  cxLedgerLogStage(stage, "skip");
   if (commissionState == 2 && !commissionRequiredComplete()) commissionSetState(1);
 }
 
@@ -757,6 +759,7 @@ void commissionManualStage(int stage) {
   commissionManualMask |= (1 << stage);
   commissionWriteDoneMask();
   commissionWriteManualMask();
+  cxLedgerLogStage(stage, "manual");
 }
 
 // Derive the lifecycle byte from the mask: none done → NOT, required stages done (stress test
@@ -780,6 +783,7 @@ void commissionMarkStage(int stage) {
   // This stage is now MEASURED (not hand-set); its invalidated dependents revert to pending, not manual.
   commissionManualMask &= ~((1 << stage) | deps);
   commissionWriteManualMask();
+  cxLedgerLogStage(stage, "stage");  // ledger row carries the stage's measured results + applied values
 }
 
 // Clear a single stage's done bit plus anything downstream of it. A previously-COMMISSIONED
@@ -1519,7 +1523,7 @@ void httpsTask(void *param) {
     HttpsRequest request;
     if (xQueueReceive(httpsQueue, &request, pdMS_TO_TICKS(1000))) {
 
-      if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG || request.type == HTTPS_UPLOAD_BOATPERF || request.type == HTTPS_UPLOAD_ALTHEALTH) {
+      if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG || request.type == HTTPS_UPLOAD_BOATPERF || request.type == HTTPS_UPLOAD_ALTHEALTH || request.type == HTTPS_UPLOAD_CX_LEDGER) {
         size_t payloadLen = request.payload ? strlen(request.payload) : 0;
         // payloadCap is the ps_malloc'd capacity (NOT sizeof a pointer); free + skip on any bad payload.
         if (!request.payload || payloadLen >= request.payloadCap || payloadLen == 0) {
@@ -1548,6 +1552,9 @@ void httpsTask(void *param) {
           break;
         case HTTPS_UPLOAD_ALTHEALTH:
           opSuccess = executeUploadAltHealth(request.payload);
+          break;
+        case HTTPS_UPLOAD_CX_LEDGER:
+          opSuccess = executeUploadCxLedger(request.payload);  // sets cxLedgerUpState itself (2 = trim due, -1 = retry)
           break;
         case HTTPS_FETCH_WEATHER:
           executeFetchWeatherData();
@@ -3194,7 +3201,9 @@ bool buildConfigPayload() {
     // v2 adds state.ov_telemetry (lifetime OV histogram + counters → device_statistics jsonb).
     // v3 nests settings.tables (RPM/fuel tables) so the daily settings jsonb equals the full
     // /exportConfig record, and update-config-snapshot projects the vessel keys → user_profiles.
-    "\"payload_v\":3,"
+    // v4 renames settings.commissioning_results → learned_state and drops its stress_test
+    // (moved to the commissioning ledger, COMMISSIONING_LEDGER_SPEC.md).
+    "\"payload_v\":4,"
     "\"settings\":",
     device_id_hex, authToken.c_str(), timestampStr);
   if (offset < 0 || offset >= CONFIG_PAYLOAD_SIZE) return false;
@@ -3204,7 +3213,7 @@ bool buildConfigPayload() {
   // sharing CONFIG_MANIFEST (8_functions.ino) with /exportConfig — one source of truth,
   // so the fleet config snapshot can never drift behind the dashboard as settings are
   // added. update-config-snapshot stores it verbatim as one jsonb column (no per-key DB).
-  // tables{} nests INSIDE settings (like commissioning_results) so the cloud record is the
+  // tables{} nests INSIDE settings (like learned_state) so the cloud record is the
   // complete boat with zero cloud schema change.
   {
     String cfgObj = manifestConfigObject();
@@ -3466,6 +3475,132 @@ done_headers_cfg:
   }
 
   return success;
+}
+
+// Mirrors executeUploadConfig() exactly (proven HTTPS pattern) — only the endpoint + result
+// signaling differ. Ships a commissioning-ledger event batch to log-commissioning-event and
+// stamps cxLedgerUpState for the Core-1 drain service: 2 = cloud has the rows, trim the sent
+// file prefix; -1 = transport/server failure, leave the file and retry. HTTP 400 also stamps 2:
+// a batch the edge fn rejects as malformed would poison the queue forever if retried — the
+// (device_uid, seq) gap it leaves is the audit trail.
+bool executeUploadCxLedger(const char *payload) {
+  if (WiFi.status() != WL_CONNECTED) { cxLedgerUpState = -1; return false; }
+  if (WiFi.RSSI() < -80) { cxLedgerUpState = -1; return false; }
+  if (!isRegistered || authToken.isEmpty()) { cxLedgerUpState = -1; return false; }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT / 1000);  // this API takes seconds
+
+  uint32_t start = millis();
+  esp_task_wdt_reset();
+
+  IPAddress hostIP;  // pre-resolve: keep DNS out of the connect's unfed-WDT window (see executeUploadPayload)
+  if (!WiFi.hostByName(host, hostIP)) {
+    Serial.println("CxLedger: DNS fail");
+    cxLedgerUpState = -1;
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  if (!client.connect(host, port, CONNECT_TIMEOUT)) {
+    Serial.println("CxLedger: Connect fail");
+    client.stop();
+    cxLedgerUpState = -1;
+    return false;
+  }
+  if (millis() - start > GLOBAL_TIMEOUT) {
+    client.stop();
+    cxLedgerUpState = -1;
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  client.printf(
+    "POST /functions/v1/log-commissioning-event HTTP/1.1\r\n"
+    "Host: %s\r\n"
+    "Content-Type: application/json\r\n"
+    "Authorization: Bearer %s\r\n"
+    "Connection: close\r\n"
+    "Content-Length: %u\r\n\r\n",
+    host,
+    SUPABASE_ANON_KEY,
+    (unsigned)strlen(payload));
+
+  size_t payloadLen = strlen(payload);
+  size_t sent = client.write((const uint8_t *)payload, payloadLen);
+  if (sent != payloadLen) {
+    Serial.println("CxLedger: Payload send fail");
+    client.stop();
+    cxLedgerUpState = -1;
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  int httpCode = 0;
+  uint32_t readStart = millis();
+  char statusBuf[64];
+  size_t statusLen = 0;
+
+  while (client.connected() && (millis() - readStart < READ_TIMEOUT)) {
+    esp_task_wdt_reset();
+    while (client.available()) {
+      char c = (char)client.read();
+      readStart = millis();
+      if (statusLen < sizeof(statusBuf) - 1) {
+        statusBuf[statusLen++] = c;
+      }
+      if (c == '\n') {
+        statusBuf[statusLen] = '\0';
+        if (strncmp(statusBuf, "HTTP/", 5) == 0) {
+          const char *sp = strchr(statusBuf, ' ');
+          if (sp) httpCode = atoi(sp + 1);
+        }
+        goto drain_headers_cxl;
+      }
+    }
+    if (millis() - start > GLOBAL_TIMEOUT) break;
+    delay(1);
+  }
+
+drain_headers_cxl:
+  {
+    uint32_t drainStart = millis();
+    uint8_t state = 0;  // \r \n \r \n
+    while (client.connected() && (millis() - drainStart < READ_TIMEOUT)) {
+      esp_task_wdt_reset();
+      while (client.available()) {
+        char c = (char)client.read();
+        drainStart = millis();
+        if (state == 0 && c == '\r') state = 1;
+        else if (state == 1 && c == '\n') state = 2;
+        else if (state == 2 && c == '\r') state = 3;
+        else if (state == 3 && c == '\n') goto done_headers_cxl;
+        else state = 0;
+      }
+      if (millis() - start > GLOBAL_TIMEOUT) break;
+      delay(1);
+    }
+  }
+
+done_headers_cxl:
+  client.stop();
+  esp_task_wdt_reset();
+
+  if (httpCode == 200) {
+    queueConsoleMessage("Commissioning ledger uploaded");
+    cxLedgerUpState = 2;
+    return true;
+  }
+  if (httpCode == 400) {
+    queueConsoleMessage("Commissioning ledger: batch rejected as malformed — discarded");
+    cxLedgerUpState = 2;   // drop the poison batch; seq gap documents it
+    return false;
+  }
+  if (httpCode == 0) Serial.println("CxLedger: No response received (timeout)");
+  else Serial.printf("CxLedger: HTTP %d\n", httpCode);
+  cxLedgerUpState = -1;
+  return false;
 }
 
 // Shared response-body buffer for the two front sync-backs (boat + alt). PSRAM, allocated once and

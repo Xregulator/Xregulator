@@ -132,6 +132,7 @@ struct UpdateInfo {
 struct CachedAsset {
   uint8_t *data = nullptr;
   size_t size = 0;
+  char etag[24] = {0};  // content hash of the gz bytes; lets a revalidating browser get a 304 instead of the body
 };
 
 CachedAsset loadFileToRAM(const char *path);  // defined in 7_functions.ino (explicit prototype: returns a custom struct)
@@ -162,7 +163,8 @@ enum HttpsRequestType {
   HTTPS_CLEAR_FORCED_UPDATE,
   HTTPS_GET_PENDING_CONFIG,    // admin config push: fetch a queued config at boot
   HTTPS_CLEAR_PENDING_CONFIG,  // clear the queued config after applying it
-  HTTPS_RESET_RPM_AXIS         // tach rescaled: delete the device's RPM-indexed cloud data
+  HTTPS_RESET_RPM_AXIS,        // tach rescaled: delete the device's RPM-indexed cloud data
+  HTTPS_UPLOAD_CX_LEDGER       // commissioning-ledger event batch → log-commissioning-event
 };
 
 struct HttpsRequest {
@@ -3667,6 +3669,28 @@ volatile bool pendingSaveUserTableEdits = false;
 volatile bool pendingSaveVesselInfo = false;
 bool pendingShutdownFlush = false;     // set on ignition-off edge; cleared after full flush
 bool shutdownNVSFlushDone = false;     // true once NVS+sensor window saved this shutdown
+
+// ── Commissioning ledger (COMMISSIONING_LEDGER_SPEC.md) ──────────────────────
+// Append-only event evidence (stage completions, skips/manual marks, finish, Bode sweeps)
+// staged in PSRAM → /cxledger.bin → log-commissioning-event edge fn, drained under the same
+// field-off cloud gates as every other upload. Producers run on BOTH cores (web handlers +
+// sweep commits), so staging is spinlock-guarded; ALL file access is Core 1 only.
+#define CX_LEDGER_PATH       "/cxledger.bin"
+#define CX_LEDGER_FILE_CAP   32768u   // on-flash queue cap; oldest rows dropped when full
+#define CX_LEDGER_PEND_CAP   8192u    // PSRAM staging cap per buffer (double-buffered swap)
+#define CX_LEDGER_ROW_MAX    4096u    // sanity bound per row (biggest real row ~1.2 KB)
+#define CX_LEDGER_BATCH_CAP  24576u   // one upload batch: envelope + rows
+#define CX_LEDGER_BATCH_ROWS 20       // max events per POST (edge fn enforces 25)
+char *cxPendBuf = nullptr;            // active staging buffer (ps_malloc, cxLedgerInit)
+char *cxPendSwap = nullptr;           // flush swaps this in so producers never block on flash
+volatile uint32_t cxPendLen = 0;
+portMUX_TYPE cxPendMux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t cxLedgerSeq = 0;             // monotonic event counter, NVS-backed; cloud dedupes on (device_uid, seq)
+volatile uint32_t cxLedgerDroppedRows = 0;   // rows lost to caps — confessed in the next row's data
+volatile bool cxLedgerFlushPending = false;
+volatile int8_t cxLedgerUpState = 0;  // 0 idle · 1 in flight · 2 sent-ok (trim due) · -1 failed
+uint32_t cxLedgerUpBytes = 0;         // file bytes staged in the in-flight batch
+unsigned long cxLedgerLastAttemptMs = 0;
 uint32_t shutdownCloudDeadlineMs = 0;  // millis() deadline for cloud drain window
 
 // Field-off flush triggers — two staggered gates off the same field-off edge.
@@ -5390,6 +5414,7 @@ void setup() {
   loadCVTuningLog();          // restore CV tuning records from LittleFS
   loadSystemIDLog();          // restore plant-delay (SystemID) records from LittleFS
   loadSysidSweepLog();        // restore Plant Delay sine-sweep history from LittleFS
+  cxLedgerInit();             // commissioning-ledger staging buffers + NVS event counter
   loadTuningSweepLog();       // restore Current closed-loop sine-sweep history from LittleFS
   // Check if we should wake WiFi for a pending OTA update
   nvs_handle_t wake_handle;
@@ -5785,6 +5810,10 @@ void loop() {
   if (pendingSaveTuningSweepLog) {
     pendingSaveTuningSweepLog = false;
     saveTuningSweepLog();
+  }
+  if (cxLedgerFlushPending) {  // commissioning-ledger rows: PSRAM staging → /cxledger.bin
+    cxLedgerFlushPending = false;
+    cxLedgerFlush();
   }
   if (pendingRpmAxisWipe) {  // must run BEFORE the flags it raises, so they drain in this same pass
     pendingRpmAxisWipe = false;
@@ -6222,6 +6251,14 @@ void loop() {
               free(req.payload);   // nothing to send (build returned false) → release the buffer
             }
           }
+        }
+
+        // Commissioning-ledger drain (COMMISSIONING_LEDGER_SPEC.md): queued stage/sweep events →
+        // log-commissioning-event. Deliberately NEVER fires during commissioning itself — rows wait
+        // on flash until the boat is idle; the network gates live inside the service, the flash-safety
+        // gates (hardware + field-off settled) here, because the post-send file trim is a flash write.
+        if (hardwarePresent == 1 && fieldOffSettled(10000)) {
+          cxLedgerDrainService();
         }
       }
       TIMED_CALL(ft_ch1_compute_stats, ch1_compute_stats());

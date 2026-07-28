@@ -1035,7 +1035,7 @@ static void cfgAppendFloatArr(String &out, const float *a, int n, int dec) {
 // so knobs added to those registries are covered without touching the manifest.
 String manifestConfigObject() {
   String j;
-  j.reserve(18432);   // manifest + registry + commissioning-result blobs (DCIR up to ~5.6KB)
+  j.reserve(18432);   // manifest + registry + learned-state blobs (DCIR up to ~5.6KB)
   j = "{";
   bool first = true;
   for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
@@ -1077,21 +1077,19 @@ String manifestConfigObject() {
   j += "\"cvComputedKp\":"; cfgAppendJsonStr(j, String(cvComputedKp, 2));
   j += ",\"cvComputedKi\":"; cfgAppendJsonStr(j, String(cvComputedKi, 2));
   j += ",\"cvComputedKd\":"; cfgAppendJsonStr(j, String(cvComputedKd, 2));
-  // Commissioning RESULT records (measured outcomes, not tunable settings) — captured so the
-  // owner can monitor them across the fleet and so a local export archives them. Read from the
-  // persisted NVS blobs, which are always the last graded result (the parsed live globals are
-  // NOT repopulated at boot). Not in CONFIG_MANIFEST → applyImportConfig ignores them: a boat
-  // must never adopt another's measured results — same contract as cvComputed* above.
-  j += ",\"commissioning_results\":{";
+  // Learned per-device STATE (measured values that keep evolving after commissioning) — captured
+  // so the owner can monitor it across the fleet and so a local export archives it. Was named
+  // commissioning_results through payload_v 3; renamed because everything here is LIVING state,
+  // not a commissioning event — frozen per-run evidence (incl. the stress test, which lived here
+  // until v4) now goes to the commissioning ledger instead (COMMISSIONING_LEDGER_SPEC.md).
+  // Not in CONFIG_MANIFEST → applyImportConfig ignores it: a boat must never adopt another's
+  // measured results — same contract as cvComputed* above.
+  j += ",\"learned_state\":{";
   {
     bool cfirst = true;
-    // CV stress test — ver-2 positional CSV; layout documented at cvStressPersistResult().
-    if (settingExists(NK_cvStressLast)) {
-      j += "\"stress_test\":"; cfgAppendJsonStr(j, settingRead(NK_cvStressLast)); cfirst = false;
-    }
-    // Battery-health DCIR: baseline capacity (Ah) + full per-edge result blob (bhSerializeResults()).
+    // Battery-health: baseline capacity (Ah) only. DCIR test results are EVENT data — each run
+    // uploads its own "test" ledger row at finish; they no longer ride the daily snapshot.
     if (settingExists(NK_bhBaseline)) { if (!cfirst) j += ','; j += "\"bh_baseline_ah\":"; cfgAppendJsonStr(j, settingRead(NK_bhBaseline)); cfirst = false; }
-    if (settingExists(NK_bhResults))  { if (!cfirst) j += ','; j += "\"bh_dcir\":";        cfgAppendJsonStr(j, settingRead(NK_bhResults));  cfirst = false; }
     // Capacity-fade: SUMMARY only (latest capacity %, point count). The full bhCapCap-point ring
     // (~21KB at 512) would overflow the 32KB daily upload buffer; the monitoring signal is the
     // latest measured capacity, and the full ring is never adopted on import anyway.
@@ -1246,10 +1244,10 @@ String vesselInfoJson() {
 
 String exportConfigJson() {
   String j;
-  j.reserve(20480);   // config (manifest + commissioning-result blobs) + tables
+  j.reserve(20480);   // config (manifest + learned-state blobs) + tables
   j = "{\"fw_version\":\"";
   j += FIRMWARE_VERSION;
-  j += "\",\"payload_v\":3,\"config\":";
+  j += "\",\"payload_v\":4,\"config\":";
   j += manifestConfigObject();
   j += ",\"tables\":";
   j += exportTablesObject();
@@ -1450,6 +1448,9 @@ void bhAbort(const char *reason) {
   bhTestState = 3;
   bhAbortReason = reason;
   queueConsoleMessageF("BATT HEALTH: test aborted — %s", reason);
+  char ev[192];
+  snprintf(ev, sizeof(ev), "{\"test\":\"batt_health\",\"ok\":0,\"abort\":\"%s\"}", reason);
+  cxLedgerLogTest(ev);
 }
 
 bool bhStartTest() {
@@ -1542,6 +1543,14 @@ void bhComputeDcir() {
   bhResultsDirty = true;   // NVS persist deferred to field-off — a test always ends field-on
   queueConsoleMessageF("BATT HEALTH: DCIR = %.2f mOhm (%d/%u edges, SoC %.0f%%, %.1fF, fit %luus)",
                        r.dcir_mOhm, Rn, bhNumEdges, r.soc_pct, r.boardTempF, (unsigned long)(micros() - bhT0));
+  char ev[288];
+  snprintf(ev, sizeof(ev),
+           "{\"test\":\"batt_health\",\"ok\":1,\"dcir_mohm\":%.2f,\"spread_mohm\":%.2f,\"edges_used\":%d,"
+           "\"edges_cfg\":%u,\"soc_pct\":%.1f,\"board_temp_f\":%.1f,\"batt_v\":%.2f,"
+           "\"low_a\":%.1f,\"delta_a\":%.1f,\"dwell_ms\":%u}",
+           r.dcir_mOhm, r.fitSpread_mOhm, Rn, (unsigned)bhNumEdges, r.soc_pct, r.boardTempF, r.battV,
+           r.stepLowA, r.stepDeltaA, (unsigned)r.dwellMsUsed);
+  cxLedgerLogTest(ev);
 }
 
 // Called every loop() iteration. Cheap: a couple of compares unless a test is live.
@@ -1893,12 +1902,13 @@ void cvpfAbort(const char *reason) {
   cvpfState = 3; cvpfReady = true; cvpfOk = false;
   cvpfAbortMsg = reason;
   queueConsoleMessageF("CV plant-fit: aborted — %s", reason);
+  cxLedgerLogCvpf();
 }
 
 // Called every loop(): runs the fit once the control-loop branch finishes, plus a hang watchdog.
 void cvpfServiceCompletion() {
   if (cvpfState != 1) return;
-  if (!cvPlantFitActive) { cvpfProcess(); return; }   // tick machine finished the RELEASE phase
+  if (!cvPlantFitActive) { cvpfProcess(); cxLedgerLogCvpf(); return; }   // tick machine finished the RELEASE phase
   // Worst case: settle timeout + pilot + two hold timeouts (OV re-size) + 9 segments + slack.
   uint32_t budget = CVPF_SETTLE_TIMEOUT_MS + CVPF_T_PILOT_MS + 2 * CVPF_HOLD_TIMEOUT_MS
                     + 9 * CVPF_PULSE_SEG_MS + 8000;
@@ -1918,8 +1928,12 @@ void cvpfServiceCompletion() {
 //   3 ARMED     : operator snaps the throttle; alternator output multiplies and pushes the (now reachable)
 //                 bus over target → the OV protection fires. The watcher counts EVERY protection edge (no
 //                 clustering — rapid re-clamping IS the defect), times the recovery, measures overshoot/valley.
+//                 The snap has CVS_WATCH_MAX_MS to happen; the recovery then gets its own full
+//                 CVS_WATCH_MAX_MS from the PROVOCATION, so a late snap can't starve it.
 //   4 DONE      : grade. The firmware ends the run itself, 5 s after the bus has re-settled at the target —
 //                 the operator never decides when it is over.
+// EVERY ending — graded, stability-fail, or abort — also queues a "test" ledger row, so each
+// attempt (wizard or standalone) reaches the cloud when uploads next become allowed.
 // The test DRIVES the target (no longer a pure observer): it sets ChargingVoltageTargetReq through the
 // cvStressForceCV hook in AdjustField, exactly like TargetVoltageMode. Every protection stays fully armed.
 static const uint32_t CVS_IDLE_MIN_MS       = 10000;   // min idle charge before the stability gate opens
@@ -1976,6 +1990,12 @@ static uint32_t cvsPhaseStartMs = 0, cvsTestStartMs = 0, cvsLastEndMs = 0;
 static volatile uint32_t cvsLastPollMs = 0;
 static uint32_t cvsRpmLowSinceMs = 0;
 static float    cvsIdleAvgV = 0.0f, cvsBattStartA = 0.0f, cvsArmRpm = 0.0f;
+// Alternator amps at arm — the standing current the snap must shed. Battery current (cvsBattStartA)
+// can read ~0 there while the alternator still carries house loads, so it can't be the discriminator.
+static float    cvsArmAltA = 0.0f;
+// Idle-wait charge-current steadiness (report-only): alternator amps at the stability-ring cadence.
+static float    cvsCcSumA = 0.0f, cvsCcMinA = 0.0f, cvsCcMaxA = 0.0f, cvsCcAvgA = 0.0f, cvsCcRipA = 0.0f;
+static int      cvsCcN = 0;
 // settle-up gate state (phase 1): reference re-anchors whenever the filtered bus drifts beyond the band
 static float    cvsSettleRefV = 0.0f;
 static uint32_t cvsSettleRefMs = 0;
@@ -1988,9 +2008,10 @@ static uint32_t cvsRpmPrevMs = 0;
 static uint16_t cvsEvents = 0, cvsHardCuts = 0, cvsIxTrips = 0;
 static float    cvsWobbleIdleV = 0.0f, cvsWobbleCvV = 0.0f, cvsWobblePostV = 0.0f;  // measured 3 s swing (max−min) at each phase's settle, clean or loose; 0 = that phase never completed
 static uint32_t cvsMaxLockoutMs = 0, cvsFirstEventMs = 0, cvsResettleSinceMs = 0, cvsRecoveryMs = 0;
+static uint32_t cvsProvokedMs = 0;   // first provocation (event or snap) — the recovery watch runs from here
 static bool     cvsSnapDetected = false, cvsRecovered = false, cvsSettled = false, cvsSoftStimulus = false;
 static bool     cvsLoosePost = false;   // post-snap settle was outside the tight band — drives the marginal stability grade (the wobble V is recorded even on a clean settle)
-static uint8_t  cvsFailPhase = 0;       // phase at a basic-stability fail (1 idle / 2 CV) — 0 = the run armed; lets the web card name the criterion that actually failed
+static uint8_t  cvsFailPhase = 0;       // basic-stability fail kind: 1 idle swing / 2 CV approach / 3 target unreachable (bank too stiff for the headroom) — 0 = the run armed; lets the web card name the criterion that actually failed
 // grade: 0 pass, 1 marginal, 2 fail, 3 n/a. outcome: 1 rode-it-out, 2 event-graded, 3 stability-fail
 static uint8_t  cvsOutcome = 0;
 static uint8_t  cvsGPreStab = 0, cvsGEvents = 3, cvsGHardCut = 3, cvsGRecovery = 3, cvsGStab = 3, cvsGOverall = 3;
@@ -2012,6 +2033,9 @@ bool cvStressStartTest() {
   cvStressTargetV = 0.0f; cvsIdleAvgV = 0.0f; cvsArmRpm = 0.0f;
   cvsEvents = cvsHardCuts = cvsIxTrips = 0;
   cvsMaxLockoutMs = 0; cvsFirstEventMs = 0; cvsResettleSinceMs = 0; cvsRecoveryMs = 0;
+  cvsProvokedMs = 0;
+  cvsArmAltA = 0.0f;
+  cvsCcSumA = cvsCcMinA = cvsCcMaxA = cvsCcAvgA = cvsCcRipA = 0.0f; cvsCcN = 0;
   cvsSnapDetected = cvsRecovered = cvsSettled = cvsSoftStimulus = cvsLoosePost = false;
   cvsOvershootV = cvsValleyV = 0.0f;
   cvsWobbleIdleV = cvsWobbleCvV = cvsWobblePostV = 0.0f;
@@ -2035,17 +2059,25 @@ void cvStressAbort(const char *reason) {
   cvStressAbortMsg = reason;
   cvsLastEndMs = millis();
   queueConsoleMessageF("CV stress test: aborted — %s", reason);
+  // Aborts are fleet data too — Cancel/X, lost browser, engine stall all land here.
+  char ev[224];
+  snprintf(ev, sizeof(ev), "{\"test\":\"cv_stress\",\"abort\":\"%s\",\"phase\":%d,\"target_v\":%.2f}",
+           reason, (int)cvStressPhase, cvStressTargetV);
+  cxLedgerLogTest(ev);
 }
 
 // Serialize + persist the graded result so the wizard card and Diag survive a reload/reboot.
 // ver-2 positional blob (ver-1 layout is incompatible; the web parser reads the leading version).
 // The three wobble fields, the two graded stability bands (all V×100; bands = constant × V/12
-// at grade time, so failBand reflects the live CvStressFailBandV), then the fail phase are
+// at grade time, so failBand reflects the live CvStressFailBandV), the fail phase, then the
+// alternator amps at arm (A×10) and the idle-wait alternator-amps mean/swing (A×10) are
 // appended — the parser reads missing trailing fields as 0, so older blobs degrade gracefully.
+// Also queues the "test" ledger row — every graded ending reaches the cloud, not just the
+// last attempt the wizard's stage-8 row happens to carry.
 static void cvStressPersistResult() {
   const float k = (float)BATTERY_VOLTAGE / 12.0f;
   snprintf(cvsLastBlob, sizeof(cvsLastBlob),
-           "2,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+           "2,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
            (int)cvsOutcome, (int)cvsGOverall, (int)cvsGPreStab, (int)cvsGEvents, (int)cvsGHardCut,
            (int)cvsGRecovery, (int)cvsGStab, (unsigned long)cvsRecoveryMs, (unsigned long)cvsMaxLockoutMs,
            (int)cvsEvents, (int)cvsHardCuts, (int)cvsIxTrips,
@@ -2057,8 +2089,12 @@ static void cvStressPersistResult() {
            (int)lroundf(cvsWobbleIdleV * 100.0f), (int)lroundf(cvsWobbleCvV * 100.0f),
            (int)lroundf(cvsWobblePostV * 100.0f),
            (int)lroundf(CVS_STAB_BAND_V * k * 100.0f), (int)lroundf(CvStressFailBandV * k * 100.0f),
-           (int)cvsFailPhase);
+           (int)cvsFailPhase,
+           (int)lroundf(cvsArmAltA * 10.0f), (int)lroundf(cvsCcAvgA * 10.0f), (int)lroundf(cvsCcRipA * 10.0f));
   settingWrite(NK_cvStressLast, cvsLastBlob);
+  char ev[280];
+  snprintf(ev, sizeof(ev), "{\"test\":\"cv_stress\",\"result\":\"%s\"}", cvsLastBlob);
+  cxLedgerLogTest(ev);
 }
 
 // Grade a run that reached ARMED (armed → snapped). Overshoot/valley are reported, never gated.
@@ -2092,7 +2128,7 @@ static void cvStressGrade() {
 static void cvStressStabilityFail(const char *where) {
   cvStressForceCV = false;
   cvsOutcome = 3; cvsGPreStab = 2;
-  cvsFailPhase = cvStressPhase;
+  if (cvsFailPhase == 0) cvsFailPhase = cvStressPhase;   // a caller may pre-stamp a specific kind (3 = unreachable)
   cvsGEvents = cvsGHardCut = cvsGRecovery = cvsGStab = 3;
   cvsGOverall = 2;
   cvStressPersistResult();
@@ -2120,7 +2156,9 @@ void cvStress_tick(uint32_t nowMs) {
   bool protGrace = (g_lastProtClampMs != 0) && ((uint32_t)(nowMs - g_lastProtClampMs) < PROT_RPM_GRACE_MS + 2000UL);
   if (RPM < 80.0f && !protGrace) { if (cvsRpmLowSinceMs == 0) cvsRpmLowSinceMs = nowMs; } else cvsRpmLowSinceMs = 0;
   if (cvsRpmLowSinceMs != 0 && (uint32_t)(nowMs - cvsRpmLowSinceMs) > 1500UL) { cvStressAbort("engine stopped"); return; }
-  if (nowMs - cvsTestStartMs > CVS_IDLESTAB_TO_MS + CVS_CVSTAB_TO_MS + CVS_WATCH_MAX_MS + 20000UL) {
+  // Watch max counted twice: up to CVS_WATCH_MAX_MS waiting for the snap, then a fresh
+  // CVS_WATCH_MAX_MS of recovery from a provocation at the last moment.
+  if (nowMs - cvsTestStartMs > CVS_IDLESTAB_TO_MS + CVS_CVSTAB_TO_MS + 2UL * CVS_WATCH_MAX_MS + 20000UL) {
     cvStressAbort("timed out"); return;
   }
 
@@ -2130,6 +2168,12 @@ void cvStress_tick(uint32_t nowMs) {
 
   switch (cvStressPhase) {
     case 1: {  // STAB_IDLE — charge normally ≥10 s, wait for the bus to hold steady AND stop settling up, then fix the target
+      if (cvsRingLastMs == nowMs) {   // a ring sample was just accepted — same ~10 Hz cadence
+        if (cvsCcN == 0) { cvsCcMinA = cvsCcMaxA = MeasuredAmps; }
+        else if (MeasuredAmps < cvsCcMinA) cvsCcMinA = MeasuredAmps;
+        else if (MeasuredAmps > cvsCcMaxA) cvsCcMaxA = MeasuredAmps;
+        cvsCcSumA += MeasuredAmps; cvsCcN++;
+      }
       if (fabsf(IBV_filtered - cvsSettleRefV) > CVS_SETTLEUP_BAND_V * k) { cvsSettleRefV = IBV_filtered; cvsSettleRefMs = nowMs; }
       bool  settledUp = (uint32_t)(nowMs - cvsSettleRefMs) >= CVS_SETTLEUP_WIN_MS || elapsed >= CVS_SETTLEUP_MAX_MS;
       bool  timedOut = elapsed > CVS_IDLESTAB_TO_MS;
@@ -2140,6 +2184,7 @@ void cvStress_tick(uint32_t nowMs) {
           queueConsoleMessage("CV stress test: bus still creeping at the settle-up cap — target may read slightly low");
         cvsWobbleIdleV = range;
         if (!stable) cvsGPreStab = 1;
+        if (cvsCcN > 0) { cvsCcAvgA = cvsCcSumA / cvsCcN; cvsCcRipA = cvsCcMaxA - cvsCcMinA; }
         cvsIdleAvgV = cvsStabMean(nowMs, CVS_TARGET_AVG_MS);
         cvStressTargetV = cvsIdleAvgV - CvStressDropV * k;   // achievable: idle already held above it
         cvStressForceCV = true;                                   // AdjustField now parks CV at cvStressTargetV
@@ -2181,6 +2226,7 @@ void cvStress_tick(uint32_t nowMs) {
         cvsClamp0 = cvsClampPrev = g_fastOvClampCount;
         cvsHoc0 = g_hardOCCount; cvsLd0 = g_loadDumpCount; cvsIx0 = g_iExcessCount;
         cvsBattStartA = Bcur;
+        cvsArmAltA = MeasuredAmps;
         cvsArmRpm = RPM;
         cvsPeakV = cvsMinV = IBV;
         cvsRpmMax = cvsRpmPrev = RPM; cvsRpmPrevMs = nowMs;
@@ -2188,8 +2234,15 @@ void cvStress_tick(uint32_t nowMs) {
         cvsStabReset(nowMs);
         queueConsoleMessageF("CV stress test: ARMED at %.2f V target, bus settled to %.2f V — snap the throttle to ~half max RPM, then back to idle", cvStressTargetV, busAvg);
       } else if (timedOut) {
-        cvStressStabilityFail(nearTarget ? "voltage swinging beyond the fail limit in CV mode"
-                                         : "voltage would not settle onto the CV target");
+        if (!nearTarget && busAvg > cvStressTargetV && MeasuredAmps < 2.0f) {
+          // The loop shed everything and the bus still sits above target: the bank is too stiff
+          // to pull down by the commanded headroom. Setup condition, not a loop defect.
+          cvsFailPhase = 3;
+          cvStressStabilityFail("bank too stiff to pull the bus down by the Target Headroom — reduce it and re-run");
+        } else {
+          cvStressStabilityFail(nearTarget ? "voltage swinging beyond the fail limit in CV mode"
+                                           : "voltage would not settle onto the CV target");
+        }
       }
       break; }
     case 3: {  // ARMED — CV still forced; the watcher observes. Firmware ends the run itself.
@@ -2227,6 +2280,7 @@ void cvStress_tick(uint32_t nowMs) {
       // Re-settle detector = provoked (an event fired, or a snap happened) then held in-band + stable
       // for 5 s. Works from BELOW the target (the field-dump valley), which is the real recovery path.
       bool provoked = (cvsFirstEventMs != 0) || cvsSnapDetected;
+      if (provoked && cvsProvokedMs == 0) cvsProvokedMs = nowMs;
       bool inBand    = fabsf(IBV_filtered - cvStressTargetV) <= CVS_RESETTLE_BAND_V * k;
       if (provoked && inBand) { if (cvsResettleSinceMs == 0) cvsResettleSinceMs = nowMs; }
       else cvsResettleSinceMs = 0;
@@ -2249,7 +2303,9 @@ void cvStress_tick(uint32_t nowMs) {
       if (!cvsSettled && elapsed >= CVS_WATCH_MAX_MS && !provoked) {
         cvStressAbort("no throttle snap detected — re-run and snap to ~half max RPM"); return;
       }
-      if (cvsSettled || elapsed >= CVS_WATCH_MAX_MS) {   // provoked but never re-settled = graded fail
+      // The recovery deadline runs from the PROVOCATION, not from arming — a snap late in the
+      // wait no longer starves a healthy recovery into "never re-settled".
+      if (cvsSettled || (provoked && (uint32_t)(nowMs - cvsProvokedMs) >= CVS_WATCH_MAX_MS)) {   // provoked but never re-settled = graded fail
         cvStressForceCV = false;
         cvStressGrade();
         cvStressPersistResult();
@@ -2275,6 +2331,7 @@ int cvStressJsonBuild(char *buf, int cap) {
                   "\"outcome\":%d,\"overall\":%d,\"gPreStab\":%d,\"gEvents\":%d,\"gHardCut\":%d,\"gRecov\":%d,\"gStab\":%d,\"failPhase\":%d,"
                   "\"wobIdleV\":%.2f,\"wobCvV\":%.2f,\"wobPostV\":%.2f,"
                   "\"stabBandV\":%.2f,\"failBandV\":%.2f,"
+                  "\"armAltA\":%.1f,\"ccAvgA\":%.1f,\"ccRipA\":%.1f,"
                   "\"tune\":{\"gainMode\":%d,\"alpha\":%.3f,\"td\":%.2f,\"kp\":%.2f,\"ki\":%.2f,\"kd\":%.1f,\"recovEn\":%d},"
                   "\"last\":\"%s\"}",
                   cvStressActive ? 1 : 0, (int)cvStressPhase, cvsReady ? 1 : 0, cvsOk ? 1 : 0, cvsAborted ? 1 : 0, cvStressAbortMsg,
@@ -2285,6 +2342,7 @@ int cvStressJsonBuild(char *buf, int cap) {
                   (int)cvsOutcome, (int)cvsGOverall, (int)cvsGPreStab, (int)cvsGEvents, (int)cvsGHardCut, (int)cvsGRecovery, (int)cvsGStab, (int)cvsFailPhase,
                   cvsWobbleIdleV, cvsWobbleCvV, cvsWobblePostV,
                   CVS_STAB_BAND_V * k, CvStressFailBandV * k,
+                  cvsArmAltA, cvsCcAvgA, cvsCcRipA,
                   (int)cvGainMode, cvAlpha, CvKdTd, VoltageKp, VoltageKi, VoltageKd, (int)cvRecovEnable,
                   cvsLastBlob);
 }
@@ -2800,4 +2858,576 @@ void debugClearMax(AsyncWebServerRequest *request) {
   request->send(200, "text/plain",
     "CLEARMAX done — in-RAM rings zeroed; persistence frozen. REBOOT to reload from flash\n"
     "(real data — unless a fillmax?persist=yes wrote synthetic there; then Erase All Flash).\n");
+}
+
+// ════════════════ Commissioning Ledger (COMMISSIONING_LEDGER_SPEC.md) ════════════════
+// Append-only evidence of commissioning activity: one event per measured stage completion
+// (with that stage's raw curves/results), per skip / hand-set mark, per wizard finish, and
+// per committed Bode sweep. Events stage in PSRAM (cxLedgerAppend, any core), move to
+// /cxledger.bin on Core 1 (cxLedgerFlush, deferred-writes cluster), and drain to the
+// log-commissioning-event edge fn under the field-off cloud gates (cxLedgerDrainService).
+// Cloud dedupes on (device_uid, seq), so retries after a lost response are harmless.
+// Ledger vs daily snapshot: the ledger is frozen per-run evidence; the snapshot's manifest
+// keys + learned_state stay the LIVE values. Same numbers only until something re-learns.
+
+void cxLedgerInit() {
+  cxPendBuf  = (char *)ps_malloc(CX_LEDGER_PEND_CAP);
+  cxPendSwap = (char *)ps_malloc(CX_LEDGER_PEND_CAP);
+  if (settingExists(NK_cxLedgerSeq)) cxLedgerSeq = (uint32_t)settingRead(NK_cxLedgerSeq).toInt();
+}
+
+// Stage one event row in PSRAM. Safe from either core (spinlock); no flash I/O here.
+// dataJson must be a complete {...} object. Rows that can't fit are counted, and the count
+// is confessed as data.dropped_prior on the next row that makes it through.
+static void cxLedgerAppend(const char *eventType, int stage, const String &dataJson) {
+  if (!cxPendBuf) return;
+  uint32_t seq, dropped;
+  portENTER_CRITICAL(&cxPendMux);
+  seq = ++cxLedgerSeq;
+  dropped = cxLedgerDroppedRows;
+  cxLedgerDroppedRows = 0;
+  portEXIT_CRITICAL(&cxPendMux);
+
+  String row;
+  row.reserve(dataJson.length() + 160);
+  row = "{\"seq\":";
+  row += String((unsigned long)seq);
+  row += ",\"event_type\":\"";
+  row += eventType;
+  row += '"';
+  if (stage >= 0) { row += ",\"stage\":"; row += String(stage); }
+  row += ",\"fw_version\":\"";
+  row += FIRMWARE_VERSION;
+  row += "\",\"device_epoch\":";
+  row += String((unsigned long)getCurrentTimestamp());
+  row += ",\"data\":";
+  if (dropped > 0 && dataJson.length() >= 2) {
+    row += "{\"dropped_prior\":";
+    row += String((unsigned long)dropped);
+    if (dataJson.length() > 2) { row += ','; row += dataJson.substring(1); }
+    else row += '}';
+  } else {
+    row += dataJson;
+  }
+  row += '}';
+
+  uint32_t need = (uint32_t)row.length() + 2;
+  bool ok = false;
+  portENTER_CRITICAL(&cxPendMux);
+  if (row.length() <= CX_LEDGER_ROW_MAX && cxPendLen + need <= CX_LEDGER_PEND_CAP) {
+    uint16_t len = (uint16_t)row.length();
+    memcpy(cxPendBuf + cxPendLen, &len, 2);
+    memcpy(cxPendBuf + cxPendLen + 2, row.c_str(), len);
+    cxPendLen += need;
+    ok = true;
+  } else {
+    cxLedgerDroppedRows++;
+  }
+  portEXIT_CRITICAL(&cxPendMux);
+  if (ok) cxLedgerFlushPending = true;
+}
+
+// The stage-specific evidence payload, read at the moment the stage is marked complete.
+// "applied" objects carry the AFTER values of the settings that stage writes (owner's call:
+// no before/after pairs — the daily snapshot history covers earlier states).
+static String cxLedgerStageData(int stage) {
+  String d;
+  d.reserve(1536);
+  d = "{";
+  switch (stage) {
+    case 1: {  // Field curve: raw duty→amps ramp — RAM-only elsewhere, this row is its only persistence
+      d += "\"curve\":[";
+      for (int i = 0; fieldCurveBuf && i < fieldCurveCount; i++) {
+        if (i) d += ',';
+        d += '[';
+        cfgAppendNum(d, fieldCurveBuf[i].duty, 2);
+        d += ',';
+        cfgAppendNum(d, fieldCurveBuf[i].amps, 1);
+        d += ']';
+      }
+      d += "],\"applied\":{\"SystemIDStabilizeAmps\":";
+      cfgAppendNum(d, SystemIDStabilizeAmps, 1);
+      d += ",\"SystemIDStepAmplitude\":";
+      cfgAppendNum(d, SystemIDStepAmplitude, 2);
+      d += '}';
+      break;
+    }
+    case 2: {  // Current-loop plant fit
+      d += "\"plant_tau_ms\":";
+      d += String((int)systemIDPlantTauMs);
+      d += ",\"applied\":{\"PidKp\":"; cfgAppendNum(d, PidKp, 4);
+      d += ",\"PidKi\":"; cfgAppendNum(d, PidKi, 4);
+      d += ",\"OutputPIDFilterTC\":"; cfgAppendNum(d, OutputPIDFilterTC, 1);
+      d += ",\"VoltageFilterTC\":"; cfgAppendNum(d, VoltageFilterTC, 1);
+      d += '}';
+      break;
+    }
+    case 3: {  // Verify: gains as left in force (an accepted "Soften 20%" lands here too)
+      d += "\"kp\":"; cfgAppendNum(d, PidKp, 4);
+      d += ",\"ki\":"; cfgAppendNum(d, PidKi, 4);
+      d += ",\"kd\":"; cfgAppendNum(d, PidKd, 4);
+      break;
+    }
+    case 4: {  // Disturbances: committed per-RPM map + the 3-level fit projections (raw points inside)
+      d += "\"level_a\":"; cfgAppendNum(d, ripTab.sess.levelA, 1);
+      d += ",\"ibv_min\":"; cfgAppendNum(d, ripTab.sess.ibvMinV, 2);
+      d += ",\"ibv_max\":"; cfgAppendNum(d, ripTab.sess.ibvMaxV, 2);
+      d += ",\"idle_rpm\":"; d += String((int)ripTab.sess.idleRpm);
+      d += ",\"map\":[";
+      {
+        bool first = true;
+        for (int r = 0; r < RIPTAB_BINS; r++) {
+          const RipTabCell *c = &ripTab.cell[r];
+          if (c->state == 0) continue;
+          int altSt  = (c->state & RIPTAB_ALT_DONE)  ? 2 : (c->state & RIPTAB_ALT_PEND)  ? 1 : 0;
+          int battSt = (c->state & RIPTAB_BATT_DONE) ? 2 : (c->state & RIPTAB_BATT_PEND) ? 1 : 0;
+          uint16_t aV = (altSt == 2)  ? c->altPkX100  : c->altPendX100;
+          uint16_t bV = (battSt == 2) ? c->battPkX100 : c->battPendX100;
+          if (!first) d += ',';
+          first = false;
+          d += '[';
+          d += String(r * FA_RPM_BIN_W); d += ',';
+          cfgAppendNum(d, aV / 100.0f, 2); d += ',';
+          cfgAppendNum(d, bV / 100.0f, 2); d += ',';
+          d += String(altSt); d += ',';
+          d += String(battSt);
+          d += ']';
+        }
+      }
+      d += "],\"rip_fit\":";
+      cfgAppendJsonStr(d, ripFitEncode(ripFitAlt));
+      d += ",\"slp_fit\":";
+      cfgAppendJsonStr(d, ripFitEncode(slpFitAlt));
+      break;
+    }
+    case 5: {  // Fault thresholds: the affine trip line + D-term deadband line as applied
+      d += "\"applied\":{\"IExcessFrac\":"; cfgAppendNum(d, IExcessFrac, 4);
+      d += ",\"IExcessFracBulk\":"; cfgAppendNum(d, IExcessFracBulk, 4);
+      d += ",\"IExcessBaseA\":"; cfgAppendNum(d, IExcessBaseA, 2);
+      d += ",\"CvKdDeadbandVps\":"; cfgAppendNum(d, CvKdDeadbandVps, 3);
+      d += ",\"CvKdDbSlope\":"; cfgAppendNum(d, CvKdDbSlope, 5);
+      d += '}';
+      break;
+    }
+    case 6: {  // CV plant fit: stiffness + the 8-edge table behind the median + gains it computed
+      d += "\"plant_ka\":"; cfgAppendNum(d, cvPlantKa, 5);
+      d += ",\"edges_k\":[";
+      for (int i = 0; i < 8; i++) { if (i) d += ','; cfgAppendNum(d, cvpfEdgeK[i], 2); }
+      d += "],\"edges_stat\":[";  // 0 used · 1 weak step · 2 wrong-way · 3 window starved · 4 not fired
+      for (int i = 0; i < 8; i++) { if (i) d += ','; d += String((int)cvpfEdgeStat[i]); }
+      d += "],\"computed\":{\"kp\":"; cfgAppendNum(d, cvComputedKp, 2);
+      d += ",\"ki\":"; cfgAppendNum(d, cvComputedKi, 2);
+      d += ",\"kd\":"; cfgAppendNum(d, cvComputedKd, 2);
+      d += "},\"cond\":{\"base_a\":"; cfgAppendNum(d, cvpfBaseA, 1);
+      d += ",\"step_a\":"; cfgAppendNum(d, cvpfStepA, 1);
+      d += ",\"batt_v\":"; cfgAppendNum(d, cvpfBattVAtFit, 3);
+      d += "},\"commission_temp_f\":"; cfgAppendNum(d, CommissionTempF, 1);
+      break;
+    }
+    case 7: {  // Min% floor + field decay: as-commissioned tables + the drain-vs-RPM line
+      d += "\"rpm_axis\":[";
+      for (int i = 0; i < RPM_TABLE_SIZE; i++) { if (i) d += ','; d += String(rpmTableRPMPoints[i]); }
+      d += "],\"min_duty_floor\":"; cfgAppendFloatArr(d, rpmMinDutyTable, RPM_TABLE_SIZE, 2);
+      d += ",\"knee_detected\":"; cfgAppendFloatArr(d, kneeKnee, RPM_TABLE_SIZE, 2);
+      d += ",\"knee_frozen\":[";
+      for (int i = 0; i < RPM_TABLE_SIZE; i++) { if (i) d += ','; d += (kneeFrozen[i] ? '1' : '0'); }
+      d += "],\"drain\":{\"lo_ms\":"; d += String((int)fdDrainLoMs);
+      d += ",\"hi_ms\":"; d += String((int)fdDrainHiMs);
+      d += ",\"rpm_lo\":"; d += String((int)fdDrainRpmLo);
+      d += ",\"rpm_hi\":"; d += String((int)fdDrainRpmHi);
+      d += ",\"tau_ms\":"; d += String((int)fieldDecayTauMs);
+      d += '}';
+      break;
+    }
+    case 8: {  // Stress test: the full graded record, verbatim (layout at cvStressPersistResult())
+      d += "\"stress\":";
+      cfgAppendJsonStr(d, String(cvsLastBlob));
+      break;
+    }
+    default: break;  // Prep (0): the row's existence + timestamp is the content
+  }
+  d += '}';
+  return d;
+}
+
+// action: "stage" (measured completion — carries evidence), "manual", or "skip".
+void cxLedgerLogStage(int stage, const char *action) {
+  cxLedgerAppend(action, stage,
+                 (strcmp(action, "stage") == 0) ? cxLedgerStageData(stage) : String("{}"));
+}
+
+void cxLedgerLogFinish() {
+  String d;
+  d.reserve(192);
+  d = "{\"done_mask\":";
+  d += String((int)commissionDoneMask);
+  d += ",\"manual_mask\":";
+  d += String((int)commissionManualMask);
+  d += ",\"state\":";
+  d += String((int)commissionState);
+  d += ",\"commission_temp_f\":";
+  cfgAppendNum(d, CommissionTempF, 1);
+  d += ",\"commission_epoch\":";
+  {
+    char eb[24];
+    snprintf(eb, sizeof(eb), "%lld", (long long)CommissionEpoch);  // time_t is 64-bit
+    d += eb;
+  }
+  d += '}';
+  cxLedgerAppend("finish", -1, d);
+}
+
+// which: 0 = open-loop plant sweep (SystemID), 1 = closed-loop tuning sweep.
+// Reads the record just committed into the respective 50-slot ring.
+void cxLedgerLogSweep(int which) {
+  String d;
+  d.reserve(1024);
+  if (which == 0) {
+    if (!sysidSweepLog || sysidSweepLogCount == 0) return;
+    const SysIDSweepRecord *r = &sysidSweepLog[(sysidSweepLogHead + 49) % 50];
+    d = "{\"run\":"; d += String(r->runNumber);
+    d += ",\"rolloff_hz\":"; cfgAppendNum(d, r->rolloffHz, 2);
+    d += ",\"dc_gain_a_per_pct\":"; cfgAppendNum(d, r->dcGainApPct, 3);
+    d += ",\"worst_phase_deg\":"; cfgAppendNum(d, r->worstPhaseDeg, 1);
+    d += ",\"worst_phase_hz\":"; cfgAppendNum(d, r->worstPhaseFreqHz, 2);
+    d += ",\"amp_pct\":"; cfgAppendNum(d, r->setupAmplitude, 2);
+    d += ",\"floor_a\":"; cfgAppendNum(d, r->stabilizeAmps, 1);
+    d += ",\"rpm\":"; cfgAppendNum(d, r->avgRPM, 0);
+    d += ",\"alt_temp_f\":"; cfgAppendNum(d, r->avgAltTempF, 1);
+    d += ",\"batt_v\":"; cfgAppendNum(d, r->battV, 2);
+    d += ",\"stage_code\":"; d += String((int)r->chargeStage);
+    d += ",\"curve\":[";
+    for (int i = 0; i < r->nPoints; i++) {
+      if (i) d += ',';
+      d += '[';
+      cfgAppendNum(d, r->curve[i].freqHz, 3); d += ',';
+      cfgAppendNum(d, r->curve[i].gainApPct, 3); d += ',';
+      cfgAppendNum(d, r->curve[i].phaseDeg, 1);
+      d += ']';
+    }
+    d += "]}";
+    cxLedgerAppend("bode_sysid", -1, d);
+  } else {
+    if (!tuningSweepLog || tuningSweepLogCount == 0) return;
+    const TuningSweepRecord *r = &tuningSweepLog[(tuningSweepLogHead + 49) % 50];
+    d = "{\"run\":"; d += String(r->runNumber);
+    d += ",\"bandwidth_hz\":"; cfgAppendNum(d, r->bandwidthHz, 2);
+    d += ",\"peak_gain\":"; cfgAppendNum(d, r->peakGain, 3);
+    d += ",\"peak_gain_hz\":"; cfgAppendNum(d, r->peakGainFreqHz, 2);
+    d += ",\"worst_phase_deg\":"; cfgAppendNum(d, r->worstPhaseDeg, 1);
+    d += ",\"worst_phase_hz\":"; cfgAppendNum(d, r->worstPhaseFreqHz, 2);
+    d += ",\"kp\":"; cfgAppendNum(d, r->kp, 4);
+    d += ",\"ki\":"; cfgAppendNum(d, r->ki, 4);
+    d += ",\"kd\":"; cfgAppendNum(d, r->kd, 4);
+    d += ",\"sine_amp_a\":"; cfgAppendNum(d, r->sineAmpA, 1);
+    d += ",\"base_a\":"; cfgAppendNum(d, r->baseA, 1);
+    d += ",\"batt_v\":"; cfgAppendNum(d, r->battV, 2);
+    d += ",\"rpm_min\":"; cfgAppendNum(d, r->rpmMin, 0);
+    d += ",\"rpm_max\":"; cfgAppendNum(d, r->rpmMax, 0);
+    d += ",\"worst_coherence\":"; cfgAppendNum(d, r->worstCoherence, 3);
+    d += ",\"duty_railed\":"; d += String((int)r->dutyRailed);
+    d += ",\"stage_code\":"; d += String((int)r->chargeStage);
+    d += ",\"curve\":[";
+    for (int i = 0; i < r->nPoints; i++) {
+      if (i) d += ',';
+      d += '[';
+      cfgAppendNum(d, r->curve[i].freqHz, 3); d += ',';
+      cfgAppendNum(d, r->curve[i].gain, 3); d += ',';
+      cfgAppendNum(d, r->curve[i].phaseDeg, 1);
+      d += ']';
+    }
+    d += "]}";
+    cxLedgerAppend("bode_tuning", -1, d);
+  }
+}
+
+// Event-driven test-result row (event_type "test"): one per test ENDING — graded, failed, or
+// aborted — from any entry point (wizard or standalone). Plain char* signature on purpose:
+// call sites live in earlier .ino files where a String-arg prototype wouldn't survive
+// auto-prototype ordering.
+void cxLedgerLogTest(const char *dataJson) {
+  cxLedgerAppend("test", -1, String(dataJson));
+}
+
+// Serialize the LAST COMMITTED record of a scored tuning run into a "test" row.
+// which: 0 = CC square wave (tuningLog), 1 = CV square wave (cvTuningLog), 2 = SystemID step (systemIDLog).
+// Mirrors cxLedgerLogSweep: called from the commit functions in 6_functions right after the ring write.
+void cxLedgerLogTuneRun(int which) {
+  String d;
+  d.reserve(768);
+  if (which == 0) {
+    if (!tuningLog || tuningLogCount == 0) return;
+    const TuningRecord *r = &tuningLog[(tuningLogHead + 49) % 50];
+    d = "{\"test\":\"cc_square\",\"run\":"; d += String(r->runNumber);
+    d += ",\"score\":"; cfgAppendNum(d, r->score, 2);
+    d += ",\"worst_err_a\":"; cfgAppendNum(d, r->worstErrorA, 1);
+    d += ",\"active_s\":"; cfgAppendNum(d, r->activeTimeSec, 1);
+    d += ",\"kp\":"; cfgAppendNum(d, r->kp, 4);
+    d += ",\"ki\":"; cfgAppendNum(d, r->ki, 4);
+    d += ",\"kd\":"; cfgAppendNum(d, r->kd, 4);
+    d += ",\"sample_div\":"; d += String((int)r->sampleDivisor);
+    d += ",\"tracking_gain\":"; cfgAppendNum(d, r->trackingGain, 3);
+    d += ",\"duty_ramp\":"; cfgAppendNum(d, r->dutyRampRate, 2);
+    d += ",\"amp_a\":"; d += String((int)r->waveAmplitude);
+    d += ",\"period_s\":"; d += String((int)r->wavePeriod);
+    d += ",\"floor_a\":"; d += String((int)r->waveFloor);
+    d += ",\"rpm\":"; cfgAppendNum(d, r->avgRPM, 0);
+    d += ",\"alt_temp_f\":"; cfgAppendNum(d, r->avgAltTempF, 1);
+    d += ",\"batt_v\":"; cfgAppendNum(d, r->battV, 2);
+    d += ",\"stage_code\":"; d += String((int)r->chargeStage);
+    if (r->note[0]) { d += ",\"note\":\""; d += r->note; d += '"'; }   // sanitizeTuningNote strips " \ < >
+  } else if (which == 1) {
+    if (!cvTuningLog || cvTuningLogCount == 0) return;
+    const CVTuningRecord *r = &cvTuningLog[(cvTuningLogHead + 49) % 50];
+    d = "{\"test\":\"cv_square\",\"run\":"; d += String(r->runNumber);
+    d += ",\"score\":"; cfgAppendNum(d, r->score, 2);
+    d += ",\"low_score\":"; cfgAppendNum(d, r->lowScore, 2);
+    d += ",\"avg_settle_s\":"; cfgAppendNum(d, r->avgSettlingTimeSec, 2);
+    d += ",\"avg_low_settle_s\":"; cfgAppendNum(d, r->avgLowSettlingTimeSec, 2);
+    d += ",\"worst_ov_v\":"; cfgAppendNum(d, r->worstOvershootV, 3);
+    d += ",\"worst_low_ov_v\":"; cfgAppendNum(d, r->worstLowOvV, 3);
+    d += ",\"worst_low_under_v\":"; cfgAppendNum(d, r->worstLowUndershootV, 3);
+    d += ",\"steady_p2p_v\":"; cfgAppendNum(d, r->steadyP2PV, 3);
+    d += ",\"active_s\":"; cfgAppendNum(d, r->activeTimeSec, 1);
+    d += ",\"fires\":{\"fast_ov\":"; d += String((int)r->fastOvFires);
+    d += ",\"i_excess\":"; d += String((int)r->iExcessFires);
+    d += ",\"load_dump\":"; d += String((int)r->loadDumpFires);
+    d += ",\"hard_oc\":"; d += String((int)r->hardOcFires);
+    d += "},\"kp\":"; cfgAppendNum(d, r->voltageKp, 2);
+    d += ",\"ki\":"; cfgAppendNum(d, r->voltageKi, 2);
+    d += ",\"kd\":"; cfgAppendNum(d, r->voltageKd, 1);
+    d += ",\"amp_v\":"; cfgAppendNum(d, r->waveAmplitudeV, 2);
+    d += ",\"period_s\":"; d += String((int)r->wavePeriodSec);
+    d += ",\"target_v\":"; cfgAppendNum(d, r->chargingVoltageTarget, 2);
+    d += ",\"rpm\":"; cfgAppendNum(d, r->avgRPM, 0);
+    d += ",\"alt_temp_f\":"; cfgAppendNum(d, r->avgAltTempF, 1);
+    d += ",\"batt_v\":"; cfgAppendNum(d, r->battVAtStart, 2);
+    d += ",\"soc\":"; cfgAppendNum(d, r->socAtStart, 1);
+    d += ",\"stage_code\":"; d += String((int)r->chargeStage);
+    if (r->note[0]) { d += ",\"note\":\""; d += r->note; d += '"'; }
+  } else {
+    if (!systemIDLog || systemIDLogCount == 0) return;
+    const SystemIDRecord *r = &systemIDLog[(systemIDLogHead + 49) % 50];
+    d = "{\"test\":\"sysid_step\",\"run\":"; d += String(r->runNumber);
+    d += ",\"ok\":"; d += (r->abortReason == 0) ? '1' : '0';
+    d += ",\"abort_reason\":"; d += String((int)r->abortReason);
+    d += ",\"abort_phase\":"; d += String((int)r->abortPhase);
+    d += ",\"score\":"; cfgAppendNum(d, r->score, 0);
+    d += ",\"rise_avg_ms\":"; cfgAppendNum(d, r->riseAvg_ms, 0);
+    d += ",\"fall_avg_ms\":"; cfgAppendNum(d, r->fallAvg_ms, 0);
+    d += ",\"rise_ms\":[";
+    for (int i = 0; i < 3; i++) { if (i) d += ','; cfgAppendNum(d, r->riseDelays[i], 0); }
+    d += "],\"fall_ms\":[";
+    for (int i = 0; i < 3; i++) { if (i) d += ','; cfgAppendNum(d, r->fallDelays[i], 0); }
+    d += "],\"step_a\":[";
+    for (int i = 0; i < 3; i++) { if (i) d += ','; cfgAppendNum(d, r->stepAmps[i], 1); }
+    d += "],\"quiet_pp_a\":[";
+    for (int i = 0; i < 3; i++) { if (i) d += ','; cfgAppendNum(d, r->quietPP[i], 1); }
+    d += "],\"amp_pct\":"; cfgAppendNum(d, r->setupStepAmplitude, 2);
+    d += ",\"rpm\":"; cfgAppendNum(d, r->avgRPM, 0);
+    d += ",\"alt_temp_f\":"; cfgAppendNum(d, r->avgAltTempF, 1);
+    d += ",\"batt_v\":"; cfgAppendNum(d, r->battV, 2);
+    d += ",\"stage_code\":"; d += String((int)r->chargeStage);
+  }
+  d += '}';
+  cxLedgerAppend("test", -1, d);
+}
+
+// CV plant-fit "test" row — success serializes the fit (same shape as the stage-6 wizard row
+// plus conditions); any failure carries the abort text. Called from cvpfAbort and from
+// cvpfServiceCompletion right after cvpfProcess() settles cvpfState.
+void cxLedgerLogCvpf() {
+  String d;
+  d.reserve(512);
+  if (cvpfOk) {
+    d = "{\"test\":\"cv_plant_fit\",\"ok\":1,\"plant_ka\":"; cfgAppendNum(d, cvpfKa, 5);
+    d += ",\"edges_k\":[";
+    for (int i = 0; i < 8; i++) { if (i) d += ','; cfgAppendNum(d, cvpfEdgeK[i], 2); }
+    d += "],\"edges_stat\":[";
+    for (int i = 0; i < 8; i++) { if (i) d += ','; d += String((int)cvpfEdgeStat[i]); }
+    d += "],\"kp\":"; cfgAppendNum(d, cvpfKp, 2);
+    d += ",\"ki\":"; cfgAppendNum(d, cvpfKi, 2);
+    d += ",\"dv_mv\":"; cfgAppendNum(d, cvpfDV * 1000.0f, 0);
+    d += ",\"di_a\":"; cfgAppendNum(d, cvpfDI, 2);
+    d += ",\"snr\":"; cfgAppendNum(d, cvpfSNR, 1);
+    d += ",\"warn\":"; d += String((int)cvpfWarn);
+    d += ",\"base_a\":"; cfgAppendNum(d, cvpfBaseA, 1);
+    d += ",\"step_a\":"; cfgAppendNum(d, cvpfStepA, 1);
+    d += ",\"rpm\":"; cfgAppendNum(d, cvpfRpmAtFit, 0);
+    d += ",\"batt_v\":"; cfgAppendNum(d, cvpfBattVAtFit, 3);
+    d += ",\"soc\":"; cfgAppendNum(d, cvpfSocAtFit, 1);
+    d += '}';
+  } else {
+    d = "{\"test\":\"cv_plant_fit\",\"ok\":0,\"abort\":\"";
+    d += cvpfAbortMsg;   // fixed literals, no quote characters
+    d += "\"}";
+  }
+  cxLedgerAppend("test", -1, d);
+}
+
+// Core 1 only (loop() deferred-writes cluster): staged rows → /cxledger.bin. Same policy as
+// the neighboring pendingSave* writers — every row is the product of a user-driven wizard or
+// tuning action, so this flash write never fires autonomously.
+void cxLedgerFlush() {
+  if (!cxPendBuf || !cxPendSwap) return;
+  char *rows;
+  uint32_t n;
+  portENTER_CRITICAL(&cxPendMux);
+  n = cxPendLen;
+  if (n == 0) { portEXIT_CRITICAL(&cxPendMux); return; }
+  rows = cxPendBuf;
+  cxPendBuf = cxPendSwap;   // producers keep appending into the other buffer
+  cxPendSwap = rows;
+  cxPendLen = 0;
+  portEXIT_CRITICAL(&cxPendMux);
+
+  // Seq persists BEFORE the rows land: a crash between the two burns a gap in the sequence
+  // (harmless) instead of reusing numbers (the cloud would silently drop the reuse as dupes).
+  settingWrite(NK_cxLedgerSeq, String((unsigned long)cxLedgerSeq).c_str());
+
+  fsTakeLock();
+  uint32_t cur = 0;
+  {
+    File f = LittleFS.open(CX_LEDGER_PATH, "r");
+    if (f) { cur = f.size(); f.close(); }
+  }
+  if (cur + n > CX_LEDGER_FILE_CAP) {
+    // Compact: drop oldest rows until the incoming batch fits (newest evidence wins).
+    char *tmp = (char *)ps_malloc(CX_LEDGER_FILE_CAP);
+    if (tmp) {
+      uint32_t sz = 0;
+      File f = LittleFS.open(CX_LEDGER_PATH, "r");
+      if (f) { sz = f.read((uint8_t *)tmp, CX_LEDGER_FILE_CAP); f.close(); }
+      uint32_t off = 0, droppedRows = 0;
+      while (off < sz) {
+        uint16_t len;
+        memcpy(&len, tmp + off, 2);
+        if (len == 0 || len > CX_LEDGER_ROW_MAX || off + 2 + len > sz) { sz = off; break; }  // corrupt tail: discard the rest
+        if (sz - off + n <= CX_LEDGER_FILE_CAP) break;
+        off += 2 + (uint32_t)len;
+        droppedRows++;
+      }
+      uint32_t kept = (off <= sz) ? sz - off : 0;
+      File w = LittleFS.open(CX_LEDGER_PATH, "w");
+      if (w) {
+        if (kept) w.write((uint8_t *)tmp + off, kept);
+        w.close();
+      }
+      free(tmp);
+      if (droppedRows) {
+        portENTER_CRITICAL(&cxPendMux);
+        cxLedgerDroppedRows += droppedRows;
+        portEXIT_CRITICAL(&cxPendMux);
+      }
+    } else {
+      LittleFS.remove(CX_LEDGER_PATH);  // no PSRAM for compaction — start the file over
+    }
+  }
+  File f = LittleFS.open(CX_LEDGER_PATH, "a");
+  if (f) {
+    f.write((uint8_t *)rows, n);
+    f.close();
+  }
+  fsReleaseLock();
+}
+
+// Core 1 (cloud-features block; caller gates hardware + field-off — the post-send trim is a
+// flash write). Network gates live here. One batch in flight at a time; sent bytes trim off
+// the file head only after the cloud confirms.
+void cxLedgerDrainService() {
+  if (cxLedgerUpState == 1) return;                            // batch in flight
+  if (cxLedgerUpState == -1) { cxLedgerUpState = 0; return; }  // failed: retry paced by the 60s guard below
+  if (cxLedgerUpState == 2) {                                  // cloud has the rows → drop the sent prefix
+    fsTakeLock();
+    File f = LittleFS.open(CX_LEDGER_PATH, "r");
+    if (f) {
+      uint32_t sz = f.size();
+      if (cxLedgerUpBytes >= sz) {
+        f.close();
+        LittleFS.remove(CX_LEDGER_PATH);
+      } else {
+        uint32_t rem = sz - cxLedgerUpBytes;
+        char *tmp = (char *)ps_malloc(rem);
+        uint32_t kept = 0;
+        if (tmp) {
+          f.seek(cxLedgerUpBytes);
+          kept = f.read((uint8_t *)tmp, rem);
+        }
+        f.close();
+        File w = LittleFS.open(CX_LEDGER_PATH, "w");
+        if (w) {
+          if (tmp && kept) w.write((uint8_t *)tmp, kept);
+          w.close();
+        }
+        if (tmp) free(tmp);
+      }
+    }
+    fsReleaseLock();
+    cxLedgerUpBytes = 0;
+    cxLedgerUpState = 0;
+    return;
+  }
+  if (millis() - cxLedgerLastAttemptMs < 60000UL) return;
+  if (!(currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -80)) return;
+  if (cxPendLen > 0 || cxLedgerFlushPending) return;  // let staged rows reach the file first — one batch, not two
+
+  fsTakeLock();
+  File f = LittleFS.open(CX_LEDGER_PATH, "r");
+  if (!f || f.size() == 0) {
+    if (f) f.close();
+    fsReleaseLock();
+    return;
+  }
+  uint32_t sz = f.size();
+  char *body = (char *)ps_malloc(CX_LEDGER_BATCH_CAP);
+  if (!body) {
+    f.close();
+    fsReleaseLock();
+    return;
+  }
+  int off = snprintf(body, CX_LEDGER_BATCH_CAP,
+                     "{\"device_uid\":\"%s\",\"token\":\"%s\",\"events\":[",
+                     device_id_hex, authToken.c_str());
+  uint32_t consumed = 0;
+  int rows = 0;
+  bool corrupt = false;
+  while (consumed < sz && rows < CX_LEDGER_BATCH_ROWS) {
+    uint16_t len = 0;
+    f.seek(consumed);
+    if (f.read((uint8_t *)&len, 2) != 2 || len == 0 || len > CX_LEDGER_ROW_MAX || consumed + 2 + len > sz) {
+      corrupt = true;
+      break;
+    }
+    if ((uint32_t)off + len + 4 > CX_LEDGER_BATCH_CAP) break;  // batch full — next pass takes the rest
+    if (rows) body[off++] = ',';
+    if (f.read((uint8_t *)body + off, len) != (int)len) { corrupt = true; break; }
+    off += len;
+    consumed += 2 + (uint32_t)len;
+    rows++;
+  }
+  f.close();
+  if (corrupt && rows == 0) {
+    // Unreadable from the first row: the queue file is garbage — drop it rather than wedge.
+    LittleFS.remove(CX_LEDGER_PATH);
+    fsReleaseLock();
+    free(body);
+    queueConsoleMessage("Commissioning ledger: corrupt queue discarded");
+    return;
+  }
+  fsReleaseLock();
+  if (rows == 0) { free(body); return; }
+  off += snprintf(body + off, CX_LEDGER_BATCH_CAP - off, "]}");
+
+  HttpsRequest req = {};
+  req.type = HTTPS_UPLOAD_CX_LEDGER;
+  req.payloadCap = CX_LEDGER_BATCH_CAP;
+  req.payload = body;
+  cxLedgerLastAttemptMs = millis();
+  cxLedgerUpBytes = consumed;
+  cxLedgerUpState = 1;
+  if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+    free(req.payload);
+    cxLedgerUpState = 0;
+    cxLedgerUpBytes = 0;
+  }
 }

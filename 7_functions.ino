@@ -2886,6 +2886,21 @@ bool serveCachedAsset(AsyncWebServerRequest *request, const String &path, const 
   else if (path == "/uPlot.iife.min.js") cf = &cachedUplotJs;
 
   if (cf && cf->data && cf->size > 0) {
+    // index.html must revalidate on every load. Cached without a network round trip it renders a
+    // complete, live-looking dashboard off a device that is unreachable (wrong network, still in
+    // AP/config mode) — every reading dashed out and vesselInfoComplete stuck false. The other
+    // assets are only ever fetched by an index.html that already reached the device, so they keep
+    // the hour. The ETag makes the revalidation a 304, not a 164 KB re-download.
+    const char *cacheHdr = (path == "/index.html") ? "no-cache" : "public, max-age=3600";
+
+    if (cf->etag[0] && request->header("If-None-Match").indexOf(cf->etag) >= 0) {
+      AsyncWebServerResponse *r304 = request->beginResponse(304);
+      r304->addHeader("ETag", cf->etag);
+      r304->addHeader("Cache-Control", cacheHdr);
+      request->send(r304);
+      return true;
+    }
+
     uint8_t *data = cf->data;
     size_t len = cf->size;
     AsyncWebServerResponse *resp = request->beginResponse(
@@ -2897,7 +2912,8 @@ bool serveCachedAsset(AsyncWebServerRequest *request, const String &path, const 
         return toSend;
       });
     resp->addHeader("Content-Encoding", "gzip");
-    resp->addHeader("Cache-Control", "public, max-age=3600");
+    resp->addHeader("Cache-Control", cacheHdr);
+    if (cf->etag[0]) resp->addHeader("ETag", cf->etag);
     request->send(resp);
     return true;
   }
@@ -4731,6 +4747,11 @@ CachedAsset loadFileToRAM(const char *path) {
   result.data = (uint8_t *)ps_malloc(result.size);
   if (result.data) {
     f.read(result.data, result.size);
+    // FNV-1a over the loaded bytes — recomputed on every cacheWebAssets(), so a web-bundle
+    // update mints a new ETag and browsers can never revalidate onto the old bundle.
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < result.size; i++) h = (h ^ result.data[i]) * 16777619u;
+    snprintf(result.etag, sizeof(result.etag), "\"%08x-%x\"", h, (unsigned)result.size);
     Serial.printf("Preloaded %s into RAM (%d bytes)\n", path, result.size);
   } else {
     Serial.printf("preload malloc FAILED: %s\n", path);

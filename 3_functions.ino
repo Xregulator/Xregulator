@@ -3149,6 +3149,30 @@ void setupServer() {
     bool nvsPersistNow = false;   // set by discrete reset/set handlers that write saveNVSDataFull()-owned vars; forces ONE immediate persist at the end so a reboot before the next field-off edge can't revert the action
     String inputMessage;
 
+    // === SAFETY: Allow field OFF without arming ===
+    if (request->hasParam("OnOff")) {
+      int requestedState = request->getParam("OnOff")->value().toInt();
+      if (requestedState == 0) {
+        // Turning OFF is ALWAYS allowed — safety critical
+        OnOff = 0;
+        settingWrite(NK_OnOff, "0");
+        stateRevision++;
+        queueConsoleMessage("FIELD OFF: Safety override (no arming required)");
+        request->send(200, "text/plain", "0");
+        return;
+      }
+      // If turning ON, fall through to arm check below
+    }
+
+    if (!settingsArmActive()) {
+      // Console line so a rejected write is visible — a stale/replayed URL lands here silently.
+      queueConsoleMessage("Settings write REJECTED: not armed (press Unlock Settings first)");
+      request->send(403, "text/plain", "Settings not armed");
+      return;
+    }
+
+    // Arm-gated like every other mutation — a stale/replayed update URL must never reboot the
+    // device. The dashboard's two update flows arm just-in-time on the user's confirm click.
     if (request->hasParam("UpdateToVersion")) {
       foundParameter = true;
       String selectedVersionStr = request->getParam("UpdateToVersion")->value();
@@ -3251,28 +3275,6 @@ void setupServer() {
         ESP.restart();
         return;
       }
-    }
-
-    // === SAFETY: Allow field OFF without arming ===
-    if (request->hasParam("OnOff")) {
-      int requestedState = request->getParam("OnOff")->value().toInt();
-      if (requestedState == 0) {
-        // Turning OFF is ALWAYS allowed — safety critical
-        OnOff = 0;
-        settingWrite(NK_OnOff, "0");
-        stateRevision++;
-        queueConsoleMessage("FIELD OFF: Safety override (no arming required)");
-        request->send(200, "text/plain", "0");
-        return;
-      }
-      // If turning ON, fall through to arm check below
-    }
-
-    if (!settingsArmActive()) {
-      // Console line so a rejected write is visible — a stale/replayed URL lands here silently.
-      queueConsoleMessage("Settings write REJECTED: not armed (press Enable Settings Changes first)");
-      request->send(403, "text/plain", "Settings not armed");
-      return;
     }
 
     if (request->hasParam("SystemIDStepAmplitude")) {
@@ -3801,6 +3803,7 @@ void setupServer() {
       }
       commissionAgeAck = false;      settingWrite(NK_cmAgeAck, "0");
       commissionChangeFlag = false;  settingWrite(NK_cmChangeFlag, "0");
+      cxLedgerLogFinish();  // ledger completion row: masks + state + CommissionTempF/Epoch (epoch stamped above)
       settingsDirty = true;
       queueConsoleMessageF("Commissioning: pass finished — %s",
                            commissionDoneMask >= COMMISSION_ALL_DONE ? "all steps complete, device COMMISSIONED"
@@ -6785,13 +6788,20 @@ void setupServer() {
   });
 
   // Explicit routes for all static web assets — served directly, never hit onNotFound
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+  // PSRAM-preload-failed fallback still has to carry no-cache, or the flash path reintroduces the
+  // stale-dashboard-off-an-unreachable-device problem serveCachedAsset() closes.
+  auto sendIndexFromFlash = [](AsyncWebServerRequest *request) {
+    AsyncWebServerResponse *resp = request->beginResponse(webFS, "/index.html", "text/html");
+    resp->addHeader("Cache-Control", "no-cache");
+    request->send(resp);
+  };
+  server.on("/", HTTP_GET, [sendIndexFromFlash](AsyncWebServerRequest *request) {
     if (!serveCachedAsset(request, "/index.html", "text/html"))
-      request->send(webFS, "/index.html", "text/html");
+      sendIndexFromFlash(request);
   });
-  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+  server.on("/index.html", HTTP_GET, [sendIndexFromFlash](AsyncWebServerRequest *request) {
     if (!serveCachedAsset(request, "/index.html", "text/html"))
-      request->send(webFS, "/index.html", "text/html");
+      sendIndexFromFlash(request);
   });
   server.on("/styles.css", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!serveCachedAsset(request, "/styles.css", "text/css"))
@@ -7450,9 +7460,9 @@ void setupServer() {
   // CV stress-test status + result (wizard stage 8 and the Tuning ▸ Stress Test standalone modal poll this; the
   // poll itself stamps the browser-alive deadman inside cvStressJsonBuild).
   server.on("/cvstress.json", HTTP_GET, [](AsyncWebServerRequest *request) {
-    std::shared_ptr<char> bufPtr((char *)ps_malloc(1344), [](char *p) { if (p) free(p); });
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(1408), [](char *p) { if (p) free(p); });
     if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
-    cvStressJsonBuild(bufPtr.get(), 1344);
+    cvStressJsonBuild(bufPtr.get(), 1408);
     request->send(200, "application/json", bufPtr.get());
   });
 

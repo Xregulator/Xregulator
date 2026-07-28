@@ -107,12 +107,12 @@
       <!-- Only path back to the Unlock Settings button while collapsed: the whole settings-access tier
            is display:none under .header-collapsed, so a locked+minimized session is otherwise a dead end.
            Shown by syncHeaderStrip only while settingsUnlocked is false. -->
-      <span id="hcs-unlock" class="hcs-unlock" style="display:none;" title="Expand the header and unlock settings" onclick="stripExpandToUnlock(event)">Tap to unlock</span>
+      <span id="hcs-unlock" class="hcs-unlock" style="display:none;" title="Expand the header and unlock settings" onclick="stripExpandToUnlock(event)"><svg class="lock-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 9V7a5 5 0 0 0-10 0v2H5v13h14V9h-2zm-8-2a3 3 0 0 1 6 0v2H9V7zm4 9.7V19h-2v-2.3a2 2 0 1 1 2 0z"/></svg><span class="u-long">Tap to unlock</span><span class="u-short">Unlock</span></span>
       <!-- Alternator group -->
       <span class="hcs-m hcs-alt"><span id="hcs-alt">-</span><i>A</i></span>
       <span class="hcs-m hcs-temp"><span id="hcs-temp">-</span><i>°F</i></span>
       <span class="hcs-m hcs-duty"><span id="hcs-duty">-</span><i>% duty</i></span>
-      <span class="hcs-gsep"></span>
+      <span class="hcs-gsep hcs-asep"></span>
       <!-- Battery group -->
       <span class="hcs-m"><span id="hcs-volt">-</span><i>V</i></span>
       <span class="hcs-m hcs-soc req-batt-current"><span id="hcs-soc">-</span><i>%</i></span>
@@ -214,17 +214,16 @@
     <div id="protections-banner" class="lock-status-locked" style="display:none;">⚠️ PROTECTIONS DISABLED FOR TUNING — RE-ENABLE BEFORE NORMAL USE ⚠️</div>
 
     <!-- Settings Access — the button arms the firmware's 30-min settings write window
-         (no password; LAN clients are trusted, this is an acknowledgment) -->
+         (no password; LAN clients are trusted, this is an acknowledgment). The button's
+         padlock styling is the ONLY locked-state indicator; the whole tier hides once armed. -->
     <div id="settings-access-section" class="settings-access-tier">
-      <div id="lock-status">Settings are Locked</div>
       <div class="password-form-wrapper">
         <form onsubmit="return armSettings();">
           <div class="password-form">
             <div class="password-input-group">
-              <input type="submit" id="settings_arm_btn" value="Unlock Settings" class="btn-primary" />
+              <button type="submit" id="settings_arm_btn"><svg class="lock-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 9V7a5 5 0 0 0-10 0v2H5v13h14V9h-2zm-8-2a3 3 0 0 1 6 0v2H9V7zm4 9.7V19h-2v-2.3a2 2 0 1 1 2 0z"/></svg>Unlock Settings</button>
             </div>
           </div>
-          <div style="font-size:11px;color:#888;margin-top:4px;">Allows settings changes from any device on this network for 30 minutes, then relocks automatically.</div>
           <div id="unlock-warning" style="font-size:11px;color:#b87b00;margin-top:4px;">⚠ Avoid parameter changes during rapid RPM or load swings — controls may briefly lag.</div>
           <div id="settings_arm_msg"></div>
         </form>

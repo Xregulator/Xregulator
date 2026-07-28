@@ -1486,14 +1486,34 @@ input[type="submit"]:hover {
 /* Locked-out CTA: always visible (no @container hide rule). order:100 floats it past the grow
    spacer to the far-right edge so it reads as a passive corner prompt, not an alarm crowding the
    readouts. House teal, not red. */
+/* Mirrors #settings_arm_btn (see its rule) — keep the two in step; pill radius is the only
+   intentional difference, so it reads as a strip chip at this height. */
 #header-collapsed-strip .hcs-unlock {
-  order: 100; margin-left: 8px;
-  font-weight: 800; letter-spacing: .3px; cursor: pointer; color: var(--accent);
-  background: rgba(0, 161, 154, .12); border: 1px solid rgba(0, 161, 154, .35);
-  border-radius: 999px; padding: 4px 11px; line-height: 1;
+  order: 100; margin-left: 8px; align-items: center; gap: 6px;
+  font-weight: 800; letter-spacing: .3px; cursor: pointer; color: #00867f;
+  background: rgba(0, 161, 154, .10); border: 2px solid var(--accent);
+  border-radius: 999px; padding: 3px 11px; line-height: 1;
 }
+#header-collapsed-strip .hcs-unlock .lock-glyph { width: 12px; height: 12px; flex: none; }
 .dark-mode #header-collapsed-strip .hcs-unlock {
-  color: #78c8c4; background: rgba(120, 200, 196, .14); border-color: rgba(120, 200, 196, .4);
+  color: #4fd6ce;
+}
+/* The chip costs 150px of a row that cannot wrap, so it sheds text as the strip narrows:
+   "Tap to unlock" (needs 436px) → "Unlock" (389px) → glyph only (324px). Without this a
+   phone-width locked strip clips the chip off the right edge instead of shrinking anything.
+   Below ~392px the lock glyph alone is the affordance — the state word wins the space. */
+#header-collapsed-strip .hcs-unlock .u-short { display: none; }
+@container (max-width: 439px) {
+  #header-collapsed-strip .hcs-unlock .u-long  { display: none; }
+  #header-collapsed-strip .hcs-unlock .u-short { display: inline; }
+  /* ~12px of phone-width compaction, spent so the state word survives whole down to a 360px viewport */
+  #header-collapsed-strip .hcs-chevron { margin-left: 4px; }
+  #header-collapsed-strip .hcs-pill { letter-spacing: 0; }
+}
+@container (max-width: 379px) {
+  #header-collapsed-strip .hcs-unlock .u-short { display: none; }
+  #header-collapsed-strip .hcs-unlock { gap: 0; padding: 4px 7px; }
+  #header-collapsed-strip .hcs-unlock .lock-glyph { width: 14px; height: 14px; }
 }
 
 #header-collapsed-strip .hcs-m { display: inline-flex; align-items: baseline; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -1516,25 +1536,44 @@ input[type="submit"]:hover {
 /* margin-left buys extra space from the toggle; vertical padding gives a ~40px expand tap target without changing the line height */
 #header-collapsed-strip .hcs-chevron { font-size: 16px; opacity: .55; cursor: pointer; margin-left: 12px; padding: 11px 6px; margin-top: -11px; margin-bottom: -11px; }
 
-/* progressive reveal — State + Volts always; then Alt A → Temp → SOC → RPM(+Eng sep) → Batt A → Duty */
+/* progressive reveal — State + Volts always; then Alt A → Temp → SOC → RPM(+Eng sep) → Batt A → Duty.
+   Every threshold is the measured width of everything shown at that step plus the worst-case state
+   word (ABSORPTION, 99px at 14px/800), so a reveal never squeezes the word into an ellipsis. The
+   Alt│Batt separator rides with Alt A — it is the first thing in the row and must not appear alone. */
 #header-collapsed-strip .hcs-alt,
 #header-collapsed-strip .hcs-temp,
 #header-collapsed-strip .hcs-soc,
 #header-collapsed-strip .hcs-rpm,
 #header-collapsed-strip .hcs-batt,
 #header-collapsed-strip .hcs-duty,
+#header-collapsed-strip .hcs-asep,
 #header-collapsed-strip .hcs-eng { display: none; }
-@container (min-width: 335px) { #header-collapsed-strip .hcs-alt  { display: inline-flex; } }
-@container (min-width: 405px) { #header-collapsed-strip .hcs-temp { display: inline-flex; } }
-@container (min-width: 470px) { #header-collapsed-strip .hcs-soc  { display: inline-flex; } }
-@container (min-width: 540px) { #header-collapsed-strip .hcs-rpm  { display: inline-flex; }
-                                #header-collapsed-strip .hcs-eng  { display: inline-block; } }
-@container (min-width: 620px) { #header-collapsed-strip .hcs-batt { display: inline-flex; } }
-@container (min-width: 700px) { #header-collapsed-strip .hcs-duty { display: inline-flex; } }
+@container (min-width: 361px) { #header-collapsed-strip:not(.hcs-locked) .hcs-alt  { display: inline-flex; }
+                                #header-collapsed-strip:not(.hcs-locked) .hcs-asep { display: inline-block; } }
+@container (min-width: 433px) { #header-collapsed-strip:not(.hcs-locked) .hcs-temp { display: inline-flex; } }
+@container (min-width: 504px) { #header-collapsed-strip:not(.hcs-locked) .hcs-soc  { display: inline-flex; } }
+@container (min-width: 593px) { #header-collapsed-strip:not(.hcs-locked) .hcs-rpm  { display: inline-flex; }
+                                #header-collapsed-strip:not(.hcs-locked) .hcs-eng  { display: inline-block; } }
+@container (min-width: 661px) { #header-collapsed-strip:not(.hcs-locked) .hcs-batt { display: inline-flex; } }
+@container (min-width: 760px) { #header-collapsed-strip:not(.hcs-locked) .hcs-duty { display: inline-flex; } }
+
+/* Locked (.hcs-locked, set by syncHeaderStrip): same ladder shifted right by the full-text chip's
+   150px + its 10px gap. A metric that reveals before the chip has room pushes the state word — and
+   then the chip — past the right edge, where overflow:hidden cuts them off. */
+@container (min-width: 521px) { #header-collapsed-strip.hcs-locked .hcs-alt  { display: inline-flex; }
+                                #header-collapsed-strip.hcs-locked .hcs-asep { display: inline-block; } }
+@container (min-width: 593px) { #header-collapsed-strip.hcs-locked .hcs-temp { display: inline-flex; } }
+@container (min-width: 664px) { #header-collapsed-strip.hcs-locked .hcs-soc  { display: inline-flex; } }
+@container (min-width: 753px) { #header-collapsed-strip.hcs-locked .hcs-rpm  { display: inline-flex; }
+                                #header-collapsed-strip.hcs-locked .hcs-eng  { display: inline-block; } }
+@container (min-width: 821px) { #header-collapsed-strip.hcs-locked .hcs-batt { display: inline-flex; } }
+@container (min-width: 920px) { #header-collapsed-strip.hcs-locked .hcs-duty { display: inline-flex; } }
 
 .dark-mode #header-collapsed-strip .hcs-gsep { background: rgba(120, 200, 196, .30); }
 .dark-mode #header-collapsed-strip .hcs-divider { background: rgba(120, 200, 196, .18); }
 .dark-mode #header-collapsed-strip .hcs-toggle { background: #555a60; }
+/* must follow the line above — equal specificity, so ON would otherwise read as OFF in dark mode */
+.dark-mode #header-collapsed-strip .hcs-toggle.on { background: var(--accent); }
 
 #header-collapse-bar {
   display: flex;
@@ -1987,12 +2026,49 @@ input[type="submit"]:hover {
   text-align: center;
 }
 
-.lock-status-unlocked {
-  font-size: 16px;
-  font-weight: 900 !important;
-  margin-bottom: 6px;
-  color: var(--accent) !important;
-  text-align: center;
+/* Unlock Settings — the only locked-state indicator now that the red "Settings are Locked"
+   line is gone, so it is deliberately heavier than a stock .btn-primary. Must stay visually
+   identical to #hcs-unlock (the collapsed strip's "Tap to unlock"). */
+#settings_arm_btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  background: rgba(0, 161, 154, 0.10);
+  color: #00867f;
+  font-size: 14.5px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  transition: background .15s, box-shadow .15s, transform .05s;
+}
+
+#settings_arm_btn:hover {
+  background: rgba(0, 161, 154, 0.20);
+}
+
+#settings_arm_btn:active {
+  transform: translateY(1px);
+}
+
+#settings_arm_btn:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.dark-mode #settings_arm_btn {
+  color: #4fd6ce;
+}
+
+.lock-glyph {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  flex-shrink: 0;
 }
 
 
@@ -2011,11 +2087,6 @@ input[type="submit"]:hover {
   width: 100%;
   justify-content: center;
   max-width: 400px;
-}
-
-#lock-status {
-  text-align: center;
-  width: 100%;
 }
 
 .password-input-group {
@@ -2099,10 +2170,6 @@ input[type="submit"]:hover {
 
 .dark-mode .lock-status-locked {
   color: #ff6666 !important;
-}
-
-.dark-mode .lock-status-unlocked {
-  color: var(--accent) !important;
 }
 
 .dark-mode .wm-rest {

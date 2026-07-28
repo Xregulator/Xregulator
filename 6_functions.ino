@@ -1244,6 +1244,7 @@ void commitTuningRecord() {
   if (tuningLogCount < 50) tuningLogCount++;
 
   saveTuningLog();
+  cxLedgerLogTuneRun(0);  // every committed run uploads (RAM staging only here — no flash I/O)
   queueConsoleMessageF("TuningScore: run#%d score=%.2f kp=%.3f ki=%.3f kd=%.4f t=%.1fs",
                        rec.runNumber, rec.score, rec.kp, rec.ki, rec.kd, rec.activeTimeSec);
 
@@ -1376,6 +1377,7 @@ void commitCVTuningRecord() {
   if (cvTuningLogCount < 50) cvTuningLogCount++;
 
   saveCVTuningLog();
+  cxLedgerLogTuneRun(1);  // every committed run uploads (RAM staging only here — no flash I/O)
   queueConsoleMessageF("CVTuningScore: run#%d score=%.2f settle=%.1fs overshoot=%.3fV n=%d",
                        rec.runNumber, rec.score, rec.avgSettlingTimeSec, rec.worstOvershootV, (int)n);
   cvTuningScore = {};
@@ -1522,6 +1524,7 @@ void commitSystemIDRecord(bool aborted) {
   if (systemIDLogCount < 50) systemIDLogCount++;
 
   pendingSaveSystemIDLog = true;  // deferred to Core 1 — avoids blocking Core 0
+  cxLedgerLogTuneRun(2);  // every committed run uploads, aborts included (RAM staging only)
 
   queueConsoleMessageF("SystemID: run#%d %s rise=%.0f fall=%.0f stepAmp=%.1f%%",
                        rec.runNumber,
@@ -1622,6 +1625,8 @@ void commitSysidSweepRecord() {
   sysidSweepLogHead = (sysidSweepLogHead + 1) % 50;
   if (sysidSweepLogCount < 50) sysidSweepLogCount++;
   pendingSaveSysidSweepLog = true;  // deferred to Core 1
+
+  cxLedgerLogSweep(0);  // ledger: every committed sweep uploads (RAM staging only here — no flash I/O)
 
   queueConsoleMessageF("SysID sweep: run#%d rolloff=%.1fHz dcGain=%.3f worstLag=%.0fdeg",
                        rec.runNumber, rec.rolloffHz, rec.dcGainApPct, rec.worstPhaseDeg);
@@ -1725,6 +1730,8 @@ void commitTuningSweepRecord() {
   tuningSweepLogHead = (tuningSweepLogHead + 1) % 50;
   if (tuningSweepLogCount < 50) tuningSweepLogCount++;
   pendingSaveTuningSweepLog = true;  // deferred to Core 1
+
+  cxLedgerLogSweep(1);  // ledger: every committed sweep uploads (RAM staging only here — no flash I/O)
 
   queueConsoleMessageF("Tuning sweep: run#%d BW=%.1fHz peak=%.2f worstLag=%.0fdeg",
                        rec.runNumber, rec.bandwidthHz, rec.peakGain, rec.worstPhaseDeg);
@@ -4254,10 +4261,23 @@ void AdjustFieldLearnMode() {
               // at sub-A/s (07-21 below-target tails; the 16:25 07-22 zeroed seed took 28s). Gated
               // on projected arrival — the A3 brake's staleness+actuator horizon — so the handback
               // stops before the bus lands. The freeze/satHi gates below still veto the floor.
+              // Outside recovActive the floor is DEPTH-SCHEDULED (full rate at cvRecovDeepBandV of
+              // shortfall, →0 at the 0.10V stall-arm threshold): the stall path has no flare
+              // ceiling, so the flat floor rode the 0.354s arrival horizon into a ~1V/s target
+              // crossing that coasted +0.56V into the G2 measured margin (13:14 07-28 load apply).
+              // recovActive keeps the flat floor — cvRecovFlaredCeil bounds its momentum.
               if ((recovActive || cvStallBoost) && e >= 0.0f) {
                 float arriveTauS = 0.10f + 0.0015f * (float)VoltageLoopInterval + 0.001f * VoltageFilterTC;
                 bool arriving = (getFiltV() + fmaxf(cvDSlope, 0.0f) * arriveTauS) >= voltageTargetSlewed;
-                if (!arriving) dI = fmaxf(dI, CvRecovClimbRate * (float)MaxTableValue * dtSec);
+                if (!arriving) {
+                  float floorRate = CvRecovClimbRate * (float)MaxTableValue;
+                  if (!recovActive) {
+                    float clsSt = (float)BATTERY_VOLTAGE / 12.0f;
+                    floorRate *= clamp_f((stallOffset / clsSt - 0.10f)
+                                         / fmaxf(cvRecovDeepBandV - 0.10f, 0.05f), 0.0f, 1.0f);
+                  }
+                  dI = fmaxf(dI, floorRate * dtSec);
+                }
               }
 
               bool supervisorLimiting = fastOvClampActive && ((float)uTargetAmps < uTargetRaw_cached - 0.01f);
