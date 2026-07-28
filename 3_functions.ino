@@ -3457,6 +3457,7 @@ void setupServer() {
         fieldCurveResultsReady = false;
         fieldCurveAbortRequested = false;
         fieldCurveAbortReason = 0; fieldCurveAbortMsg[0] = '\0';  // clear prior abort latch
+        fieldCurveAbortFollowOn = 0; fieldCurveAbortVolts = 0.0f; fieldCurveAbortDuty = 0.0f;
         queueConsoleMessage("Field curve: requested via web UI");
       } else {
         queueConsoleMessage("Field curve: start ignored (cooldown)");
@@ -3614,6 +3615,7 @@ void setupServer() {
         fieldCurveResultsReady = false;
         fieldCurveAbortRequested = false;
         fieldCurveAbortReason = 0; fieldCurveAbortMsg[0] = '\0';  // clear prior abort latch
+        fieldCurveAbortFollowOn = 0; fieldCurveAbortVolts = 0.0f; fieldCurveAbortDuty = 0.0f;
         queueConsoleMessage("Min% knee: sweep requested via web UI");
       } else {
         queueConsoleMessage("Min% knee: start ignored (cooldown)");
@@ -7391,7 +7393,11 @@ void setupServer() {
     char *buf = bufPtr.get();
     int pos = 0;
     pos += snprintf(buf + pos, 2048 - pos, "{\"pts\":[");
-    for (int i = 0; i < fieldCurveCount && pos < 1700; i++) {
+    // Points are display-only and the poller reads them once, off the FINISHED run. Shipping them on
+    // the in-run polls put ~1.7 kB on the wire every 1.5 s for the whole ramp, contending with the
+    // 10 Hz SSE telemetry on the same TCP stack, for bytes the client discards.
+    const bool fcvDone = (fieldCurveActive == 0) && fieldCurveResultsReady;
+    for (int i = 0; fcvDone && i < fieldCurveCount && pos < 1700; i++) {
       pos += snprintf(buf + pos, 2048 - pos, "%s{\"d\":%.1f,\"a\":%.2f}",
                       i > 0 ? "," : "", fieldCurveBuf[i].duty, fieldCurveBuf[i].amps);
     }
@@ -7401,11 +7407,14 @@ void setupServer() {
     // can stay 1 indefinitely. The poller checks "aborted" so it never hangs waiting for !active.
     pos += snprintf(buf + pos, 2048 - pos,
                     "],\"active\":%d,\"ready\":%d,\"ok\":%d,\"kneeDuty\":%.1f,\"kneeAmps\":%.2f,"
-                    "\"targetA\":%.1f,\"propStabA\":%.1f,\"propStepPct\":%.2f,\"ceilLimited\":%d,\"aborted\":%d,\"abort\":\"%s\"}",
+                    "\"targetA\":%.1f,\"propStabA\":%.1f,\"propStepPct\":%.2f,\"ceilLimited\":%d,\"aborted\":%d,\"abort\":\"%s\","
+                    "\"abortWhy\":%d,\"abortNext\":%d,\"abortV\":%.2f,\"abortD\":%.1f}",
                     fieldCurveActive != 0 ? 1 : 0, fieldCurveResultsReady ? 1 : 0, fieldCurveOk ? 1 : 0,
                     fieldCurveKneeDuty, fieldCurveKneeAmps, fieldCurveTargetLimitA,
                     fieldCurvePropStabA, fieldCurvePropStepPct, fieldCurveCeilingLimited ? 1 : 0,
-                    fieldCurveAbortRequested ? 1 : 0, fieldCurveAbortMsg);
+                    fieldCurveAbortRequested ? 1 : 0, fieldCurveAbortMsg,
+                    (int)fieldCurveAbortReason, (int)fieldCurveAbortFollowOn,
+                    fieldCurveAbortVolts, fieldCurveAbortDuty);
     request->send(200, "application/json", buf);
   });
 
@@ -7420,7 +7429,11 @@ void setupServer() {
     char *buf = bufPtr.get();
     int pos = 0;
     pos += snprintf(buf + pos, 8192 - pos, "{\"pts\":[");
-    for (int i = 0; i < fcPlotN && pos < 7400; i++) {
+    // Same as /fieldcurve.json: display-only, read once off the finished run. fieldCutProcess fills
+    // these at cut+4 s but `active` stays set through the 1.5 s ease-out, so the in-run polls were
+    // pushing ~5 kB apiece across exactly the window where the field re-engages.
+    const bool fcDone = (fieldCutActive == 0) && fieldCutResultsReady;
+    for (int i = 0; fcDone && i < fcPlotN && pos < 7400; i++) {
       pos += snprintf(buf + pos, 8192 - pos, "%s{\"t\":%.1f,\"a\":%.2f}",
                       i > 0 ? "," : "", fcPlotMs[i], fcPlotA[i]);
     }
@@ -7520,8 +7533,11 @@ void setupServer() {
     }
     // "aborted" = protection-abort latch, reported independently of "active" (see /fieldcurve.json note).
     // "ceilLimited" = the sweep stopped at the 24/48V field-duty ceiling before finding onset.
-    pos += snprintf(buf + pos, 1024 - pos, "],\"ceilLimited\":%d,\"aborted\":%d,\"abort\":\"%s\"}",
-                    fieldCurveCeilingLimited ? 1 : 0, fieldCurveAbortRequested ? 1 : 0, fieldCurveAbortMsg);
+    pos += snprintf(buf + pos, 1024 - pos, "],\"ceilLimited\":%d,\"aborted\":%d,\"abort\":\"%s\","
+                    "\"abortWhy\":%d,\"abortNext\":%d,\"abortV\":%.2f,\"abortD\":%.1f}",
+                    fieldCurveCeilingLimited ? 1 : 0, fieldCurveAbortRequested ? 1 : 0, fieldCurveAbortMsg,
+                    (int)fieldCurveAbortReason, (int)fieldCurveAbortFollowOn,
+                    fieldCurveAbortVolts, fieldCurveAbortDuty);
     request->send(200, "application/json", buf);
   });
 

@@ -765,9 +765,14 @@ uint32_t nextTachLieLockoutMs(uint32_t nowMs) {
  */
 void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
   bool alreadyCut = gpio4IsLow;
+  const float preCutDuty = dutyCycle;    // zeroed below the alreadyCut return; the abort latch wants the pre-cut command
   g_fieldEventReason = (uint8_t)reason;  // authoritative cut cause for the banner OFF-reason telemetry
   digitalWrite(4, LOW);
   gpio4IsLow = true;
+  // Opens the tach-corruption mask window (buildTickSnapshot). NOT for the two RPM-derived cuts:
+  // masking the gate that just fired would re-energize the field on a real stall or against a lying
+  // tach for the length of the window.
+  if (reason != REASON_RPM_TOO_LOW && reason != REASON_TACH_IMPLAUSIBLE) g_lastFieldCutMs = tick.nowMs;
   // Fast OV: arm the adaptive cooldown lockout (nextFastOvLockoutMs ladder, not FIELD_COLLAPSE_DELAY).
   // applyImmediateCut returns before runShutdownPath's lockout-arm ever runs, so set it here.
   if (reason == REASON_FAST_OVERVOLTAGE && fieldCollapseTime == 0) {
@@ -818,20 +823,30 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
   }
   // Commissioning field-curve / knee ramp shares the same override path — flag it for a clean abort
   // AND latch why, so the dashboard can report it instead of the dialog sitting there silently.
-  // fieldCurve_tick resets its static phase when it next runs (after the cooldown lockout clears).
+  // fieldCurve_tick resets its static phase when it next runs (after the cooldown lockout clears) —
+  // so a second cut can still land while this latch is set. First cause wins; later ones go to the
+  // follow-on slot rather than overwriting the reason the user actually needs to act on.
   if (fieldCurveActive != 0) {
+    if (!fieldCurveAbortRequested) {
+      fieldCurveAbortReason = (uint8_t)reason;
+      fieldCurveAbortVolts = tick.currentBatteryVoltage;
+      fieldCurveAbortDuty = preCutDuty;
+      strncpy(fieldCurveAbortMsg, reasonToString(reason), sizeof(fieldCurveAbortMsg) - 1);
+      fieldCurveAbortMsg[sizeof(fieldCurveAbortMsg) - 1] = '\0';
+    } else if (fieldCurveAbortFollowOn == 0 && (uint8_t)reason != fieldCurveAbortReason) {
+      fieldCurveAbortFollowOn = (uint8_t)reason;
+    }
     fieldCurveAbortRequested = true;
-    fieldCurveAbortReason = (uint8_t)reason;
-    strncpy(fieldCurveAbortMsg, reasonToString(reason), sizeof(fieldCurveAbortMsg) - 1);
-    fieldCurveAbortMsg[sizeof(fieldCurveAbortMsg) - 1] = '\0';
   }
   // Field de-energize τ test rides the same override path — latch the abort identically. The tick that
   // consumes the flag is gated out during the fault lockout, so without the latch the test would resume
   // from a stale phase (stale phaseStartMs) once the lockout clears.
   if (fieldCutActive != 0) {
+    if (!fieldCutAbortRequested) {   // first cause wins (same rationale as the field-curve latch above)
+      strncpy(fieldCutAbortMsg, reasonToString(reason), sizeof(fieldCutAbortMsg) - 1);
+      fieldCutAbortMsg[sizeof(fieldCutAbortMsg) - 1] = '\0';
+    }
     fieldCutAbortRequested = true;
-    strncpy(fieldCutAbortMsg, reasonToString(reason), sizeof(fieldCutAbortMsg) - 1);
-    fieldCutAbortMsg[sizeof(fieldCutAbortMsg) - 1] = '\0';
   }
   // CV plant fit: abort directly (state resets at start — no stale-phase latch; cvpfState=3 blocks a
   // partial-buffer fit).
@@ -1987,6 +2002,42 @@ void AdjustFieldLearnMode() {
   // Direct cv_I clamp kept here because the CV loop only runs every 100ms;
   // without it cv_I builds positive for up to 100ms while battV is above target.
 
+  // ── Zero-output protection stand-down (altZeroOutput) ─────────────────────
+  // A protection whose actuator cannot move the protected variable must not fire. With the
+  // alternator delivering ~0 A into a bus above target, the excess is authored by battery rest
+  // (CV target set below resting V) or another source (solar/shore/DC-DC) — a field cut removes
+  // nothing, and each no-op fire still costs the tach false-zero, the cv_I reseed, the OV-episode
+  // derate and the lockout ladder. Gates G1/G2 and the CV iExcess arm; the bulk iExcess arms only
+  // below target − margin, unreachable while this holds. Absolute layers (AlternatorHardShutdownV,
+  // fast-OV ceiling, INA228 ALERT, Load Dump) stay armed. Zero band scales with the configured
+  // hall sensor's full scale (different noise floors). Entry needs a 2.5 s dwell so a normal decay
+  // through target can't latch; exit is SINGLE-TICK — an RPM rise at unchanged field regains real
+  // output with no warning, and re-arming one tick late is a real overvoltage. Signed amps on
+  // purpose (no fabsf): negative reads as no shed authority. Stale current data = never latch.
+  {
+    float zeroFullScaleA = (AmpSensorRange == 0) ? 200.0f : (AmpSensorRange == 2) ? 500.0f : 300.0f;
+    float zeroBandA = fmaxf(2.0f, 0.01f * zeroFullScaleA);
+    static uint32_t altZeroSinceMs = 0;
+    bool inBandNow = voltageControlActive && !tick.currentDataStale
+                     && IBV > ChargingVoltageTarget
+                     && MeasuredAmps < zeroBandA;
+    if (inBandNow) {
+      if (altZeroSinceMs == 0) altZeroSinceMs = currentMillis;
+      if (!altZeroOutput && (uint32_t)(currentMillis - altZeroSinceMs) >= 2500UL) {
+        altZeroOutput = true;
+        queueConsoleMessageF("Protections standing down: alternator %.1fA (zero band %.1fA) with bus %.2fV over target %.2fV — battery/other source holds the bus, a field cut can't lower it; hard cuts stay armed",
+                             MeasuredAmps, zeroBandA, IBV, ChargingVoltageTarget);
+      }
+    } else {
+      altZeroSinceMs = 0;
+      if (altZeroOutput) {
+        altZeroOutput = false;
+        queueConsoleMessageF("Protections re-armed: zero-output stand-down ended (alt %.1fA, bus %.2fV, target %.2fV)",
+                             MeasuredAmps, IBV, ChargingVoltageTarget);
+      }
+    }
+  }
+
   // Pre-event cv_I snapshot for the protection-release reseed (rationale: CV_Loop_Dev_Summary.md).
   // Timing note: g_fastOvClampActive here holds LAST tick's final value — it is updated at the
   // end of the bumpless block, after every supervisor has voted, so this read reflects the
@@ -2140,7 +2191,9 @@ void AdjustFieldLearnMode() {
       // fast-OV ceiling (priority 1.5) and the INA228 hardware ALERT stay live regardless. G2's arm
       // state (ovActive) is recomputed every tick from g2SoftNow, which carries these same gates, so
       // engaging the bypass drops the clamp on the same tick — no stranded latch to de-assert.
-      if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && IBV > ChargingVoltageTarget - PRED_GUARD) {
+      // altZeroOutput (zero-output stand-down, computed above) rides the same gates: at ~0 A
+      // delivered a fire cannot move the bus, so G1/G2 stand down until real output returns.
+      if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && !altZeroOutput && IBV > ChargingVoltageTarget - PRED_GUARD) {
         if (OvGroup1Enable && Vpred > V_HARD) {
           float hardCap = fmaxf(0.0f, setpointLimited - KHard * (Vpred - V_HARD));
           // record reason only when this layer actually lowers the cap (equiv. to fminf)
@@ -2152,7 +2205,7 @@ void AdjustFieldLearnMode() {
 
       // Lifetime soft-exceed counter tracks the EXACT Group-2 trigger below (not g_fastOvClampCount,
       // which counts all protections), so the count means "the soft current-cap actually engaged."
-      bool g2SoftNow = (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && ibvFilt > ChargingVoltageTarget + OvMeasMarginV);
+      bool g2SoftNow = (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && !altZeroOutput && OvGroup2Enable && ibvFilt > ChargingVoltageTarget + OvMeasMarginV);
       static bool g2SoftPrev = false;
       if (g2SoftNow && !g2SoftPrev) g_ovTel.softExceedCount++;
       g2SoftPrev = g2SoftNow;
@@ -3138,10 +3191,12 @@ void AdjustFieldLearnMode() {
           // in the bumpless tracker block.
 
           // MaintainMode / zero-current float: the command is deliberately 0 while the alternator supplies
-          // the house loads, so percent-of-command has no meaning — both iExcess regimes disarm. OV groups,
-          // Load Dump, and the hard OC trip stay armed.
+          // the house loads, so percent-of-command has no meaning — both iExcess regimes disarm (there,
+          // OV groups / Load Dump / hard OC stay armed). altZeroOutput is the generalization to zero
+          // measured OUTPUT, any cause: delivering ~0 A no fire can move the bus, so this arm AND G1/G2
+          // stand down together; Load Dump and the hard/absolute cuts stay armed.
           if (IExcessEnable && testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && voltageControlActive
-              && MaintainMode == 0 && !zeroFloatActive && (IBV > ChargingVoltageTarget - IExcessArmMarginV)) {
+              && MaintainMode == 0 && !zeroFloatActive && !altZeroOutput && (IBV > ChargingVoltageTarget - IExcessArmMarginV)) {
             // Affine trip line: slope·command + base, floor/ceiling guarded. Commissioning fits slope to the
             // measured ripple slope and base to ripple-at-idle + Safety Margin, so the line rides a fixed
             // margin above the ripple (base 0 = legacy through-origin behaviour).
@@ -4104,7 +4159,17 @@ void AdjustFieldLearnMode() {
               // "answering" and froze the ceiling at 47.9A for 10s (12:45 07-25 stuck) — at that
               // depth only a hard takeoff is an answer; near target the original band is unchanged.
               float busAnswerV = (0.05f + 0.08f * fmaxf(0.0f, shortfallF / clsRec - cvRecovDeepBandV)) * clsRec;
-              bool busAnswering = (getFiltV() - recovVRefEma) >= busAnswerV;
+              // Shallow closure-horizon clause: over the band alone is not an answer unless the
+              // rise would also close the remaining shortfall within ~3 reference windows (~10s).
+              // A 20 mV/s ceiling-limited creep parks the 3s delta just over the 0.05V band and
+              // starved the walk to ~0.07 A/s for 27s of a 33s recovery (13:15 07-28 no-shunt
+              // load removal). Dimensionless (delta vs shortfall, both real volts) so it is
+              // class/chemistry/size-blind. Deep band exempt — bit-identical to the widened-band
+              // behavior above: at the 5x walk rate a saturated delta must still pause a takeoff
+              // on the plain band.
+              float busDeltaV = getFiltV() - recovVRefEma;
+              bool busAnswering = (busDeltaV >= busAnswerV)
+                                  && (shortfallF >= cvRecovDeepBandV * clsRec || busDeltaV * 3.0f >= shortfallF);
               bool delivering = (setpointLimited - g_pidI_filtered) < fmaxf(5.0f, 0.15f * setpointLimited);
               // Rail test against the FLARED ceiling (the one Icv was actually clamped to last
               // tick), 1A slack: the flare moves with ripple (~26A/V of goal-60 slope), so an
@@ -4573,6 +4638,7 @@ void AdjustFieldLearnMode() {
           uint8_t rawCode;
           if (CVTuningMode || zeroCmd || inStartupRamp)           rawCode = 0;
           else if (protBinding)                                   rawCode = 6;
+          else if (altZeroOutput)                                 rawCode = 7;
           else if (fieldSaturated)                                rawCode = 5;
           else if (voltageControlActive && Icv < icvCeil - 0.5f)  rawCode = 3;
           else if (battCeilBinding)                               rawCode = 4;
@@ -5838,7 +5904,18 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
                           // ~4.6s false-zero would otherwise run unmasked → phantom engine-stop + restart confirm.
                           || (protTestLastEndMs != 0
                               && (uint32_t)(currentMillis - protTestLastEndMs) < FIELDCUT_RPM_GRACE_MS);
-  bool rpmDropoutGrace = fieldCutRpmGrace
+  // Hard-cut tail: an abrupt protection cut slams the LM2907 the same way the field-cut test does —
+  // spike HIGH, false-zero, then a garbage low-NONZERO ramp for ~4.6 s. The clamp term below misses
+  // it twice over (applyImmediateCut never stamps g_lastProtClampMs, and the ramp is nonzero), so
+  // rpmBelowMinimum used to fire a phantom RPM_TOO_LOW cut on top of the real protection — stealing
+  // the abort reason from a commissioning ramp and arming rpmRestartPending's 2 s dwell for nothing.
+  // Mask both gates for ANY reading, but only while there is something to protect: a commissioning
+  // ramp owns the field outright, and in normal running chargingEnabled excludes a key-off/BMS
+  // spin-down, where the cut is wanted and an energized field only fakes tach readings.
+  bool hardCutRpmGrace = (g_lastFieldCutMs != 0)
+                         && ((uint32_t)(currentMillis - g_lastFieldCutMs) < FIELDCUT_RPM_GRACE_MS)
+                         && ((fieldCurveActive != 0) || chargingEnabledLocal);
+  bool rpmDropoutGrace = fieldCutRpmGrace || hardCutRpmGrace
                          || ((g_lastProtClampMs != 0)
                              && ((uint32_t)(currentMillis - g_lastProtClampMs) < PROT_RPM_GRACE_MS)
                              && chargingEnabledLocal

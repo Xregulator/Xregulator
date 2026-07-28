@@ -816,7 +816,7 @@ const CSV4_FIELDS = [
     "VictronCurrent",             // Victron battery current (A ×100)
     "currentFuelGPH",             // live fuel flow (gal/hr ×100)
     "currentNMPG",                // live fuel economy (naut mi/gal ×100)
-    "ctrlLimiter",                // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty, 6 protection (cap binding or recovery window)
+    "ctrlLimiter",                // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty, 6 protection (cap binding or recovery window), 7 battery above target (zero-output stand-down)
     "chargeStage",                // CHARGE_STAGE_* code — feeds gLastChargeStage at 2 Hz for the mode ribbon
 ];
 
@@ -4718,7 +4718,16 @@ function processCSVDataOptimized(data) {
             // 4 intervals of slack absorbs ordinary SSE jitter; the 1.5 s floor keeps a fast
             // gauge interval from marking a gap on every hiccup.
             const gapLimit = Math.max(4 * (window._lastKnownInterval || 200), 1500);
-            if (measured > gapLimit) insertStreamGap(measured / 1000);
+            if (measured > gapLimit) {
+                // WifiHeartBeat increments once per CSV1 frame the FIRMWARE sends, so its delta across
+                // the seam says where the frames went: ~1 = they were sent and arrived late (this tab
+                // blocked), ~gap/interval = they were sent and dropped in flight and never got here.
+                const hb = Number(data.WifiHeartBeat);
+                const hbPrev = processCSVDataOptimized._lastHb;
+                console.warn('[SSE GAP] ' + measured.toFixed(0) + ' ms | heartbeat ' + hbPrev +
+                             ' -> ' + hb + ' (delta ' + (hb - hbPrev) + ')');
+                insertStreamGap(measured / 1000);
+            }
             const clamped = Math.max(100, Math.min(1000, measured));
             plotInterp.current.lerpDuration     = clamped;
             plotInterp.voltage.lerpDuration     = clamped;
@@ -4728,6 +4737,7 @@ function processCSVDataOptimized(data) {
             plotInterp.cv.lerpDuration          = clamped;
         }
         processCSVDataOptimized._lastArrival = _arrivalNow;
+        processCSVDataOptimized._lastHb = Number(data.WifiHeartBeat);
 
         // ALWAYS UPDATE DATA STRUCTURES - Current/Temperature plot data
         const battCurrent = 'Bcur' in data ? parseFloat(data.Bcur) / 100 : 0;
@@ -10481,7 +10491,8 @@ function applyStaleStyleByAge(elementId, ageMs, staleThreshold = STALE_THRESHOLD
 }
 // Active-limit cue: teal pill on the governing figure's label (ctrlLimiter 1 alt current,
 // 2 thermal, 3 CV voltage, 4 battery limit, 5 field at max duty → header duty readout,
-// 6 protection → RED duty pill + PROTECTION word left of the charge stage).
+// 6 protection → RED duty pill + PROTECTION word left of the charge stage,
+// 7 battery above target → voltage pill + muted BATT > TARGET word in the same slot).
 // Alt temp digits also go red >2°F over the limit.
 function updateHeaderLimiterColors(sa) {
     const RED = "#f44336", NORM = "var(--reading)";
@@ -10504,7 +10515,7 @@ function updateHeaderLimiterColors(sa) {
         else { const c = overTemp ? RED : NORM; if (tnum._limTint !== c) { tnum.style.color = c; tnum._limTint = c; } }
     }
     pill('lbl-alt-temp', sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS, lim === 2 || nearLimit);
-    pill('lbl-voltage', sa.ibv, STALE_THRESHOLD_DEFAULT_MS, lim === 3);
+    pill('lbl-voltage', sa.ibv, STALE_THRESHOLD_DEFAULT_MS, lim === 3 || lim === 7);
     pill('lbl-alt-current', sa.measuredAmps, STALE_THRESHOLD_DEFAULT_MS, lim === 1);
     pill('lbl-batt-current', sa.bcur, STALE_THRESHOLD_DEFAULT_MS, lim === 4);
     pill('duty-pill-wrap', sa.dutyCycle, STALE_THRESHOLD_DEFAULT_MS, lim === 5);
@@ -10514,6 +10525,8 @@ function updateHeaderLimiterColors(sa) {
     if (dw && dw._protPill !== want6) { dw.classList.toggle('prot-pill', want6); dw._protPill = want6; }
     const pn = document.getElementById('prot-note');
     if (pn) { const d = (lim === 6) ? '' : 'none'; if (pn.style.display !== d) pn.style.display = d; }
+    const bn = document.getElementById('battgt-note');
+    if (bn) { const d = (lim === 7) ? '' : 'none'; if (bn.style.display !== d) bn.style.display = d; }
 }
 
 function updateAllStalenessStyles() {
@@ -11576,6 +11589,9 @@ function computeStripState() {
     if (cs === 'COMMISSIONING')                    return { label: 'SETUP', cls: 'st-test' };
     if (cs === 'PLANT TEST' || cs === 'CURR TEST') return { label: 'TEST',  cls: 'st-test' };
     if (cs === 'WAVE GEN')                         return { label: 'WAVE',  cls: 'st-test' };
+    // Zero-output stand-down (ctrlLimiter 7): battery/other source holds the bus above target —
+    // field parked at floor delivering nothing. Below the test words, above the stage words.
+    if (limFresh && Number(window._ctrlLimiter) === 7) return { label: 'BATT > TGT', cls: 'st-idle' };
     if (fs === 'ACTIVE')        return { label: cs || 'ACTIVE', cls: 'st-charging' };
     if (fs === 'RAMP DOWN')     return { label: 'RAMP DOWN', cls: 'st-charging' };
     if (fs === 'MANUAL')        return { label: 'MANUAL', cls: 'st-manual' };
@@ -20576,6 +20592,83 @@ function cxRpmAlignRefresh() {
     if (isFinite(pr) && prEl && document.activeElement !== prEl) prEl.value = pr.toFixed(2);
 }
 
+// Firmware cut reasons (FieldEventReason enum) phrased as the CAUSE of a stopped test — distinct
+// from fieldOffReasonText(), which phrases the same codes as a live status word for the header.
+function cxCutCauseText(code) {
+    switch (code) {
+        case 1:  return 'a stale temperature reading';
+        case 2:
+        case 3:
+        case 4:  return 'alternator over-temperature protection';
+        case 5:  return 'an implausible voltage reading';
+        case 6:
+        case 8:  return 'the two voltage sensors disagreeing';
+        case 7:  return 'a voltage spike';
+        case 9:  return 'a protection lockout still being active';
+        case 10: return 'charging being switched off';
+        case 11: return 'manual field mode';
+        case 12: return 'over-voltage protection (hardware cutoff)';
+        case 13: return 'over-current protection';
+        case 14: return 'engine speed below the field minimum';
+        case 15: return 'a stale current-sensor reading';
+        case 16: return 'over-voltage protection';
+        case 17: return 'the cold-charge lockout';
+        case 19: return 'the field being driven with no alternator output';
+        default: return '';
+    }
+}
+// reasonToString() names → the same enum codes, so the string-only endpoints (/fieldcut.json) share
+// the one cause table instead of carrying a second copy of it.
+const CX_CUT_NAME_TO_CODE = {
+    'TEMP_STALE': 1, 'TEMP_CRITICAL': 2, 'TEMP_WARNING': 3, 'TEMP_SUSTAINED': 4,
+    'VOLT_IMPLAUSIBLE': 5, 'VOLT_DISAGREE_CRIT': 6, 'VOLT_SPIKE': 7, 'VOLT_DISAGREE_WARN': 8,
+    'LOCKOUT': 9, 'DISABLED': 10, 'MANUAL': 11, 'INA228 hardware overvoltage': 12,
+    'HARD_OVERCURRENT': 13, 'RPM_TOO_LOW': 14, 'CURRENT_STALE': 15, 'FAST_OVERVOLTAGE': 16,
+    'Battery too cold to charge': 17, 'TACH_IMPLAUSIBLE': 19
+};
+function cxCutIsOv(code) { return code === 7 || code === 12 || code === 16; }
+
+// The saturation ramp climbs open-loop until output reaches the current limit for the held RPM in
+// the active cap table, so on a nearly-full bank the voltage ceiling arrives first. Both remedies
+// move that crossing: a lower limit ends the ramp sooner, a lower state of charge raises the ceiling.
+function cxOvRampAdviceHtml() {
+    const col = (currentChargeRateMode === 'low') ? 'Low' : 'High';
+    return '<div style="font-size:13px;color:#caa;margin-top:6px;line-height:1.5;">' +
+        'The battery could not absorb the ramp current at this engine speed — bus voltage reached the shutdown ceiling before the ramp reached its target current. Two ways forward:' +
+        '<ul style="margin:6px 0 0 18px;padding:0;">' +
+        '<li>Lower the current limits in the <strong>' + col + '</strong> column of the table of current limits vs. RPM (<strong>Setup ▸ Alternator ▸ RPM Table</strong>) for the rows near your test speed. The ramp stops at whichever limit applies, so a lower one ends it before the bank runs away.</li>' +
+        '<li>Or re-run this step at a <strong>lower state of charge</strong>, when the bank will take the current without the voltage climbing.</li>' +
+        '</ul></div>';
+}
+
+// One abort panel for both ramps. info = {why, next, v, d} from the firmware latch; without it (older
+// firmware, or a browser-side refusal) this degrades to the raw message it always showed.
+function cxRampAbortHtml(lead, msg, info, consoleTag, retryWord, ovAdvice) {
+    const wrap = h => '<div style="margin:10px 0;padding:8px 10px;background:#3a2222;border:1px solid #a55;border-radius:6px;color:#f0a500;">' + h + '</div>';
+    const fallback = '<span style="font-size:13px;color:#caa;">Open <strong>Live Data → Console</strong> for the firmware reason. If there is no <em>' + consoleTag + '</em> line there, the regulator never ran it — fix the cause above, then ' + retryWord + ' again.</span>';
+    const why = info ? (info.why | 0) : 0;
+    if (!why) return wrap(lead + ': <strong>' + (msg || 'unknown') + '</strong><br>' + fallback);
+    const cause = cxCutCauseText(why) || ('a protection (' + (msg || why) + ')');
+    let at = '';
+    if (info.d > 0) at = ' at <strong>' + info.d.toFixed(0) + '%</strong> field';
+    if (info.v > 0) at += (at ? ' · ' : ' at ') + '<strong>' + info.v.toFixed(2) + ' V</strong>';
+    let h = lead + ' by <strong>' + cause + '</strong>' + at + '.';
+    // A cut starves the tach front end for ~5 s, so a low-speed cut riding in behind a real
+    // protection is that first cut's own doing — say so rather than leave two faults on screen.
+    if (info.next === 14 && why !== 14)
+        h += '<br><span style="font-size:13px;color:#caa;">A low-engine-speed cut followed it. That is the field cut scrambling the engine-speed signal for about five seconds, not a second fault.</span>';
+    else if (info.next) {
+        const n = cxCutCauseText(info.next);
+        if (n) h += '<br><span style="font-size:13px;color:#caa;">Then also: ' + n + '.</span>';
+    }
+    if (ovAdvice && cxCutIsOv(why)) h += cxOvRampAdviceHtml();
+    else h += '<br><span style="font-size:13px;color:#caa;">Clear the cause, then ' + retryWord + ' again. <strong>Live Data → Console</strong> has the firmware line.</span>';
+    return wrap(h);
+}
+function cxAbortInfoFrom(j) {
+    return { why: j.abortWhy | 0, next: j.abortNext | 0, v: +j.abortV || 0, d: +j.abortD || 0 };
+}
+
 // ── Stage 1 · Field curve — duty→amps map + saturation knee ───────────────────
 function cxRenderField(b) {
     const r = cx.fieldResult;
@@ -20583,9 +20676,7 @@ function cxRenderField(b) {
     if (cx.fieldRunning) {
         body += '<p style="color:#4a9eff;">Running field-% ramp… keep RPM roughly steady — best effort, it doesn\'t have to be perfect.</p>';
     } else if (cx.fieldAbort) {
-        body += '<div style="margin:10px 0;padding:8px 10px;background:#3a2222;border:1px solid #a55;border-radius:6px;color:#f0a500;">' +
-            'Ramp stopped: <strong>' + cx.fieldAbort + '</strong><br>' +
-            '<span style="font-size:13px;color:#caa;">Open <strong>Live Data → Console</strong> for the firmware reason. If there is no <em>Field curve</em> line there, the regulator never ran the ramp — fix the cause above, then run again.</span></div>';
+        body += cxRampAbortHtml('Ramp stopped', cx.fieldAbort, cx.fieldAbortInfo, 'Field curve', 'run', true);
     } else if (r) {
         body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
             'Captured <strong>' + r.pts.length + '</strong> points. ' +
@@ -20619,9 +20710,9 @@ function cxFieldRunBlockReason() {
 
 function cxFieldStart() {
     const blocked = cxFieldRunBlockReason();
-    if (blocked) { cx.fieldResult = null; cx.fieldApplied = false; cx.fieldRunning = false; cx.fieldAbort = blocked; commissionRender(); return; }
+    if (blocked) { cx.fieldResult = null; cx.fieldApplied = false; cx.fieldRunning = false; cx.fieldAbort = blocked; cx.fieldAbortInfo = null; commissionRender(); return; }
     cxShowTab('plots', 'displays');   // open-loop ramp → watch on Plots ▸ Short Term
-    cx.fieldResult = null; cx.fieldApplied = false; cx.fieldAbort = null; cx.fieldRunning = true; commissionRender();
+    cx.fieldResult = null; cx.fieldApplied = false; cx.fieldAbort = null; cx.fieldAbortInfo = null; cx.fieldRunning = true; commissionRender();
     cxGet('startFieldCurve=1').then(() => {
         cxStopPoll();
         let waited = 0, sawActive = false;
@@ -20630,9 +20721,11 @@ function cxFieldStart() {
             fetch(buildURL('/fieldcurve.json')).then(r => r.json()).then(j => {
                 if (j.active) sawActive = true;
                 if (j.aborted) {                         // protection latched an abort — may still read active=1 during the post-cut lockout, so don't wait for !active
-                    cxStopPoll(); cx.fieldRunning = false; cx.fieldAbort = j.abort || 'Protection fired — see console.'; commissionRender();
+                    cxStopPoll(); cx.fieldRunning = false; cx.fieldAbort = j.abort || 'Protection fired — see console.';
+                    cx.fieldAbortInfo = cxAbortInfoFrom(j); commissionRender();
                 } else if (j.abort && !j.active) {        // a protection cut this run — reason latched in firmware
-                    cxStopPoll(); cx.fieldRunning = false; cx.fieldAbort = j.abort; commissionRender();
+                    cxStopPoll(); cx.fieldRunning = false; cx.fieldAbort = j.abort;
+                    cx.fieldAbortInfo = cxAbortInfoFrom(j); commissionRender();
                 } else if (j.ready && !j.active) {        // completed normally
                     cxStopPoll(); cx.fieldRunning = false; cx.fieldResult = j; commissionRender();
                 } else if (sawActive && !j.active) {      // ran then stopped, no result/reason (e.g. cancel)
@@ -20718,9 +20811,9 @@ function cxRenderKnee(b) {
     } else if (step < NSTEP) {
         const s = CX_KNEE_STEPS[step];
         if (cx.kneeAbort) {
-            body += '<div style="margin:10px 0;padding:8px 10px;background:#3a2222;border:1px solid #a55;border-radius:6px;color:#f0a500;">' +
-                'Automatic current sweep stopped: <strong>' + cx.kneeAbort + '</strong><br>' +
-                '<span style="font-size:13px;color:#caa;">Open <strong>Live Data → Console</strong> for the firmware reason. If there is no <em>Min% knee</em> line there, the regulator never ran the automatic current sweep — fix the cause above, then Record again.</span></div>';
+            // No RPM-table advice here: the onset sweep stops at the first amps, so it never walks
+            // the bank up to the table limit the way the saturation ramp does.
+            body += cxRampAbortHtml('Automatic current sweep stopped', cx.kneeAbort, cx.kneeAbortInfo, 'Min% knee', 'Record', false);
         } else if (cx.kneeNoOnset) {
             body += '<div style="margin:10px 0;padding:8px 10px;background:#3a3322;border:1px solid #a85;border-radius:6px;color:#f0a500;">' +
                 (cx.kneeCeilLimited
@@ -20787,7 +20880,7 @@ function cxRenderKnee(b) {
 function cxKneeStart() {
     cxShowTab('plots', 'displays');   // onset ramp → watch on Plots ▸ Short Term
     const idx = (cx.kneeAnchors || []).length;   // the speed slot this Record fills (anchor + drain pair)
-    cx.kneeAbort = null; cx.kneeNoOnset = false; cx.kneeRunning = true; cx.fdErr = null; commissionRender();
+    cx.kneeAbort = null; cx.kneeAbortInfo = null; cx.kneeNoOnset = false; cx.kneeRunning = true; cx.fdErr = null; commissionRender();
     cxGet('startKneeSweep=1').then(() => {
         cxStopPoll();
         let waited = 0, sawActive = false;
@@ -20797,9 +20890,11 @@ function cxKneeStart() {
                 cx.kneeAnchors = j.anchors || [];
                 if (j.active) sawActive = true;
                 if (j.aborted) {                         // protection latched an abort — may still read active=1 during the post-cut lockout, so don't wait for !active
-                    cxStopPoll(); cx.kneeRunning = false; cx.kneeAbort = j.abort || 'Protection fired — see console.'; commissionRender();
+                    cxStopPoll(); cx.kneeRunning = false; cx.kneeAbort = j.abort || 'Protection fired — see console.';
+                    cx.kneeAbortInfo = cxAbortInfoFrom(j); commissionRender();
                 } else if (j.abort && !j.active) {        // a protection cut this run — reason latched in firmware
-                    cxStopPoll(); cx.kneeRunning = false; cx.kneeAbort = j.abort; commissionRender();
+                    cxStopPoll(); cx.kneeRunning = false; cx.kneeAbort = j.abort;
+                    cx.kneeAbortInfo = cxAbortInfoFrom(j); commissionRender();
                 } else if (j.ready && !j.active) {        // completed — auto-commit only a CLEAN onset
                     cxStopPoll();
                     if (j.ok && j.kneeDuty > 0) {         // good point → commit, then measure the field drain at this same held speed
@@ -21459,13 +21554,11 @@ let cxFdPlot = null, cxFdObs = null, cxFdRaf = 0, cxFdY = null;
 // English for the wizard face; anything unrecognized passes through with a re-run hint.
 function cxFcErrText(raw) {
     if (!raw) return 'no usable result — re-run';
-    const map = {
-        'RPM_TOO_LOW': 'the engine-speed signal dropped during the test (a protection cut in) — re-run',
-        'FAST_OVERVOLTAGE': 'an over-voltage protection fired during the test — re-run once charging is steady',
-        'HARD_OVERCURRENT': 'an over-current protection fired during the test — re-run',
-        'aborted': 'test cancelled'
-    };
-    if (map[raw]) return map[raw];
+    if (raw === 'aborted') return 'test cancelled';
+    const code = CX_CUT_NAME_TO_CODE[raw] || 0;
+    if (code === 14) return 'the engine-speed signal dropped during the test (a protection cut in) — re-run';
+    const cause = cxCutCauseText(code);
+    if (cause) return cause + ' fired during the test — re-run' + (cxCutIsOv(code) ? ' once charging is steady' : '');
     if (/^[A-Z0-9_]+$/.test(raw)) return 'a protection fired during the test (' + raw + ') — re-run';
     return raw;
 }

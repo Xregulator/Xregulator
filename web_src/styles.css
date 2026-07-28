@@ -275,6 +275,20 @@ textarea {
   .prot-word .pw-short { display: inline; }
 }
 
+/* Zero-output stand-down note (ctrlLimiter 7): informational, not an alarm — no pulse, muted color */
+.battgt-word {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: var(--text-muted, #888);
+  white-space: nowrap;
+}
+.battgt-word .pw-short { display: none; }
+@media (max-width: 359px) {
+  .battgt-word .pw-full { display: none; }
+  .battgt-word .pw-short { display: inline; }
+}
+
 /* Why the field reads OFF — plain-English cause. An OVERLAY (position:absolute, zero layout
    height): showing/hiding it must never change header height, or the Alternator Enable toggle
    below jumps while the reason flaps at the RPM threshold (banner-jump fix). Shown/hidden via

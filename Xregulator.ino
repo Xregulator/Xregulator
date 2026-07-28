@@ -1109,8 +1109,14 @@ bool  fieldCurveCeilingLimited = false;         // true if the ramp was capped b
 // Abort reason for the field-curve / knee sweeps (latched at the protection cut, cleared at each start).
 // fieldCurveAbortMsg is built from reasonToString() in 6_functions.ino and read back by the dashboard
 // via /fieldcurve.json & /kneesweep.json so the commissioning dialog can say WHY a test stopped.
+// FIRST cause wins — the cut that killed the ramp is the one reported. A hard cut corrupts the tach
+// for ~4.6 s, so a phantom RPM_TOO_LOW cut lands during the teardown; before the mask + this latch it
+// overwrote the real reason and the wizard blamed engine speed for an over-voltage.
 volatile uint8_t fieldCurveAbortReason = 0;     // 0 = none / user-cancel; else FieldEventReason code
 char  fieldCurveAbortMsg[48] = {0};             // human reason text at the cut ("" = none)
+volatile uint8_t fieldCurveAbortFollowOn = 0;   // 2nd distinct cut reason in the same teardown (0 = none)
+float fieldCurveAbortVolts = 0.0f;              // bus volts at the first cut
+float fieldCurveAbortDuty  = 0.0f;              // commanded field % at the first cut
 
 // ── Min% onset-knee sweep (commissioning) ────────────────────────────────────
 // Reuses the field-curve ramp but STOPS the instant settled amps lift off the baseline
@@ -2493,6 +2499,10 @@ bool tachLieLockoutArmed = false;    // active lockout was armed by a tach-lie t
 bool rpmRestartPending = true;       // set on confirmed stop, cleared by sustained above-min RPM
 uint32_t rpmAboveMinSinceMs = 0;     // millis() when RPM first held >= MinRPMForField (0 = below)
 uint32_t g_lastProtClampMs = 0;      // millis() of the most recent tick any protection clamp was active
+// millis() of the most recent ABRUPT protection cut (applyImmediateCut). g_lastProtClampMs never
+// covers these: applyImmediateCut returns out of the control loop long before the clamp block that
+// stamps it. The cut slams the LM2907 coupling cap, so the RPM gates mask off this stamp instead.
+uint32_t g_lastFieldCutMs = 0;
 // Field-drain early release. g_ovClampRiseMs stamps the FIRST tick of a clamp episode (rising
 // edge) — distinct from g_lastProtClampMs, which restamps every clamped tick. Once a clamp has held
 // for the commissioned drain time at this speed (fdDrainMsAtRpm at g_ovClampRpm — the measured
@@ -2901,7 +2911,7 @@ GovernorMode govMode = GOV_NORMAL_SLEW;
 // Setpoint tracking
 float setpointLimited = 0.0f;
 float setpointCommand = 0.0f;   // pre-slew current command (Icv in CV, uTargetAmps in idle); global so the Control Accuracy score gate can see whether setpointLimited is still slewing toward it
-uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty (machine/RPM limit), 6 protection (cap binding or post-protection recovery window)
+uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty (machine/RPM limit), 6 protection (cap binding or post-protection recovery window), 7 battery above target (zero-output stand-down, altZeroOutput)
 bool setpointInitialized = false;
 
 // ===== LEARNING MODE CONTROL PARAMETERS =====
@@ -3917,6 +3927,11 @@ uint32_t g_fastOvClampCount = 0;   // rising-edge counter across all protections
 // loop is deliberately holding current below where free integration would put it, so voltage reading
 // under target is by-design recovery, not a tracking fault. Gates the CV accuracy score.
 volatile bool g_cvAwRecovering = false;
+// Zero-output protection stand-down: alternator delivering ~0 A into a bus above target means the
+// excess is battery rest / solar / shore — a field cut cannot move the bus, so the target-relative
+// layers (G1/G2, CV iExcess) must not fire. Computed every tick at the top of the FAST OV section
+// in AdjustFieldLearnMode (2.5 s entry dwell, single-tick exit). Hard/absolute layers stay armed.
+bool altZeroOutput = false;
 
 float g_I_cap = 0.0f;  // RPM table current ceiling this tick (A); set each AUTO tick
 bool g_thermalOwnsCeiling = false;  // the thermal derate, not warmup/HiLo/battery-limit/fastOV/MaxTableValue, set uTargetAmps this tick
