@@ -90,7 +90,6 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
 })();
 
 
-// ============================================================
 // STALENESS DISPLAY THRESHOLDS
 // These control when sensor readings gray out in the UI only.
 // They have zero effect on the regulator or field control logic —
@@ -99,7 +98,6 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
 //
 // The timestamp payload sends every 3s, so any threshold below
 // ~6s will cause false stale flashes even with healthy sensors.
-// ============================================================
 const STALE_THRESHOLD_DEFAULT_MS = 6000;   // All sensors except temperature
 const STALE_THRESHOLD_TEMP_MS = 12000;  // Temp sensors read every 5s — allows one failed read
 
@@ -2642,6 +2640,7 @@ const CSV3_FIELDS = [
     "cvRecovDeepMult",               // starve-walk rate multiplier at full depth; ×100
     "cvRecovFlareBandV",             // arrival flare band (V per 12V block); ×1000
     "cvRecovFlareFrac",              // arrival flare ceiling floor, fraction of recovery goal; ×100
+    "TachLieEnable",                 // tach-lie plausibility cut enable (0/1)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -2932,9 +2931,7 @@ function startPhoneDataPoster() {
 // are trusted backup sources the device accepts unconditionally.
 document.addEventListener('DOMContentLoaded', startPhoneDataPoster);
 
-// ============================================================================
-// CRITICAL MOBILE FIXES (Required for iOS)
-// ============================================================================
+// ===== CRITICAL MOBILE FIXES (Required for iOS) =====
 
 function manualReconnect() {
     sseReconnectAttempts = 0;
@@ -2945,9 +2942,7 @@ function manualReconnect() {
     closeRecovery(); // Dismiss the Connection Lost dialog if user used the in-page button instead
 }
 
-// ============================================================================
-// DIAGNOSTIC LOGGING SYSTEM
-// ============================================================================
+// ===== DIAGNOSTIC LOGGING SYSTEM =====
 let SHOW_DIAGNOSTIC_MESSAGES = false; // Initial value (gets overridden below)
 
 /**
@@ -3009,9 +3004,7 @@ function devLog(...args) {
     console.log('[DEV]', ...args);
 }
 
-// ============================================================================
-// TOGGLE DIAGNOSTIC MODE HERE - SET TO false FOR APP STORE SUBMISSION
-// ============================================================================
+// ===== TOGGLE DIAGNOSTIC MODE HERE - SET TO false FOR APP STORE SUBMISSION =====
 setDiagnosticMode(false); // ← CHANGE THIS LINE: true=ON, false=OFF
 //What gets hidden when false:
 //diagLog() - YES, hidden when false
@@ -3019,9 +3012,7 @@ setDiagnosticMode(false); // ← CHANGE THIS LINE: true=ON, false=OFF
 //diagError() - NO, always shows (even when false)
 
 
-// ============================================================================
-// END DIAGNOSTIC LOGGING SYSTEM
-// ============================================================================
+// ===== END DIAGNOSTIC LOGGING SYSTEM =====
 
 
 // 1. Fetch with timeout - prevents infinite hangs
@@ -3164,7 +3155,6 @@ if (IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
     });
 }
 
-// 5. EventSource initialization with reconnection
 function initializeEventSource() {
 
     if (DEMO_MODE) {
@@ -3366,9 +3356,7 @@ function initializeEventSource() {
     }
 }
 
-// ============================================================================
-// DEMO MODE FOR APP STORE (No ESP32 hardware required)
-// ============================================================================
+// ===== DEMO MODE FOR APP STORE (No ESP32 hardware required) =====
 
 function enableDemoMode() {
     if (DEMO_MODE) return;
@@ -3473,14 +3461,10 @@ function showHotspotSetupHint() {
     document.body.style.paddingTop = 'calc(72px + env(safe-area-inset-top))';
 }
 
-// ============================================================================
-// END DEMO MODE
-// ============================================================================
+// ===== END DEMO MODE =====
 
 
-// ============================================================================
-// END CRITICAL MOBILE FIXES
-// ============================================================================
+// ===== END CRITICAL MOBILE FIXES =====
 
 
 //Profiling system
@@ -3679,7 +3663,6 @@ let _autoScaleTempLeft  = null;
 let _autoScaleTempRight = null;
 
 
-// Plot update batching system
 const plotUpdateQueue = new Set();
 let plotUpdateScheduled = false;
 
@@ -4215,7 +4198,6 @@ function firmwareIntToString(versionInt) {
     return `${major}.${minor}.${patch}`;
 }
 
-// Format Unix timestamp to readable time
 function formatDeadline(unixTimestamp) {
     const date = new Date(unixTimestamp * 1000);
     const now = new Date();
@@ -5686,6 +5668,7 @@ function updateAllEchosOptimized(data) {
         { key: 'OvGroup1Enable',    id: 'OvGroup1Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'OvGroup2Enable',    id: 'OvGroup2Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'HardOCEnable',      id: 'HardOCEnable_echo',      transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'TachLieEnable',     id: 'TachLieEnable_echo',     transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'IExcessEnable',     id: 'IExcessEnable_echo',     transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'BattLimitEnable',   id: 'BattLimitEnable_echo',   transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'LoadDumpEnable',    id: 'LoadDumpEnable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
@@ -5983,9 +5966,7 @@ function debounce(fn, delay) {
 // keeps it honest against the device, so a reload while armed comes back unlocked.
 let settingsUnlocked = false;
 
-// ============================================
-// CLOUD FEATURES - Profile Management
-// ============================================
+// ===== CLOUD FEATURES - Profile Management =====
 
 async function initializeProfileTab() {
     if (!settingsUnlocked) {
@@ -7346,7 +7327,6 @@ function handleProfileUpdate(event) {
         });
 }
 
-// Handle delete all data button
 async function handleDeleteAllData() {
     if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
@@ -7409,9 +7389,7 @@ async function resetVoltageLoop() {
         .catch(err => console.warn('Reset error:', err));
 }
 
-// ============================================================================
-// PID TUNING SCORE LOG
-// ============================================================================
+// ===== PID TUNING SCORE LOG =====
 
 let _tuningLogPollTimer = null;
 
@@ -7495,7 +7473,6 @@ function renderTuningLog(data) {
         if (el1) el1.textContent = 'Peak: ' + (live[1] > 0 ? live[1].toFixed(2) + ' A' : '—');
     }
 
-    // Active test score
     const testRow = document.getElementById('testScoreRow');
     if (testRow) {
         if (data.ta) {
@@ -7877,7 +7854,6 @@ function renderCVTuningLog(data) {
         if (el1) el1.textContent = 'Peak: ' + (live[1] > 0 ? Math.round(live[1]) + ' mV' : '—');
     }
 
-    // Active test score banner
     const testRow = document.getElementById('cvTestScoreRow');
     if (testRow) {
         if (data.ta) {
@@ -8743,11 +8719,9 @@ async function resetTempTaskCounters() {
 }
 
 
-// ============================================
 // LONG TERM PLOTS — Dashboard-hosted brush
 // Lives in the parent dashboard so it sticks naturally to the dashboard viewport.
 // Range changes route to the native LT charts via nativeSink.
-// ============================================
 const _brushState = {
     dataMin: null,
     dataMax: null,
@@ -8981,12 +8955,10 @@ function _brushUpdateStaleness() {
     else if (s > 300) ago.classList.add('stale-warn');
 }
 
-// ============================================
 // CLOUD FEATURES - Dark mode for embedded Vercel pages
 // The cloud pages live in iframes and can't see this dashboard's dark-mode toggle.
 // We tell them: ?dark=N on the URL for flash-free first paint, plus a SET_THEME
 // postMessage when the user flips the toggle while a cloud tab is open.
-// ============================================
 function cloudDarkParam() {
     return document.body.classList.contains('dark-mode') ? '1' : '0';
 }
@@ -9034,9 +9006,7 @@ async function loadLeaderboardsInIframe() {
         }
     }
 }
-// ============================================
-// CLOUD FEATURES - Fleet Stats
-// ============================================
+// ===== CLOUD FEATURES - Fleet Stats =====
 
 async function loadFleetStatsInIframe() {
     const statusEl = document.getElementById('fleetstats-status');
@@ -9060,12 +9030,10 @@ async function loadFleetStatsInIframe() {
     }
 }
 
-// ============================================
 // CLOUD FEATURES - Config Sharing
 // Browse the shared config library (Vercel page). Passes the device token so the page
 // can offer "load onto my regulator", which it relays back via a LOAD_CONFIG_TO_DEVICE
 // postMessage (handled below) — the cloud page can't reach the LAN device directly.
-// ============================================
 async function loadConfigSharingInIframe() {
     const statusEl = document.getElementById('configsharing-status');
     const iframe = document.getElementById('configsharing-iframe');
@@ -9133,7 +9101,6 @@ function handleResetLatch() {
 }
 
 
-//Factory Reset Logic
 async function factoryReset() {
     if (!settingsUnlocked) {
         xAlert("You must be logged in to perform a factory reset.");
@@ -9212,7 +9179,6 @@ function updateInlineStatus(isConnected) {
 }
 
 
-//Reset buttons
 function resetParameter(parameterName) {
     if (!settingsUnlocked) {
         xAlert("Please unlock settings first");
@@ -9255,7 +9221,6 @@ async function restartChargeCycle() {
     submitSimpleParam('RestartChargeCycle', 1);
 }
 
-//Console
 let consolePaused = false;
 
 // ── Console buffer (persistent, coalesced) ───────────────────────────────────
@@ -9425,7 +9390,6 @@ function toggleConsolePause() {
     if (!consolePaused) renderConsoleFromBuffer();  // catch the display up with anything buffered while paused
 }
 
-//Mirror for Alarm
 function updateAlarmStatus(data) {
     const alarmLed = document.getElementById('alarm-led');
     const alarmText = document.getElementById('alarm-status-text');
@@ -11099,6 +11063,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("OvGroup1Enable_checkbox", data.OvGroup1Enable, "OvGroup1Enable");
         updateCheckbox("OvGroup2Enable_checkbox", data.OvGroup2Enable, "OvGroup2Enable");
         updateCheckbox("HardOCEnable_checkbox", data.HardOCEnable, "HardOCEnable");
+        updateCheckbox("TachLieEnable_checkbox", data.TachLieEnable, "TachLieEnable");
         updateCheckbox("IExcessEnable_checkbox", data.IExcessEnable, "IExcessEnable");
         updateCheckbox("BattLimitEnable_checkbox", data.BattLimitEnable, "BattLimitEnable");
         updateCheckbox("LoadDumpEnable_checkbox", data.LoadDumpEnable, "LoadDumpEnable");
@@ -11324,13 +11289,11 @@ if (typeof window.learningTableInitialized === 'undefined') {
     window.learningTableInitialized = false;
 }
 
-// ===========================================================================
 // TEST-MODE PROTECTION DISABLE — shared firmware flag exposed via three toggles
 // (one on each of Plant Delay / Current Tuning / Voltage Tuning pages). When the
 // user flips one, this helper mirrors the new state to the other two checkboxes
 // optimistically so a mid-flight page switch doesn't show stale state, then
 // delegates to handleUserToggle for the actual pending/echo plumbing.
-// ===========================================================================
 const TEST_PROT_CHECKBOXES = [
     'testProtectionsEnabled_plant_checkbox',
     'testProtectionsEnabled_current_checkbox',
@@ -11348,15 +11311,11 @@ function mirrorTestProtectionsToggle(srcCheckboxId) {
 
 
 
-// ===========================================================================
-// CAP TABLE — kW / AMPS MODE
-// ===========================================================================
+// ===== CAP TABLE — kW / AMPS MODE =====
 
 let currentCapMode = 'amps'; // tracks active mode; updated by setCapMode()
 
-// ===========================================================================
-// CAP TABLE — NORMAL / LOW CHARGE RATE MODE  (HiLow: 1=Normal, 0=Low)
-// ===========================================================================
+// ===== CAP TABLE — NORMAL / LOW CHARGE RATE MODE  (HiLow: 1=Normal, 0=Low) =====
 
 let currentChargeRateMode = 'high'; // tracks active mode; updated by setChargeRateMode()
 
@@ -12522,7 +12481,6 @@ window.addEventListener("load", function () {
 
             updateAnchorColorCoding(data);
 
-            //  updateFields for CSVData2
             const updateFields = (fieldArray) => {
                 for (const [elementId, key] of fieldArray) {
                     const value = data[key];
@@ -13317,7 +13275,6 @@ window.addEventListener("load", function () {
 
             ];
 
-            // Update other fields every cycle
             updateFields(otherFields);
 
             // Victron MPPT status codes -> human text (CS charge state, MPPT tracker mode, ERR)
@@ -13418,14 +13375,12 @@ window.addEventListener("load", function () {
                 updateGPSDisplay(latDegrees, lonDegrees);
             }
 
-            // Update echos every cycle
             updateAllEchosOptimized(data);
 
             // Update toggle states
             updateTogglesFromData(data);
             // capLimitMode / HiLow pending toggle confirmation handled in CSVData3 handler
 
-            // Update life indicators
             updateLifeIndicators(data);
 
             // gLastChargeStage now rides CSV4 (2 Hz) — not set here, see the CSVData4 listener
@@ -13780,7 +13735,6 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 100).toFixed(2);
                     }
 
-                    // safeHours: seconds → hours
                     else if (key.startsWith("safeHours")) {
                         newTextContent = (value / 3600).toFixed(2);
                     }
@@ -13825,9 +13779,7 @@ window.addEventListener("load", function () {
             updateTestActivePanel();
 
 
-            // =====================
-            // FUEL TABLE INIT 
-            // =====================
+            // ===== FUEL TABLE INIT =====
 
             // Initialize fuel table inputs from ESP32 data exactly once
             if (!window.fuelTableInitialized) {
@@ -13910,9 +13862,7 @@ window.addEventListener("load", function () {
                 }
             }
 
-            // =========================
-            // LEARNING TABLE - update every cycle, skip focused inputs
-            // =========================
+            // ===== LEARNING TABLE - update every cycle, skip focused inputs =====
             const hasValidData =
                 data.rpmTableRPMPoints0 !== undefined &&
                 data.rpmCapCurrentTable0 !== undefined;
@@ -15093,9 +15043,7 @@ function updateUploadNowButtonState(mode) {
 }
 
 
-// ============================================================================
-// LEARNING TABLE - GLYPH SYSTEM & STICKY HEADER
-// ============================================================================
+// ===== LEARNING TABLE - GLYPH SYSTEM & STICKY HEADER =====
 
 // Draw the SVG glyphs connecting RPM ranges to history buckets
 function drawGlyphs() {
@@ -15245,9 +15193,7 @@ if (ltX) {
     ltX.addEventListener('scroll', drawGlyphs, { passive: true });
 }
 
-// ============================================================================
-// END LEARNING TABLE GLYPH SYSTEM
-// ============================================================================
+// ===== END LEARNING TABLE GLYPH SYSTEM =====
 
 
 function updateLifeIndicators(data) {
@@ -15272,7 +15218,6 @@ function updateLifeIndicators(data) {
             if (indicator.percent < 20) colorIndex = 2;      // Red below 20%
             else if (indicator.percent < 50) colorIndex = 1; // Yellow below 50%
         } else if (indicator.hours !== undefined) {
-            // For predicted hours indicator
             if (indicator.hours < 1000) colorIndex = 2;      // Red below 1000 hours
             else if (indicator.hours < 5000) colorIndex = 1; // Yellow below 5000 hours
         }
@@ -16005,7 +15950,6 @@ function updatePIDXButtons() {
     });
 }
 
-// Custom legend with checkboxes for PID tuning plot
 function createPidTuningLegend(u) {
     const plotContainer = document.getElementById('pid-tuning-plot');
     if (!plotContainer) return;
@@ -16097,7 +16041,6 @@ function togglePidTuningSeries(seriesIdx, color, visible) {
     }
 }
 
-// Plot update batching for PID tuning
 let pidTuningUpdateScheduled = false;
 
 function queuePidTuningPlotUpdate() {
@@ -16199,7 +16142,6 @@ function populateYearDropdown() {
     }
 }
 
-// Orientation card click handling
 document.querySelectorAll('.pri-orientation-card').forEach(card => {
     card.addEventListener('click', function () {
         const radio = this.querySelector('input[type="radio"]');
@@ -16730,9 +16672,7 @@ let thermalSeriesVisible = {
     outerP: true, lookahead: true, outerI: true,
 };
 
-// ---------------------------------------------------------------------------
-// Window buttons
-// ---------------------------------------------------------------------------
+// ===== Window buttons =====
 function highlightThermalWindowBtn(minutes) {
     [5, 10, 30, 60].forEach(v => {
         const btn = document.getElementById(`tw-${v}`);
@@ -16754,9 +16694,7 @@ function resetThermalZoom() {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Watermark
-// ---------------------------------------------------------------------------
+// ===== Watermark =====
 function drawThermalWatermark(u) {
     const lines = [
         `Kp: ${getEchoText('TempPIDKp_echo')}   Ki: ${getEchoText('TempPIDKi_echo')}`,
@@ -16890,9 +16828,7 @@ function thermalRenderAll() {
     renderThermalPlot2([t, flip(pPresent), flip(r.lookahead), flip(r.outerI)], t[0]);
 }
 
-// ---------------------------------------------------------------------------
-// Zoom plugin
-// ---------------------------------------------------------------------------
+// ===== Zoom plugin =====
 const thermalZoomPlugin = {
     hooks: {
         setScale: [(u, key) => {
@@ -16943,9 +16879,7 @@ function modeFromStage(stage, flags) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Resize helper
-// ---------------------------------------------------------------------------
+// ===== Resize helper =====
 function _thermalResizeObserver(plotIdx, elId, h) {
     if (thermalLogResizeObservers[plotIdx])
         thermalLogResizeObservers[plotIdx].disconnect();
@@ -17103,9 +17037,7 @@ function renderThermalPlot1(data, tMin) {
     addThermalAutoBox(el, 'autoscale-thermal0-cb', () => thermalLogPlots[0], thermalY.p0, ['temp', 'amps']);
 }
 
-// ---------------------------------------------------------------------------
-// Plot 2 
-// ---------------------------------------------------------------------------
+// ===== Plot 2 =====
 function renderThermalPlot2(data, tMin) {
     if (thermalLogPlots[2]) {
         if (data.every(d => d !== undefined)) thermalLogPlots[2].setData(data);
@@ -17169,9 +17101,7 @@ function renderThermalPlot2(data, tMin) {
     addThermalAutoBox(el, 'autoscale-thermal2-cb', () => thermalLogPlots[2], thermalY.p2, ['amps']);
 }
 
-// ---------------------------------------------------------------------------
-// State strip
-// ---------------------------------------------------------------------------
+// ===== State strip =====
 function renderThermalPlotState(data, tMin, flagsArr, antiWindupArr, stageArr, tArr) {
     // Always update BEFORE the early return
     _thermalStateArrays.flagsArr = flagsArr;
@@ -17323,9 +17253,7 @@ function renderThermalPlotState(data, tMin, flagsArr, antiWindupArr, stageArr, t
     });
 }
 
-// ---------------------------------------------------------------------------
-// Shared legend builder
-// ---------------------------------------------------------------------------
+// ===== Shared legend builder =====
 function _createThermalLegend(container, plotIdx, items) {
     const existing = container.querySelector('.custom-legend');
     if (existing) existing.remove();
@@ -17385,9 +17313,7 @@ function thermalPinAxis(plotIdx, bucketKey, axis, cbId, mn, mx) {
     if (thermalLogPlots[plotIdx]) thermalLogPlots[plotIdx].setScale(axis, { min: mn, max: mx });
 }
 
-// ---------------------------------------------------------------------------
-// Auto-refresh tied to <details> open/close  — MUST BE LAST
-// ---------------------------------------------------------------------------
+// ===== Auto-refresh tied to <details> open/close  — MUST BE LAST =====
 (function attachThermalLogToggle() {
     function attach() {
         const det = document.getElementById('thermallog-details');
@@ -17903,80 +17829,18 @@ function updateFloatVisibility(pendingVal) {
 
 
 
-// ===========================================================================
-// CV / Voltage Tuner Log — JavaScript
-//
-// Decodes /cvlog.bin and downloads as CSV.
-// Binary layout: 68-byte header + N × entrySize-byte CvLogEntry structs (little-endian).
-// entrySize comes from the header (57 on current firmware).
-//
-// Header (68 bytes) — carries the FULL D-term trim equation, so kdTrim can be reconstructed from
-// cvDSlope + spLimited alone:
-//   offset  0  uint32  count
-//   offset  4  uint32  entrySize (57)
-//   offset  8  float32 VoltageKp_active (the gain in effect, not the typed knob)
-//   offset 12  float32 VoltageKi_active
-//   offset 16  uint32  VoltageLoopInterval (ms)
-//   offset 20  float32 CvKdDeadbandVps (V/s) — deadband line BASE (b of clamp(floor, b + m·I, ceil))
-//   offset 24  float32 VoltageKd_active (A/(V/s)) — was the typed VoltageKd before 2026-07-21
-//   offset 28  float32 CvKdArmV (V)
-//   offset 32  float32 CvKdOneSided (0/1)
-//   offset 36  float32 CvKdVoltFiltTC (ms) — the D term's dedicated voltage-EMA time constant
-//   offset 40  float32 CvKdDbSlope (V/s per A) — deadband line slope m, evaluated at spLimited
-//   offset 44  float32 CvKdDbFloor (V/s) — deadband line clamp floor
-//   offset 48  float32 CvKdDbCeil (V/s) — deadband line clamp ceiling
-//   offset 52  float32 CvKdSlopeCeil (V/s, real per-bus) — cvDSlope is clamped to ±this
-//   offset 56  float32 CvKdMaxTrimA (A) — flat trim cap
-//   offset 60  float32 CvKdExcessMode (0/1): 1 = trim = Kd×(slope − band), 0 = legacy Kd×slope latch
-//   offset 64  float32 CvBrakeFallRate (A/s) at log time
-//
-// Entry (57 bytes, packed — see static_assert(sizeof(CvLogEntry)==57) in firmware):
-//   offset  0  uint32   ts
-//   offset  4  int16    battV       / 100  → V
-//   offset  6  int16    targV       / 100  → V
-//   offset  8  int16    vErrorMv    / 1000 → V
-//   offset 10  int16    dvdt_x1000  / 1000 → V/s
-//   offset 12  int16    vPred       / 100  → V
-//   offset 14  int16    fastOvCap   / 10   → A
-//   offset 16  int16    cv_I_x10    / 10   → A
-//   offset 18  int16    Icv_x10     / 10   → A
-//   offset 20  int16    uTarget     / 10   → A
-//   offset 22  int16    spLimited   / 10   → A
-//   offset 24  int16    iMeas       / 10   → A
-//   offset 26  int16    duty        / 10   → %
-//   offset 28  uint8    flags       (b0=fastOvActive b1=voltLoopFired b2=cvActive
-//                                    b3=iExcessBulk b4=hard b5=iExcess b6=loadDumpActive
-//                                    b7=recovActive — post-protection integrator refill)
-//   offset 29  uint8    awState     (0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless 5=target wind-down)
-//   offset 30  int16    rpm
-//   offset 32  int16    battV_filt_x100 / 100 → V  (IBV_filtered — display EMA, VoltageFilterTC)
-//   offset 34  int16    ch1IntervalMs        → ms  (last CH1 inter-sample gap)
-//   offset 36  int16    cvDSlope_x10000 / 10000 → V/s (cvDSlope — sliding-window backward diff of cvKdFiltV)
-//   offset 38  int16    battI_x10       / 10  → A  (getBatteryCurrent — INA228 or Victron)
-//   offset 40  int16    dBcur_dt_Aps    raw A/s   (g_dBcur_dt clamped to int16)
-//   offset 42  int16    voltLoopIntervalMs  ms    actual voltage loop interval when fired (0 if not)
-//   offset 44  int16    inaIntervalMs       ms    ina_last_ms at log time — INA228 read freshness
-//   offset 46  int16    kdTrim_x1000 / 1000 → A  D-term current reduction at the Icv output
-//                                     (most recent nonzero trim since the last log write, 0 if none;
-//                                     SIGNED — negative only in two-sided mode. A position recomputed
-//                                     each tick, NOT a cumulative drain into cv_I.)
-//   offset 48  uint8    capReason   0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump (binding cap this tick)
-//   offset 49  int16    ovFilt_x100 / 100 → V  (g_ovIbvFilt — Group 2's comparator input, plant-tau EMA of IBV)
-//   offset 51  int16    targSlewed_x100 / 100 → V (voltageTargetSlewed — rise-governor output; the setpoint
-//                                     the CV PI actually tracks. vErrorMv above is (targV − IBV), NOT the
-//                                     PI's error; the real PI error is (targSlewed − battV).)
-//   offset 53  int16    pTerm_x10 / 10 → A  (g_cvPTerm — P contribution to Icv; I=cv_I offset 16, D=kdTrim offset 46)
-//   offset 55  int16    cvKdFiltV_x100 / 100 → V (g_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC; the D term's slope input)
-// ===========================================================================
+// CV / Voltage Tuner Log — decodes /cvlog.bin (68-byte header + N x entrySize little-endian
+// CvLogEntry structs) to CSV. entrySize comes from the header, never assumed; shorter legacy
+// strides still parse (see the hasOvFilt / hasTargSlewed / hasPidTerms gates below).
+// Field meanings live on struct CvLogEntry in Xregulator.ino — this parser must track it.
+// awState: 0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless 5=target wind-down
 
 const CV_LOG_HEADER_SIZE = 68;
 const CV_LOG_MIN_ENTRY_SIZE = 51;   // minimum accepted stride (ovFilt-era); actual stride comes from the header
 
-// ---------------------------------------------------------------------------
 // parseCvBin(buf)
 // Returns a decoded object with arrays for each field plus the header params.
 // Returns null on bad input.
-// ---------------------------------------------------------------------------
 function parseCvBin(buf) {
     if (!buf || buf.byteLength < CV_LOG_HEADER_SIZE + CV_LOG_MIN_ENTRY_SIZE) {
         return null;
@@ -18118,11 +17982,9 @@ function parseCvBin(buf) {
 }
 
 
-// ---------------------------------------------------------------------------
 // cvBinToCsv(d)
 // Converts a parsed cvlog object to a CSV string.
 // First row is a settings comment; second row is column headers.
-// ---------------------------------------------------------------------------
 function cvBinToCsv(d, csv3) {
     const lines = [];
 
@@ -18263,13 +18125,11 @@ function cvBinToCsv(d, csv3) {
 }
 
 
-// ---------------------------------------------------------------------------
 // downloadCvLog()
 // Fetches /cvlog.bin, decodes, saves as timestamped CSV.
 // ts/sfx come from the caller so the whole batch shares one click-time name. Reading them
 // here instead let the Filename Tag box be retyped mid-transfer, tagging this file with the
 // NEXT run's name while pidlog kept the current one.
-// ---------------------------------------------------------------------------
 async function downloadCvLog(ts = getLogTimestamp(), sfx = getLogNameSuffix()) {
     // Failure still emits the file with the cause named inside (see saveLogFile rationale), and
     // the fetch retries once — Safari's teardown of the preceding pidlog connection can kill
@@ -19426,7 +19286,6 @@ function showSystemIDResults() {
             qTbody.appendChild(tr);
         }
 
-        // Quality advisory
         const qNote = document.getElementById('sysid-quality-note');
         if (qNote && hasQuality) {
             const noiseHigh  = quietPP.some(v => v >= 2.0);
@@ -23990,13 +23849,11 @@ window.addEventListener('load', function () {
   window.addEventListener('resize', renderSlopeDeadbandPlot);
 })();
 
-// ========================================================================
 // BAROMETER PANEL (Other tab) — Zambretti forecast + 14-day history plot
 // Lives in its own IIFE so locals don't leak into the global namespace.
 // Public hooks (window.*) are how the rest of the app pokes us:
-//   window.initBaroPanel()              — call on Other-tab activation (idempotent)
-//   window.updateBaroDisplay(data, sa)  — call from CSV2 dispatcher each cycle
-// ========================================================================
+// window.initBaroPanel()              — call on Other-tab activation (idempotent)
+// window.updateBaroDisplay(data, sa)  — call from CSV2 dispatcher each cycle
 (function () {
   'use strict';
 
@@ -24394,14 +24251,12 @@ window.addEventListener('load', function () {
   }
 })();
 
-// ========================================================================
 // LONG TERM PLOTS — native render of the on-device month-long ring.
 // Mirrors the barometer pattern: lazy fetch of a binary ring on tab open,
 // parse header + records, derive each record's time from a single lastEpoch +
 // ring position (no per-record timestamp), render with uPlot. Supabase data
 // tier (older than the local ring) stitches in later. Public: initLongTermPlots().
 // Record layout MUST match firmware LongTermRecord (144 B).
-// ========================================================================
 (function () {
   'use strict';
 
@@ -25225,7 +25080,6 @@ window.addEventListener('load', function () {
     }
   }
 
-  // ======================================================================
   // CLOUD STITCH — history older than the local ring (LOCAL_DATA_SYSTEMS_PLAN 1b).
   // Lazy + cloud-gated: when Cloud Features is on and the device is registered,
   // brushing past the oldest local record pulls a matching 10-min min/max/avg
@@ -25234,7 +25088,6 @@ window.addEventListener('load', function () {
   // 30-day chunks, each older than the last; reaching the loaded edge opens + fetches
   // the next chunk. When cloud is off/unregistered the pre-ring region simply stays
   // empty (one-line hint), never an error, and the in-ring month is never greyed.
-  // ======================================================================
   const LT_CLOUD_CHUNK_S        = 30 * 86400;    // pull 30 days of older history per request
   const LT_CLOUD_MAX_LOOKBACK_S = 365 * 86400;   // stop pulling beyond ~1 year back
   // JS field key → sensor_history column prefix (envelope: _min/_max/_avg; avg-only: _avg).
@@ -25597,12 +25450,10 @@ window.addEventListener('load', function () {
   };
 })();
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Fast alternator-current scope (Plots → Scope). Pulls /fastscope.bin — a 500 ms
 // raw capture at 20 kSPS — and renders it as amps vs milliseconds. Zoom buttons
 // show the LAST N ms of the capture (ms is ground truth); the hint reports how many engine
 // and alternator revolutions that window spans, from the live RPM and PulleyRatio.
-// ─────────────────────────────────────────────────────────────────────────────
 let fastScopePlot = null;
 let fastScopeData = null;
 let fastScopeViewMs = 200;   // shared X window (ms) for BOTH the scope and the Reference Flipbook; capped at the 200 ms flipbook page length

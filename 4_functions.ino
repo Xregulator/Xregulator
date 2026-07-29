@@ -425,9 +425,7 @@ bool writeINA228Register(uint8_t i2cAddress, uint8_t reg, uint16_t value) {
 }
 
 
-// ============================================================================
-// IMU Initialization
-// ============================================================================
+// ===== IMU Initialization =====
 bool i2cProbe8bit(uint8_t addr8) {
   uint8_t addr7 = addr8 >> 1;
   Wire.beginTransmission(addr7);
@@ -538,7 +536,6 @@ void imuInit() {
   //   // Non-fatal - continue without compression
   // }
 
-  // Set FIFO to continuous mode (mode = 6)
   if (imu.Set_FIFO_Mode(6) != LSM6DSOX_OK) {
     Serial.println("ERROR: Failed to set FIFO continuous mode");
     queueConsoleMessageF("IMU: failed to set FIFO mode");
@@ -2229,6 +2226,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     HardOCEnable = settingRead(NK_HardOCEnable).toInt() != 0;
   }
+  if (!settingExists(NK_TachLieEnable)) {
+    settingWrite(NK_TachLieEnable, String((int)TachLieEnable).c_str());
+  } else {
+    TachLieEnable = settingRead(NK_TachLieEnable).toInt() != 0;
+  }
   if (!settingExists(NK_IExcessEnable)) {
     settingWrite(NK_IExcessEnable, String((int)IExcessEnable).c_str());
   } else {
@@ -2416,9 +2418,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   }
 }
 
-// ============================================================================
-// IMU Ring Buffer Helper Functions
-// ============================================================================
+// ===== IMU Ring Buffer Helper Functions =====
 inline void pushAccelSample(int16_t x, int16_t y, int16_t z, uint32_t timestamp_us) {
   uint16_t next_head = (imuRingBuffer->accel_head + 1) % ACCEL_RING_SIZE;
 
@@ -2488,7 +2488,6 @@ static_assert(sizeof(axisRemap) / sizeof(axisRemap[0]) == IMU_ORIENT_COUNT,
 // Complementary filter parameters
 constexpr float CF_ALPHA = 0.90f;  // Gyro weight (0.90 = trust gyro 90%, accel 10%) → time constant ~0.19 s; may show some wave flutter at sea
 
-// 60-second rolling window
 constexpr uint16_t ROLLING_WINDOW_SIZE = 60;  // 1 sample per second
 struct RollingWindow {
   float heel[ROLLING_WINDOW_SIZE];
@@ -2508,9 +2507,7 @@ struct RollingWindow120 {
   uint16_t count = 0;
 } rolling120s;
 
-// ============================================================================
-// IMU METRIC PROCESSING FUNCTIONS
-// ============================================================================
+// ===== IMU METRIC PROCESSING FUNCTIONS =====
 void resetAccelStats() {
   // Reset all period statistics (called after uploading to Supabase)
   imu_accel_x_min = 999.0;
@@ -3797,7 +3794,6 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
         lastDataTime = millis();
         totalDownloaded += actualRead;
 
-        // Update hash for signature verification
         mbedtls_md_update(&extractor.hashCtx, inputBuffer, actualRead);
 
         // Process tar data directly (no decompression needed)
@@ -4614,7 +4610,6 @@ bool testInternetSpeed() {
 
   WiFiClient client;
 
-  // Test 1: Can we connect at all? (3 second timeout)
   Serial.println(">>> Test 1: Attempting to connect to 1.1.1.1:80 (3s timeout)");
   Serial.flush();
   unsigned long connectStart = millis();

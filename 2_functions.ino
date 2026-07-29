@@ -244,6 +244,7 @@ bool fsRemove(const char *path) {
 #define NK_OvMeasMarginV "OvMeasMarginV"
 #define NK_OvPredMarginV "OvPredMarginV"
 #define NK_PIDTrackingGain "PIDTrackingGain"
+#define NK_TachLieEnable "TachLieEnable"
 #define NK_PITCHPOLE_THRESHOLD_DEG "PITCHPOLETHRESH"
 #define NK_PeukertExponent "PeukertExponent"
 #define NK_PidKd "PidKd"
@@ -949,7 +950,6 @@ void fsReleaseLock() {
   }
 }
 
-// ───────────────────────────────────────────────────────────────────────────
 // Versioned PSRAM-blob persistence — the shared scaffold for "accumulate in
 // PSRAM, dump to a versioned LittleFS blob at field-off, restore at boot."
 // Built for the long-term-plot ring and the alternator/boat matrices so each
@@ -957,7 +957,6 @@ void fsReleaseLock() {
 // and layout-change guard. The sensor ring + eff matrix predate this and keep
 // their own copies; retrofit them onto this later. Field-off only (LittleFS
 // writes can stall a core ~300 ms — never on a live control loop).
-// ───────────────────────────────────────────────────────────────────────────
 struct PsramBlobHeader {
   uint32_t magic;       // caller-chosen dataset id
   uint32_t version;     // caller-chosen layout version (bump on record-layout change)
@@ -1218,18 +1217,12 @@ void performDeepFactoryReset() {
   ESP.restart();
 }
 
-// Temperature task with robust fault handling:
-// - Reads DS18B20 scratchpad every 5s with CRC validation.
-// - Rejects known invalid signatures (CRC fail, all-0xFF, power-on 85°C/185°F).
-// - Holds last good value on any read fault; freshness is tracked separately.
-// - Applies sanity range (-50..300°F).
-// - Auto-corrects resolution if EEPROM or sensor reset changed it from 12-bit.
-// - Re-enumerates sensor after disconnect detection.
-// - tempTaskHealthy is owned by checkTempTaskHealth(); TempTask only sets it true on a clean read.
-// - File writes use fsMutex for filesystem serialization.
-// - Reads core0Busy as a courtesy (defers if HTTPS/NTP/OTA is mid-flight) but does NOT
-//   set it — TempTask runs during active charging, and core0Busy gates AdjustFieldLearnMode,
-//   so setting it would freeze the voltage/current control loops for ~190–750 ms every 5 s.
+// DS18B20 reader, 5 s cadence. Rejects CRC fails, all-0xFF and the power-on 85C/185F signature, holds
+// the last good value on any fault (freshness tracked separately), re-enumerates after a disconnect and
+// re-applies 12-bit resolution if an EEPROM or sensor reset changed it. tempTaskHealthy is owned by
+// checkTempTaskHealth(); this task only ever sets it true.
+// Reads core0Busy as a courtesy but must NEVER set it — TempTask runs during active charging, and
+// core0Busy gates AdjustFieldLearnMode, so setting it would freeze both control loops ~190-750 ms every 5 s.
 void TempTask(void *parameter) {
   // NO watchdog registration - keep it separate from main loop watchdog
 
@@ -1874,7 +1867,6 @@ void resetAccelWindow() {
   imuWindow->pitch_change_60s = 0;
   imuWindow->pitch_deviation_60s = 0;
 
-  // Wave period
   imuWindow->wave_period = -1000;  // -1.0s scaled
 
   // Period counters
@@ -1906,7 +1898,6 @@ void updateSensorWindow() {
   // so the on-avg stays stable across bulk/absorption/float.
   bool engineOn = engineSpinning();
 
-  // Battery voltage
   int32_t battVolt = (int32_t)(getBatteryVoltage() * 100.0);
   if (battVolt < currentWindow->battVolt_min) currentWindow->battVolt_min = battVolt;
   if (battVolt > currentWindow->battVolt_max) currentWindow->battVolt_max = battVolt;
@@ -1939,7 +1930,6 @@ void updateSensorWindow() {
     if (engineOn) currentWindow->altCurr_on_area_v_us += (int64_t)altCurr * delta_us;
   }
 
-  // Victron current
   int32_t victronCurr = (int32_t)(VictronCurrent * 100.0);
   if (victronCurr < currentWindow->victronCurr_min) currentWindow->victronCurr_min = victronCurr;
   if (victronCurr > currentWindow->victronCurr_max) currentWindow->victronCurr_max = victronCurr;
@@ -1949,7 +1939,6 @@ void updateSensorWindow() {
     if (engineOn) currentWindow->victronCurr_on_area_v_us += (int64_t)victronCurr * delta_us;
   }
 
-  // SOC
   int32_t soc = SOC_percent;
   if (soc < currentWindow->soc_min) currentWindow->soc_min = soc;
   if (soc > currentWindow->soc_max) currentWindow->soc_max = soc;
@@ -2009,7 +1998,6 @@ void updateSensorWindow() {
     }
   }
 
-  // RPM
   int32_t rpm = (int32_t)RPM;
   if (rpm < currentWindow->rpm_min) currentWindow->rpm_min = rpm;
   if (rpm > currentWindow->rpm_max) currentWindow->rpm_max = rpm;
@@ -2018,7 +2006,6 @@ void updateSensorWindow() {
     currentWindow->rpm_valid_us += delta_us;
   }
 
-  // WiFi strength
   int32_t wifiStr = WifiStrength;
   if (wifiStr < currentWindow->wifiStr_min) currentWindow->wifiStr_min = wifiStr;
   if (wifiStr > currentWindow->wifiStr_max) currentWindow->wifiStr_max = wifiStr;
@@ -2027,7 +2014,6 @@ void updateSensorWindow() {
     currentWindow->wifiStr_valid_us += delta_us;
   }
 
-  // Duty cycle
   int32_t duty = (int32_t)(dutyCycle * 100.0);
   if (duty < currentWindow->dutyCycle_min) currentWindow->dutyCycle_min = duty;
   if (duty > currentWindow->dutyCycle_max) currentWindow->dutyCycle_max = duty;
@@ -2037,7 +2023,6 @@ void updateSensorWindow() {
     if (engineOn) currentWindow->dutyCycle_on_area_v_us += (int64_t)duty * delta_us;
   }
 
-  // Dynamic alternator zero
   int32_t altZero = (int32_t)(DynamicAltCurrentZero * 100.0);
   if (altZero < currentWindow->altZero_min) currentWindow->altZero_min = altZero;
   if (altZero > currentWindow->altZero_max) currentWindow->altZero_max = altZero;
@@ -2046,7 +2031,6 @@ void updateSensorWindow() {
     currentWindow->altZero_valid_us += delta_us;
   }
 
-  // Target amps (uTargetAmps)
   int32_t targetAmps = (int32_t)(uTargetAmps * 100.0);
   if (targetAmps < currentWindow->uTargetAmps_min) currentWindow->uTargetAmps_min = targetAmps;
   if (targetAmps > currentWindow->uTargetAmps_max) currentWindow->uTargetAmps_max = targetAmps;
@@ -2055,7 +2039,6 @@ void updateSensorWindow() {
     currentWindow->uTargetAmps_valid_us += delta_us;
   }
 
-  // Temperature margin
   float tempMargin = TemperatureLimitF - TempToUse;
   int32_t tempMarginScaled = (int32_t)(tempMargin * 100.0);
   if (tempMarginScaled < currentWindow->tempMargin_min) currentWindow->tempMargin_min = tempMarginScaled;
@@ -2087,7 +2070,6 @@ void updateSensorWindow() {
     }
   }
 
-  // Heading
   if (!IS_STALE(IDX_HEADING_NMEA)) {
     int32_t heading = (int32_t)(HeadingNMEA * 100.0);
     if (heading < currentWindow->heading_min) currentWindow->heading_min = heading;
@@ -2098,7 +2080,6 @@ void updateSensorWindow() {
     }
   }
 
-  // Apparent wind speed
   int32_t aws = (int32_t)(ApparentWindSpeedNMEA * 100.0);
   if (aws < currentWindow->aws_min) currentWindow->aws_min = aws;
   if (aws > currentWindow->aws_max) currentWindow->aws_max = aws;
@@ -2107,7 +2088,6 @@ void updateSensorWindow() {
     currentWindow->aws_valid_us += delta_us;
   }
 
-  // Apparent wind angle
   int32_t awa = (int32_t)(ApparentWindAngleNMEA * 100.0);
   if (awa < currentWindow->awa_min) currentWindow->awa_min = awa;
   if (awa > currentWindow->awa_max) currentWindow->awa_max = awa;
@@ -2116,7 +2096,6 @@ void updateSensorWindow() {
     currentWindow->awa_valid_us += delta_us;
   }
 
-  // True wind speed - CONDITIONAL on valid
   if (!isnan(TrueWindSpeedNMEA)) {
     int32_t tws = (int32_t)(TrueWindSpeedNMEA * 100.0);
     if (tws < currentWindow->tws_min) currentWindow->tws_min = tws;
@@ -2127,7 +2106,6 @@ void updateSensorWindow() {
     }
   }
 
-  // True wind angle - CONDITIONAL on valid
   if (!isnan(TrueWindAngleNMEA)) {
     int32_t twa = (int32_t)(TrueWindAngleNMEA * 100.0);
     if (twa < currentWindow->twa_min) currentWindow->twa_min = twa;
@@ -2200,9 +2178,7 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     // Alternator
     "\"alt_curr_min\":%.2f,\"alt_curr_max\":%.2f,\"alt_curr_avg\":%.2f,"
     "\"duty_cycle_min\":%.2f,\"duty_cycle_max\":%.2f,\"duty_cycle_avg\":%.2f,"
-    // Victron / external
     "\"victron_curr_min\":%.2f,\"victron_curr_max\":%.2f,\"victron_curr_avg\":%.2f,"
-    // SOC
     "\"soc_min\":%.2f,\"soc_max\":%.2f,\"soc_avg\":%.2f,"
     // Engine
     "\"rpm_min\":%d,\"rpm_max\":%d,\"rpm_avg\":%d,"
@@ -2242,7 +2218,6 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     "\"imu_vomit_pct\":%.2f,"
     "\"imu_anchorage_comfort\":%.2f,"
     "\"imu_wave_period_sec\":%.2f,"
-    // IMU events (counters for this window)
     "\"imu_slam_count_window\":%u,"
     "\"imu_slam_peak_max_window\":%.3f,"
     // true = this window's IMU data is not trustworthy (install unvalidated/bad, or implausible heel/pitch
@@ -2604,13 +2579,11 @@ done_headers:
   return (httpCode == 200 && ackConfirmed);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // PSRAM sensor-snapshot ring (replaces the old LittleFS /buffer/*.json layout).
 // One slot per completed SENSOR_UPLOAD_INTERVAL window. Push is microseconds;
 // no flash I/O, no Core 1 stall. Drain to Supabase happens from the cloud-
 // feature block in loop() under the same field-off gate as uploadBufferedRecords.
 // On overflow, the oldest unread slot is dropped.
-// ─────────────────────────────────────────────────────────────────────────────
 inline bool ringIsFull()  { return sensorRingCount >= SENSOR_RING_SIZE; }
 inline bool ringIsEmpty() { return sensorRingCount == 0; }
 
@@ -3172,20 +3145,14 @@ void clearSensorBuffer() {
   Serial.println("Cleared sensor ring + shutdown backup");
 }
 
-// ============================================
-// ESP32 CONFIG SNAPSHOT FUNCTIONS
-// ============================================
-// Build config snapshot JSON payload.
-// Shape: { device_uid, token, snapshot_timestamp, settings: {…}, state: {…} }
-// settings = the complete manifest + alt/perf-registry set from manifestConfigObject
-// (~260 keys, grows automatically as settings are added — stored verbatim as jsonb).
-// Settings populate device_settings_snapshots (owner-visible only, never leaderboards).
-// State populates device_state_daily + UPSERTs lifetime fields into device_statistics.
-// Field names and grouping mirror configsnapshot_picker.html.
-// All checked-box fields included; "Not in HTML — JS-driven" picker notes are noted but
-// the firmware variables still exist and are emitted normally.
-// snprintf's size argument is size_t. Once offset passes the buffer end, (cfgRemain(offset))
-// goes negative and converts to an enormous size_t, defeating the bound. Clamp to 0.
+// ===== ESP32 CONFIG SNAPSHOT FUNCTIONS =====
+// Build config snapshot JSON: { device_uid, token, snapshot_timestamp, settings: {…}, state: {…} }
+// settings = the full manifest + alt/perf-registry set from manifestConfigObject (~260 keys, grows
+// automatically as settings are added, stored verbatim as jsonb) → device_settings_snapshots,
+// owner-visible only, never leaderboards. state → device_state_daily + an UPSERT of the lifetime
+// fields into device_statistics. Field names and grouping mirror configsnapshot_picker.html.
+// snprintf's size argument is size_t: once offset passes the buffer end cfgRemain(offset) goes
+// negative and converts to an enormous size_t, defeating the bound. Clamp to 0.
 static inline size_t cfgRemain(int off) {
   return (off >= CONFIG_PAYLOAD_SIZE) ? (size_t)0 : (size_t)(CONFIG_PAYLOAD_SIZE - off);
 }
@@ -3943,7 +3910,6 @@ bool canUploadNow() {
   return true;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // FAST ALTERNATOR-CURRENT CHANNEL — GPIO3 / ADC1_CH2
 // Hardware: CH1 buffer output (U9 pins 6+7) jumpered to J3 pin 11 (net EXTRA6, C66
 // removed). 3.33 mV/A at the node for the 300 A sensor; zero amps = 1.25 V. Spec:
@@ -3955,7 +3921,6 @@ bool canUploadNow() {
 // reference flipbook, fleet scalars.
 // A board with a broken/missing jumper reads pegged full-scale through the R110
 // pullup (fail-obvious by design) — the subsystem detects that and goes dormant.
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #define FA_ADC_CHANNEL ADC_CHANNEL_2  // GPIO3
 #define FA_SAMPLE_RATE_HZ 20000

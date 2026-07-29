@@ -1031,6 +1031,7 @@ enum Csv3Index {
   CSV3_cvRecovDeepMult,        // starve-walk rate multiplier at full depth; ×100
   CSV3_cvRecovFlareBandV,      // arrival flare band (V per 12V block); ×1000
   CSV3_cvRecovFlareFrac,       // arrival flare ceiling floor, fraction of recovery goal; ×100
+  CSV3_TachLieEnable,          // tach-lie plausibility cut enable (0/1)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1118,22 +1119,12 @@ void loadAPCredentials(bool forceDefaults = false) {
 void setupWiFi() {
   Serial.println("\n=== WiFi Setup Starting ===");
 
-  // Configuration Options Summary - GPIO Boot Mode Selection
-  // GPIO41 - Boot from Factory Partition (emergency recovery from bad OTA)
-  // GPIO45 - Force Configuration Mode (WiFi setup/password recovery - alternator disabled for safety)
-  // GPIO46 - Select AP vs Client Mode:
-  //   - LOW  = AP Mode (creates own WiFi network, full alternator operation, emergency access without credentials)
-  //   - HIGH = Client Mode (connects to ship's WiFi network, full alternator operation)
-  //
-  // EMERGENCY ACCESS WITHOUT CREDENTIALS:
-  //   Hold GPIO46 LOW during boot → AP mode → Full alternator functionality
-  //   Connect to "ALTERNATOR_WIFI" (or custom SSID) with password "alternator123" (or custom)
-  //   Access full interface at http://192.168.4.1
-  //
-  // WHY CONFIG MODE DISABLES ALTERNATOR:
-  //   CONFIG mode (GPIO45 LOW or no credentials) intentionally prevents alternator operation
-  //   This is a safety feature - prevents running with unconfigured/unknown settings
-  //   Use GPIO46 LOW (AP mode) for emergency operation without reconfiguring
+  // Boot-mode straps:
+  //   GPIO41 LOW — boot the factory partition (emergency recovery from a bad OTA)
+  //   GPIO45 LOW — force CONFIG mode (WiFi setup / password recovery); alternator DISABLED, deliberately:
+  //                config mode means settings are unknown/unconfigured, so charging must not run
+  //   GPIO46     — LOW = AP mode, HIGH = Client mode. Both run the alternator fully, so holding 46 LOW is
+  //                the credential-free emergency path: join ALTERNATOR_WIFI, browse to 192.168.4.1
 
   // GPIO45 = Configuration Mode Override (always checked first)
   pinMode(45, INPUT_PULLUP);
@@ -1210,7 +1201,6 @@ void setupWiFi() {
     cached_wifi_creds_valid = false;
   }
 
-  // GPIO46 HIGH = Client Mode Requested
   Serial.println("=== GPIO46 HIGH: CLIENT MODE REQUESTED ===");
 
   // If no saved credentials, enter config mode
@@ -6340,6 +6330,13 @@ void setupServer() {
       settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
       queueConsoleMessageF("OV Group 2 (measured-voltage threshold): %s", OvGroup2Enable ? "ENABLED" : "DISABLED");
     }
+    if (request->hasParam("TachLieEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("TachLieEnable")->value();
+      TachLieEnable = inputMessage.toInt() != 0;
+      settingWrite(NK_TachLieEnable, String((int)TachLieEnable).c_str());
+      queueConsoleMessageF("Tach plausibility cut (commanded current, zero output): %s", TachLieEnable ? "ENABLED" : "DISABLED");
+    }
     if (request->hasParam("HardOCEnable")) {
       foundParameter = true;
       inputMessage = request->getParam("HardOCEnable")->value();
@@ -6579,7 +6576,6 @@ void setupServer() {
       ft_altFold.worstSession = 0;
       ft_boatPerf.worstSession = 0;
       VeTime2 = 0;
-      // CPU load maxes
       cpuLoadCore0Max = 0;
       cpuLoadCore1Max = 0;
       // Session max loop time (this session only — last session is preserved)
@@ -7026,7 +7022,6 @@ void setupServer() {
       String tokenDeviceUID = doc["device_uid"].as<String>();
       Serial.println("Token belongs to device: " + tokenDeviceUID);
 
-      // Check if token's device matches current device
       if (tokenDeviceUID != deviceUID) {
         Serial.println("ERROR: Token device mismatch!");
         Serial.println("  Token device: " + tokenDeviceUID);
@@ -7067,7 +7062,6 @@ void setupServer() {
       request->send(200, "application/json", "{\"registered\":false,\"error\":\"validation_failed\"}");
 
     } else {
-      // Network error or server error - keep credentials
       Serial.println("⚠️ Network/server issue (HTTP " + String(httpCode) + ") - keeping credentials");
       request->send(200, "application/json", "{\"registered\":false,\"error\":\"network_error\"}");
     }
@@ -7222,7 +7216,6 @@ void setupServer() {
     request->send(httpCode, "application/json", response);
   });
 
-  // Delete All Data endpoint
   server.on("/deleteAllData", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (!settingsArmActive()) {
       request->send(403, "text/plain", "Settings not armed");
@@ -7761,7 +7754,6 @@ void setupServer() {
         r.avgRPM, r.avgAltTempF, r.battVAtStart, r.socAtStart * 100.0f, r.chargingVoltageTarget,
         (int)r.chargeStage, (unsigned)r.epoch, r.steadyP2PV, r.note);
     }
-    // Active test state
     bool cvTestActive = (CVTuningMode && cvTuningScore.testStarted);
     float cvts = 0.0f;
     if (cvTestActive && cvTuningScore.activeTimeSec > 0.0f) {
@@ -9063,7 +9055,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -9420,7 +9412,8 @@ void SendWifiData() {
                                SafeInt(cvRecovDeepBandV, 1000),
                                SafeInt(cvRecovDeepMult, 100),
                                SafeInt(cvRecovFlareBandV, 1000),
-                               SafeInt(cvRecovFlareFrac, 100));
+                               SafeInt(cvRecovFlareFrac, 100),
+                               (int)TachLieEnable);
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;

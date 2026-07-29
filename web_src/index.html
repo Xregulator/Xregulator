@@ -2265,6 +2265,26 @@
                     </form>
                   </article>
 
+                  <article class="protections-param" data-groups="">
+                    <div class="protections-name">
+                      <span class="protections-tag">RPM</span>
+                      Tach Plausibility Cut (<span id="TachLieEnable_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Cuts the field when the tach claims the engine is turning, the control loop is commanding current, the field is driven well above the learned zero-output floor, and the alternator still delivers nothing for several seconds. That combination means a false RPM reading (field switching noise on the tach line), a dead alternator, or an open field circuit — a false reading left running energizes the field indefinitely and drains the battery through it with the engine stopped. This cut stays armed even when the global Protections toggle is off; this switch is the only thing that disarms it. Leave it on unless bench work with a simulated tach signal requires otherwise.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="TachLieEnable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('TachLieEnable_checkbox', 'TachLieEnable', 'TachLieEnable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="TachLieEnable" name="TachLieEnable" type="number" value="" style="display:none;" />
+                      </div>
+                    </form>
+                  </article>
+
                 </div>
               </section>
 

@@ -14,16 +14,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// IMPORTANT: Firmware Version number MUST follow semantic versioning (x.y.z format)
-// - Only numeric digits and dots allowed (regex: ^\d+\.\d+\.\d+$)
-// - Examples: "1.0.0", "2.1.3", "10.5.22" ✅
-// - Invalid: "1.1.1Retry", "v2.0.0", "2.1.0-beta" ❌
-//Maximum supported version = "999.99.99" → 999*10000 + 99*100 + 99 = 9,999,999
-//         Safe Version Ranges:
-//major: 0-999   (4 digits max)
-//minor: 0-99    (2 digits max)
-//patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.5";
+// Must be strict semver ^\d+\.\d+\.\d+$ — no suffixes, no leading v. Compared as an integer
+// major*10000 + minor*100 + patch, so the ceiling is 999.99.99 (minor/patch cannot exceed 99).
+const char *FIRMWARE_VERSION = "0.0.2";
 
 // OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
 // proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
@@ -177,18 +170,16 @@ String currentUID;
 #define FUNC_TIMING_WINDOW_MS 10000  // rolling window for per-function worst-case timing (ms)
 
 
-// ============================================================
 // ALTERNATOR HEALTH v2 — cloud-fitted curve model + best-ever record book.
-//   A_pred = base(RPM, excitation) × tempCorr(T) × busCorr(Vbus).
-//   "excitation proxy" = temp-normalized field drive, NOT measured field current.
-//   The CLOUD fits these surfaces from uploaded best-ever record points (field-off +
-//   interval); the device only EVALUATES them to rate live output, BUFFERS new
-//   envelope-pushing records for the next upload, and tracks a performance%-vs-engine-
-//   hours TREND (the headline display). Best-ever works here because an alternator's
-//   output is near-deterministic given its inputs, so best-ever ≈ expected and the
-//   reference auto-ratchets to the healthy peak (no freeze trigger needed).
-//   Mirrors boat-performance v2. Full design: ALT_HEALTH_V2_REBUILD_PLAN.md.
-// ============================================================
+// A_pred = base(RPM, excitation) × tempCorr(T) × busCorr(Vbus).
+// "excitation proxy" = temp-normalized field drive, NOT measured field current.
+// The CLOUD fits these surfaces from uploaded best-ever record points (field-off +
+// interval); the device only EVALUATES them to rate live output, BUFFERS new
+// envelope-pushing records for the next upload, and tracks a performance%-vs-engine-
+// hours TREND (the headline display). Best-ever works here because an alternator's
+// output is near-deterministic given its inputs, so best-ever ≈ expected and the
+// reference auto-ratchets to the healthy peak (no freeze trigger needed).
+// Mirrors boat-performance v2. Full design: ALT_HEALTH_V2_REBUILD_PLAN.md.
 
 // Excitation-proxy temp normalization (copper seed; cloud refits α later).
 #define ALT_ALPHA_PER_C 0.00393f
@@ -271,13 +262,11 @@ float altPaused       = 0.0f;    // 1 = halt LEARNING into My History (sticky). 
                                  // Selecting Uploaded defaults this ON; live display + trend still update either way.
 float altSimMode      = 0.0f;    // 1 = inject synthetic operating points for bench testing (not persisted)
 
-// ============================================================
 // BOAT PERFORMANCE — sailing polar (Phase 3). Pitch-corrected best-ever speed map.
-//   V_best(windspeed, windangle) × pitchDerate(pitch_std).  Predict STW (fallback SOG).
-//   Learning unit = sliding ~60 s windows; per-cell best-ever = robust top-K of window means.
-//   Fouling/current = one-sided CUSUM on recent ÷ best-ever.  Manual Pause (sticky) + Reset.
-//   Motoring map + web dashboard = follow-up slices. Full design: BOAT_PERFORMANCE_MATRIX_PLAN.md.
-// ============================================================
+// V_best(windspeed, windangle) × pitchDerate(pitch_std).  Predict STW (fallback SOG).
+// Learning unit = sliding ~60 s windows; per-cell best-ever = robust top-K of window means.
+// Fouling/current = one-sided CUSUM on recent ÷ best-ever.  Manual Pause (sticky) + Reset.
+// Motoring map + web dashboard = follow-up slices. Full design: BOAT_PERFORMANCE_MATRIX_PLAN.md.
 #define PERF_WS_BINS    16         // wind-speed bands 0..40 kt
 #define PERF_WS_MAX     40.0f
 #define PERF_WA_BINS    36         // wind-angle bins 0..360° (symmetric fold uses 0..180 → first 18)
@@ -287,13 +276,11 @@ float altSimMode      = 0.0f;    // 1 = inject synthetic operating points for be
 #define PERF_SAIL_CELLS (PERF_WS_BINS * PERF_WA_BINS)   // 576
 #define PERF_TOPK       4          // best-ever = K best window-means; reference = min(topK) (robust high pct)
 
-// ============================================================
 // BOAT PERFORMANCE — Best-Ever Front (sailing polar + motoring curve). Two sparse best-ever
-//   boat-speed surfaces: SAIL over {AWS, AWA, sea-state(pitch-std)}, MOTOR over {RPM, headwind,
-//   sea-state}. Wind axes are APPARENT (raw both-sided stored); perfFoldSymmetric folds |AWA| at
-//   eval+display only. Speed = user-selected STW or SOG. Device learns + evaluates; cloud prunes +
-//   retains raw history. Engine instances + functions: 7_functions.ino. Generic engine: top of file.
-// ============================================================
+// boat-speed surfaces: SAIL over {AWS, AWA, sea-state(pitch-std)}, MOTOR over {RPM, headwind,
+// sea-state}. Wind axes are APPARENT (raw both-sided stored); perfFoldSymmetric folds |AWA| at
+// eval+display only. Speed = user-selected STW or SOG. Device learns + evaluates; cloud prunes +
+// retains raw history. Engine instances + functions: 7_functions.ino. Generic engine: top of file.
 
 // Live points for the dashboard (red dot + % gauge), via PerfLive / MotorLive SSE.
 static float perfLive_ws = 0, perfLive_wa = 0, perfLive_spd = 0, perfLive_best = 0;
@@ -391,7 +378,6 @@ volatile bool settingsDirty = false;  // set by /get handler; triggers immediate
 unsigned long lastEventSourceSend = 0;
 
 
-// Ring buffers 
 struct ImuRingBuffer {
   IMUSample accel[ACCEL_RING_SIZE];
   IMUSample gyro[GYRO_RING_SIZE];
@@ -409,7 +395,6 @@ bool imuEnabled = false;
 unsigned long lastIMUPoll = 0;
 constexpr unsigned long IMU_POLL_INTERVAL = 10;  // ms
 
-// FIFO drain budget
 constexpr uint16_t MAX_FIFO_DRAIN_PER_POLL = 6;   // Conservative start, tune up if needed
 uint8_t fifoBuffer[MAX_FIFO_DRAIN_PER_POLL * 7];  // 7 bytes per FIFO entry
 
@@ -420,13 +405,10 @@ uint64_t imu_total_samples_accel = 0;
 uint64_t imu_total_samples_gyro = 0;
 uint32_t imu_unknown_tag_count = 0;
 
-// Collision avoidance threshold
 constexpr int ANALOG_READ_COLLISION_THRESHOLD = 1200;  // µs - skip IMU if analog read was long
 
 
-// ============================================================================
-// IMU DERIVED METRICS - GLOBAL VARIABLES
-// ============================================================================
+// ===== IMU DERIVED METRICS - GLOBAL VARIABLES =====
 
 // --- RAW SIGNALS (Current values, updated at reporting rate) ---
 // Note: Stored as int16 in ring buffers, converted to float only when needed
@@ -451,37 +433,31 @@ float imu_pitch_deviation_120s = 0;  // Peak pitch deviation from 2-min mean (°
 float imu_heading_swing_120s = -1;   // Peak-to-peak heading swing over 2 min (°); -1 = no compass data
 
 // --- RAW SIGNAL STATISTICS (Reset every reporting period) ---
-// Accel X
 float imu_accel_x_min = 999.0;
 float imu_accel_x_max = -999.0;
 float imu_accel_x_sum = 0;
 uint32_t imu_accel_x_count = 0;
 
-// Accel Y
 float imu_accel_y_min = 999.0;
 float imu_accel_y_max = -999.0;
 float imu_accel_y_sum = 0;
 uint32_t imu_accel_y_count = 0;
 
-// Accel Z
 float imu_accel_z_min = 999.0;
 float imu_accel_z_max = -999.0;
 float imu_accel_z_sum = 0;
 uint32_t imu_accel_z_count = 0;
 
-// Gyro X
 float imu_gyro_x_min = 999.0;
 float imu_gyro_x_max = -999.0;
 float imu_gyro_x_sum = 0;
 uint32_t imu_gyro_x_count = 0;
 
-// Gyro Y
 float imu_gyro_y_min = 999.0;
 float imu_gyro_y_max = -999.0;
 float imu_gyro_y_sum = 0;
 uint32_t imu_gyro_y_count = 0;
 
-// Gyro Z
 float imu_gyro_z_min = 999.0;
 float imu_gyro_z_max = -999.0;
 float imu_gyro_z_sum = 0;
@@ -494,25 +470,21 @@ float CAPSIZE_THRESHOLD_DEG = 120.0f;
 float PITCHPOLE_THRESHOLD_DEG = 70.0f;
 float SLAM_THRESHOLD_G = 2.5f;  // Vertical accel threshold for slam
 
-// Heel
 float imu_heel_min = 999.0;
 float imu_heel_max = -999.0;
 float imu_heel_sum = 0;
 uint32_t imu_heel_count = 0;
 
-// Pitch
 float imu_pitch_min = 999.0;
 float imu_pitch_max = -999.0;
 float imu_pitch_sum = 0;
 uint32_t imu_pitch_count = 0;
 
-// Vertical accel
 float imu_vertical_accel_min = 999.0;
 float imu_vertical_accel_max = -999.0;
 float imu_vertical_accel_sum = 0;
 uint32_t imu_vertical_accel_count = 0;
 
-// Total accel
 float imu_total_accel_min = 999.0;
 float imu_total_accel_max = -999.0;
 float imu_total_accel_sum = 0;
@@ -636,7 +608,6 @@ uint32_t prev_imu_min_stat_extreme = 0;
 
 
 
-// Forced update tracking
 unsigned long forcedUpdateDeadline = 0;
 bool hasForcedUpdate = false;
 int forcedFwVersionInt = 0;
@@ -693,7 +664,6 @@ struct StreamingExtractor {
   bool inPadding;
   size_t paddingRemaining;
 
-  // OTA state
   esp_ota_handle_t otaHandle;
   const esp_partition_t *otaPartition;
   bool otaStarted;
@@ -702,7 +672,6 @@ struct StreamingExtractor {
   File currentWebFile;
   bool prodFSMounted;
 
-  // Hash verification
   mbedtls_md_context_t hashCtx;
   bool hashStarted;
 };
@@ -775,7 +744,6 @@ int cpuLoadCore1Max = 0;
 //More health monitoring
 // Session and health tracking
 unsigned long sessionStartTime = 0;
-// Duration of last WiFi session (seconds, persistent)
 unsigned long LastSessionDuration = 0;     // seconds, persistent
 unsigned long CurrentSessionDuration = 0;  // seconds
 int LastSessionMaxLoopTime = 0;            // microseconds, persistent (UI divides by 1e6 to show seconds)
@@ -867,7 +835,6 @@ const uint32_t READ_TIMEOUT = 10000;      // ms, idle
 const uint32_t GLOBAL_TIMEOUT = 45000;    // ms
 
 
-//Console
 unsigned long lastConsoleMessageTime = 0;
 const unsigned long CONSOLE_MESSAGE_INTERVAL = 700;  //
 // Fixed-size circular buffer:
@@ -911,7 +878,6 @@ enum DeviceMode {
 };
 DeviceMode currentMode = MODE_CLIENT;  // gets overwritten immediately, exact mode here doesn't matter
 
-//little fs monitor
 bool littleFSMounted = false;
 
 int INADisconnected = 0;
@@ -1097,7 +1063,7 @@ bool  fieldCurveResultsReady = false;          // true when curve + proposals ar
 uint32_t fieldCurveLastEndMs = 0;              // cooldown guard
 // Results (read via /fieldcurve.csv)
 float fieldCurveKneeDuty   = -1.0f;            // duty at the saturation knee (%), -1 = none found
-float fieldCurveKneeAmps   = -1.0f;            // amps at the knee (A)
+float fieldCurveKneeAmps   = -1.0f;
 float fieldCurveTargetLimitA = 0.0f;           // table limit-at-speed used for the 50/75% targets (A)
 float fieldCurvePropStabA  = 0.0f;             // proposed SystemIDStabilizeAmps (A)
 float fieldCurvePropStepPct = 0.0f;            // proposed SystemIDStepAmplitude (% duty)
@@ -1282,13 +1248,11 @@ int weatherDataValid = 0;  // 0=false, 1=true
 char weatherLastError[64];
 int weatherHttpResponseCode = 0;
 
-// Weather Mode Settings
 int weatherModeEnabled = 0;            // 0=disabled, 1=enabled
 float UVThresholdHigh = 2.1;           // UV index above this = high solar expected (kWh)
 int WeatherUpdateInterval = 21600000;  // Update every 6 hours (in milliseconds)
 int WeatherTimeoutMs = 10000;          // HTTP timeout in milliseconds
 
-// Weather Mode Status Variables
 int currentWeatherMode = 0;           // 0=normal, 1=high solar, 2=low solar
 unsigned long nextWeatherUpdate = 0;  // When next update is due
 
@@ -1364,7 +1328,6 @@ int UseFloat = 0;              // post-absorption mode: 0 = idle until rebulk cr
 bool zeroFloatActive = false;  // live: in the float stage with UseFloat=2 — zero-current regulation (MaintainMode's control law, entered by the stage machine with rebulk criteria still armed)
 
 
-// Absorption stage
 volatile bool inAbsorptionStage = false;
 uint32_t absorptionStartTime = 0;
 float AbsorptionVoltage = 13.9f;
@@ -1401,7 +1364,6 @@ float HardOCTripAmps = 160.0f;   // derived: MaxTableValue + 10A — recomputed 
 uint32_t HardOCDebounceMs = 20;  // user-adjustable, persisted in NVS
 bool HardOCEnable = true;        // Group 0 enable — gates the last-resort trip; survives the global protections toggle, so OFF removes the final over-current backstop
 uint32_t hardOCStartMs = 0;
-//Field PWM stuff
 const int pwmPin = 14;  // field PWM pin
 //const int pwmChannel = 0;      //0–7 available for high-speed PWM  (ESP32)
 const int pwmResolution = 12;          // Error = +0.010%    PWM Resolution = ±0.024% (1/4096)
@@ -1431,7 +1393,7 @@ float dutyCycle;                              // Field outout %--- this is just 
 float FieldResistance = 2;                    // Field resistance in Ohms usually between 2 and 6 Ω, changes 10-20% with temp
 float vvout;                                  // Calculated field volts (approximate)
 float iiout;                                  // Calculated field amps (approximate)
-volatile float AlternatorTemperatureF = NAN;  // alternator temperature
+volatile float AlternatorTemperatureF = NAN;
 float MaxAlternatorTemperatureF = 0;          // maximum alternator temperature
 // === Thermistor Stuff
 float R_fixed = 10000.0;               // Series resistor in ohms
@@ -1493,7 +1455,6 @@ double DischargedEnergy_AllTime = 0.0;         // Wh (lifetime)
 float SolarChargedEnergy = 0.0f;               // Solar Wh (session)
 double SolarChargedEnergy_AllTime = 0.0;       // Solar Wh (lifetime)
 double AlternatorChargedEnergy_AllTime = 0.0;  // Alternator Wh (lifetime)
-// Fuel (L)
 float EngineFuelUsed = 0.0f;              // L (session)
 float EngineFuelUsed_AllTime = 0.0f;      // L (lifetime)
 float AlternatorFuelUsed_AllTime = 0.0f;  // L (lifetime)
@@ -1526,17 +1487,14 @@ uint32_t fcRunStartMs = 0;
 bool fcRun = false;
 double fcSampleMpgSum = 0, fcSampleRpmSum = 0;
 uint32_t fcSampleCount = 0;
-// Voltage (V)
 float PeakVoltage_AllTime = 0.0f;  // V (lifetime peak)
 float MinVoltage = 99.0f;          // V (session min)
 float MinVoltage_AllTime = 99.0f;  // V (lifetime min)
-// Runtime (hours)
 double EngineRunTime_AllTime = 0.0;  // seconds (lifetime) — divide by 3600 for hours; double for many-year precision
 // Boat-speed data maturity — lifetime seconds spent moving in each mode (sailing = engine off, motoring = engine on).
 // Shown next to "front points" in the Boat Speed plot. Reset by Clear All (resetBoatPerformance). Persisted in NVS.
 double perfSailSeconds = 0.0;
 double perfMotorSeconds = 0.0;
-// Charge cycles (count)
 float ChargeCycles = 0;          // count (session)
 float ChargeCycles_AllTime = 0;  // count (lifetime)
 // Travel (nm, kts)
@@ -1617,7 +1575,6 @@ char *payloadBuffer;
 char *filenameBuffer;
 char *timestampBuffer;
 char *messageBuffer;
-// Time management
 bool timeIsSynced = false;
 time_t timeBase = 0;               // Unix timestamp at last sync
 unsigned long timeBaseMillis = 0;  // millis() at last sync
@@ -1677,7 +1634,6 @@ GpsSource currentGpsSource = GPS_NONE;
 enum GpsTimeSourceMode { GTS_AUTO, GTS_NMEA, GTS_PHONE, GTS_NTP };
 uint8_t gpsTimeSourceMode = GTS_AUTO;
 
-// Sensor aggregation window
 struct SensorWindow {
   // Battery voltage
   int32_t battVolt_min = 999900;
@@ -1697,13 +1653,11 @@ struct SensorWindow {
   int64_t altCurr_area_v_us = 0;
   uint64_t altCurr_valid_us = 0;
 
-  // Victron current
   int32_t victronCurr_min = 999900;
   int32_t victronCurr_max = -999900;
   int64_t victronCurr_area_v_us = 0;
   uint64_t victronCurr_valid_us = 0;
 
-  // SOC
   int32_t soc_min = 999900;
   int32_t soc_max = 0;
   int64_t soc_area_v_us = 0;
@@ -1733,7 +1687,6 @@ struct SensorWindow {
   int64_t ambTemp_area_v_us = 0;
   uint64_t ambTemp_valid_us = 0;
 
-  // RPM
   int32_t rpm_min = 999900;
   int32_t rpm_max = 0;
   int64_t rpm_area_v_us = 0;
@@ -1745,7 +1698,6 @@ struct SensorWindow {
   int64_t wifiStr_area_v_us = 0;
   uint64_t wifiStr_valid_us = 0;
 
-  // Duty cycle
   int32_t dutyCycle_min = 999900;
   int32_t dutyCycle_max = 0;
   int64_t dutyCycle_area_v_us = 0;
@@ -1779,7 +1731,6 @@ struct SensorWindow {
   int64_t cog_area_v_us = 0;
   uint64_t cog_valid_us = 0;
 
-  // Heading
   int32_t heading_min = 999900;
   int32_t heading_max = 0;
   int64_t heading_area_v_us = 0;
@@ -1809,13 +1760,11 @@ struct SensorWindow {
   int64_t twa_area_v_us = 0;
   uint64_t twa_valid_us = 0;
 
-  // Leeway
   int32_t leeway_min = 999900;
   int32_t leeway_max = -999900;
   int64_t leeway_area_v_us = 0;
   uint64_t leeway_valid_us = 0;
 
-  // VMG
   int32_t vmg_min = 999900;
   int32_t vmg_max = -999900;
   int64_t vmg_area_v_us = 0;
@@ -2151,32 +2100,16 @@ struct ImuWindow {  // lives in PSRAM to save internal SRAM
 };
 ImuWindow *imuWindow = nullptr;
 
-// Upload timing
 unsigned long lastSensorUploadTime = 0;
 bool sensorUploadInProgress = false;
 
-// core0Busy — "hold the field off while a long Core 0 op is in flight."
-//
-// What it actually does: AdjustFieldLearnMode() early-returns when this is set,
-// which prevents digitalWrite(4, HIGH) from re-enabling the field AND freezes the
-// voltage PI + inner current PID. The early-return is the whole control loop, not
-// just the field-enable line.
-//
-// What should set it:
-//   - Long-running Core 0 operations that are themselves only allowed to start
-//     while the field has been off for ≥ 60 s (gated by fieldOffSettled()).
-//     Currently: httpsTask (HTTPS uploads/fetches), syncTimeFromNTP, and the OTA
-//     update path. Field is already off when they start, and the gate keeps it off
-//     until they finish so the WiFi/HTTPS subsystem isn't fighting a field
-//     re-enable mid-transaction.
-//
-// What must NOT set it:
-//   - Anything that can fire during active charging. Setting this flag while RPM
-//     could change blinds the protection logic and PID for the full duration of
-//     the op.
-//
-// Readers: TempTask (defer own work), testInternetSpeed (skip), scheduled restart
-// (wait up to 30 s), OTA orchestration, and the AFLM gate at 6_functions.ino:1388.
+// core0Busy — "hold the field off while a long Core 0 op is in flight." AdjustFieldLearnMode()
+// early-returns on it, so it freezes the ENTIRE control loop (voltage PI + inner current PID),
+// not just the field-enable line.
+// Set it ONLY from ops that are themselves gated on fieldOffSettled() (>= 60 s field-off): httpsTask,
+// syncTimeFromNTP, OTA. Anything that can fire during active charging must NOT set it — that blinds
+// the protections and the PID for the full duration of the op.
+// Readers: TempTask, testInternetSpeed, scheduled restart, OTA orchestration, the AFLM gate.
 volatile bool core0Busy = false;
 
 // Dashboard mirror of sensorRingCount. Real cap is SENSOR_RING_SIZE (1000).
@@ -2287,7 +2220,6 @@ int32_t prev_EngineFuel = 0;
 float prev_ChargeCycles = 0;
 int32_t prev_TotalDist = 0;
 int32_t prev_AvgSpeed = 0;
-// NVS cache variables for _AllTime
 uint32_t prev_ChargedEnergy_AllTime = 0;
 uint32_t prev_DischrgdEnergy_AllTime = 0;
 uint32_t prev_AltChrgdEnergy_AllTime = 0;
@@ -2378,7 +2310,7 @@ int LifeIndicatorColor = 0;           // 0=green, 1=yellow, 2=red
 
 
 // Timing
-unsigned long lastThermalUpdateTime = 0;     // Last thermal calculation time
+unsigned long lastThermalUpdateTime = 0;
 const uint32_t INA_SLOW_INTERVAL_MS = 1100;  // field off: AVG=128, CT=4120µs → 1054ms update
 const uint32_t INA_FAST_INTERVAL_MS = 5;     // field on:  AVG=4,   CT=540µs  → 4.3ms update
 uint32_t inaReadInterval = INA_SLOW_INTERVAL_MS;
@@ -2425,7 +2357,6 @@ int ResetDynamicAltZero = 0;        // Momentary reset button (0=normal, 1=reset
 
 //Momentary Buttons and alarm logic
 int FactorySettings = 0;  // Reset Button
-// Alarm variables
 bool alarmLatch = false;        // Current latched alarm state
 int AlarmLatchEnabled = 0;      // Whether latching is enabled (0/1 for consistency)
 int AlarmTest = 0;              // Momentary alarm test (1 = test active)
@@ -2478,20 +2409,32 @@ uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not c
 // Applies ONLY while charging is enabled — a shutdown has nothing to recover, so both cuts fire
 // ungated and a stopping engine can't sit with an energized field faking tach readings.
 #define PROT_RPM_GRACE_MS 5000
-// Tach-lie plausibility cut: tach claims the engine is running while the field is driven hard and
-// the alternator makes nothing — physically impossible above cut-in speed. Cause is one of: RPM
-// signal noise (field-PWM coupling / LM2907 re-bias), a dead alternator, or an open field drive
-// where the commanded field delivers no current (ON/OFF switch off, field wire loose, gate-drive/
-// Q3 fault). The first two drain the battery through the field; the open-drive case does not, but
-// the immediate cut + escalating lockout (nextTachLieLockoutMs) is correct for all three. The 2026-07-22
-// runaway: phantom ~950 RPM sustained 99% duty at -0.4 A output indefinitely — no RPM-only gate
-// can catch it because the phantom sits above MinRPMForField and below the 1000-RPM lone-jump bar.
-#define TACH_LIE_MIN_DUTY_PCT 25.0f  // applied duty at/above which a live alternator above cut-in always makes >TACH_LIE_MAX_AMPS
-#define TACH_LIE_MAX_AMPS 2.0f       // |alternator amps| below this = no output
+// Tach-lie plausibility cut: tach claims the engine is running, the loop is COMMANDING current, the
+// field is driven well above the per-RPM onset floor, and the alternator makes nothing — physically
+// impossible above cut-in speed. Cause is one of: RPM signal noise (field-PWM coupling / LM2907
+// re-bias), a dead alternator, or an open field drive where the commanded field delivers no current
+// (ON/OFF switch off, field wire loose, gate-drive/Q3 fault). The first two drain the battery through
+// the field; the open-drive case does not, but the immediate cut + escalating lockout
+// (nextTachLieLockoutMs) is correct for all three. The 2026-07-22 runaway: phantom ~950 RPM sustained
+// 99% duty at -0.4 A output indefinitely — no RPM-only gate can catch it because the phantom sits
+// above MinRPMForField and below the 1000-RPM lone-jump bar.
+// Both arm bars are install-relative, never absolute duty: the knee floor (rpmMinDutyTable) is
+// DEFINED as the most field that still makes ~0 A, so zero output parked at the floor with the loop
+// demanding nothing is designed behavior, not a lie (2026-07-28: a flat 25% bar sat below the ~27%
+// commissioned idle floor and false-cut three CV re-entries). A phantom always has the loop demanding
+// current — the bus is low and nothing charges it — with duty wound far above the floor. The headroom
+// fraction inherits voltage-class scaling for free: rpmMinDuty and MaxDuty both already carry it
+// (~99% MaxDuty @12V scales to ~25% @48V, where any flat bar goes blind).
+#define TACH_LIE_HEADROOM_FRAC 0.15f  // arm bar = rpmMinDuty + this fraction of (MaxDuty - rpmMinDuty)
+#define TACH_LIE_MAX_AMPS 2.0f       // |alternator amps| below this = no output; commanded amps above this = loop demanding
 #define TACH_LIE_DWELL_MS 3000       // condition must persist this long — outlasts ramp/settling transients
+#define TACH_LIE_RELEASE_BLANK_MS 6000  // no rev-up release decision until the LM2907 settles post-cut: covers the ~40 ms collapse spike (~570 ms after cut, observed) and the full ~4.6 s re-bias interval (doc figure)
+#define TACH_LIE_RELEASE_HOLD_MS 300    // rev-up must hold this long continuously (~10 tach samples) — a lone spike frees nothing
+bool TachLieEnable = true;           // user disarm (NVS). Cut ignores the global protections toggle — this switch is the only disarm
 uint32_t tachLieSinceMs = 0;         // millis() when the implausible condition started (0 = clear)
 float tachLieTripRpm = 0.0f;         // RPM latched at trip — early-release rev-up reference
 bool tachLieLockoutArmed = false;    // active lockout was armed by a tach-lie trip (enables early release)
+uint32_t tachLieRevUpSinceMs = 0;    // rev-up release test continuously true since (0 = not currently true)
 // Engine-restart confirmation: after a confirmed stop, RPM must hold >= MinRPMForField this long
 // before the RPM gate releases — a noise blip (or a phantom's first seconds) can't re-energize the
 // field. Costs ~2 s of charging at every real engine start. Boot starts unconfirmed.
@@ -2579,22 +2522,10 @@ bool engineWasRunning = false;  // Engine state in previous check
 bool alternatorWasOn = false;   // Alternator state in previous check
 
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CH1 Interval Instrumentation — zero heap, all storage is static
-//
-// Three tiers:
-//   10s  : ring of timestamped interval entries; stats computed on demand
-//   2m   : ring of 12 pre-aggregated 10-second closed buckets
-//   at   : running scalar accumulators (all-time this session)
-//
-// 2m stats reflect only closed buckets, so the most recent ≤10s of data is
-// not yet included. Acceptable for a diagnostic tool.
-//
-// CH1_RING sizing: must hold at least 10000 / (minimum expected CH1 interval ms).
-// Default 2000 × 6 bytes = 12 KB static on ESP32.
-// After timing test, set CH1_RING = ceil(10000 / actual_min_interval_ms) × 1.25.
-// ─────────────────────────────────────────────────────────────────────────────
-// CH1 interval telemetry globals
+// CH1 Interval Instrumentation — zero heap, all storage static. Three tiers: a 10 s ring of
+// timestamped intervals (stats on demand), a 2 m ring of 12 closed 10 s buckets, and all-time
+// scalars. The 2 m tier only counts CLOSED buckets, so the most recent <=10 s is missing — fine
+// for a diagnostic. CH1_RING must hold at least 10000 / (min expected CH1 interval ms).
 uint16_t ch1_last_ms = 0;
 float ch1_avg_10s = 0;
 uint16_t ch1_worst_10s = 0;
@@ -2624,7 +2555,6 @@ struct Ch1Bucket {
   uint16_t over2x;  // count of intervals > 2× this bucket's own mean
 };
 
-// 10-second ring
 static Ch1Entry *ch1Ring = nullptr;
 static uint16_t ch1Head = 0;
 static uint16_t ch1Count = 0;  // valid entries; saturates at CH1_RING
@@ -2653,16 +2583,10 @@ static uint32_t ch1AtOver2x = 0;  // threshold = running mean at sample time (ap
 static uint32_t ch1PrevTs = 0;
 static bool ch1HasPrev = false;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Inner Current PID Firing Interval — field-on-gated clone of the CH1 tracker.
-// Records the gap between successive inner-current-PID firings, but ONLY on ticks
-// where the field is actually driven. pidFire_record() is called once per normal
-// control tick (past the digitalWrite(4,HIGH) gate); field-off ticks never reach
-// it, and loop() clears pfHasPrev whenever the field is down so the first firing
-// after a field-off stretch re-baselines instead of logging the whole off-gap.
-// Reuses Ch1Bucket. No PSRAM ring — CH1's 5000-entry ring only ever yielded "last",
-// which we track directly in pf_last_ms.
-// ─────────────────────────────────────────────────────────────────────────────
+// Inner Current PID Firing Interval — field-on-gated clone of the CH1 tracker. pidFire_record()
+// sits past the digitalWrite(4,HIGH) gate so field-off ticks never reach it, and loop() clears
+// pfHasPrev while the field is down so the first firing afterwards re-baselines instead of logging
+// the whole off-gap. No ring: CH1's 5000-entry ring only ever yielded "last", tracked here directly.
 uint16_t pf_last_ms = 0;
 float    pf_avg_10s = 0;
 uint16_t pf_worst_10s = 0;
@@ -2692,14 +2616,12 @@ static uint32_t pfAtOver2x = 0;
 static uint32_t pfPrevTs = 0;
 bool pfHasPrev = false;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // CV Voltage Loop Firing Interval — CV-mode-gated clone of the pf tracker above.
 // Records the gap between successive CV (constant-voltage) loop firings, but ONLY
 // while voltageControlActive (the regulator is actively holding a voltage target).
 // voltLoop_record() is called once per CV fire; the control loop clears vlHasPrev
 // whenever CV is inactive so the first firing after a CV-off stretch re-baselines
 // instead of logging the whole off-gap. Reuses Ch1Bucket.
-// ─────────────────────────────────────────────────────────────────────────────
 uint16_t vl_last_ms = 0;
 float    vl_avg_10s = 0;
 uint16_t vl_worst_10s = 0;
@@ -2835,7 +2757,6 @@ int32_t prev_faDomEp = 0;
     if (_dt > (ft).worstSession) (ft).worstSession = _dt; \
   } while (0)
 
-// Session-scoped rolling 5s loop worst
 uint32_t loopTime5sWindow = 0;                     // worst loop time in last AinputTrackerTime window (µs)
 constexpr unsigned long AinputTrackerTime = 5000;  // rolling window reset interval (ms)
 // Previous session max loop time — snapshot of MaxLoopTime taken at boot before reset
@@ -2896,7 +2817,6 @@ int Ymin4 = 50, Ymax4 = 250;   // Temperature plot
 
 float PIDTrackingGain = 4.0f;  // Tracking gain in 1/sec (increase for faster tracking)
 
-// Governor state
 enum GovernorMode { GOV_NORMAL_SLEW,
                     GOV_BYPASS_SLEW,
                     GOV_HOLD };
@@ -2908,7 +2828,6 @@ enum SystemMode { SYS_MODE_OFF,
 SystemMode sysMode = SYS_MODE_OFF;
 GovernorMode govMode = GOV_NORMAL_SLEW;
 
-// Setpoint tracking
 float setpointLimited = 0.0f;
 float setpointCommand = 0.0f;   // pre-slew current command (Icv in CV, uTargetAmps in idle); global so the Control Accuracy score gate can see whether setpointLimited is still slewing toward it
 uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty (machine/RPM limit), 6 protection (cap binding or post-protection recovery window), 7 battery above target (zero-output stand-down, altZeroOutput)
@@ -2933,7 +2852,6 @@ int LearningSettlingPeriod = 30000;          // Milliseconds to wait after RPM c
 int LearningRPMChangeThreshold = 500;        // RPM change that triggers settling period
 int LearningTempHysteresis = 10;
 
-// PID Tuning
 int wavePeriod = 10;     //For PID tuning
 int waveAmplitude = 10;  //For PID tuning
 int tuningWaveFloor = 5; // A — floor (trough) the Current Target Generator wave sits on; shared by square + sine. Separate from the Plant tab's SystemIDStabilizeAmps.
@@ -3436,22 +3354,18 @@ float pidError = 0.0f;  // PID error for display (A)
 
 // Accelerometer is always on — no enable toggle exists.
 
-// =====================================================================================
-// === CV LOOP PARAMETERS — all tunable values consolidated here
-// === Note: fastOV trip levels derive from settings inside AdjustFieldLearnMode() in
-// ===       6_functions.ino: G2 measured at target+OvMeasMarginV, G1 predictive at
-// ===       target+OvPredMarginV over horizon TdPred. Only PRED_GUARD (0.06V arm
-// ===       window, per-cell-scaled by class) remains a local const there.
-// =====================================================================================
+// ===== CV LOOP PARAMETERS — all tunable values consolidated here =====
+// fastOV trip levels are derived inside AdjustFieldLearnMode() (6_functions.ino): G2 measured at
+// target+OvMeasMarginV, G1 predictive at target+OvPredMarginV over horizon TdPred. Only PRED_GUARD
+// (0.06 V arm window, per-cell-scaled by class) stays a local const there.
+
 // --- Output current PID ---
-// PidKp/Ki/Kd are 12V-EQUIVALENT (normalized) gains — the same numbers work on 12/24/48V banks.
-// recomputeCcGains() bakes in ×(12/BATTERY_VOLTAGE) to get the duty-space gains the loop actually
-// applies (PidK*_active), because field current per duty-% scales with bus voltage. Mirror of the CV
-// loop's recomputeCvGains(). Do NOT scale these per-class by hand — the normalization does it.
-// Seed gains are the 2026-07-03 plant fit (τ 112ms, IMC) de-rated 30%: that fit is one alternator at one
-// operating point, and a fresh/uncommissioned install on a different plant oscillates at full gain. Ki/Kp
-// ratio (integral zero, 8.9 rad/s) is preserved — this is loop gain only, not a reshape. Commissioning
-// overwrites both.
+// PidKp/Ki/Kd are 12V-EQUIVALENT gains — the same numbers work on 12/24/48V banks. recomputeCcGains()
+// bakes in x(12/BATTERY_VOLTAGE) to reach the duty-space gains the loop applies (PidK*_active), because
+// field current per duty-% scales with bus voltage. Do NOT scale these per-class by hand.
+// Seeds are the 2026-07-03 plant fit (tau 112 ms, IMC) de-rated 30%: that fit is one alternator at one
+// operating point, and a fresh install on a different plant oscillates at full gain. The Ki/Kp ratio
+// (integral zero, 8.9 rad/s) is preserved — loop gain only, not a reshape. Commissioning overwrites both.
 float PidKp = 0.4662f;  // 12V-equivalent proportional gain
 float PidKi = 4.5384f;  // 12V-equivalent integral gain
 float PidKd = 0.0f;  // 12V-equivalent derivative gain (default off; current-loop D adds noise, little benefit)
@@ -3651,12 +3565,11 @@ float MaxTableValue = 150.0;               // Maximum table entry (A)
 float MaxPenaltyPercent = 15.0;            // Max penalty as % of nominal
 unsigned long MaxPenaltyDuration = 60000;  // Max penalty time (ms)
 
-// Advanced Learning
 float NeighborLearningFactor = 0.25;                // Neighbor reduction factor
 unsigned long LearningMemoryDuration = 2592000000;  // How long to remember events (30 days in ms)
 
 // Safety Overrides
-int IgnoreLearningDuringPenalty = 1;  // Block learning during penalty
+int IgnoreLearningDuringPenalty = 1;
 
 // Diagnostics & Debugging
 int LogAllLearningEvents = 0;       // Log every learning decision
@@ -3753,7 +3666,6 @@ enum FieldEventReason : uint8_t {
   REASON_TACH_IMPLAUSIBLE          // field driven hard, zero alternator output while tach claims running — open field drive (ON/OFF/wiring/gate-drive), dead alternator, or false RPM (tach noise)
 };
 
-// ==================== TICK SNAPSHOT STRUCT ====================
 
 struct TickSnapshot {
   uint32_t nowMs;
@@ -4368,85 +4280,25 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 
 
 
-// ===========================================================================
 // CV / Voltage Tuner Log
 // Logs every CH1 sample (fresh CH1 arrives 5–25ms apart, assume ~30ms) — no internal rate limiter.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
 // 57 bytes/entry × 6000 entries = 342 KB PSRAM → ~28 sec at full rate.
-// ===========================================================================
 
-// ---------------------------------------------------------------------------
-// STRUCT  (57 bytes, offsets below match JS parser exactly)
-// ---------------------------------------------------------------------------
-//
-//  offset  field            scale      notes
-//  ──────  ─────            ─────      ─────
-//   0      ts               raw ms     millis()
-//   4      battV            ×100       IBV (raw bus voltage)
-//   6      targV            ×100       ChargingVoltageTarget
-//   8      vErrorMv         ×1000      (target − batt), millivolts resolution
-//  10      dvdt_x1000       ×1000      filtered dV/dt, signed
-//  12      vPred            ×100       IBV + TdPred × max(0,dvdt)
-//  14      fastOvCap        ×10        fastOvCurrentCap ceiling this tick
-//  16      cv_I_x10         ×10        cv_I integrator state
-//  18      Icv_x10          ×10        Icv PI output (current setpoint to output current loop)
-//  20      uTarget          ×10        uTargetAmps (table+thermal+user ceiling)
-//  22      spLimited        ×10        setpointLimited (slewed command to PID)
-//  24      iMeas            ×10        MeasuredAmps (raw alternator current)
-//  26      duty             ×10        dutyCycle
-//  28      flags            —          see bit definitions below
-//  29      awState          —          0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless 5=target wind-down
-//  30      rpm              raw        RPM, clamped to int16 range
-//  32      battV_filt_x100  ×100       IBV_filtered (display EMA, VoltageFilterTC)
-//  34      ch1IntervalMs    raw ms     last CH1 inter-sample gap
-//  36      cvDSlope_x10000  ×10000     cvDSlope — sliding-window backward diff of g_cvKdFiltV over ~one
-//                                      voltage-loop interval, refreshed every output tick. The CV D
-//                                      term's input; positive on a rise, negative on a fall.
-//  38      battI_x10        ×10        getBatteryCurrent() — INA228 or Victron
-//  40      dBcur_dt_Aps     raw A/s    g_dBcur_dt clamped to int16
-//  42      voltLoopIntervalMs  raw ms  actual voltage loop interval when fired this tick; 0 if not fired
-//  44      inaIntervalMs       raw ms  ina_last_ms at log time — INA228 read freshness
-//  46      kdTrim_x1000         ×1000  D-term current reduction applied at the Icv output this voltage
-//                                      loop tick (A×1000); 0 on non-VL ticks. Signed: negative only when
-//                                      CvKdOneSided is off. This is a POSITION, not a cumulative drain —
-//                                      it does not integrate into cv_I.
-//  48      capReason            —      which layer set fastOvCap this tick
-//  49      ovFilt_x100          ×100   g_ovIbvFilt — Group 2's comparator input (plant-tau EMA of IBV)
-//  51      targSlewed_x100      ×100   voltageTargetSlewed — rise-governor output; THE setpoint the CV PI
-//                                      actually tracks. Equals targV unless the governor is clamping a
-//                                      RISING target, so targV is not a safe stand-in on stage changes.
-//                                      Note vErrorMv above is (targV − IBV), NOT the PI's error: the real
-//                                      PI error is (targSlewed − battV).
-//  53      pTerm_x10            ×10    g_cvPTerm — P contribution to Icv (VoltageKp_active × error). With
-//                                      cv_I (offset 16 = I) and kdTrim (offset 46 = D), the full P/I/D split.
-//  55      cvKdFiltV_x100       ×100   g_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC (header offset 36); the
-//                                      D term's slope input, distinct from battV_filt (VoltageFilterTC).
-//
-//  flags bits:
-//    b0  fastOvActive    any OV clamp fired this tick
-//    b1  voltLoopFired   voltage PI ran this tick (100ms cadence)
-//    b2  cvActive        voltageControlActive
-//    b3  iExcessBulk     iExcess BULK sub-mode (current-control phase)
-//    b4  hardClamp       Group 1 (prediction cap) or Group 2 (voltage threshold) applied
-//    b5  iExcess         iExcess supervisor (Group 3 alternator) fired this tick
-//    b6  loadDumpActive  load dump feedforward active this tick
-//    b7  recovActive     post-protection integrator refill (Icv goal ceiling + deficit-gated Ki boost engaged)
-
-
-
-
+// Field order/offsets must stay in lockstep with parseCvBin() in script.js.
+// Unnamed scales: battV/targV/vPred ×100, vErrorMv ×1000, fastOvCap/uTarget/spLimited/iMeas/duty ×10.
 struct __attribute__((packed)) CvLogEntry {
-  uint32_t ts;
-  int16_t battV;
-  int16_t targV;
-  int16_t vErrorMv;
+  uint32_t ts;              // millis()
+  int16_t battV;            // IBV (raw bus)
+  int16_t targV;            // ChargingVoltageTarget
+  int16_t vErrorMv;         // targV − battV; NOT the PI error (that is targSlewed − battV)
   int16_t dvdt_x1000;
-  int16_t vPred;
+  int16_t vPred;            // IBV + TdPred × max(0,dvdt)
   int16_t fastOvCap;
   int16_t cv_I_x10;
-  int16_t Icv_x10;
-  int16_t uTarget;
-  int16_t spLimited;
+  int16_t Icv_x10;          // CV PI output = current setpoint into the output loop
+  int16_t uTarget;          // uTargetAmps (table+thermal+user ceiling)
+  int16_t spLimited;        // setpointLimited (slewed command to PID)
   int16_t iMeas;
   int16_t duty;
   uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive b7=recovActive
@@ -4481,30 +4333,9 @@ struct CvBinDLState {
   int entryPos;
 };
 
-// ---------------------------------------------------------------------------
-// BINARY HEADER  (68 bytes) — carries the FULL D-term trim equation so a log is
-// self-describing: kdTrim can be reconstructed from cvDSlope + spLimited alone.
-// offset  field           type      notes
-//   0     count           uint32    number of valid entries
-//   4     entrySize       uint32    = 57
-//   8     voltageKp       float     VoltageKp_active at download time (the gain in effect, not the typed knob)
-//  12     voltageKi       float     VoltageKi_active at download time
-//  16     voltageInterval uint32    VoltageLoopInterval ms
-//  20     kdDeadband      float     CvKdDeadbandVps (V/s) — deadband line BASE (b of clamp(floor, b + m·I, ceil))
-//  24     kdActiveGain    float     VoltageKd_active (A/(V/s)) — the D gain the trim law actually multiplies
-//                                   (pack-space: Auto Td·Kp or Manual typed, ×vNorm×derate). Was the typed
-//                                   VoltageKd before 2026-07-21, which mislabeled Auto-mode logs.
-//  28     kdArmV          float     CvKdArmV (V)
-//  32     kdOneSided      float     CvKdOneSided (0/1, stored as float for header layout stability)
-//  36     kdVoltFiltTC    float     CvKdVoltFiltTC (ms) — the D term's dedicated voltage-EMA time constant
-//  40     kdDbSlope       float     CvKdDbSlope (V/s per A) — deadband line slope m, evaluated at spLimited
-//  44     kdDbFloor       float     CvKdDbFloor (V/s) — deadband line clamp floor
-//  48     kdDbCeil        float     CvKdDbCeil (V/s) — deadband line clamp ceiling
-//  52     kdSlopeCeil     float     slope ceiling (V/s, real per-bus) — cvDSlope is clamped to ±this
-//  56     kdMaxTrimA      float     CvKdMaxTrimA (A) — flat trim cap
-//  60     kdExcessMode    float     CvKdExcessMode (0/1): 1 = trim = Kd×(slope − band), 0 = legacy Kd×slope latch
-//  64     brakeFallRate   float     A/s — CvBrakeFallRate at log time
-// ---------------------------------------------------------------------------
+// 68-byte header carries the full D-term trim equation, so kdTrim is reconstructible from
+// cvDSlope + spLimited alone. Layout is written (offset by offset) in the /cvlog.bin handler
+// in 3_functions.ino; all fields after entrySize are float, including the 0/1 flags.
 
 static CvLogEntry *cvLog = nullptr;
 bool loggingActive = true;  // Stop/Start Logs: false freezes thermal/PID/CV ring buffers
@@ -4682,14 +4513,12 @@ float longest_gale_duration_hours_alltime = 0.0;  // leaderboard: lifetime longe
 bool galeActive = false;
 uint32_t galeStartMs = 0;
 
-// ─────────────────────────────────────────────────────────────────────
 // IGNITION-CYCLE WATERMARKS
 // Min/max since boot (= since ignition cycled). SEPARATE from the
 // *_AllTime / *Max / *_min systems above — those persist across boots
 // via NVS; these reset every boot. Initialized to NAN so the first valid
 // sample seeds both ends (see wmIgnUpdate).
 // 16 pairs × 8 bytes = 128 bytes, internal RAM, plain globals.
-// ─────────────────────────────────────────────────────────────────────
 struct IgnWatermark { float lo; float hi; };
 
 IgnWatermark wmIgn_amps     = { NAN, NAN };   // MeasuredAmps (A)
@@ -4697,7 +4526,7 @@ IgnWatermark wmIgn_altTempF = { NAN, NAN };   // AlternatorTemperatureF (°F)
 IgnWatermark wmIgn_IBV      = { NAN, NAN };   // IBV — INA228 battery V
 IgnWatermark wmIgn_Bcur     = { NAN, NAN };   // Bcur — INA228 battery A
 IgnWatermark wmIgn_SOC      = { NAN, NAN };   // SOC percent (0..100, float)
-IgnWatermark wmIgn_RPM      = { NAN, NAN };   // RPM
+IgnWatermark wmIgn_RPM      = { NAN, NAN };
 IgnWatermark wmIgn_SOG      = { NAN, NAN };   // SOGNMEA (knots)
 IgnWatermark wmIgn_AWS      = { NAN, NAN };   // ApparentWindSpeedNMEA (knots)
 IgnWatermark wmIgn_TWS      = { NAN, NAN };   // TrueWindSpeedNMEA (knots)
@@ -4810,7 +4639,6 @@ const char *server_root_ca =
   "-----END CERTIFICATE-----\n";
 
 
-// RSA Public Key -
 const char *OTA_PUBLIC_KEY =
   "-----BEGIN PUBLIC KEY-----\n"
   "MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAp2sRgMjD4wazKHo6Rk3g\n"
@@ -4876,7 +4704,7 @@ bool wifiNapEnabled = true;           // System Setting (Client only); default o
 bool wifiNapActive = false;           // true while modem-sleep nap is active
 
 AsyncWebServer server(80);                  // Create AsyncWebServer object on port 80
-AsyncEventSource events("/events");         // Create an Event Source on /events
+AsyncEventSource events("/events");
 unsigned long webgaugesinterval = 100;      // delay in ms between sensor updates on webpage
 // Per-CSV1-window aggregation for analog channels sampled faster than the ~100ms send interval,
 // so a plotted point is the window mean (anti-aliased) or peak instead of one aliased snapshot.
@@ -5281,11 +5109,9 @@ void setup() {
   loadAuthToken();         // Loads token (will be empty if just cleared)  // for supabase
   Serial.flush();          // Ensure it's sent before continuing
   int major = 0, minor = 0, patch = 0;
-  // Parse FIRMWARE_VERSION directly (e.g. "0.1.65")
   const char *version = FIRMWARE_VERSION;
   int len = strlen(version);
 
-  // Find first dot
   int firstDot = -1;
   for (int i = 0; i < len; i++) {
     if (version[i] == '.') {
@@ -5293,7 +5119,6 @@ void setup() {
       break;
     }
   }
-  // Find second dot
   int secondDot = -1;
   for (int i = firstDot + 1; i < len; i++) {
     if (version[i] == '.') {
@@ -5303,15 +5128,12 @@ void setup() {
   }
   // Parse each part
   if (firstDot > 0 && secondDot > firstDot) {
-    // Parse major (0 to firstDot)
     for (int i = 0; i < firstDot; i++) {
       major = major * 10 + (version[i] - '0');
     }
-    // Parse minor (firstDot+1 to secondDot)
     for (int i = firstDot + 1; i < secondDot; i++) {
       minor = minor * 10 + (version[i] - '0');
     }
-    // Parse patch (secondDot+1 to end)
     for (int i = secondDot + 1; i < len; i++) {
       patch = patch * 10 + (version[i] - '0');
     }
@@ -5379,7 +5201,7 @@ void setup() {
 
 
   captureResetReason();            // immediately capture the reason for last ESP32 shutdown and store in LittleFS and variable that won't be overwritten until next boot
-  ensurePreferredBootPartition();  // Ensure we boot from preferred partition
+  ensurePreferredBootPartition();
   loadNVSData();                   // Load persistent variables from NVS- everything from last session is restored
   initNVSCache();                  // Sync change-detection cache with loaded NVS values to prevent false writes
   restoreSoftClock();              // Re-establish a usable timebase (retained RTC, else NVS epoch) so AP-mode/no-internet Long Term records aren't stamped 0 and rendered as phantom gaps. Snaps to truth when a real source reports.
@@ -5502,15 +5324,7 @@ void setup() {
     initializeHardware();  // Initialize hardware systems
   };
 
-  // Enable watchdog - only after setup is complete
-  // What Happens During Watchdog Reset:
-  //Watchdog triggers (after 16 seconds of hang)
-  //ESP32 immediately reboots (hardware reset)
-  //ALL GPIO pins reset to 0 (including pin 4 field enable)
-  //Field control pin 4 goes LOW → Field turns OFF
-  //Alternator output stops → Batteries safe
-  //ESP32 restarts and runs setup()
-  //Normal operation resumes
+  // A WDT reset is safe for the bank: every GPIO resets to 0, so pin 4 drops the field before setup() reruns.
 
   // Enable watchdog - only after setup is complete
   Serial.println();
@@ -5529,7 +5343,6 @@ void setup() {
   if (result == ESP_OK) {
     Serial.println("✅ Watchdog reconfigured: 16s timeout");
   } else if (result == ESP_ERR_INVALID_STATE) {
-    // Not initialized, init it
     result = esp_task_wdt_init(&wdt_config);
     if (result == ESP_OK) {
       Serial.println("✅ Watchdog initialized: 16s timeout");
@@ -5653,12 +5466,11 @@ void loop() {
     // Clear the flag pre-attempt so a mid-install crash can't boot-loop
     clearPendingUpdateNVS();
 
-    // Force core0 to not be busy (we're taking over)
+    // Claim the core0-busy gate so the control loop holds the field off through the install.
     core0Busy = true;
 
     performOTAUpdateToVersion(pendingVersion);  // This calls prepareForOTA() which kills tasks
   }
-  // === END OTA MANUAL UPDATE CHECK ===
 
   // === OTA UPDATE: simple one-shot FORCED UPDATE check after 3s ===
   static bool otaCheckDone = false;
@@ -5858,7 +5670,6 @@ void loop() {
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
   // Power management affects AP and CLIENT modes, but NOT CONFIG mode (CONFIG mode exits early below)
   if (currentMode != MODE_CONFIG) {
-    // Ignition state tracking variables
     static int lastIgnitionState = 1;            // Track previous ignition state (-1 = uninitialized)
     static bool lastWifiWakeActive = false;      // Track previous WiFi wake mode state
     static bool wakeExpiryWarningShown = false;  // Track if we've warned about wake mode expiring
@@ -6035,7 +5846,6 @@ void loop() {
         // Throttle this later , it's not so trivial    Serial.println("You're in Config Mode, connect to the alternator's hotspot and enter credentials");
       return;  // Exit loop() entirely - prevents alternator operation without proper configuration
     case MODE_AP:
-      // Full functionality - same as client mode, plus DNS for captive portal
       dnsHandleRequest();  // Need DNS for captive portal in AP mode
       // Fall through to full functionality (no break statement - intentional)
 
@@ -6350,22 +6160,16 @@ void loop() {
   }
   endtime = esp_timer_get_time();
   LoopTime = (endtime - starttime);
-  // Worst-loop attribution. All ft_*.lastCall are THIS pass's durations (every suspect is TIMED_CALL'd
-  // earlier in this same loop()). ctrl(inclFold) already contains fold. A part larger than total = that
-  // function was throttled this pass, so its lastCall is stale — judge by total. Emitted here (after
-  // endtime) so it never counts against the measured pass.
-  //
-  // Two headless serial streams, both non-blocking (skip if the UART TX FIFO is full, so the print
-  // itself never adds loop latency). We do NOT auto-reset a worst-watermark on a guessed interval —
-  // we don't know the stall cadence yet, so instead:
-  //   (1) PER-EVENT line on EVERY pass over the threshold (not just a new worst): absolute timestamp
-  //       + gap since the previous over-threshold pass (reveals cadence/periodicity directly) + the
-  //       per-function breakdown (which function dominated THIS one) + context (clients, CPU MHz,
-  //       heap). Throttled to 1 print / 100 ms so a burst can't flood the UART; suppressed passes are
-  //       still counted in the window and reported as sup=.
-  //   (2) WINDOW summary every 30 s that SELF-RESETS — count in 10/15/20 ms buckets + window max +
-  //       context. This is the live "still happening / how often / how bad" signal with no client and
-  //       no watermark to clear. The SSE console still gets the classic line on a genuine new worst.
+  // Worst-loop attribution. All ft_*.lastCall are THIS pass's durations. ctrl(inclFold) already contains
+  // fold. A part larger than total means that function was throttled this pass and its lastCall is stale —
+  // judge by total. Emitted after endtime so it never counts against the measured pass.
+  // Two headless serial streams, both non-blocking (skipped when the UART TX FIFO is full, so printing
+  // never adds loop latency). No watermark auto-reset — the stall cadence is unknown, so instead:
+  //   (1) a PER-EVENT line on every over-threshold pass (not just a new worst), carrying the gap since the
+  //       previous one so cadence reads directly off the stream. Throttled to 1 per 100 ms; suppressed
+  //       passes still count toward the window and report as sup=.
+  //   (2) a 30 s WINDOW summary that SELF-RESETS — 10/15/20 ms bucket counts + window max. This is the
+  //       live signal with no client attached and no watermark to clear.
   static uint32_t winStartMs = 0, winN10 = 0, winN15 = 0, winN20 = 0, winMaxUs = 0;
   static uint32_t lastStallMs = 0, lastEvtPrintMs = 0, evtSuppressed = 0;
   static uint32_t winB46 = 0, winB68 = 0, winB810 = 0;  // sub-10ms loop-pass bands — the band that stretches CH1 reads
@@ -6461,7 +6265,6 @@ void loop() {
     MaxLoopTime = LoopTime;
   }
 
-  //TempTask Debug
   static unsigned long lastTempDebugPrint = 0;
   if (millis() - lastTempDebugPrint >= 300000) {  //5 minutes
     lastTempDebugPrint = millis();

@@ -7,23 +7,20 @@
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, version 3 of the License.
 
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// This program is distributed WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-// ============================================================
 // BEST-EVER FRONT — shared engine (Phase A). Generic over an axis count NAXIS so one C++
 // instance serves each system: alternator (4-D), sail (3-D), motor (3-D). Templates can't be
 // auto-prototyped, so this block must stay ABOVE the alt/boat front code below that instantiates
 // it (this project keeps no .h files; the FRONT_* state #defines stay in Xregulator.ino because
 // globals there use them). Design contract: BEST_EVER_FRONT_SPEC.md §2/§5 + IMPLEMENTATION_PLAN.md §2.
-//   1. Episode<NAXIS>    — sliding-window steady-state detector (per-axis monotonic-deque min/max).
-//   2. FrontStore<NAXIS> — sparse best-ever support points (never a grid) + IDW eval + device keep-gate.
-// ============================================================
+// 1. Episode<NAXIS>    — sliding-window steady-state detector (per-axis monotonic-deque min/max).
+// 2. FrontStore<NAXIS> — sparse best-ever support points (never a grid) + IDW eval + device keep-gate.
 
 // Per-axis steadiness knobs (live-tunable): deviation bound + how long it must hold.
 struct EpAxisCfg { float tol; float steadySec; };
@@ -470,14 +467,12 @@ struct FrontStore {
   }
 };
 
-// ============================================================
 // ALTERNATOR HEALTH — Best-Ever Front (device side). Folds one sample per control tick (~200 Hz,
-//   via the pidLog hook) into the Episode detector; an emitted steady-run average pushes the sparse
-//   best-ever output-amps front (FrontStore). The cloud prunes dominated points + retains raw
-//   history. Surface axes {RPM, excitation, Vbus, temp}; excitation derived from run-average
-//   duty/Vbus/temp. Generic engine + globals: Xregulator.ino. Design:
-//   BEST_EVER_FRONT_SPEC.md / BEST_EVER_IMPLEMENTATION_PLAN.md.
-// ============================================================
+// via the pidLog hook) into the Episode detector; an emitted steady-run average pushes the sparse
+// best-ever output-amps front (FrontStore). The cloud prunes dominated points + retains raw
+// history. Surface axes {RPM, excitation, Vbus, temp}; excitation derived from run-average
+// duty/Vbus/temp. Generic engine + globals: Xregulator.ino. Design:
+// BEST_EVER_FRONT_SPEC.md / BEST_EVER_IMPLEMENTATION_PLAN.md.
 
 #define ALT_VER          4u
 #define ALT_FRONT_MAGIC  0x414C4652u  // 'ALFR' — best-ever front point blob
@@ -1424,12 +1419,10 @@ void altHealth_tick(uint32_t nowMs) {
 }
 
 
-// ============================================================
 // ALTERNATOR HEALTH — GUI-adjustable settings (registry-driven)
-//   One float registry → one /get handler loop + one boot-load loop +
-//   one "AltSettings" SSE echo. (ALT_SETTINGS[] is defined up with the param
-//   declarations so altDebugCsvSend can iterate it.) Avoids fragile CSV3 plumbing.
-// ============================================================
+// One float registry → one /get handler loop + one boot-load loop +
+// one "AltSettings" SSE echo. (ALT_SETTINGS[] is defined up with the param
+// declarations so altDebugCsvSend can iterate it.) Avoids fragile CSV3 plumbing.
 void altSettingsLoad() {
   // Three knobs are class-dependent 12V-value defaults, and this loader runs BEFORE InitSystemSettings
   // resolves BATTERY_VOLTAGE (NVS else vessel-JSON mirror). Their first creation is DEFERRED to
@@ -1507,12 +1500,10 @@ String altSchemaJson() {
 
 
 
-// ============================================================
 // BOAT PERFORMANCE — Best-Ever Front engine instances (sail 3-D + motor 3-D). Mirrors the
-//   alternator module. Folds on a fast internal tick (~10 Hz, from boatPerf_tick). Sail axes
-//   {AWS, AWA, sea-state}; motor axes {RPM, headwind = AWS·cosAWA, sea-state}. Best-ever output =
-//   the user-selected STW or SOG. Generic engine (Episode/FrontStore): top of Xregulator.ino.
-// ============================================================
+// alternator module. Folds on a fast internal tick (~10 Hz, from boatPerf_tick). Sail axes
+// {AWS, AWA, sea-state}; motor axes {RPM, headwind = AWS·cosAWA, sea-state}. Best-ever output =
+// the user-selected STW or SOG. Generic engine (Episode/FrontStore): top of Xregulator.ino.
 #define PERF_VER         3u
 #define PERF_SAILF_MAGIC 0x50534652u  // 'PSFR' sail front blob
 #define PERF_MOTF_MAGIC  0x504D4652u  // 'PMFR' motor front blob
@@ -1673,7 +1664,6 @@ void perfFold_tick(uint32_t nowMs) {
   // ── feed both Episodes; the inactive one gets an ineligible break so runs don't span a mode change ──
   FrontPoint<PERF_NAXIS> ep;
 
-  // SAIL
   bool sailLearn = (sailFront.source != 1);
   bool sailElig = sailLearn && !motoring && haveSpd && spd >= perfMinBoatSpeed && aws >= perfMinWindSpeed;
   RawSample<PERF_NAXIS> ss; ss.x[0] = aws; ss.x[1] = awa; ss.x[2] = sea; ss.out = spd; ss.tMs = nowMs;
@@ -1696,7 +1686,6 @@ void perfFold_tick(uint32_t nowMs) {
     }
   }
 
-  // MOTOR
   bool motorLearn = (motorFront.source != 1);
   bool motorElig = motorLearn && motoring && haveSpd && spd >= perfMinBoatSpeed;
   RawSample<PERF_NAXIS> ms; ms.x[0] = rpm; ms.x[1] = headwind; ms.x[2] = sea; ms.out = spd; ms.tMs = nowMs;
@@ -2191,9 +2180,7 @@ void boatPerf_tick(uint32_t nowMs) {
   }
 }
 
-// ============================================================
-// BOAT PERFORMANCE — GUI-adjustable settings (registry-driven, like AltSettings).
-// ============================================================
+// ===== BOAT PERFORMANCE — GUI-adjustable settings (registry-driven, like AltSettings). =====
 struct PerfSetting { const char *name; float *ptr; };
 static PerfSetting PERF_SETTINGS[] = {
   {"perfWsTol", &perfWsTol}, {"perfWsSec", &perfWsSec},
@@ -2277,9 +2264,7 @@ String perfSchemaJson() {
 }
 
 
-// ===========================================================================
-// VOLTAGE MODE SUPPORT FUNCTIONS
-// ===========================================================================
+// ===== VOLTAGE MODE SUPPORT FUNCTIONS =====
 void cvLog_init() {
   if (!psramFound()) {
     Serial.println("cvLog: PSRAM not found, disabled");
@@ -2506,10 +2491,8 @@ float sweepAliasLimitHz() {
   return (fs > 0.0f) ? (fs / 3.0f) : 0.0f;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Inner Current PID Firing Interval — field-on-gated clone of ch1_record/_compute_stats.
 // Called once per normal control tick (field driven). Globals live in Xregulator.ino.
-// ─────────────────────────────────────────────────────────────────────────────
 void pidFire_record(uint32_t now) {
   if (!pfHasPrev) {
     pfPrevTs = now;
@@ -2608,11 +2591,9 @@ void pidFire_compute_stats() {
   pf_over2x_at = pfAtOver2x;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // CV Voltage Loop Firing Interval — CV-mode-gated clone of pidFire_record/_compute_stats.
 // Called once per CV fire. Globals live in Xregulator.ino. The control loop clears
 // vlHasPrev when CV is inactive, so re-entering CV re-baselines instead of logging the gap.
-// ─────────────────────────────────────────────────────────────────────────────
 void voltLoop_record(uint32_t now) {
   if (!vlHasPrev) {
     vlPrevTs = now;
@@ -2709,11 +2690,9 @@ void voltLoop_compute_stats() {
   vl_over2x_at = vlAtOver2x;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // INA228 fast-mode interval tracking
 // Mirrors CH1 interval stats. Only updated when inaFastModeActive.
 // resetINA228IntervalWindows() clears 10s/2m windows; all-time persists.
-// ─────────────────────────────────────────────────────────────────────────────
 struct InaMiniB  { uint32_t sum; uint32_t count; uint16_t worst; uint16_t over2x; };
 struct InaBucket { uint32_t sum; uint32_t count; uint16_t worst; uint16_t over2x; };
 
@@ -2919,29 +2898,13 @@ bool serveCachedAsset(AsyncWebServerRequest *request, const String &path, const 
   }
   return false;
 }
-// ============================================================
-// systemID_tick() — plant delay measurement step test
-//
-// Architecture:
-//  • 8-phase state machine: BASELINE + 3× (UP / DOWN).
-//  • Each phase holds for a fixed SYSID_STEP_HOLD_MS (5000 ms), sized to plant settling.
-//  • Called every CH1 fresh hit from AdjustFieldLearnMode.
-//  • Returns true while active; caller must:
-//      – force govMode = GOV_BYPASS_SLEW
-//      – set PID to MANUAL and reset integrator to dutyOut
-//      – use dutyOut as the duty command
-//  • On completion, post-processes buffer in-place (O(N) scan)
-//    and populates systemIDRise/FallDelay_ms[] and averages.
-//  • systemIDResultsReady → true signals UI to show popup.
-//  • Buffer (PSRAM) allocated once on first run, never freed.
-//
-// Detection thresholds:
-//  Rising : current must exceed quietMax × 1.2 (20% above prior-phase max)
-//  Falling: current must drop below upMin − 0.3 × stepAmp (30% of step below high-phase min)
-//           stepAmp = upMin − quietMax, making fall threshold step-relative not absolute-percentage.
-//           Scan bounded by t_down_end so it cannot bleed into later phases.
-//  A delay of -1 ms means the threshold crossing was not found in the buffer.
-// ============================================================
+// systemID_tick() — plant delay measurement step test. 8 phases: BASELINE + 3x (UP/DOWN), each held
+// SYSID_STEP_HOLD_MS to let the plant settle. Called on every fresh CH1 hit from AdjustFieldLearnMode;
+// the caller MUST force govMode = GOV_BYPASS_SLEW, put the PID in MANUAL with its integrator reset to
+// dutyOut, and drive duty from dutyOut. PSRAM buffer allocated once on first run, never freed.
+// The fall threshold is step-RELATIVE, not a fixed percentage: stepAmp = upMin - quietMax, fall at
+// upMin - 0.3*stepAmp (rise at quietMax * 1.2). The scan is bounded by t_down_end so it cannot bleed
+// into later phases. A reported delay of -1 ms means the crossing was never found in the buffer.
 
 bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   // Phase enum. Values 1–9 map to phaseStartMs indices 0–8 via (phase – 1).
@@ -3605,7 +3568,6 @@ static float fieldCurveInvert(float targetA) {
   return fieldCurveBuf[fieldCurveCount - 1].duty;
 }
 
-// ============================================================
 // fieldCut_tick() — commissioning stage 7: field de-energize τ
 //
 // Sequence: (1) RAMP — the normal AUTO path drives the REAL current PID to SystemIDStabilizeAmps
@@ -3626,7 +3588,6 @@ static float fieldCurveInvert(float targetA) {
 // the LM2907 tach signal (spike/false-zero/garbage ramp for ~4.6 s), so BOTH RPM gates are masked
 // for the whole test + FIELDCUT_RPM_GRACE_MS tail (fieldCutRpmGrace in the tick builder).
 // Field-at-MinDuty is the SAFE direction.
-// ============================================================
 
 static float fcMeanMv(const int16_t *b, int n) {
   if (!b || n <= 0) return NAN;
@@ -4010,7 +3971,6 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   return false;
 }
 
-// ============================================================
 // protTest_tick() — manual protection-trigger test (Settings → Emergency & Troubleshooting)
 //
 // Reproduces each field-collapse waveform on demand to hunt an electrical fault (a suspected field
@@ -4018,12 +3978,11 @@ bool fieldCut_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 // duty (via dutyOut); returns FALSE during the energize ramp (the protTestCcActive branch in
 // AdjustField drives the real current PID to protTestCmdA) and during the mode-1/4 pre-gate cut +
 // ladder recovery. NO capture — the normal CSV / cvlog / console telemetry records the transient.
-//   mode 1 instant cut : arms protTestCutPending → the pre-gate fires applyImmediateCut(fast-OV)
-//   mode 2 load-dump    : owns duty at MinDuty + dumps the inner PID integrator (fastest commanded collapse)
-//   mode 3 graceful     : owns duty, ramps down at DutyRampRate (the clean control case)
-//   mode 4 ladder walk  : the mode-1 cut repeated protTestReps× — each climbs the fast-OV lockout ladder
+// mode 1 instant cut : arms protTestCutPending → the pre-gate fires applyImmediateCut(fast-OV)
+// mode 2 load-dump    : owns duty at MinDuty + dumps the inner PID integrator (fastest commanded collapse)
+// mode 3 graceful     : owns duty, ramps down at DutyRampRate (the clean control case)
+// mode 4 ladder walk  : the mode-1 cut repeated protTestReps× — each climbs the fast-OV lockout ladder
 // Guards (AUTO / RPM / charging / no other test) live in the /protTestStart handler, not here.
-// ============================================================
 bool protTest_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint8_t  phase = 0;          // 0=idle 1=ramp/settle 2=fire-active 3=ease-out 5=ladder recovery wait
   static uint32_t phaseStartMs = 0;
@@ -4238,7 +4197,6 @@ bool protTest_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   return false;
 }
 
-// ============================================================
 // fieldCurve_tick() — auto-commissioning Phase 1a field-% sweep
 //
 // Quasi-static duty→amps ramp. Like systemID_tick it returns true while active and
@@ -4249,7 +4207,6 @@ bool protTest_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 // saturation knee and proposes SystemIDStabilizeAmps / SystemIDStepAmplitude placed in
 // the linear region below the knee. Results are read by the dashboard via /fieldcurve.csv;
 // the user clicks Apply (show-before-write) — the firmware does NOT auto-write the settings.
-// ============================================================
 bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint8_t  phase = 0;          // 0=idle, 1=ramp, 2=ease-out
   static float    stepDuty = 0.0f;
@@ -4459,7 +4416,6 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         if (fieldCurveKneeAmps > 0.0f && amps75 > fieldCurveKneeAmps) amps75 = fieldCurveKneeAmps;
         float amps50 = amps75 * (0.50f / 0.75f);
 
-        // Invert the curve (amps→duty) by linear interpolation.
         float duty50 = fieldCurveInvert(amps50);
         float duty75 = fieldCurveInvert(amps75);
 
@@ -4565,7 +4521,6 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 }
 
 
-// ============================================================
 // tuningSineStep() — Tuning→Current closed-loop sine generator (Stage 2)
 //
 // Emits a sine setpoint reference into *out (centred on baseA, amplitude ampA). For
@@ -4573,7 +4528,6 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 // current against the reference, per log-spaced frequency, filling tuningBode[]. The
 // phase accumulator is owned by the caller (passed by ref) so it persists across ticks.
 // Called every control tick from the TuningMode block while a sine waveform is selected.
-// ============================================================
 void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float ampA,
                     float measAmps, float &out) {
   static uint8_t  segIdx = 0;
@@ -4728,9 +4682,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
 }
 
 
-// ============================================================
-// SMALL SHARED HELPERS (prototypes live in Xregulator.ino).
-// ============================================================
+// ===== SMALL SHARED HELPERS (prototypes live in Xregulator.ino). =====
 
 // Preload a gzip-compressed web asset from LittleFS into PSRAM so the dashboard serves from RAM.
 CachedAsset loadFileToRAM(const char *path) {

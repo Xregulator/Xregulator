@@ -35,7 +35,6 @@ bool isTempSustainedWarning(uint32_t nowMs, float tempToUseF, float tempLimitF,
                             float tempWarnExcessF, bool ignoreTemperature);
 bool isVoltageDisagreementWarning(uint32_t nowMs, float batteryV, float ibv,
                                   bool voltagePlausible, bool voltageDisagreementCritical);
-// Voltage validation
 bool isVoltageSensorPlausible();
 bool isVoltageDisagreementCritical();
 // RPM table shared segment resolver and interpolator
@@ -67,10 +66,8 @@ void kneeLearnResetDefaults();
 String kneeLearnStateJson();
 // RPM table index (for UI highlighting and bucket history)
 void updateCurrentRPMTableIndex(float rpm);
-// GPIO4 cut decision logic
 bool shouldImmediatelyCutGPIO4(FieldEventReason reason);
 bool shouldCutGPIO4AfterSettle(FieldEventReason reason, uint32_t nowMs, float appliedDuty);
-// Telemetry and reporting
 void updateFieldTelemetry(float duty, float voltage, float fieldResistance);
 void reportFieldModeEvent(uint32_t nowMs, FieldControlMode mode, FieldEventReason reason,
                           const TickSnapshot &tick, bool gpio4Low, float appliedDuty);
@@ -84,7 +81,6 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
                      float actualDtSec, bool exitingNormal);
 void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float actualDtSec);
 
-// ====================================================================================
 // FIELD CONTROL MODULE - Refactored with Unified Actuator Governor
 // ====================================================================================
 //
@@ -92,7 +88,6 @@ void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float 
 // and global variables (sysMode, govMode, setpointLimited, etc.) are defined
 // in the main .ino file. This file contains only function implementations.
 //
-// ====================================================================================
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -486,6 +481,8 @@ void applyCcOutputLimits() {
 // time). Currents/times/normalized gains are voltage-independent. VoltageKd is NOT here — it is
 // runtime-normalized like VoltageKp/Ki (recomputeCvGains below re-derives VoltageKd_active for the new
 // class). CvKdMaxTrimA is NOT here either — a flat amp cap, voltage-independent by design.
+// The per-RPM Min% floor table is the one commissioned artifact this RESETS rather than rescales
+// (to the 1% default, knee tracker unlearned) — see the block at the end of the function.
 void applyNominalVoltageChange(int oldV, int newV) {
   if (newV != oldV && oldV > 0 && (newV == 12 || newV == 24 || newV == 48)) {
     settingWrite(NK_BatteryVoltage, String(newV).c_str());  // persist class FIRST, same transaction as the profile below
@@ -576,6 +573,35 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
     settingWrite(NK_cvWindDownStopV, String(cvWindDownStopV, 3).c_str());
     settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str());
+    // Min% floor table: RESET, never rescaled. The duty-knee is class-invariant by design (see
+    // rpmMinDutyTable in Xregulator.ino — the field-strength and rectifier-threshold effects
+    // cancel), but MaxDuty just moved by 12/newV as a real per-bus FIELD-CURRENT cap, so floors
+    // learned on the old class can now sit at or above the new cap. Two things break there: the
+    // floor outranks the cap in the duty path, and the tach-lie arm bar
+    // (rpmMinDuty + frac x (MaxDuty - rpmMinDuty)) collapses to an unsatisfiable value, silently
+    // disarming the phantom-RPM cut. The re-commission flag is only an advisory nag — it clears no
+    // commissioned value — so the reset has to happen here. A class change also means a different
+    // alternator, which invalidates the learned knee anyway. Back to the flat 1% default (behaves
+    // as MinDuty alone) with the knee tracker unlearned; bin 0 keeps its permanent 0% lock while
+    // the learner owns the table, matching what the boot rebuild in kneeLearnInit produces.
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) {
+      kneeKnee[i] = 0; kneeFrozen[i] = false; kneeLearnTempF[i] = 0; kneeLastMs[i] = 0;
+      kneeFloor[i] = (i == 0) ? 0.0f : defaultMinDutyValues[i];
+      rpmMinDutyTable[i] = kneeLearnEnable ? kneeFloor[i] : defaultMinDutyValues[i];
+    }
+    kneeFitA = 0.0f; kneeFitC = 0.0f;   // no commissioning fit any more -> live correction reverts to whole-knee
+    kneeFitResidPct = -1.0f; kneeFitWorstIdx = -1;   // -1/-1 = "no fit", same sentinel the wizard's clear path writes
+    saveKneeLearnState();
+    {
+      nvs_handle_t nvs_h;
+      if (nvs_open("learning", NVS_READWRITE, &nvs_h) == ESP_OK) {
+        nvs_set_blob(nvs_h, "minDutyTable", rpmMinDutyTable, sizeof(rpmMinDutyTable));
+        nvs_commit(nvs_h);
+        nvs_close(nvs_h);
+      }
+    }
+    queueConsoleMessageF("System voltage %dV -> %dV: Min Field %% floors reset to the 1%% default and knee learning cleared (old floors were %dV-referenced and can exceed the new %d%% Max Field cap). Re-run the Min%% floor step.",
+                         oldV, newV, oldV, MaxDuty);
     updateINA228OvervoltageThreshold();
   }
   recomputeCvGains();  // always re-derive the normalized active gains for the (possibly) new class
@@ -646,7 +672,6 @@ void apply_pwm_float(float dutyPercent) {
 float governor_apply(float lastAppliedDuty, float requestDutyFloat, int gmode,
                      float effectiveMinDuty, bool writeToHardware, float dtSec) {
 
-  // Hard bounds
   float hardMin = MinDuty;
   float hardMax = MaxDuty;
 
@@ -672,7 +697,6 @@ float governor_apply(float lastAppliedDuty, float requestDutyFloat, int gmode,
     finalMax = finalMin;
   }
 
-  // Pre-clamp the request
   float requestClamped = clamp_f(requestDutyFloat, finalMin, finalMax);
 
   // Apply governor mode
@@ -705,10 +729,8 @@ float governor_apply(float lastAppliedDuty, float requestDutyFloat, int gmode,
       break;
   }
 
-  // Keep fractional duty - final clamp
   float nextDuty = clamp_f(nextFloat, finalMin, finalMax);
 
-  // Write to hardware if requested
   if (writeToHardware) {
     apply_pwm_float(nextDuty);
   }
@@ -724,7 +746,6 @@ void enter_sys_off() {
   sysMode = SYS_MODE_OFF;
   govMode = GOV_NORMAL_SLEW;
 
-  // Put PID in manual, align integrator to current state
   currentPID.SetMode(MANUAL);
   pidOutput = (double)lastAppliedDuty;
   currentPID.ResetIntegratorTo((double)lastAppliedDuty);
@@ -746,8 +767,11 @@ uint32_t nextFastOvLockoutMs(uint32_t nowMs) {
 
 // Adaptive tach-lie lockout ladder: 15s, 30s, 60s, then 120s cap; 10 min with no trip resets.
 // Tiers are long relative to fast-OV because every retry burns ~3s of field drain producing
-// nothing; buildTickSnapshot releases the lockout early on a rev-up or signal drop, so a real
-// engine never waits out the timer. RAM-only by design — a reboot restarts the ladder.
+// nothing. The tier IS the back-off between probes — buildTickSnapshot releases early ONLY on a
+// blanked+held rev-up (running engine), never on a signal drop: a stopped-then-restarted engine
+// waits out the tier remainder (tier 1 usually elapses while the engine is off), and deep tiers
+// mean recurring trips where withholding the field is correct. RAM-only by design — a reboot
+// restarts the ladder.
 uint32_t nextTachLieLockoutMs(uint32_t nowMs) {
   static uint32_t lastFireMs = 0;
   static uint8_t fireCount = 0;
@@ -789,7 +813,7 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
     activeCollapseDelay = nextTachLieLockoutMs(tick.nowMs);
     tachLieTripRpm = RPM;
     tachLieLockoutArmed = true;
-    queueConsoleMessageF("Field commanded but no alternator output: %d RPM, %.0f%% field, %.1fA out - open field drive (ON/OFF switch off, field wire loose, gate-drive/Q3 fault), dead alternator, or false RPM (tach noise). Lockout %.1fs (rev-up or signal drop releases early)",
+    queueConsoleMessageF("Field commanded but no alternator output: %d RPM, %.0f%% field, %.1fA out - open field drive (ON/OFF switch off, field wire loose, gate-drive/Q3 fault), dead alternator, or false RPM (tach noise). Lockout %.1fs (sustained rev-up releases early)",
                          (int)RPM, dutyCycle, MeasuredAmps, activeCollapseDelay / 1000.0f);
   }
   if (alreadyCut) return;  // hardware already cut — skip logging, don't spam
@@ -1157,9 +1181,7 @@ void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float 
 
 // ==================== MAIN CONTROL FUNCTION ====================
 
-// ============================================================================
-// PID TUNING SCORE — helpers called from AdjustFieldLearnMode
-// ============================================================================
+// ===== PID TUNING SCORE — helpers called from AdjustFieldLearnMode =====
 
 // Called from setup() after PSRAM allocations and loadTuningLog() are done.
 // Prints sizing info; allocation and load happen in setup() proper.
@@ -2011,16 +2033,30 @@ void AdjustFieldLearnMode() {
   // below target − margin, unreachable while this holds. Absolute layers (AlternatorHardShutdownV,
   // fast-OV ceiling, INA228 ALERT, Load Dump) stay armed. Zero band scales with the configured
   // hall sensor's full scale (different noise floors). Entry needs a 2.5 s dwell so a normal decay
-  // through target can't latch; exit is SINGLE-TICK — an RPM rise at unchanged field regains real
-  // output with no warning, and re-arming one tick late is a real overvoltage. Signed amps on
-  // purpose (no fabsf): negative reads as no shed authority. Stale current data = never latch.
+  // through target can't latch; the amps/CV/stale exits are SINGLE-TICK — an RPM rise at unchanged
+  // field regains real output with no warning, and re-arming one tick late is a real overvoltage.
+  // The voltage leg alone is hysteretic (strict above-target to start, target − ~50 mV×class to
+  // continue and to hold the latch): the wind-down glide parks the target ~20 mV under the bus, so
+  // a strict comparison chatters at ripple rate — the dwell never completed (2026-07-28 log:
+  // longest run 0.30 s of 2.5 s, so the stand-down could only ever arm AFTER something had already
+  // fired) and a completed latch would have chattered the same way. The continue/hold leg reads
+  // g_ovIbvFilt (the G2 level filter, one tick stale — computed just below): raw IBV rides 110 mV
+  // p-p through the 50 mV band at a MILD operating point, and a single sample exactly on the bar
+  // reset the whole dwell 115 ms before it would have armed. Same doctrine as G2 — a sustained-
+  // state decision must not be paced by raw ripple. Entry stays strict on raw (the permissive
+  // direction), and a ripple dip below target at ~0 A restores no shed authority, so holding
+  // through it is safe. Signed amps on purpose (no fabsf): negative reads as no shed authority.
+  // Stale current data = never latch.
   {
     float zeroFullScaleA = (AmpSensorRange == 0) ? 200.0f : (AmpSensorRange == 2) ? 500.0f : 300.0f;
     float zeroBandA = fmaxf(2.0f, 0.01f * zeroFullScaleA);
     static uint32_t altZeroSinceMs = 0;
-    bool inBandNow = voltageControlActive && !tick.currentDataStale
-                     && IBV > ChargingVoltageTarget
-                     && MeasuredAmps < zeroBandA;
+    float zeroHystV = 0.05f * ((float)BATTERY_VOLTAGE / 12.0f);
+    bool zeroLegs = voltageControlActive && !tick.currentDataStale
+                    && MeasuredAmps < zeroBandA;
+    bool inBandNow = zeroLegs && ((altZeroOutput || altZeroSinceMs != 0)
+                                    ? (g_ovIbvFilt > ChargingVoltageTarget - zeroHystV)
+                                    : (IBV > ChargingVoltageTarget));
     if (inBandNow) {
       if (altZeroSinceMs == 0) altZeroSinceMs = currentMillis;
       if (!altZeroOutput && (uint32_t)(currentMillis - altZeroSinceMs) >= 2500UL) {
@@ -2896,7 +2932,6 @@ void AdjustFieldLearnMode() {
           tuningParamChanged = false;
         }
 
-        // Manual commit requested from UI
         if (manualCommitTuningRequested) {
           manualCommitTuningRequested = false;
           if (tuningScore.scoredToggleCount >= 4 && tuningScore.activeTimeSec > 0.5f) {
@@ -3005,7 +3040,6 @@ void AdjustFieldLearnMode() {
         pidError = setpointLimited - targetCurrent;
         currentPID.Compute();
 
-        // Accumulate test score while inside a scoring window
         if (tuningScore.inScoringWindow) {
           float e = pidError;
           tuningScore.errorAccum += e * e * actualDtSec;
@@ -3580,7 +3614,6 @@ void AdjustFieldLearnMode() {
           }
           lastCVTuningMode = (CVTuningMode != 0);
 
-          // Manual commit requested from UI
           if (manualCommitCVTuningRequested) {
             manualCommitCVTuningRequested = false;
             if (cvTuningScore.scoredHighCount >= 1) {
@@ -3663,7 +3696,6 @@ void AdjustFieldLearnMode() {
                 cvTuningScore.iExcessFires += (uint16_t)(g_iExcessCount - cvTuningScore.iExcessSnap);
                 cvTuningScore.loadDumpFires += (uint16_t)(g_loadDumpCount - cvTuningScore.loadDumpSnap);
                 cvTuningScore.hardOcFires += (uint16_t)(g_hardOCCount - cvTuningScore.hardOcSnap);
-                // Start of scored LOW phase (step-down response)
                 cvTuningScore.lowPhaseStartMs = currentMillis;
                 cvTuningScore.lowPhaseSettled = false;
                 cvTuningScore.lowConsecInBand = 0;
@@ -3684,31 +3716,20 @@ void AdjustFieldLearnMode() {
         }
 
         // ── Voltage-target slew (bidirectional) — outer layer; master switch vTgtRampEnable ──
-        // The commanded target lives in ChargingVoltageTargetReq (set THIS tick by stage logic /
-        // TargetVoltageMode / MaintainMode above, and by updateChargingStage()). We rate-limit the REAL
-        // ChargingVoltageTarget toward it at vTgtRampUp / vTgtRampDn (V/s). ChargingVoltageTarget is what
-        // BOTH the CV PI error AND the *relative* over-voltage protections read. A commanded DROP
-        // (absorption→float, manual lower) collapses in one tick through the dead band far above
-        // battery voltage — the field is already saturated (current-limited) there, so the target's
-        // value is inert — then glides the final approach at vTgtRampDn, BUS-PACED (descent holds while
-        // getFiltV lags more than CV_TGT_PACE_LEAD_V behind the reference) so the gliding reference can
-        // never outrun delivery and open the measured-vs-target gap to the OV margin.
-        //   Protections still fire at the same speed relative to whatever the target currently is —
-        //   this only limits how fast the target itself may move. The ABSOLUTE backstops are fully
-        //   independent of the target: AlternatorHardShutdownV (software hard-cut) and the INA228
-        //   hardware comparator at VoltageHardwareLimit (cuts before any software runs) both fire at
-        //   fixed voltages.
-        //   vTgtRampEnable=0 → instant target. The ramp DOES apply
-        //   in CVTuningMode when enabled, so the square-wave test can be studied with the limiter on/off.
-        //   Always snap (no ramp) when not doing voltage control, or on the first CV tick (bumpless seed —
-        //   start the target at the right value rather than ramping it up from a stale one). 0 = instant.
-        // A waveform-exit wind-down overrides the target-slew-off instant path so the elevated target always
-        // glides back to base — but idle / CV-entry still snap (and abort the glide). CV manual test
-        // (CVTuningMode, not auto): the Voltage-tab Test-Limiters slew mode overrides vTgtRampEnable —
-        // 0 Off = instant target, 1 Default = factory ramp, 2 Custom = user vTgtRampUp/Dn. vTgtRampEnable
-        // still governs normal op. Off keeps the base duty slew engaged — conservative default, not a
-        // requirement: the field-slew safety is the ramp-to-zero at test EXIT (cvWaveExitWindDown), not the
-        // base rate, so bypassing duty here (like the CC Off path) is a valid future change if a need arises.
+        // Rate-limits the REAL ChargingVoltageTarget toward the commanded ChargingVoltageTargetReq at
+        // vTgtRampUp / vTgtRampDn (V/s). ChargingVoltageTarget is what both the CV PI error and the
+        // RELATIVE over-voltage protections read, so this limits only how fast the trip points move —
+        // the absolute backstops (AlternatorHardShutdownV, the INA228 comparator) are unaffected.
+        // A commanded DROP collapses in one tick through the dead band far above battery voltage (the field
+        // is already saturated there, so the target is inert), then glides the final approach BUS-PACED:
+        // descent holds while getFiltV lags more than CV_TGT_PACE_LEAD_V behind the reference, so a gliding
+        // reference can never outrun delivery and open the measured-vs-target gap to the OV margin.
+        // Snap (no ramp) when not doing voltage control or on the first CV tick — a bumpless seed, not a ramp
+        // up from a stale target. A waveform-exit wind-down overrides the instant path so an elevated target
+        // always glides back to base; idle / CV-entry still snap and abort the glide. In the manual CV test
+        // the Test-Limiters slew mode overrides vTgtRampEnable (0 Off / 1 Default / 2 Custom); Off there still
+        // keeps the base duty slew engaged — conservative, not required, since the field-slew safety is the
+        // ramp-to-zero at test exit (cvWaveExitWindDown).
         bool cvManualTest = (CVTuningMode != 0 && !g_autoTestActive);
         bool tgtSlewOff   = cvManualTest ? (cvTestSlewMode == 0)
                                          : (vTgtRampEnable == 0 && !g_autoTestActive);
@@ -4591,7 +4612,6 @@ void AdjustFieldLearnMode() {
           setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                          effectiveRiseRate, effectiveFallRate, actualDtSec);
         }
-        // Clear startup ramp once setpointLimited has caught up to command
         if (inStartupRamp && setpointLimited >= setpointCommand - 0.5f) {
           inStartupRamp = false;
         }
@@ -4963,7 +4983,6 @@ void setDutyPercent(float percent) {
     percent = MaxDuty;
   }
 
-  // Calculate duty with full resolution
   uint32_t duty = (uint32_t)((((1UL << pwmResolution) - 1) * percent) / 100.0f);
 
   if (!pwmInitialized) {
@@ -5845,10 +5864,8 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   tick.ibv = IBV;
   tick.currentBatteryVoltage = getBatteryVoltage();
 
-  // Current sensor
   tick.batteryCurrentA = Bcur;
 
-  // RPM-dependent minimum field
   tick.rpmMinDuty = getMinimumFieldForRPM(RPM);
 
   // Control state
@@ -6072,27 +6089,35 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     tick.currentDataStale = curStale;
   }
 
-  // Tach-lie plausibility: tach claims running + field driven hard + zero alternator output,
-  // held TACH_LIE_DWELL_MS. Impossible with a live alternator above cut-in, so one of: the RPM
-  // signal is noise (field-PWM coupling sustains it — the 2026-07-22 phantom runaway), the
-  // alternator is dead, or the field drive is open so the commanded field makes no current
-  // (ON/OFF switch off, field wire loose, gate-drive/Q3 fault). The first two waste battery
-  // through the field; the open-drive case wastes nothing but the cut still stops the churn.
-  // A real below-cut-in idle can trip this too — harmless (zero output foregone) and the rev-up
-  // early release below frees it instantly.
+  // Tach-lie plausibility: tach claims running + loop COMMANDING current + field driven well above
+  // the per-RPM onset floor + zero alternator output, held TACH_LIE_DWELL_MS. Impossible with a live
+  // alternator above cut-in, so one of: the RPM signal is noise (field-PWM coupling sustains it — the
+  // 2026-07-22 phantom runaway), the alternator is dead, or the field drive is open so the commanded
+  // field makes no current (ON/OFF switch off, field wire loose, gate-drive/Q3 fault). The first two
+  // waste battery through the field; the open-drive case wastes nothing but the cut still stops the churn.
+  // Duty parked AT the floor with setpointLimited ~0 is the commissioned zero-output state — the knee
+  // floor is DEFINED as the most field that still makes ~0 A — so both bars are relative, never flat
+  // duty (2026-07-28: a flat 25% bar sat below the ~27% idle floor and false-cut three CV re-entries).
+  // The setpoint bar also covers slew lag: a rev-up drops the floor faster than duty can follow, but
+  // the loop is demanding nothing there. A real below-cut-in idle demanding current can still trip —
+  // harmless (zero output foregone); a sustained rev-up past 1.5x the trip RPM (after the release
+  // blank window) or plain tier expiry frees it.
   // MANUAL mode stays unrestricted by design; a stale current sensor can't fake the zero.
   // Commissioning sweeps (field curve/knee, SystemID, τ drain) hold high duty with zero output
-  // below the onset knee ON PURPOSE — the lie signature exactly — so an active or pending sweep
-  // is exempt (07-22 bench: idle knee sweep aborted TACH_IMPLAUSIBLE at 743 RPM / 30% field).
+  // below the onset knee ON PURPOSE — the lie signature exactly — and drive duty open-loop while
+  // setpointLimited holds its pre-test value, so an active or pending sweep stays exempt; the knee
+  // sweep is also mid-rewrite of the very floor table the arm bar reads (07-22 bench: idle knee
+  // sweep aborted TACH_IMPLAUSIBLE at 743 RPM / 30% field).
   {
     bool sweepDrivingField = (fieldCurveActive != 0) || (systemIDActive != 0) || (fieldCutActive != 0)
                              || fieldCurveRequested || systemIDRequested || fieldCutRequested
                              || fieldCutCcActive || (protTestActive != 0) || protTestCcActive;
-    bool tachLieNow = chargingEnabledLocal && !tick.manualMode && !tick.ignoreRPM
+    bool tachLieNow = TachLieEnable && chargingEnabledLocal && !tick.manualMode && !tick.ignoreRPM
                       && !sweepDrivingField
                       && !tick.currentDataStale
                       && RPM >= (float)MinRPMForField
-                      && dutyCycle >= TACH_LIE_MIN_DUTY_PCT
+                      && setpointLimited > TACH_LIE_MAX_AMPS
+                      && dutyCycle >= tick.rpmMinDuty + TACH_LIE_HEADROOM_FRAC * fmaxf(0.0f, MaxDuty - tick.rpmMinDuty)
                       && fabsf(MeasuredAmps) < TACH_LIE_MAX_AMPS;
     if (tachLieNow) {
       if (tachLieSinceMs == 0) tachLieSinceMs = currentMillis;
@@ -6102,7 +6127,6 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     tick.tachImplausible = (tachLieSinceMs != 0 && (uint32_t)(currentMillis - tachLieSinceMs) >= TACH_LIE_DWELL_MS);
   }
 
-  // Voltage validation
   tick.voltagePlausible = isVoltageSensorPlausible();
   tick.voltageDisagreementCritical = isVoltageDisagreementCritical();
   tick.voltageDisagreementWarning = isVoltageDisagreementWarning(
@@ -6137,26 +6161,51 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     suppressLoggedThisCycle = false;  // reset for next OV event
   }
 
-  // Tach-lie lockout early release: the phantom dying (RPM below the field minimum) or a real
-  // rev-up (RPM well above the latched trip value — sustained noise stays in its band, a throttle
-  // change doesn't) both end the standoff; don't make a real engine wait out the timer. A false
-  // release just re-trips in TACH_LIE_DWELL_MS and the ladder escalates, so churn stays bounded.
+  // Tach-lie lockout early release: ONLY a real rev-up (RPM well above the latched trip value —
+  // sustained noise stays in its band, a throttle change doesn't) ends the standoff early, and only
+  // after the tach can be trusted again: no release decision until TACH_LIE_RELEASE_BLANK_MS after
+  // the cut (the collapse slams the LM2907 — a ~40 ms upward spike ~570 ms post-cut read as a
+  // rev-up and released the 15 s lockout in ~600 ms, 2026-07-28 log), then the test must hold
+  // TACH_LIE_RELEASE_HOLD_MS continuously so a lone spike frees nothing.
+  // There is deliberately NO signal-dropped release — do not re-add one. A phantom is sustained by
+  // field PWM, so the cut itself drives RPM to zero: releasing on the drop discards the ladder tier
+  // on exactly the fault the ladder exists for, and the 07-22 phantom later RESEEDED with the field
+  // off and passed the 2 s restart confirmation — no RPM-comes-back test discriminates either. The
+  // tier is the back-off between probes (energize + TACH_LIE_DWELL_MS is the only real
+  // phantom-vs-alternator test this hardware has); while RPM reads low the RPM gate holds the field
+  // off regardless, and a real restart waits only the tier remainder, usually already elapsed.
+  // Disabling the detector (TachLieEnable off) clears an in-flight lockout — the toggle is the
+  // user's escape hatch and must not leave a 120 s tier running. An ignored tach (ignoreRPM) makes
+  // no release decisions and must zero the hold timer, or a stale stamp satisfies the hold the
+  // instant ignoreRPM is toggled back off. Every re-trip restamps fieldCollapseTime, so the blank
+  // window self-resets.
   if (tachLieLockoutArmed) {
     if (fieldCollapseTime == 0) {
       tachLieLockoutArmed = false;  // lockout expired naturally elsewhere
-    } else if (!tick.ignoreRPM) {
-      bool signalDropped = (RPM < (float)MinRPMForField);
-      bool realRevUp = (RPM > tachLieTripRpm * 1.5f);
-      if (signalDropped || realRevUp) {
+      tachLieRevUpSinceMs = 0;
+    } else if (!TachLieEnable) {
+      fieldCollapseTime = 0;
+      tachLieLockoutArmed = false;
+      tachLieRevUpSinceMs = 0;
+      queueConsoleMessageF("Tach-lie lockout cleared: detector disabled by user");
+    } else if (tick.ignoreRPM || (uint32_t)(tick.nowMs - fieldCollapseTime) < TACH_LIE_RELEASE_BLANK_MS) {
+      tachLieRevUpSinceMs = 0;
+    } else {
+      if (RPM > tachLieTripRpm * 1.5f) {
+        if (tachLieRevUpSinceMs == 0) tachLieRevUpSinceMs = tick.nowMs;
+      } else {
+        tachLieRevUpSinceMs = 0;
+      }
+      if (tachLieRevUpSinceMs != 0 && (uint32_t)(tick.nowMs - tachLieRevUpSinceMs) >= TACH_LIE_RELEASE_HOLD_MS) {
         fieldCollapseTime = 0;
         tachLieLockoutArmed = false;
-        queueConsoleMessageF("Tach-lie lockout released early (%s, RPM=%d)",
-                             signalDropped ? "signal dropped" : "rev-up detected", (int)RPM);
+        tachLieRevUpSinceMs = 0;
+        queueConsoleMessageF("Tach-lie lockout released early (rev-up held %d ms, RPM=%d)",
+                             (int)TACH_LIE_RELEASE_HOLD_MS, (int)RPM);
       }
     }
   }
 
-  // Lockout
   tick.inLockout = (fieldCollapseTime > 0 && (tick.nowMs - fieldCollapseTime) < activeCollapseDelay);
 
   // Thresholds
@@ -6252,7 +6301,6 @@ void loadLearningTableFromNVS() {
     capLimitMode = 0;
   }
 
-  // Load min duty table
   required_size = sizeof(rpmMinDutyTable);
   err = nvs_get_blob(nvs_handle, "minDutyTable", rpmMinDutyTable, &required_size);
   if (err != ESP_OK || required_size != sizeof(rpmMinDutyTable)) {
@@ -6270,7 +6318,6 @@ void loadLearningTableFromNVS() {
     return;
   }
 
-  // Load historical data (optional)
   bool historicalDataValid = true;
 
   required_size = sizeof(overheatCount);
@@ -6707,7 +6754,6 @@ void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
     return;
   }
 
-  // Probing this bin.
   if (probeBin != b || !haveZero) {
     // (Re)start the probe: capture a fresh zero at the current floor (we are below the knee here).
     probeBin = b; probeZero = amps; haveZero = true;
@@ -7111,10 +7157,8 @@ bool isVoltageSensorPlausible() {
   return (batteryVPlausible || ibvPlausible);
 }
 
-// ===========================================================================
 // tempPID_init()
 // Call from setup() after NVS and sensors are initialized.
-// ===========================================================================
 void tempPID_init() {
   // Start at zero; FF and the integral build only if temperature demands it. tempPID_tick()
   // does the real bumpless seed when it first activates on a valid temp.
@@ -7134,9 +7178,7 @@ void tempFilterUpdate(uint32_t nowMs) {
   bool tempValueSane = !isnan(TempToUse) && (TempToUse > -50.0f) && (TempToUse < 400.0f);
   if (!tempValueSane) return;  // hold last filtered value; do not poison with garbage
 
-  // ---------------------------------------------------------------------------
-  //  IIR filter
-  // ---------------------------------------------------------------------------
+  // ===== IIR filter =====
   if (isnan(tempFiltered) || tempFilterNeedsReseed) {
     tempFiltered = TempToUse;
     tempFilterNeedsReseed = false;

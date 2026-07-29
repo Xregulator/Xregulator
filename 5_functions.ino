@@ -1065,9 +1065,7 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
     ChargeCycles_AllTime = (ChargedEnergy_AllTime) / batteryCapacity_Wh;
   }
 
-  // =================================================================
-  //     AVERAGE SOC TRACKING (TIME-WEIGHTED)
-  // =================================================================
+  // ===== AVERAGE SOC TRACKING (TIME-WEIGHTED) =====
   static float socAccumulator = 0.0f;
   // socAccumulator_AllTime and totalSocSampleTime_AllTime are globals, not statics here
   static unsigned long totalSocSampleTime = 0;  // Session seconds tracked
@@ -1105,9 +1103,7 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   }
 }
 void UpdateTravelStatistics(unsigned long elapsedMillis) {
-  // ==========================================================================
-  // DISTANCE CALCULATION - Using GPS position (Haversine)
-  // ==========================================================================
+  // ===== DISTANCE CALCULATION - Using GPS position (Haversine) =====
 
   // gpsValid is shared with trip-tracking below — not stale, not NaN, not (0,0);
   // the (0,0) check rejects the "boot before first fix" sentinel.
@@ -1172,14 +1168,12 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
     }
   }
 
-  // ==========================================================================
   // LONGEST SINGLE TRIP TRACKING
   // Trip ends after 60 min continuous (a) GPS invalid OR (b) SOG < 1.5 kn.
   // Either valid GPS + SOG >= 1.5 kn sample resets both timers.
   // Boot recovery: if NVS had an in-progress trip, hold in stasis until time
   // syncs, then resume (epoch < 1 hr old) or finalize (stale). 10-min fallback
   // forces stale-finalize if time never syncs (e.g., no GPS / no NTP).
-  // ==========================================================================
   {
     if (tripPendingRecovery) {
       if (timeIsSynced && timeBase > 0) {
@@ -1238,11 +1232,9 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
     }
   }
 
-  // ==========================================================================
   // ROLLING 24-HOUR MAX DISTANCE (lb-max-24hr leaderboard)
   // Ring of 24 hourly buckets; bucket[head] = in-progress hour. Sum = approx
   // last 24 hr of motion (~1 hr undercount at the leading edge).
-  // ==========================================================================
   {
     uint32_t now = millis();
     if (distHourStartMs == 0) distHourStartMs = now;  // first-tick init
@@ -1257,12 +1249,9 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
     if (rollingSum > Max24hrDistance_AllTime) Max24hrDistance_AllTime = rollingSum;
   }
 
-  // Anchorage detection — see UpdateAnchorageDetection() for the full algorithm.
   UpdateAnchorageDetection(gpsValid);
 
-  // ==========================================================================
-  // SPEED CALCULATION - Using SOGNMEA (time-weighted average) - UNCHANGED
-  // ==========================================================================
+  // ===== SPEED CALCULATION - Using SOGNMEA (time-weighted average) - UNCHANGED =====
 
   if (IS_STALE(IDX_SOG_NMEA) || SOGNMEA < 0) {
     return;
@@ -1546,9 +1535,7 @@ float thermistorTempC(float V_node) {
   return tempK - 273.15f;
 }
 
-//============================================================================
-// CheckAlarms() - Alarm monitoring and INA228 hardware protection
-// ============================================================================
+// ===== CheckAlarms() - Alarm monitoring and INA228 hardware protection =====
 void CheckAlarms() {
   static unsigned long lastRunTime = 0;
   if (millis() - lastRunTime < 250) return;
@@ -1745,19 +1732,13 @@ void CheckAlarms() {
     }
   }
 
-  // ========== INA228 HARDWARE OVERVOLTAGE PROTECTION ==========
-  // The INA228 ALERT pin pulls GPIO4 low electrically the instant the bus
-  // voltage crosses VoltageHardwareLimit — before any software runs.
-  // This block manages the software latch that keeps the field suppressed
-  // until the condition is confirmed cleared, and produces clear messaging
-  // about what the hardware did and when it recovered.
-  //
-  // SLOW_ALERT is SET: the threshold comparison uses the averaged ADC value
-  // (~1054ms filter with 128-sample averaging), not instantaneous readings.
-  // This prevents single-sample noise spikes from asserting the ALERT pin.
-  //
-  // New event detection: throttled to every 5s to avoid hammering I2C.
-  // Latch management (3s and 10s checks): runs every 250ms.
+  // ===== INA228 HARDWARE OVERVOLTAGE PROTECTION =====
+  // The ALERT pin pulls GPIO4 low electrically the instant the bus crosses VoltageHardwareLimit —
+  // before any software runs. This block only manages the software latch that keeps the field
+  // suppressed until the condition is confirmed cleared, plus the messaging around it.
+  // SLOW_ALERT is SET, so the comparison uses the averaged ADC value (~1054 ms, 128-sample) rather
+  // than instantaneous reads — a single noise spike cannot assert ALERT.
+  // New-event detection is throttled to 5 s (I2C cost); the 3 s / 10 s latch checks run every 250 ms.
 
   if (INADisconnected == 0) {
     static unsigned long lastINA228Check = 0;
@@ -3188,7 +3169,6 @@ void ReadAnalogInputs_Fake() {
     static float fakeHeading = random(0, 360);
     static float fakeCOG = fakeHeading + random(-30, 30);
     static float fakeSOG = 3.0 + (random(-150, 150) / 100.0);  // 1.5–4.5 kt initial band
-    // Wind simulation
     static float fakeApparentWindSpeed = 12.0;
     static float fakeApparentWindAngle = 45.0;
     fakeLon += 0.000375f;
@@ -3227,7 +3207,6 @@ void ReadAnalogInputs_Fake() {
     HeadingNMEA = fakeHeading;
     MARK_FRESH(IDX_HEADING_NMEA);
 
-    // Apparent Wind
     fakeApparentWindSpeed += (random(-40, 40) / 10.0);  // ±4 kt per update
     if (fakeApparentWindSpeed < 0.0) fakeApparentWindSpeed = 0.0;
     if (fakeApparentWindSpeed > 35.0) fakeApparentWindSpeed = 35.0;
@@ -3273,7 +3252,6 @@ void ReadAnalogInputs_Fake() {
     if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; }
 
 
-    // Fake battery current
     static float fakeBattCurrent = 0;
     if (SOC_percent > 99) {
       fakeBattCurrent = -100.0;
@@ -3372,9 +3350,7 @@ void ReadAnalogInputs_Fake() {
     MARK_FRESH(IDX_CHANNEL3V);
   }
 
-  // ============================================================================
-  // IMU FAKE DATA GENERATION
-  // ============================================================================
+  // ===== IMU FAKE DATA GENERATION =====
   if (imuEnabled) {
     static float fakeHeelAngle = 0;
     static float fakePitchAngle = 0;
@@ -3864,20 +3840,9 @@ bool ensureLittleFS() {
 
 
 void ensurePreferredBootPartition() {
-  //called during startup, in setup() function.
-  //Purpose: Decides which firmware partition to boot from and handles emergency recovery.
-  //User Flow Permutations:
-  //Normal Operation (GPIO41 not pressed)
-  //If running from factory → switch to ota_0 (if valid firmware exists there)
-  //If running from ota_0 → stay on ota_0
-  //Goal: Always prefer the updated firmware in ota_0
-  //Emergency Recovery (GPIO41 pressed during boot)
-  //Force boot to factory partition regardless of current location
-  //Clear any stuck OTA update flags in memory
-  //Stay in factory mode (safe, known-good firmware)
-  //Corrupted ota_0 Firmware
-  //If ota_0 has invalid/corrupted firmware → stay on factory
-  //Prevents boot to broken firmware
+  //Boot partition selection. Prefer ota_0 whenever it holds valid firmware, else stay on factory
+  //(a corrupt ota_0 must never be booted). GPIO41 held at boot forces factory and clears any stuck
+  //OTA flags — the emergency path back to known-good firmware.
   const esp_partition_t *ota0_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
   const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
   const esp_partition_t *current_boot = esp_ota_get_boot_partition();
@@ -4074,14 +4039,12 @@ void saveNVSDataFull() {
   }
   bool chg = false;
 
-  // Session Energy
   if (prev_ChargedEnergy != (uint32_t)ChargedEnergy)                        { nvs_set_u32(h, "ChargedEnergy",  (uint32_t)ChargedEnergy);                        prev_ChargedEnergy = (uint32_t)ChargedEnergy;                        chg = true; }
   if (prev_DischrgdEnergy != (uint32_t)DischargedEnergy)                    { nvs_set_u32(h, "DischrgdEnergy", (uint32_t)DischargedEnergy);                    prev_DischrgdEnergy = (uint32_t)DischargedEnergy;                    chg = true; }
   if (prev_AltChrgdEnergy != (uint32_t)AlternatorChargedEnergy)             { nvs_set_u32(h, "AltChrgdEnergy", (uint32_t)AlternatorChargedEnergy);             prev_AltChrgdEnergy = (uint32_t)AlternatorChargedEnergy;             chg = true; }
   if (prev_SolarEnergy != (uint32_t)SolarChargedEnergy)                     { nvs_set_u32(h, "SolarEnergy",    (uint32_t)SolarChargedEnergy);                  prev_SolarEnergy = (uint32_t)SolarChargedEnergy;                     chg = true; }
   if (prev_AltFuelUsed != (int32_t)(AlternatorFuelUsed * 10))               { nvs_set_i32(h, "AltFuelUsed",    (int32_t)(AlternatorFuelUsed * 10));             prev_AltFuelUsed = (int32_t)(AlternatorFuelUsed * 10);               chg = true; }
   if (prev_EngineFuel != (int32_t)(EngineFuelUsed * 10))                    { nvs_set_i32(h, "EngineFuel",     (int32_t)(EngineFuelUsed * 10));                 prev_EngineFuel = (int32_t)(EngineFuelUsed * 10);                    chg = true; }
-  // Lifetime Energy
   if (prev_ChargedEnergy_AllTime != (uint32_t)ChargedEnergy_AllTime)        { nvs_set_u32(h, "ChrgdEng_AT",    (uint32_t)ChargedEnergy_AllTime);               prev_ChargedEnergy_AllTime = (uint32_t)ChargedEnergy_AllTime;        chg = true; }
   if (prev_DischrgdEnergy_AllTime != (uint32_t)DischargedEnergy_AllTime)    { nvs_set_u32(h, "DschrgEng_AT",   (uint32_t)DischargedEnergy_AllTime);            prev_DischrgdEnergy_AllTime = (uint32_t)DischargedEnergy_AllTime;    chg = true; }
   if (prev_AltChrgdEnergy_AllTime != (uint32_t)AlternatorChargedEnergy_AllTime) { nvs_set_u32(h, "AltChrgEng_AT", (uint32_t)AlternatorChargedEnergy_AllTime); prev_AltChrgdEnergy_AllTime = (uint32_t)AlternatorChargedEnergy_AllTime; chg = true; }
@@ -4139,7 +4102,6 @@ void saveNVSDataFull() {
   if (prev_sailing_dist_alltime != sailing_dist_alltime)                    { nvs_set_blob(h, "SailDist_AT",   &sailing_dist_alltime,       sizeof(float));     prev_sailing_dist_alltime = sailing_dist_alltime;                    chg = true; }
   if (prev_alt_power_max_alltime_w != alt_power_max_alltime_w)              { nvs_set_blob(h, "AltPwrMax_AT",  &alt_power_max_alltime_w,    sizeof(float));     prev_alt_power_max_alltime_w = alt_power_max_alltime_w;              chg = true; }
   if (prev_solar_power_max_alltime_w != solar_power_max_alltime_w)          { nvs_set_blob(h, "SolPwrMax_AT",  &solar_power_max_alltime_w,  sizeof(float));     prev_solar_power_max_alltime_w = solar_power_max_alltime_w;          chg = true; }
-  // IMU
   if (prev_imu_capsize_count != imu_capsize_count)                          { nvs_set_u32(h,  "IMU_Capsize",   imu_capsize_count);                              prev_imu_capsize_count = imu_capsize_count;                          chg = true; }
   if (prev_imu_pitchpole_count != imu_pitchpole_count)                      { nvs_set_u32(h,  "IMU_Pitchpol",  imu_pitchpole_count);                           prev_imu_pitchpole_count = imu_pitchpole_count;                      chg = true; }
   if (prev_imu_slam_count_lifetime != imu_slam_count_lifetime)              { nvs_set_u32(h,  "IMU_SlamLife",  imu_slam_count_lifetime);                        prev_imu_slam_count_lifetime = imu_slam_count_lifetime;              chg = true; }
@@ -4401,7 +4363,6 @@ void loadNVSData() {
   if (nvs_get_i32(nvs_handle, "AltFuelUsed", &temp_int32) == ESP_OK) AlternatorFuelUsed = temp_int32 / 10.0f;
   if (nvs_get_i32(nvs_handle, "EngineFuel", &temp_int32) == ESP_OK) EngineFuelUsed = temp_int32 / 10.0f;
 
-  // Lifetime Energy Tracking (_AllTime)
   if (nvs_get_u32(nvs_handle, "ChrgdEng_AT", &temp_uint32) == ESP_OK) ChargedEnergy_AllTime = temp_uint32;
   if (nvs_get_u32(nvs_handle, "DschrgEng_AT", &temp_uint32) == ESP_OK) DischargedEnergy_AllTime = temp_uint32;
   if (nvs_get_u32(nvs_handle, "AltChrgEng_AT", &temp_uint32) == ESP_OK) AlternatorChargedEnergy_AllTime = temp_uint32;
@@ -4414,24 +4375,20 @@ void loadNVSData() {
   if (nvs_get_i32(nvs_handle, "EngineCycles", &temp_int32) == ESP_OK) EngineCycles = temp_int32;
   if (nvs_get_i32(nvs_handle, "AltOnTime", &temp_int32) == ESP_OK) AlternatorOnTime = temp_int32;
 
-  // Lifetime Runtime Tracking (_AllTime)
   if (nvs_get_i32(nvs_handle, "EngRunTime_AT", &temp_int32) == ESP_OK) EngineRunTime_AllTime = temp_int32;
   if (nvs_get_i32(nvs_handle, "PerfSailSec", &temp_int32) == ESP_OK) perfSailSeconds = temp_int32;
   if (nvs_get_i32(nvs_handle, "PerfMotorSec", &temp_int32) == ESP_OK) perfMotorSeconds = temp_int32;
   if (nvs_get_i32(nvs_handle, "EngCycles_AT", &temp_int32) == ESP_OK) EngineCycles_AllTime = temp_int32;
   if (nvs_get_i32(nvs_handle, "AltOnTime_AT", &temp_int32) == ESP_OK) AlternatorOnTime_AllTime = temp_int32;
 
-  // Session Charge Cycles
   if (nvs_get_i32(nvs_handle, "ChrgCycles", &temp_int32) == ESP_OK) ChargeCycles = temp_int32;
 
-  // Lifetime Charge Cycles (_AllTime)
   if (nvs_get_i32(nvs_handle, "ChrgCyc_AT", &temp_int32) == ESP_OK) ChargeCycles_AllTime = temp_int32;
 
   // Session Travel Statistics
   if (nvs_get_i32(nvs_handle, "TotalDist", &temp_int32) == ESP_OK) TotalDistance = temp_int32;
   if (nvs_get_i32(nvs_handle, "AvgSpeed", &temp_int32) == ESP_OK) AvgSpeed = temp_int32 / 100.0f;
 
-  // Lifetime Travel Statistics (_AllTime)
   if (nvs_get_i32(nvs_handle, "TotDist_AT", &temp_int32) == ESP_OK) TotalDistance_AllTime = temp_int32;
   if (nvs_get_i32(nvs_handle, "AvgSpd_AT", &temp_int32) == ESP_OK) AvgSpeed_AllTime = temp_int32 / 100.0f;
 
@@ -4500,7 +4457,6 @@ void loadNVSData() {
   if (totalVoltageSampleTime_AllTime > 0)
     AvgVoltage_AllTime = voltageAccumulator_AllTime / totalVoltageSampleTime_AllTime;
 
-  // Calculate AvgSOC_AllTime from loaded accumulators
   if (totalSocSampleTime_AllTime > 0) {
     AvgSOC_AllTime = socAccumulator_AllTime / totalSocSampleTime_AllTime;
     Serial.printf("NVS LOAD: Calculated AvgSOC_AllTime = %.2f%%\n", AvgSOC_AllTime);
@@ -4549,7 +4505,6 @@ void loadNVSData() {
   nvs_get_blob(nvs_handle, "GreaseDamage", &CumulativeGreaseDamage, &required_size);
   nvs_get_blob(nvs_handle, "BrushDamage", &CumulativeBrushDamage, &required_size);
 
-  // Dynamic Learning
   nvs_get_blob(nvs_handle, "ShuntGain", &DynamicShuntGainFactor, &required_size);
   if (nvs_get_u32(nvs_handle, "LastGainTime", &temp_uint32) == ESP_OK) lastGainCorrectionTime = temp_uint32;
   // Temp-comp zero-correction learned equation (hold-last-good survives reboot). Old AltZero/LastZeroTime/
@@ -4651,7 +4606,6 @@ void initNVSCache() {
   prev_AvgSpeed = (int32_t)(AvgSpeed * 100);
   prev_AvgSOC = (int32_t)(AvgSOC * 100);
 
-  // Lifetime cache (_AllTime)
   prev_ChargedEnergy_AllTime = (uint32_t)ChargedEnergy_AllTime;
   prev_DischrgdEnergy_AllTime = (uint32_t)DischargedEnergy_AllTime;
   prev_AltChrgdEnergy_AllTime = (uint32_t)AlternatorChargedEnergy_AllTime;
@@ -4676,7 +4630,6 @@ void initNVSCache() {
   prev_SOC_percent = (int32_t)SOC_percent;
   prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;
 
-  // Session health
   prev_SessionDur = (uint32_t)CurrentSessionDuration;
   prev_MaxLoop = (int32_t)MaxLoopTime;
   prev_MinHeap = (int32_t)MinFreeHeap;
@@ -4689,7 +4642,6 @@ void initNVSCache() {
   prev_GreaseDamage = CumulativeGreaseDamage;
   prev_BrushDamage = CumulativeBrushDamage;
 
-  // Dynamic learning
   prev_ShuntGain = DynamicShuntGainFactor;
   prev_LastGainTime = (uint32_t)lastGainCorrectionTime;
   prev_zfValid = zfValid;
@@ -4705,7 +4657,6 @@ void initNVSCache() {
   prev_alt_power_max_alltime_w = alt_power_max_alltime_w;
   prev_solar_power_max_alltime_w = solar_power_max_alltime_w;
 
-  // IMU cache
   prev_imu_capsize_count = imu_capsize_count;
   prev_imu_pitchpole_count = imu_pitchpole_count;
   prev_imu_slam_count_lifetime = imu_slam_count_lifetime;

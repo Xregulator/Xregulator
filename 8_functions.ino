@@ -625,34 +625,22 @@ done:
   return 1;
 }
 
-// ============================================================================
-// Config Sharing — export/import of the cloneable settings set (Phase 1)
-// ----------------------------------------------------------------------------
-// One ALLOWLIST (CONFIG_MANIFEST) is the single source of truth for which NVS
-// "settings" keys are shareable. tier 1 = imported like any other setting, including
-// the install/hardware topology (sensor/shunt/polarity) and per-install calibration;
-// tier 3 = per-device history, always exported (fleet snapshot / support) but NEVER
-// imported, since adopting another boat's value would corrupt this device's own record.
-// The alt-health / boat-perf registry knobs (ALT_SETTINGS / PERF_SETTINGS in
-// 7_functions.ino) are ALSO shareable but save through generic loops the literal
-// manifest can't reference — they are emitted/imported programmatically (tier-1)
-// minus CFG_REGISTRY_SKIP, so a knob added to either registry is covered automatically.
-// Philosophy: the export captures essentially EVERY persisted setting — including UI
-// prefs and per-install calibration/measured fits. Paring down to what's appropriate to
-// apply happens at import time via the diff checkboxes, never by omitting from the
-// export. Only identity/secrets (WiFi creds, passwords, InstallId), device
-// lifecycle/history state, learned per-device state, and momentary actions stay out
-// (see config_drift_check.py — it fails the build if any settingWrite key is in neither
-// the manifest nor its EXCLUDE list).
-// The user-editable RPM tables are raw blobs in the "learning" namespace, carried by
-// a separate "tables" export section (exportTablesObject), not this manifest.
-//
-// Values are carried as the RAW NVS strings (settingRead output), so import is a
-// straight settingWrite of byte-identical internal state followed by a reboot —
-// InitSystemSettings then re-reads the whole set consistently. No per-key unit
-// conversion, no /get replay. Cross-rev safe: a key absent on the destination is
-// skipped and that firmware's own default applies (see CLAUDE.md "NVS Cross-Rev Risk").
-// ============================================================================
+// Config Sharing — export/import of the cloneable settings set.
+// CONFIG_MANIFEST is the single source of truth for which NVS "settings" keys are shareable.
+// tier 1 = exported AND imported (includes install topology and per-install calibration).
+// tier 3 = exported for fleet snapshot / support but NEVER imported — adopting another boat's
+// value would corrupt this device's own record.
+// The alt-health / boat-perf registry knobs (ALT_SETTINGS / PERF_SETTINGS, 7_functions.ino) are
+// tier-1 shareable too but save through generic loops a literal manifest can't reference, so they
+// are emitted/imported programmatically minus CFG_REGISTRY_SKIP — a new knob is covered for free.
+// The export deliberately captures nearly every persisted setting; paring down to what is appropriate
+// to apply happens at IMPORT time via the diff checkboxes, never by omitting from the export. Only
+// identity/secrets, device lifecycle/history, learned per-device state and momentary actions stay out
+// — config_drift_check.py fails the build if a settingWrite key is in neither the manifest nor its
+// EXCLUDE list. User-editable RPM tables are raw "learning"-namespace blobs carried by a separate
+// "tables" section (exportTablesObject), not this manifest.
+// Values are the RAW NVS strings, so import is a byte-identical settingWrite + reboot — no unit
+// conversion, no /get replay. A key absent on the destination is skipped and its own default applies.
 struct ConfigManifestEntry { const char *param; const char *nvsKey; uint8_t tier; };
 static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "BulkVoltage", NK_BulkVoltage, 1 },
@@ -777,6 +765,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "OvGroup1Enable", NK_OvGroup1Enable, 1 },
   { "OvGroup2Enable", NK_OvGroup2Enable, 1 },
   { "HardOCEnable", NK_HardOCEnable, 1 },
+  { "TachLieEnable", NK_TachLieEnable, 1 },
   { "IExcessEnable", NK_IExcessEnable, 1 },
   { "BattLimitEnable", NK_BattLimitEnable, 1 },
   { "LoadDumpEnable", NK_LoadDumpEnable, 1 },
@@ -1414,10 +1403,8 @@ int applyImportConfig(const char *body) {
   return applied;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  BATTERY HEALTH MONITOR — active DCIR test + capacity-vs-cycles trend.
-//  Step generator: 6_functions.ino.  Globals/structs: Xregulator.ino.
-// ══════════════════════════════════════════════════════════════════════════════
+// BATTERY HEALTH MONITOR — active DCIR test + capacity-vs-cycles trend.
+// Step generator: 6_functions.ino.  Globals/structs: Xregulator.ino.
 
 static uint32_t      bhSampleLastMs   = 0;
 static const uint32_t BH_SAMPLE_INTERVAL_MS = 15;   // ~INA228 cadence; bounds buffer fill
@@ -2681,7 +2668,6 @@ String bhBuildStatusJson() {
   return j;
 }
 
-// ───────────────────────────────────────────────────────────────────────────
 // /debug/fillmax + /debug/clearmax — bench-only "age the unit to its ceiling": every accumulating
 // store is a fixed-cap ring, so a decade-old unit == rings at cap; this forces that state now and
 // times the O(count) worst cases on real hardware. Points are DISPERSED (not clones) so the IDW/LWLR
@@ -2693,7 +2679,6 @@ String bhBuildStatusJson() {
 // (data partitions are not touched by a reflash); recover with Erase All Flash / factory reset. Lives
 // at the sketch tail so every static ring/front symbol (2/3/7_functions) is in scope; registered in
 // setupServer().
-// ───────────────────────────────────────────────────────────────────────────
 static uint32_t dbgLcg = 0x1234567u;               // deterministic LCG → identical fill every run
 static inline float dbgRand(float lo, float hi) {
   dbgLcg = dbgLcg * 1664525u + 1013904223u;
