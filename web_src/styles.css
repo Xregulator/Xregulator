@@ -5639,6 +5639,9 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
     border-radius: 0 0 14px 14px;
     border-bottom: 3px solid var(--accent);
     max-height: 78vh;           /* leaves room for the on-screen keyboard */
+    /* Fixed-position sheet bypasses the body's safe-area padding: pad the notch /
+       status-bar height ourselves so the input row starts below it (0 in browsers). */
+    padding-top: env(safe-area-inset-top, 0px);
   }
 }
 .dark-mode .ss-panel { background: #1e1e1e; border: 1px solid #444; }
@@ -5754,7 +5757,7 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
 .ss-pull {
   position: fixed;
   left: 50%;
-  top: 0;
+  top: env(safe-area-inset-top, 0px);   /* descend from below the notch, not under it */
   transform: translate(-50%, -60px);
   z-index: 9400;
   width: 44px;
