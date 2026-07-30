@@ -517,6 +517,7 @@ bool fsRemove(const char *path) {
 #define NK_kneeDutyTolPct  "kneeDutyTolPct"
 #define NK_ZeroLogEnable   "ZeroLogEnable"   // Zero-drift characterization log master toggle
 #define NK_lastAppldCfgId  "lastAppldCfgId"  // id of the last admin-pushed config applied (reboot-loop guard)
+#define NK_cfgSchema       "cfgSchema"       // persisted settings-schema version (runSettingsMigrations)
 
 // Vessel Info. Was /vessel_info.json on LittleFS; moved into NVS so the boat's identity,
 // geometry and chemistry survive a formatOnFail and ride the manifest export like every
@@ -592,6 +593,30 @@ bool settingRemove(const char *key) {
   if (e == ESP_OK) e = nvs_commit(h);
   nvs_close(h);
   return e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND;  // already-absent counts as removed
+}
+
+#define SETTINGS_SCHEMA_VERSION 1
+
+// Cumulative settings-schema migration chain. Runs once at boot, right after the last NVS
+// settings loader (initWeatherModeSettings), so steps see the fully seeded key set — a step
+// that transforms a key already loaded this boot must also fix the RAM global. Standing rules:
+//  - Any key rename/retire/unit-scale/enum change ships a permanent numbered step here in the
+//    SAME commit; steps are never edited or deleted once shipped.
+//  - NVS key strings are never reused or repurposed (firmware-internals.md).
+//  - Pure additions need NO step: a missing key falls back to its hardcoded default at load.
+//  - Steps must be idempotent: the schema stamp is written LAST, so a power cut mid-step
+//    re-runs that whole step on the next boot.
+void runSettingsMigrations() {
+  int stored = settingRead(NK_cfgSchema).toInt();  // absent key reads "" -> 0 = pre-schema device
+  while (stored < SETTINGS_SCHEMA_VERSION) {
+    switch (stored) {
+      case 0:
+        break;  // 0->1: stamp only — fielded pre-schema settings are valid as-is
+    }
+    stored++;
+    settingWrite(NK_cfgSchema, String(stored).c_str());
+    Serial.printf("Settings schema migrated to %d\n", stored);
+  }
 }
 
 // ── Auto-commissioning snapshot / restore ────────────────────────────────────

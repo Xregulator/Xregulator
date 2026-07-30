@@ -43,6 +43,15 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 
+// Canvas-drawn axis colors (tick text, axis titles, tick marks, grid) — CSS can't reach
+// these, so they're injected as FUNCTIONS into every plot's axes by the uPlot wrapper
+// below; uPlot re-resolves function-valued strokes on every redraw, so a dark-mode
+// toggle only needs refreshAllPlotThemes(). Light values mirror uPlot's own defaults
+// so light mode renders unchanged.
+function plotAxisTextColor() { return document.body.classList.contains('dark-mode') ? '#d0d0d0' : 'black'; }
+function plotGridColor() { return document.body.classList.contains('dark-mode') ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.07)'; }
+function plotTickColor() { return document.body.classList.contains('dark-mode') ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.07)'; }
+
 // Quantize every Y-axis gutter so sub-pixel re-measures stop shivering the X ticks.
 (function stabilizeUPlotAxisSizes() {
     if (typeof uPlot === 'undefined' || uPlot.__shiverWrapped) return;
@@ -75,13 +84,29 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
 
     const Wrapped = function (opts, data, el) {
         if (opts && Array.isArray(opts.axes)) {
+            // Phones: a rotated Y-axis title costs 30px of plot width per side (60px on
+            // dual-axis plots) — drop the titles below 600px; units already live in the
+            // legends. Only explicit side 1/3 axes: the side-undefined labeled Y axes
+            // (bode, field-decay) have no legend and already run tuned 22-24px labels.
+            // Decided per-plot at build time; a later rotation only setSize()s.
+            const compact = document.documentElement.clientWidth <= 600;
             opts.axes.forEach(ax => {
-                if (ax && (ax.side === 1 || ax.side === 3) && ax.size === undefined) {   // Y axes only
-                    ax.size = quantizedAxisSize(!!ax.label);
-                }
+                if (!ax) return;
+                // Theme injection — only fills in what the plot didn't specify, so the
+                // scope/bode plots that hardcode their own axis colors keep them.
+                if (ax.stroke === undefined) ax.stroke = plotAxisTextColor;
+                ax.grid = ax.grid || {};
+                if (ax.grid.stroke === undefined) ax.grid.stroke = plotGridColor;
+                ax.ticks = ax.ticks || {};
+                if (ax.ticks.stroke === undefined) ax.ticks.stroke = plotTickColor;
+                if (ax.side !== 1 && ax.side !== 3) return;   // Y axes only below
+                if (compact) delete ax.label;
+                if (ax.size === undefined) ax.size = quantizedAxisSize(!!ax.label);
             });
         }
-        return new _origUPlot(opts, data, el);
+        const u = new _origUPlot(opts, data, el);
+        (window._allUPlots = window._allUPlots || new Set()).add(u);   // refreshAllPlotThemes() redraw registry
+        return u;
     };
     Object.assign(Wrapped, _origUPlot);   // preserve uPlot.rangeNum/assign/etc.
     Wrapped.__shiverWrapped = true;
@@ -1238,11 +1263,7 @@ function altExportHealthDataset(){
     const txt = parts.join('\n') + '\n';
     const d=new Date(), p=n=>String(n).padStart(2,'0');
     const stamp=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+'-'+p(d.getMinutes())+'-'+p(d.getSeconds());
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(new Blob([txt],{type:'text/csv'}));
-    a.download='Alternator Health Dataset '+stamp+'.csv';
-    document.body.appendChild(a); a.click();
-    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    deliverFile('Alternator Health Dataset '+stamp+'.csv', txt, 'text/csv');
   }).catch(e=>xAlert('Export failed: '+(e&&e.message?e.message:e)));
 }
 // The This Session dots as label-prefixed CSV rows. Blank field = no reading, never a fabricated
@@ -1261,21 +1282,91 @@ function altSessSectionCsv(){
   }
   return rows.join('\n');
 }
-// Fetch a CSV endpoint and SAVE it to the browser's Downloads as a dated, human-named file
+// ── Generated-file delivery with feedback ────────────────────────────────────
+// Every file this page generates (CSV/JSON exports, Download Logs, config backup)
+// goes through deliverFile(). Desktop/Android: per-file anchor download plus a
+// confirmation toast. iOS (Safari AND the Capacitor app): files queue into a bottom
+// "ready" bar and one tap opens the system share sheet (Save to Files / AirDrop /
+// Mail). Anchors are not used there: the app's WKWebView has no download handler so
+// a.click() saves NOTHING, and Safari silently drops programmatic clicks once the
+// button tap's user activation expires — every export here fetches for seconds
+// first. The share promise resolving is the only real "it saved" signal iOS gives.
+const IS_IOS_DEVICE = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    (navigator.userAgent.includes('Mac') && navigator.maxTouchPoints > 1);   // iPadOS 13+ masquerades as Mac
+
+function fileToast(msg) {
+    let t = document.getElementById('file-toast');
+    if (!t) { t = document.createElement('div'); t.id = 'file-toast'; document.body.appendChild(t); }
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(fileToast._timer);
+    fileToast._timer = setTimeout(() => t.classList.remove('show'), 4000);
+}
+
+const _readyFiles = [];
+function deliverFile(name, data, mime) {
+    const blob = (data instanceof Blob) ? data : new Blob([data], { type: mime || 'application/octet-stream' });
+    if (IS_IOS_DEVICE && navigator.canShare && typeof File === 'function') {
+        try {
+            const f = new File([blob], name, { type: blob.type || 'application/octet-stream' });
+            if (navigator.canShare({ files: [f] })) { _readyFiles.push(f); renderFileReadyBar(); return; }
+        } catch (e) { /* fall through to anchor */ }
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+    fileToast('Saved to Downloads: ' + name);
+}
+
+function renderFileReadyBar() {
+    let bar = document.getElementById('file-ready-bar');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'file-ready-bar';
+        bar.innerHTML = '<span class="frb-text"></span>' +
+            '<button type="button" class="btn-primary" onclick="shareReadyFiles()">Save…</button>' +
+            '<button type="button" class="btn-secondary" onclick="dismissReadyFiles()">Dismiss</button>';
+        document.body.appendChild(bar);
+    }
+    const n = _readyFiles.length;
+    bar.querySelector('.frb-text').textContent =
+        n === 1 ? _readyFiles[0].name + ' ready' : n + ' files ready';
+    bar.style.display = 'flex';
+}
+function dismissReadyFiles() {
+    _readyFiles.length = 0;
+    const bar = document.getElementById('file-ready-bar');
+    if (bar) bar.style.display = 'none';
+}
+async function shareReadyFiles() {
+    const files = _readyFiles.slice();
+    if (!files.length) { dismissReadyFiles(); return; }
+    try {
+        await navigator.share({ files: files });
+        // Resolves only after the user completes the sheet — the real confirmation.
+        // Remove just what was shared: a batch (Download Logs) may still be adding files.
+        for (const f of files) { const i = _readyFiles.indexOf(f); if (i >= 0) _readyFiles.splice(i, 1); }
+        if (_readyFiles.length) renderFileReadyBar(); else dismissReadyFiles();
+        fileToast(files.length === 1 ? 'Saved: ' + files[0].name : 'Saved ' + files.length + ' files');
+    } catch (e) {
+        if (e && e.name === 'AbortError') return;   // sheet closed without choosing — keep the bar
+        fileToast('Save failed: ' + (e && e.message ? e.message : e));
+    }
+}
+
+// Fetch a CSV endpoint and save it as a dated, human-named file
 // (e.g. "Alternator Health Data 2026-06-05 12-47-00.csv") rather than rendering it inline. The
 // saved file round-trips straight back through the matching Load CSV button. Shared by both the
-// alternator-health and boat-performance download buttons. (Browser flow; Capacitor file-save is
-// a separate path.)
+// alternator-health and boat-performance download buttons.
 function downloadCsv(url, baseName){
   fetchWithTimeout(buildURL(url),{},10000).then(r=>r.text()).then(txt=>{
     if(!txt || txt.trim().length < 8){ xAlert('No '+baseName+' to download yet.'); return; }
     const d=new Date(), p=n=>String(n).padStart(2,'0');
     const stamp=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+'-'+p(d.getMinutes())+'-'+p(d.getSeconds());
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(new Blob([txt],{type:'text/csv'}));
-    a.download=baseName+' '+stamp+'.csv';
-    document.body.appendChild(a); a.click();
-    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    deliverFile(baseName+' '+stamp+'.csv', txt, 'text/csv');
   }).catch(e=>xAlert('Download failed: '+(e&&e.message?e.message:e)));
 }
 
@@ -1290,11 +1381,7 @@ function downloadRippleBundle(){
   for(const [url,name] of [['/filtripple.csv','Filtered Ripple (INA+ADS)'],['/ripforensic.csv','Ripple Commit Forensics']]){
     fetchWithTimeout(buildURL(url),{},10000).then(r=>r.text()).then(txt=>{
       if(!txt || txt.trim().split('\n').length < 2) return;  // header-only / empty → nothing captured, skip silently
-      const a=document.createElement('a');
-      a.href=URL.createObjectURL(new Blob([txt],{type:'text/csv'}));
-      a.download=stampName(name);
-      document.body.appendChild(a); a.click();
-      setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      deliverFile(stampName(name), txt, 'text/csv');
     }).catch(()=>{});
   }
 }
@@ -1311,11 +1398,7 @@ function exportConfigDownload(){
     .then(txt=>{
       const d=new Date(), p=n=>String(n).padStart(2,'0');
       const stamp=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+'-'+p(d.getMinutes())+'-'+p(d.getSeconds());
-      const a=document.createElement('a');
-      a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));
-      a.download='regulator-config '+stamp+'.json';
-      document.body.appendChild(a); a.click();
-      setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      deliverFile('regulator-config '+stamp+'.json', txt, 'application/json');
     }).catch(e=>xAlert('Export failed: '+(e&&e.message?e.message:e)));
 }
 // Pre-apply diff preview. Fetches this regulator's current config and shows current → new
@@ -2701,6 +2784,25 @@ function buildURL(path) {
     return `${API_BASE_URL}${path}`;
 }
 
+// Capacitor serves the page from the app's own localhost origin, so a form's relative
+// action (/get) submits to the app bundle server — the write never reaches the regulator,
+// and the SPA fallback answers with index.html, booting a second app copy inside the
+// hidden form-target iframe (stray SSE stream + duplicate location prompt). Point every
+// device-bound form at the regulator's absolute base; re-run whenever discovery moves
+// API_BASE_URL. Browsers are same-origin with the regulator and never need this.
+function syncFormActionsToDevice() {
+    if (!IS_CAPACITOR) return;
+    document.querySelectorAll('form').forEach(f => {
+        if (!f.dataset.devicePath) {
+            const attr = f.getAttribute('action') || '';
+            if (!attr.startsWith('/')) return;   // already absolute (built via buildURL) or empty
+            f.dataset.devicePath = attr;
+        }
+        f.setAttribute('action', buildURL(f.dataset.devicePath));
+    });
+}
+document.addEventListener('DOMContentLoaded', syncFormActionsToDevice);
+
 // =====================================================================
 // Device discovery — Capacitor only (mDNS name → subnet probe)
 // =====================================================================
@@ -2727,7 +2829,8 @@ async function probeIdentify(base, timeoutMs) {
         const resp = await fetch(base + '/identify', { signal: ctrl.signal, cache: 'no-store' });
         if (!resp.ok) return null;
         const info = await resp.json();
-        return (info && info.device === 'xregulator') ? base : null;
+        if (!info || info.device !== 'xregulator') return null;
+        return { base: base, fw: (typeof info.fw === 'string') ? info.fw : null };
     } catch (e) {
         return null;
     } finally {
@@ -2735,7 +2838,7 @@ async function probeIdentify(base, timeoutMs) {
     }
 }
 
-// Probe a list in parallel; resolves with the first base that identifies, or null.
+// Probe a list in parallel; resolves with the first {base, fw} that identifies, or null.
 function probeFirstHit(bases, timeoutMs) {
     return new Promise((resolve) => {
         let pending = bases.length;
@@ -2807,13 +2910,15 @@ async function discoverAndConnect() {
     if (discoveryInProgress) return;
     discoveryInProgress = true;
     try {
-        const base = await discoverDeviceBase();
-        if (base) {
-            console.log('[DISCOVERY] regulator at ' + base);
-            API_BASE_URL = base;
-            localStorage.setItem('xregDeviceBase', base);
+        const hit = await discoverDeviceBase();
+        if (hit) {
+            console.log('[DISCOVERY] regulator at ' + hit.base + ' (fw ' + (hit.fw || 'unknown') + ')');
+            API_BASE_URL = hit.base;
+            localStorage.setItem('xregDeviceBase', hit.base);
+            syncFormActionsToDevice();
             sseReconnectAttempts = 0;
             setSplashText('Connecting to regulator');
+            matchAppBundleToDevice(hit.fw);
         } else {
             console.log('[DISCOVERY] no regulator found');
         }
@@ -2832,25 +2937,76 @@ async function discoverAndConnect() {
 async function rediscoverAfterLoss() {
     if (discoveryInProgress || DEMO_MODE) return;
     discoveryInProgress = true;
-    let base = null;
+    let hit = null;
     try {
-        base = await discoverDeviceBase();
+        hit = await discoverDeviceBase();
     } finally {
         discoveryInProgress = false;
     }
     if (DEMO_MODE) return;
-    if (base) {
-        console.log('[DISCOVERY] regulator moved to ' + base);
-        API_BASE_URL = base;
-        localStorage.setItem('xregDeviceBase', base);
+    if (hit) {
+        console.log('[DISCOVERY] regulator moved to ' + hit.base);
+        API_BASE_URL = hit.base;
+        localStorage.setItem('xregDeviceBase', hit.base);
+        syncFormActionsToDevice();
         sseReconnectAttempts = 0;
         initializeEventSource();
+        matchAppBundleToDevice(hit.fw);
     } else {
         console.log('[DISCOVERY] re-scan found nothing');
         showRecoveryOptions();
         const reconnectBtn = document.getElementById('reconnect-button');
         if (reconnectBtn) reconnectBtn.style.display = 'none';
     }
+}
+
+// Match-on-connect: adopt the connected regulator's interface version. Downloads
+// the device's fw-matched web bundle via LiveUpdate (applied at next cold app
+// launch); download failure is non-fatal — that fw's bundle may not exist in the
+// OTA bucket, and the current UI keeps working over the live connection.
+let webBundleMatchTried = false;
+
+async function matchAppBundleToDevice(fw) {
+    if (!IS_CAPACITOR || DEMO_MODE || webBundleMatchTried) return;
+    if (typeof fw !== 'string' || !/^\d+\.\d+\.\d+$/.test(fw)) return;
+    const plugin = window.Capacitor.Plugins && window.Capacitor.Plugins.LiveUpdate;
+    if (!plugin || !plugin.getCurrentVersion || !plugin.downloadVersion) return;
+    webBundleMatchTried = true;
+    try {
+        const cur = await plugin.getCurrentVersion();
+        if (cur && !cur.isBundled && cur.version === fw) {
+            localStorage.removeItem('xregPendingWebVersion');
+            return;
+        }
+        if (localStorage.getItem('xregPendingWebVersion') === fw) {
+            console.log('[LiveUpdate] Bundle ' + fw + ' already downloaded, awaiting cold relaunch');
+            showWebMatchBanner(fw);
+            return;
+        }
+        console.log('[LiveUpdate] Active interface ' + (cur ? cur.version : 'unknown') + ', device fw ' + fw + ' — downloading matching bundle');
+        await plugin.downloadVersion({ version: fw });
+        localStorage.setItem('xregPendingWebVersion', fw);
+        console.log('[LiveUpdate] Bundle ' + fw + ' ready, applies on next cold launch');
+        showWebMatchBanner(fw);
+    } catch (err) {
+        console.log('[LiveUpdate] Match-on-connect download failed (non-fatal): ' + (err && err.message ? err.message : err));
+    }
+}
+
+function showWebMatchBanner(fw) {
+    if (document.getElementById('web-match-banner')) return;
+    const banner = document.createElement('div');
+    banner.id = 'web-match-banner';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#0a84ff;color:#fff;padding:calc(12px + env(safe-area-inset-top)) 44px 12px 14px;text-align:center;z-index:10000;font-weight:600;font-size:14px;line-height:1.45;';
+    banner.textContent = 'Interface version ' + fw + ' downloaded to match your regulator — close and reopen the app to apply.';
+    const close = document.createElement('button');
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.style.cssText = 'position:absolute;top:calc(8px + env(safe-area-inset-top));right:6px;width:34px;height:34px;background:none;border:none;color:#fff;font-size:22px;line-height:34px;padding:0;';
+    close.onclick = () => { banner.remove(); document.body.style.paddingTop = ''; };
+    banner.appendChild(close);
+    document.body.insertBefore(banner, document.body.firstChild);
+    document.body.style.paddingTop = 'calc(72px + env(safe-area-inset-top))';
 }
 
 // =====================================================================
@@ -2868,18 +3024,24 @@ let phoneDataPosterTimer = null;
 async function getPhoneLocation() {
     // Returns { latitude, longitude } or null. Works in both browser
     // (navigator.geolocation) and Capacitor (Geolocation plugin).
-    if (IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.Geolocation) {
-        try {
-            const pos = await window.Capacitor.Plugins.Geolocation.getCurrentPosition({
-                enableHighAccuracy: true,
-                timeout: 10000,
-                maximumAge: 60000
-            });
-            return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
-        } catch (e) {
-            console.warn('[PhoneGPS] Capacitor Geolocation failed:', e && e.message);
-            return null;
+    if (IS_CAPACITOR) {
+        if (window.Capacitor.Plugins && window.Capacitor.Plugins.Geolocation) {
+            try {
+                const pos = await window.Capacitor.Plugins.Geolocation.getCurrentPosition({
+                    enableHighAccuracy: true,
+                    timeout: 10000,
+                    maximumAge: 60000
+                });
+                return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+            } catch (e) {
+                console.warn('[PhoneGPS] Capacitor Geolocation failed:', e && e.message);
+                return null;
+            }
         }
+        // App build without the native Geolocation plugin: never fall through to
+        // navigator.geolocation — WKWebView re-prompts "localhost would like to use your
+        // location" on every page life. Location is a backup source; skip silently.
+        return null;
     }
     if (typeof navigator !== 'undefined' && navigator.geolocation) {
         // Browser geolocation requires a secure context (HTTPS / localhost). The
@@ -3092,30 +3254,14 @@ function cleanupResources() {
     if (typeof rpmData !== 'undefined') rpmData.length = 0;
     if (typeof temperatureData !== 'undefined') temperatureData.length = 0;
 }
-function updateUplotTheme(plot) {
-    if (!plot || !plot.root) return; // Safety check
-
-    const textColor = getComputedStyle(document.body).getPropertyValue('--text-dark').trim();
-    const gridColor = getComputedStyle(document.body).getPropertyValue('--border').trim();
-
-    // Update axis label divs
-    plot.root.querySelectorAll('.u-label').forEach(el => {
-        el.style.color = textColor;
-    });
-
-    // Update tick label text (SVG)
-    plot.root.querySelectorAll('.u-axis text').forEach(el => {
-        el.setAttribute('fill', textColor);
-    });
-
-    // Update axis strokes (SVG)
-    plot.root.querySelectorAll('.u-axis path').forEach(el => {
-        el.setAttribute('stroke', textColor);
-    });
-
-    // Update grid lines (SVG)
-    plot.root.querySelectorAll('.u-grid line').forEach(el => {
-        el.setAttribute('stroke', gridColor);
+// Dark-mode toggle repaint: axis/grid/tick colors are theme-resolving functions injected
+// at construction (see stabilizeUPlotAxisSizes), so a bare redraw() recolors every plot.
+// Plots whose root left the DOM (rebuilt/replaced) are pruned here.
+function refreshAllPlotThemes() {
+    if (!window._allUPlots) return;
+    window._allUPlots.forEach(u => {
+        if (!u.root || !u.root.isConnected) { window._allUPlots.delete(u); return; }
+        try { u.redraw(); } catch (e) { }
     });
 }
 
@@ -3154,6 +3300,19 @@ if (IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
         }
     });
 }
+
+// Foreground reconnect that needs no plugin: app builds without @capacitor/app never bind
+// the appStateChange listener above, but WKWebView still fires visibilitychange on
+// background/foreground. iOS suspends sockets in background and readyState can still read
+// OPEN on a dead stream, so a 5s event drought forces the reconnect too.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    isAppInBackground = false;
+    sseReconnectAttempts = 0;
+    window._rediscoveryTried = false;
+    const dead = !source || source.readyState === EventSource.CLOSED || (Date.now() - lastEventTime > 5000);
+    if (dead && !discoveryInProgress) initializeEventSource();
+});
 
 function initializeEventSource() {
 
@@ -5604,7 +5763,7 @@ function updateAllEchosOptimized(data) {
         { key: 'VoltageKp', id: 'VoltageKp_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'VoltageLoopInterval', id: 'VoltageLoopInterval_echo', transform: v => Math.round(v) },
         { key: 'FIELD_COLLAPSE_DELAY', id: 'FIELD_COLLAPSE_DELAY_echo', transform: v => Math.round(v / 1000) },
-        { key: 'hardwarePresent', id: 'HardwarePresent_echo', transform: v => v },
+        { key: 'hardwarePresent', id: 'HardwarePresent_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'VoltageKi', id: 'VoltageKi_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => (v / 100).toFixed(2) },
@@ -5919,15 +6078,34 @@ function lockSettingsManually() {
     if (!DEMO_MODE) fetch(buildURL('/armSettings?arm=0')).catch(() => {});
     applySettingsLockUI();
 }
-// Touch support: tap once to show tooltip, tap elsewhere to hide, for tooltips tool tip tooltip tips
+// Tooltip / "s"-badge open-close — this one handler owns ALL of it (no inline onclicks):
+// tap a badge to open, tap the same badge again to close, tap anywhere else to close.
+// Taps inside the box are ignored so its text stays selectable for copying.
+// Capture phase so a stopPropagation() in some other handler can't strand a box open.
 document.addEventListener("click", function (e) {
-    document.querySelectorAll(".tooltip").forEach(el => el.classList.remove("active"));
-    const tip = e.target.closest(".tooltip");
-    if (tip) {
-        tip.classList.add("active");
-        e.stopPropagation();
-    }
-});
+    if (e.target.closest(".tooltip-box")) return;
+    const tip = e.target.closest(".tooltip, .sinfo");
+    const wasOpen = tip && tip.classList.contains("active");
+    document.querySelectorAll(".tooltip.active, .sinfo.active").forEach(el => el.classList.remove("active"));
+    _sinfoOpenN = 0;
+    if (!tip || wasOpen) return;
+    if (tip.classList.contains("sinfo")) { sinfoRender(tip); _sinfoOpenN = 1; }
+    tip.classList.add("active");
+    clampTooltipBox(tip);
+}, true);
+
+// Shift a just-opened box sideways so it never pokes past a viewport edge — a right-side
+// icon opening a 300px centered box used to widen the page into horizontal scroll on phones.
+function clampTooltipBox(tip) {
+    const box = tip.querySelector(".tooltip-box");
+    if (!box) return;
+    box.style.transform = "";
+    const r = box.getBoundingClientRect();
+    let shift = 0;
+    if (r.right > window.innerWidth - 8) shift = window.innerWidth - 8 - r.right;
+    if (r.left + shift < 8) shift = 8 - r.left;
+    box.style.transform = "translateX(calc(-50% + " + shift + "px))";
+}
 
 
 
@@ -5975,15 +6153,20 @@ async function initializeProfileTab() {
     }
     const formData = new FormData();
 
-    // Show "Checking..." banner so the UI isn't blank while the cloud round-trip is in flight.
+    // "Checking..." banner is delay-shown: a fast /checkRegistration round-trip shows nothing
+    // (it used to flash a bright box in dark mode on every Cloud tab open); only a slow check
+    // surfaces it. Colors come from the cloud-banner-* classes so dark mode can theme them.
     const banner = document.getElementById('profile-loading-banner');
     const bannerText = document.getElementById('profile-loading-text');
-    if (banner) {
-        banner.style.display = 'block';
-        banner.style.background = '#e3f2fd';
-        banner.style.color = '#1976d2';
-        if (bannerText) bannerText.textContent = 'Checking cloud registration…';
-    }
+    if (banner) banner.style.display = 'none'; // clear a stale error banner from a prior open
+    const bannerTimer = setTrackedTimeout(() => {
+        if (banner) {
+            banner.classList.remove('cloud-banner-error');
+            banner.classList.add('cloud-banner-info');
+            if (bannerText) bannerText.textContent = 'Checking cloud registration…';
+            banner.style.display = 'block';
+        }
+    }, 400);
 
     try {
         const response = await fetchWithTimeout(buildURL('/checkRegistration'), {
@@ -6003,13 +6186,16 @@ async function initializeProfileTab() {
         } else {
             document.getElementById('profile-form').querySelector('input[type="submit"]').value = 'Register Device';
         }
+        clearTimeout(bannerTimer);
         if (banner) banner.style.display = 'none';
     } catch (error) {
         diagError('Error in initializeProfileTab:', error);
+        clearTimeout(bannerTimer);
         if (banner && bannerText) {
-            banner.style.background = '#ffebee';
-            banner.style.color = '#c62828';
+            banner.classList.remove('cloud-banner-info');
+            banner.classList.add('cloud-banner-error');
             bannerText.textContent = 'Could not reach cloud — check WiFi and try again.';
+            banner.style.display = 'block';
             // Leave the error message visible; next tab open will reset it.
         }
     }
@@ -8401,7 +8587,6 @@ function initCVTuningPlot() {
 
     if (cvTuningPlot) cvTuningPlot.destroy();
     cvTuningPlot = new uPlot(opts, cvTuningData, plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(cvTuningPlot);
     createCVTuningLegend();
 
     // Corner auto checkbox + lock button — same convention as the Plots tab.
@@ -8577,7 +8762,6 @@ function initCVPidPlot() {
 
     if (cvPidPlot) cvPidPlot.destroy();
     cvPidPlot = new uPlot(opts, cvPidData, plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(cvPidPlot);
     createCVPidLegend();
 
     plotEl.style.position = 'relative';
@@ -9160,21 +9344,20 @@ async function factoryReset() {
         });
 }
 
+// Drives every .conn-dot instance (one leads the collapsed strip, one sits by the
+// wordmark) — replaced the old WIFI CONNECTED/DISCONNECTED corner pill. While the user
+// has chosen offline mode the dot stays orange, so the staleness watchdog's repeating
+// updateInlineStatus(false) must not repaint it red.
 function updateInlineStatus(isConnected) {
-    const cornerStatus = document.getElementById('corner-status');
-
-    if (cornerStatus) {
-        if (isConnected) {
-            cornerStatus.className = 'corner-status corner-status-connected';
-            cornerStatus.textContent = 'WIFI CONNECTED';
-        } else {
-            cornerStatus.className = 'corner-status corner-status-disconnected';
-            cornerStatus.textContent = 'WIFI DISCONNECTED';
-            // Kill the "WiFi off in M:SS" countdown — once the radio drops, no more updates
-            // arrive to tick it to zero, so it would otherwise freeze on screen as a stale artifact
-            const wifiWakeStatus = document.getElementById('wifi-wake-status');
-            if (wifiWakeStatus) wifiWakeStatus.style.display = 'none';
-        }
+    document.querySelectorAll('.conn-dot').forEach(d => {
+        d.classList.toggle('conn-dot--offline', !isConnected && isOfflineMode);
+        d.classList.toggle('conn-dot--down', !isConnected && !isOfflineMode);
+    });
+    if (!isConnected) {
+        // Kill the "WiFi off in M:SS" countdown — once the radio drops, no more updates
+        // arrive to tick it to zero, so it would otherwise freeze on screen as a stale artifact
+        const wifiWakeStatus = document.getElementById('wifi-wake-status');
+        if (wifiWakeStatus) wifiWakeStatus.style.display = 'none';
     }
 }
 
@@ -9769,7 +9952,6 @@ function initCurrentTempPlot() {
     };
 
     currentTempPlot = new uPlot(opts, currentTempData, plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(currentTempPlot);
 
     // Autoscale checkbox + lock button — re-injected on each init so re-inits stay clean
     plotEl.style.position = 'relative';
@@ -9936,7 +10118,6 @@ function initVoltagePlot() {
     };
 
     voltagePlot = new uPlot(opts, voltageData, plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(voltagePlot);
 
     plotEl.style.position = 'relative';
     const existingAsV = plotEl.querySelector('.autoscale-ctrl');
@@ -10096,7 +10277,6 @@ function initRPMPlot() {
     };
 
     rpmPlot = new uPlot(opts, rpmData, plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(rpmPlot);
 
     plotEl.style.position = 'relative';
     const existingAsR = plotEl.querySelector('.autoscale-ctrl');
@@ -10255,7 +10435,6 @@ function initTemperaturePlot() {
     };
 
     temperaturePlot = new uPlot(opts, temperatureData, plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(temperaturePlot);
 
     plotEl.style.position = 'relative';
     const existingAsT = plotEl.querySelector('.autoscale-ctrl');
@@ -10531,6 +10710,7 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("header-alt-current", sa.measuredAmps);
     applyStaleStyleByAge("header-batt-current", sa.bcur);
     applyStaleStyleByAge("header-alt-temp", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
+    applyStaleStyleByAge("header-board-temp", sa.ambientTemp, STALE_THRESHOLD_TEMP_MS);
     updateHeaderLimiterColors(sa);
     applyStaleStyleByAge("header-rpm", sa.rpm);
     applyStaleStyleByAge("dutyCycleID3", sa.dutyCycle);
@@ -11594,6 +11774,7 @@ function syncHeaderStrip() {
     copy('header-alt-current', 'hcs-alt');
     copy('header-batt-current', 'hcs-batt');
     copy('header-alt-temp', 'hcs-temp');
+    copy('header-board-temp', 'hcs-board');
     copy('header-rpm', 'hcs-rpm');
     copy('dutyCycleID3', 'hcs-duty');
 
@@ -12856,6 +13037,7 @@ window.addEventListener("load", function () {
                 ["SOC_percentID", "SOC_percent"],
                 ["header-soc", "SOC_percent"],
                 ["ambientTempID", "ambientTemp"],
+                ["header-board-temp", "ambientTemp"],
                 ["baroPressureID", "baroPressure"],
                 ["firmwareVersionIntID", "firmwareVersionInt"],
                 ["deviceIdUpperID", "deviceIdUpper"],
@@ -14701,17 +14883,15 @@ function enterOfflineMode() {
         el.disabled = true;
         el.style.opacity = '0.5';
     });
-    const cornerStatus = document.getElementById('corner-status');
-    if (cornerStatus) {
-        cornerStatus.className = 'corner-status corner-status-disconnected';
-        cornerStatus.textContent = 'OFFLINE MODE';
-        cornerStatus.style.backgroundColor = '#ff6600';
-    }
+    document.querySelectorAll('.conn-dot').forEach(d => {
+        d.classList.remove('conn-dot--down');
+        d.classList.add('conn-dot--offline');
+    });
 }
 
 // Called from the SSE 'open' handler when a reconnect succeeds after the user
 // had clicked "Continue Offline". Mirrors enterOfflineMode's selectors so the
-// same set of elements is re-enabled. Corner status itself is reset by
+// same set of elements is re-enabled. The connection dot itself is reset by
 // updateInlineStatus(true) which the 'open' handler already calls.
 function exitOfflineMode() {
     if (!isOfflineMode) return;
@@ -14730,12 +14910,6 @@ function exitOfflineMode() {
         el.disabled = false;
         el.style.opacity = '';
     });
-    // Override the inline backgroundColor set by enterOfflineMode so the CSS class
-    // takes back over. updateInlineStatus(true) already flipped the class to connected.
-    const cornerStatus = document.getElementById('corner-status');
-    if (cornerStatus) {
-        cornerStatus.style.backgroundColor = '';
-    }
 }
 
 
@@ -15336,12 +15510,6 @@ function getEchoText(id, fallback = '?') {
 // CSV3 / AltSettings frame while a box is open — live values stay hot without new telemetry.
 let _sinfoOpenN = 0;
 
-function sinfoToggle(el) {
-    if (!el.classList.contains('active')) sinfoRender(el);
-    el.classList.toggle('active');
-    _sinfoOpenN = Math.max(0, _sinfoOpenN + (el.classList.contains('active') ? 1 : -1));
-}
-
 function sinfoRender(el) {
     const fn = SINFO[el.dataset.sinfo];
     let box = el.querySelector('.tooltip-box');
@@ -15842,7 +16010,6 @@ function initPidTuningPlot() {
     };
 
     pidTuningPlot = new uPlot(opts, pidTuningData, plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(pidTuningPlot);
 
     // Corner auto checkbox + lock — same convention as the Plots tab. The checkbox
     // drives the left Current axis: checked = auto-fit, unchecked = the firmware
@@ -16099,7 +16266,9 @@ function syncDualControlParameters(batteryAh, solarWatts) {
 
 
 function interceptDualControlSubmissions() {
-    document.querySelectorAll('form[action="/get"]').forEach(form => {
+    // action$= (suffix match): under Capacitor, syncFormActionsToDevice() rewrites these
+    // actions to absolute device URLs, so an exact "/get" match would find nothing there.
+    document.querySelectorAll('form[action$="/get"]').forEach(form => {
         const batteryInput = form.querySelector('input[name="BatteryCapacity_Ah"]');
         const solarInput = form.querySelector('input[name="SolarWatts"]');
 
@@ -16232,16 +16401,12 @@ function getLogNameSuffix() {
 }
 
 
-// One blob-download path for the whole Download Logs batch — real payloads and error-marker
-// files alike, so every batch always produces the full file set.
+// One save path for the whole Download Logs batch — real payloads and error-marker
+// files alike, so every batch always produces the full file set. deliverFile gives
+// per-platform delivery + feedback; on iOS the batch accumulates in the ready bar
+// and one tap shares all of it.
 function saveLogFile(name, text, mime = 'text/plain') {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([text], { type: mime }));
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    deliverFile(name, text, mime);
 }
 
 async function downloadLogs() {
@@ -17014,7 +17179,6 @@ function renderThermalPlot1(data, tMin) {
         ]
     };
     thermalLogPlots[0] = new uPlot(opts, data, el);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(thermalLogPlots[0]);
     _createThermalLegend(el, 0, [
         { key: 'tempFilt',      label: 'Temp Filtered',    color: '#d62728', idx: 1 },
         { key: 'tempProjected', label: 'Temp Projected',   color: '#e377c2', idx: 2 },
@@ -17082,7 +17246,6 @@ function renderThermalPlot2(data, tMin) {
         ]
     };
     thermalLogPlots[2] = new uPlot(opts, data, el);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(thermalLogPlots[2]);
     _createThermalLegend(el, 2, [
         { key: 'outerP',    label: 'Present Temp (P)', color: '#1f77b4', idx: 1 },
         { key: 'lookahead', label: 'Look-Ahead',       color: '#2ca02c', idx: 2 },
@@ -17213,7 +17376,6 @@ function renderThermalPlotState(data, tMin, flagsArr, antiWindupArr, stageArr, t
     };
 
     thermalLogPlots[3] = new uPlot(opts, data, el);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(thermalLogPlots[3]);
 
     const existing = el.querySelector('.custom-legend');
     if (existing) existing.remove();
@@ -17523,7 +17685,6 @@ function windTrendRender() {
         }]
     };
     windTrendPlot = new uPlot(opts, data, el);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(windTrendPlot);
     requestAnimationFrame(() => { const w = _windPlotW(el); if (windTrendPlot && w > 0) windTrendPlot.setSize({ width: w, height: H }); });
     // Click-to-edit Y limits — typing pins the axis and unchecks the corner auto box.
     attachYAxisEdit(windTrendPlot, [
@@ -18161,15 +18322,7 @@ async function downloadCvLog(ts = getLogTimestamp(), sfx = getLogNameSuffix()) {
     }
 
     const csv = cvBinToCsv(d, g_lastCsv3);
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `cvlog_${ts}${sfx}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    deliverFile(`cvlog_${ts}${sfx}.csv`, csv, 'text/csv');
 }
 
 //SYSTEMID System ID section
@@ -21714,13 +21867,12 @@ function cxCVFitLog(f, m) {
 // so the field can tell us whether the horizon / step-size / rest-gate transfer across chemistries and sizes.
 // Built ON-DEVICE now (the fit runs in firmware); this just streams /cvfit.csv down as a browser download.
 function cxCVFitDownload() {
-    // Raw trace + confidence header now live on-device (the fit runs there). Stream /cvfit.csv straight down.
-    // Named like the log batch: the handler sends no Content-Disposition filename, so a.download wins here
-    // even on a direct link (the log batch needs blobs for that reason).
-    const a = document.createElement('a');
-    a.href = buildURL('/cvfit.csv');
-    a.download = `cvfit_${getLogTimestamp()}${getLogNameSuffix()}.csv`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    // Raw trace + confidence header live on-device (the fit runs there). Fetched to a blob so
+    // deliverFile can name it like the log batch and give delivery feedback on every platform.
+    fetchWithTimeout(buildURL('/cvfit.csv'), {}, 15000)
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+        .then(txt => deliverFile(`cvfit_${getLogTimestamp()}${getLogNameSuffix()}.csv`, txt, 'text/csv'))
+        .catch(e => xAlert('CV fit download failed: ' + (e && e.message ? e.message : e)));
 }
 
 // ── Stage 4 · Disturbances — guided slow sweep populates the matrix ────────────
@@ -24818,7 +24970,6 @@ window.addEventListener('load', function () {
       auto: () => { inputs[sc.name].mn.value = ''; inputs[sc.name].mx.value = ''; applyBtn.click(); }
     })));
 
-    if (document.body.classList.contains('dark-mode') && typeof updateUplotTheme === 'function') updateUplotTheme(plot);
     el.addEventListener('dblclick', () => { if (ltFullRange) ltRenderAll(ltFullRange[0], ltFullRange[1]); });
     if (!el._ltRO) {
       el._ltRO = new ResizeObserver(debounce(() => plot.setSize({ width: el.clientWidth, height: 300 }), 500));
@@ -25387,7 +25538,6 @@ window.addEventListener('load', function () {
       legend: { show: false }
     };
     plot = new uPlot(opts, [[0], [null]], el);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(plot);
     const ro = new ResizeObserver(() => { if (plot) plot.setSize({ width: plotFitWidth(el, 600), height: 300 }); });
     ro.observe(el);
 
@@ -25580,7 +25730,6 @@ function initFastScopePlot() {
         legend: { show: false }
     };
     fastScopePlot = new uPlot(opts, [[], [], []], plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(fastScopePlot);
 
     // Auto checkbox (top-right) — same convention as the other plots. No "lock" button:
     // this is a one-shot capture, not a streaming autoscale loop. Checked = auto-fit (null
@@ -25704,11 +25853,7 @@ function downloadFaScopeCsv() {
     const csv = buildFaScopeCsv(fastScopeData);
     const dt = new Date(), p = n => String(n).padStart(2, '0');
     const stamp = dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()) + ' ' + p(dt.getHours()) + '-' + p(dt.getMinutes()) + '-' + p(dt.getSeconds());
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    a.download = 'Alt Scope Capture ' + stamp + '.csv';
-    document.body.appendChild(a); a.click();
-    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    deliverFile('Alt Scope Capture ' + stamp + '.csv', csv, 'text/csv');
 }
 
 // Live Data → Diag sub-tab (item 1). Opens the relocated scope/flipbook and starts the
@@ -25786,11 +25931,7 @@ function downloadFaFlipPageCsv() {
     const d = new Date(), p = n => String(n).padStart(2, '0');
     const stamp = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + '-' + p(d.getMinutes()) + '-' + p(d.getSeconds());
     const tag = pg.isAnomaly ? ('anomaly k' + pg.patternK) : (pg.band + 'k-' + (pg.band + 1) + 'k RPM');
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    a.download = 'Alt Waveform ' + tag + ' ' + stamp + '.csv';
-    document.body.appendChild(a); a.click();
-    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    deliverFile('Alt Waveform ' + tag + ' ' + stamp + '.csv', csv, 'text/csv');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -26011,7 +26152,6 @@ function initFastFlipPlot() {
         ],
         legend: { show: false }
     }, [[], []], plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(fastFlipPlot);
 
     // Per-page Y-axis controls — same auto / lock / click-to-edit widget as the other plots,
     // but each flipbook slot remembers its own state for the session (faFlipAxis keyed by slot).
@@ -26811,5 +26951,352 @@ function rippleWorstsClearVisual() {
 }
 
 setTimeout(drawRippleMap, 1500);
+
+// ================================== SETTINGS SEARCH ==================================
+// Find-any-setting search: spotlight card on desktop (Search button in the main tab row,
+// >=768px), top sheet on phones opened by pulling down while the page is already at the
+// top. Index is built from the live Setup DOM on first open (one entry per .form-row:
+// label + tooltip text + tab/panel breadcrumb), so new settings are searchable with no
+// registration anywhere. Selecting a result replays the same switcher chain the goTo*
+// helpers use (showSubTab / showAltTab / showBatteryPanel / showTuningPanel), opens any
+// enclosing <details>, scrolls to the row and flashes it. All identifiers are ss-prefixed;
+// nothing outside this block calls in.
+let ssIndexData = null;     // [{label, tip, crumbs, el}] built once per page load
+let ssVocab = null;         // completion-chip vocabulary, frequency-sorted
+let ssDom = null;
+let ssSel = 0;
+let ssRows = [];
+
+function ssTidy(t) { return t.replace(/\s+/g, ' ').trim(); }
+
+// Strip echo remnants the index must not match on: "(0)"/"()"/"(?)" tails and ": ?"
+function ssCleanLabel(t) {
+    let s = ssTidy(t);
+    s = s.replace(/\s*\(\s*[-\d.?]*\s*\)\s*$/, '');
+    s = s.replace(/[\s:]*\?$/, '');
+    s = s.replace(/[\s:]+$/, '');
+    return s.trim();
+}
+
+// Panel DOM id -> human name, harvested from the switcher buttons themselves so breadcrumb
+// names always match what is printed on the tabs.
+function ssBuildPanelNames() {
+    const map = {};
+    function fromOnclick(sel, re, prefix) {
+        document.querySelectorAll(sel).forEach(b => {
+            const m = (b.getAttribute('onclick') || '').match(re);
+            if (m && !map[prefix + m[1]]) map[prefix + m[1]] = ssTidy(b.textContent);
+        });
+    }
+    fromOnclick('#settings .sub-tab', /showSubTab\('settings',\s*'([^']+)'/, 'settings-');
+    fromOnclick('#tuning .tuning-tab', /showTuningPanel\('([^']+)'/, 'tuning-');
+    fromOnclick('#settings-battery .diag-panel-tab', /showBatteryPanel\('([^']+)'/, 'battery-panel-');
+    document.querySelectorAll('#settings-alternator [data-alt-panel]').forEach(b => {
+        const id = b.dataset.altPanel;
+        if (id && !map[id]) map[id] = ssTidy(b.textContent);
+    });
+    return map;
+}
+
+function ssBuildIndex() {
+    const names = ssBuildPanelNames();
+    const list = [];
+    document.querySelectorAll('#settings .form-row').forEach(row => {
+        const labEl = row.querySelector('.form-label');
+        if (!labEl) return;
+        const clone = labEl.cloneNode(true);
+        clone.querySelectorAll('.tooltip, [id$="_echo"]').forEach(n => n.remove());
+        const label = ssCleanLabel(clone.textContent);
+        if (label.length < 2) return;
+        const tipEl = labEl.querySelector('.tooltip-box');
+        const crumbs = [];
+        for (let el = row.parentElement; el && el.id !== 'settings'; el = el.parentElement) {
+            if (el.tagName === 'DETAILS') {
+                const sum = el.querySelector(':scope > summary');
+                if (sum) crumbs.push(ssTidy(sum.textContent));
+            } else if (el.id && (el.classList.contains('sub-tab-content') ||
+                el.classList.contains('alt-panel') ||
+                el.classList.contains('tuning-panel') ||
+                el.classList.contains('diag-panel'))) {
+                crumbs.push(names[el.id] || el.id);
+            }
+        }
+        crumbs.reverse();
+        const dedup = crumbs.filter((c, i) => i === 0 || c !== crumbs[i - 1]);
+        list.push({ label: label, tip: tipEl ? ssTidy(tipEl.textContent) : '', crumbs: dedup, el: row });
+    });
+
+    const stop = {};
+    ('the a an of to in on for and or is are it its this that with when while from by as at be ' +
+        'will not no you your if then than only into over under between during after before very ' +
+        'can may also all any each both more most other some such own same so too how what which ' +
+        'who whose where why').split(' ').forEach(w => { stop[w] = 1; });
+    const freq = {};
+    list.forEach(e => {
+        const words = (e.label + ' ' + e.tip).toLowerCase().match(/[a-z][a-z0-9-]{2,}/g) || [];
+        words.forEach(w => { if (!stop[w]) freq[w] = (freq[w] || 0) + 1; });
+    });
+    ssVocab = Object.keys(freq).sort((a, b) => freq[b] - freq[a]);
+    ssIndexData = list;
+}
+
+function ssCompletions(partial, limit) {
+    if (!partial || partial.length < 2) return [];
+    const out = [];
+    for (const w of ssVocab) {
+        if (w.indexOf(partial) === 0 && w !== partial) {
+            out.push(w);
+            if (out.length >= limit) break;
+        }
+    }
+    return out;
+}
+
+// Every term must hit somewhere; label hits outrank breadcrumb hits outrank tooltip hits.
+function ssFilter(q) {
+    const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return ssIndexData.map((e, i) => ({ e: e, score: 0, i: i }));
+    const out = [];
+    for (let i = 0; i < ssIndexData.length; i++) {
+        const e = ssIndexData[i];
+        const lab = e.label.toLowerCase();
+        const tip = e.tip.toLowerCase();
+        const crumb = e.crumbs.join(' ').toLowerCase();
+        let score = 0, ok = true;
+        for (const t of terms) {
+            if (lab.includes(t)) score += lab.indexOf(t) === 0 ? 30 : 20;
+            else if (crumb.includes(t)) score += 8;
+            else if (tip.includes(t)) score += 4;
+            else { ok = false; break; }
+        }
+        if (ok) out.push({ e: e, score: score, i: i });
+    }
+    out.sort((a, b) => b.score - a.score || a.i - b.i);
+    return out;
+}
+
+function ssEsc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function ssHl(text, q) {
+    const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return ssEsc(text);
+    const lo = text.toLowerCase();
+    const marks = [];
+    for (const t of terms) {
+        let p = 0;
+        while ((p = lo.indexOf(t, p)) !== -1) { marks.push([p, p + t.length]); p += t.length; }
+    }
+    if (!marks.length) return ssEsc(text);
+    marks.sort((a, b) => a[0] - b[0]);
+    const merged = [marks[0]];
+    for (let k = 1; k < marks.length; k++) {
+        const last = merged[merged.length - 1];
+        if (marks[k][0] <= last[1]) last[1] = Math.max(last[1], marks[k][1]);
+        else merged.push(marks[k]);
+    }
+    let html = '', pos = 0;
+    merged.forEach(m => {
+        html += ssEsc(text.slice(pos, m[0])) + '<mark>' + ssEsc(text.slice(m[0], m[1])) + '</mark>';
+        pos = m[1];
+    });
+    return html + ssEsc(text.slice(pos));
+}
+
+const SS_MAG_SVG = '<svg class="ss-icon" viewBox="0 0 24 24" aria-hidden="true">' +
+    '<circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"></circle>' +
+    '<line x1="15.5" y1="15.5" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"></line></svg>';
+
+function ssEnsureDom() {
+    if (ssDom) return;
+    const bd = document.createElement('div');
+    bd.className = 'ss-backdrop';
+    bd.innerHTML =
+        '<div class="ss-panel">' +
+        '<div class="ss-inputrow">' + SS_MAG_SVG +
+        '<input class="ss-input" type="text" placeholder="Search settings" autocomplete="off" autocorrect="off" autocapitalize="off">' +
+        '<button type="button" class="ss-close">CLOSE</button></div>' +
+        '<div class="ss-chips"></div>' +
+        '<div class="ss-results"></div>' +
+        '<div class="ss-count"></div></div>';
+    document.body.appendChild(bd);
+    ssDom = {
+        backdrop: bd,
+        input: bd.querySelector('.ss-input'),
+        chips: bd.querySelector('.ss-chips'),
+        results: bd.querySelector('.ss-results'),
+        count: bd.querySelector('.ss-count')
+    };
+    bd.addEventListener('click', e => { if (e.target === bd) ssClose(); });
+    bd.querySelector('.ss-close').addEventListener('click', ssClose);
+    ssDom.input.addEventListener('input', () => { ssSel = 0; ssRender(); });
+    ssDom.input.addEventListener('keydown', e => {
+        if (e.key === 'ArrowDown') { ssSel = Math.min(ssSel + 1, ssRows.length - 1); ssRender(); e.preventDefault(); }
+        else if (e.key === 'ArrowUp') { ssSel = Math.max(ssSel - 1, 0); ssRender(); e.preventDefault(); }
+        else if (e.key === 'Enter') { if (ssRows[ssSel]) ssNavigate(ssRows[ssSel].e); }
+        else if (e.key === 'Escape') ssClose();
+    });
+}
+
+function ssOpen() {
+    if (!ssIndexData) ssBuildIndex();
+    ssEnsureDom();
+    ssDom.backdrop.classList.add('ss-open');
+    ssDom.input.value = '';
+    ssSel = 0;
+    ssRender();
+    ssDom.input.focus();
+}
+
+function ssClose() {
+    if (!ssDom) return;
+    ssDom.input.blur();          // drops the phone keyboard
+    ssDom.backdrop.classList.remove('ss-open');
+}
+
+function ssRender() {
+    const q = ssDom.input.value;
+    const rows = ssFilter(q);
+    const partial = (q.match(/[a-z0-9-]+$/i) || [''])[0].toLowerCase();
+    const chips = ssCompletions(partial, 6);
+    ssDom.chips.innerHTML = chips.map(w => '<span class="ss-chip">' + w + '</span>').join('');
+    ssDom.chips.querySelectorAll('.ss-chip').forEach(ch => {
+        // completing the word keeps focus so typing continues without re-tapping
+        ch.addEventListener('click', () => {
+            ssDom.input.value = q.replace(/[a-z0-9-]+$/i, '') + ch.textContent + ' ';
+            ssSel = 0;
+            ssRender();
+            ssDom.input.focus();
+        });
+    });
+
+    let html = '', lastGroup = null, shown = 0;
+    const LIMIT = q ? 60 : 400;
+    for (const r of rows) {
+        if (shown >= LIMIT) break;
+        if (!q) {
+            const group = r.e.crumbs[0] || 'Setup';
+            if (group !== lastGroup) { html += '<div class="ss-group">' + ssEsc(group) + '</div>'; lastGroup = group; }
+        }
+        const crumb = ['Setup'].concat(r.e.crumbs).map(ssEsc).join('<span class="ss-sep">&rsaquo;</span>');
+        html += '<div class="ss-row' + (shown === ssSel && q ? ' ss-sel' : '') + '" data-i="' + shown + '">' +
+            '<div class="ss-lab">' + ssHl(r.e.label, q) + '</div>' +
+            '<div class="ss-crumb">' + crumb + '</div></div>';
+        shown++;
+    }
+    if (!shown) html = '<div class="ss-none">No matching settings. Back up a character or try another word.</div>';
+    ssDom.results.innerHTML = html;
+    ssDom.count.textContent = q ? rows.length + ' of ' + ssIndexData.length + ' settings match'
+        : ssIndexData.length + ' settings, grouped by tab';
+    ssRows = rows.slice(0, shown);
+    ssDom.results.querySelectorAll('.ss-row').forEach(rEl => {
+        rEl.addEventListener('click', () => ssNavigate(ssRows[+rEl.dataset.i].e));
+    });
+    const selEl = ssDom.results.querySelector('.ss-sel');
+    if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+}
+
+// Ancestor walk mirrors the goTo* helpers: collect switcher calls innermost-first, run them
+// outermost-first so main tab, sub-tab, alt-tab and inner panel are all set before scrolling.
+function ssNavigate(entry) {
+    ssClose();
+    const row = entry.el;
+    const acts = [];
+    for (let el = row; el && el !== document.body; el = el.parentElement) {
+        if (el.tagName === 'DETAILS') {
+            const d = el;
+            if (!d.open) acts.push(() => { d.open = true; });
+        } else if (el.classList.contains('tuning-panel') && el.id.indexOf('tuning-') === 0) {
+            const n = el.id.slice(7);
+            acts.push(() => showTuningPanel(n));
+        } else if (el.classList.contains('diag-panel') && el.id.indexOf('battery-panel-') === 0) {
+            const n = el.id.slice(14);
+            acts.push(() => showBatteryPanel(n));
+        } else if (el.classList.contains('alt-panel') && el.id) {
+            const id = el.id;
+            let group = 'primary';
+            el.classList.forEach(c => { if (c.indexOf('alt-panel-') === 0) group = c.slice(10); });
+            acts.push(() => showAltTab(group, id));
+        } else if (el.classList.contains('sub-tab-content') && el.id.indexOf('settings-') === 0) {
+            const n = el.id.slice(9);
+            acts.push(() => showSubTab('settings', n));
+        }
+    }
+    showMainTab('settings');
+    for (let i = acts.length - 1; i >= 0; i--) acts[i]();
+    // showSubTab resets window scroll; wait a frame so revealed panels have laid out
+    requestAnimationFrame(() => {
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        row.classList.remove('ss-flash');
+        void row.offsetWidth;    // restart the animation when the same row is hit twice
+        row.classList.add('ss-flash');
+        setTimeout(() => row.classList.remove('ss-flash'), 2600);
+    });
+}
+
+// Phone trigger: pull down while the page is already scrolled to the top. Badge descends as
+// feedback; release past the threshold opens search. The non-passive touchmove listener is
+// attached only for the duration of an armed touch so normal scrolling never pays for it.
+function ssInitPull() {
+    if (!('ontouchstart' in window)) return;
+    const THRESH = 70;
+    let startY = null, active = false, ready = false, badge = null;
+    function ensureBadge() {
+        if (badge) return;
+        badge = document.createElement('div');
+        badge.className = 'ss-pull';
+        badge.innerHTML = SS_MAG_SVG;
+        document.body.appendChild(badge);
+    }
+    function setProgress(p) {
+        ensureBadge();
+        badge.style.transition = 'none';
+        const y = Math.min(p, 1.15) * 74;
+        badge.style.transform = 'translate(-50%, ' + (y - 60) + 'px)';
+        badge.style.opacity = Math.min(p * 1.4, 1);
+        ready = p >= 1;
+        badge.classList.toggle('ss-ready', ready);
+    }
+    function clearBadge() {
+        if (!badge) return;
+        badge.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
+        badge.style.transform = 'translate(-50%, -60px)';
+        badge.style.opacity = '0';
+        badge.classList.remove('ss-ready');
+    }
+    function onMove(e) {
+        if (startY === null) return;
+        if (window.scrollY > 0) { startY = null; active = false; clearBadge(); return; }
+        const dy = e.touches[0].clientY - startY;
+        if (dy > 8) {
+            active = true;
+            if (e.cancelable) e.preventDefault();   // suppress rubber-band while pulling
+            setProgress((dy - 8) * 0.5 / THRESH);
+        } else if (active && dy <= 0) { active = false; clearBadge(); }
+    }
+    function onEnd() {
+        document.removeEventListener('touchmove', onMove);
+        document.removeEventListener('touchend', onEnd);
+        document.removeEventListener('touchcancel', onEnd);
+        if (active && ready) ssOpen();
+        active = false; ready = false; startY = null;
+        clearBadge();
+    }
+    document.addEventListener('touchstart', e => {
+        if (window.scrollY > 0 || e.touches.length !== 1) return;
+        if (ssDom && ssDom.backdrop.classList.contains('ss-open')) return;
+        // elements with their own touch behavior must never arm the gesture
+        if (e.target.closest('canvas, .u-over, .learning-table-container, input, textarea, select, .switch, .slider')) return;
+        startY = e.touches[0].clientY;
+        active = false; ready = false;
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onEnd);
+        document.addEventListener('touchcancel', onEnd);
+    }, { passive: true });
+}
+
+ssInitPull();
+// ================================ END SETTINGS SEARCH ================================
 
 /* XREG_END */

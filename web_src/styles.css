@@ -1512,24 +1512,6 @@ input[type="submit"]:hover {
 .dark-mode #header-collapsed-strip .hcs-unlock {
   color: #4fd6ce;
 }
-/* The chip costs 150px of a row that cannot wrap, so it sheds text as the strip narrows:
-   "Tap to unlock" (needs 436px) → "Unlock" (389px) → glyph only (324px). Without this a
-   phone-width locked strip clips the chip off the right edge instead of shrinking anything.
-   Below ~392px the lock glyph alone is the affordance — the state word wins the space. */
-#header-collapsed-strip .hcs-unlock .u-short { display: none; }
-@container (max-width: 439px) {
-  #header-collapsed-strip .hcs-unlock .u-long  { display: none; }
-  #header-collapsed-strip .hcs-unlock .u-short { display: inline; }
-  /* ~12px of phone-width compaction, spent so the state word survives whole down to a 360px viewport */
-  #header-collapsed-strip .hcs-chevron { margin-left: 4px; }
-  #header-collapsed-strip .hcs-pill { letter-spacing: 0; }
-}
-@container (max-width: 379px) {
-  #header-collapsed-strip .hcs-unlock .u-short { display: none; }
-  #header-collapsed-strip .hcs-unlock { gap: 0; padding: 4px 7px; }
-  #header-collapsed-strip .hcs-unlock .lock-glyph { width: 14px; height: 14px; }
-}
-
 #header-collapsed-strip .hcs-m { display: inline-flex; align-items: baseline; font-weight: 700; font-variant-numeric: tabular-nums; }
 #header-collapsed-strip .hcs-m i { font-style: normal; font-weight: 400; opacity: .6; margin-left: 2px; font-size: .84em; }
 /* Fixed-width right-aligned value boxes sized for each field's widest case: digit-count
@@ -1537,7 +1519,7 @@ input[type="submit"]:hover {
    decimals, units, and group separators never move. */
 #header-collapsed-strip .hcs-m > span { display: inline-block; text-align: right; }
 #hcs-volt, #hcs-soc, #hcs-alt, #hcs-batt, #hcs-temp, #hcs-duty { min-width: 5ch; }
-#hcs-rpm { min-width: 4ch; }
+#hcs-rpm, #hcs-board { min-width: 4ch; }
 
 #header-collapsed-strip .hcs-gsep { display: inline-block; width: 1px; height: 20px; background: rgba(0, 161, 154, .32); margin: 0 3px; }
 #header-collapsed-strip .hcs-divider { display: inline-block; width: 1px; height: 18px; background: rgba(0, 161, 154, .15); }
@@ -1550,6 +1532,25 @@ input[type="submit"]:hover {
 /* margin-left buys extra space from the toggle; vertical padding gives a ~40px expand tap target without changing the line height */
 #header-collapsed-strip .hcs-chevron { font-size: 16px; opacity: .55; cursor: pointer; margin-left: 12px; padding: 11px 6px; margin-top: -11px; margin-bottom: -11px; }
 
+/* Narrow band: effective 7px gap + glyph-only unlock chip buy ~120px of row on locked strips —
+   that margin is what lets Alt A reveal at phone widths. The chip sheds "Tap to unlock" and the
+   state word wins the space; the band ends at 478 so the full text only returns where it fits
+   without ellipsizing a short state word. Two spec constraints shape this block: a container
+   query can only style DESCENDANTS of the container (the strip is its own container, so its
+   `gap` property is unreachable — the negative child margins emulate gap 7px), and strip padding
+   must stay constant (padding feeds back into the content-box width these queries measure).
+   This block must sit AFTER the base .hcs-unlock/.hcs-gsep/.hcs-chevron rules — equal
+   specificity, source order decides. NOTE all @container thresholds in this file compare
+   against the strip's CONTENT-BOX width = outer − 28px padding = viewport − 44px on phones. */
+@container (max-width: 478px) {
+  #header-collapsed-strip > :not(:first-child) { margin-left: -3px; }
+  #header-collapsed-strip .hcs-unlock .u-long { display: none; }
+  #header-collapsed-strip .hcs-unlock { gap: 0; padding: 4px 7px; margin-left: 5px; }
+  #header-collapsed-strip .hcs-unlock .lock-glyph { width: 14px; height: 14px; }
+  #header-collapsed-strip .hcs-chevron { margin-left: 1px; }
+  #header-collapsed-strip .hcs-pill { letter-spacing: 0; }
+}
+
 /* progressive reveal — State + Volts always; then Alt A → Temp → SOC → RPM(+Eng sep) → Batt A → Duty.
    Every threshold is the measured width of everything shown at that step plus the worst-case state
    word (ABSORPTION, 99px at 14px/800), so a reveal never squeezes the word into an ellipsis. The
@@ -1560,9 +1561,15 @@ input[type="submit"]:hover {
 #header-collapsed-strip .hcs-rpm,
 #header-collapsed-strip .hcs-batt,
 #header-collapsed-strip .hcs-duty,
+#header-collapsed-strip .hcs-board,
 #header-collapsed-strip .hcs-asep,
+#header-collapsed-strip .hcs-bsep,
 #header-collapsed-strip .hcs-eng { display: none; }
-@container (min-width: 361px) { #header-collapsed-strip:not(.hcs-locked) .hcs-alt  { display: inline-flex; }
+/* Alt A budgets a SHORT state word (BULK/IDLE/OFF exact-fit at threshold, headless-Chrome
+   measured); MANUAL/ABSORPTION ellipsize near it — the pill is the only shrinkable element, so
+   a tight row costs state-word characters, never digits. Later rungs keep the original budget
+   (mid word whole, ABSORPTION may clip ~18px just past the rung). */
+@container (min-width: 292px) { #header-collapsed-strip:not(.hcs-locked) .hcs-alt  { display: inline-flex; }
                                 #header-collapsed-strip:not(.hcs-locked) .hcs-asep { display: inline-block; } }
 @container (min-width: 433px) { #header-collapsed-strip:not(.hcs-locked) .hcs-temp { display: inline-flex; } }
 @container (min-width: 504px) { #header-collapsed-strip:not(.hcs-locked) .hcs-soc  { display: inline-flex; } }
@@ -1570,11 +1577,14 @@ input[type="submit"]:hover {
                                 #header-collapsed-strip:not(.hcs-locked) .hcs-eng  { display: inline-block; } }
 @container (min-width: 661px) { #header-collapsed-strip:not(.hcs-locked) .hcs-batt { display: inline-flex; } }
 @container (min-width: 760px) { #header-collapsed-strip:not(.hcs-locked) .hcs-duty { display: inline-flex; } }
+/* Board temp is a big-screen extra: it reveals only where even ABSORPTION fits whole. */
+@container (min-width: 895px) { #header-collapsed-strip:not(.hcs-locked) .hcs-board { display: inline-flex; }
+                                #header-collapsed-strip:not(.hcs-locked) .hcs-bsep  { display: inline-block; } }
 
-/* Locked (.hcs-locked, set by syncHeaderStrip): same ladder shifted right by the full-text chip's
-   150px + its 10px gap. A metric that reveals before the chip has room pushes the state word — and
-   then the chip — past the right edge, where overflow:hidden cuts them off. */
-@container (min-width: 521px) { #header-collapsed-strip.hcs-locked .hcs-alt  { display: inline-flex; }
+/* Locked (.hcs-locked, set by syncHeaderStrip): ladder shifted right for the unlock chip. Alt A
+   reveals against the glyph-only chip of the ≤439 band, so a locked phone still shows amps;
+   the later rungs stay budgeted for the full-text chip. */
+@container (min-width: 341px) { #header-collapsed-strip.hcs-locked .hcs-alt  { display: inline-flex; }
                                 #header-collapsed-strip.hcs-locked .hcs-asep { display: inline-block; } }
 @container (min-width: 593px) { #header-collapsed-strip.hcs-locked .hcs-temp { display: inline-flex; } }
 @container (min-width: 664px) { #header-collapsed-strip.hcs-locked .hcs-soc  { display: inline-flex; } }
@@ -1582,6 +1592,8 @@ input[type="submit"]:hover {
                                 #header-collapsed-strip.hcs-locked .hcs-eng  { display: inline-block; } }
 @container (min-width: 821px) { #header-collapsed-strip.hcs-locked .hcs-batt { display: inline-flex; } }
 @container (min-width: 920px) { #header-collapsed-strip.hcs-locked .hcs-duty { display: inline-flex; } }
+@container (min-width: 1055px) { #header-collapsed-strip.hcs-locked .hcs-board { display: inline-flex; }
+                                 #header-collapsed-strip.hcs-locked .hcs-bsep  { display: inline-block; } }
 
 .dark-mode #header-collapsed-strip .hcs-gsep { background: rgba(120, 200, 196, .30); }
 .dark-mode #header-collapsed-strip .hcs-divider { background: rgba(120, 200, 196, .18); }
@@ -1905,39 +1917,6 @@ input[type="submit"]:hover {
   color: var(--text-dark);
 }
 
-/* Temp block: flex column so label sits above the value row.
-   Saves horizontal space; chip card stretches to match neighbor height. */
-.reading-duo-solo {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 1px;
-}
-
-/* Number + unit sit side-by-side within the Temp block */
-.duo-value-row {
-  display: flex;
-  align-items: baseline;
-  gap: 3px;
-}
-
-.reading-duo-solo .duo-num,
-.reading-duo-solo .duo-unit {
-  font-size: 20px;
-  font-weight: 800;
-  text-align: left;
-}
-/* Reserve width for the widest temp string ("250.5", 1 decimal) and right-align
-   the value. Without this, temp crossing 100.0°F (4->5 chars) widened this
-   content-sized chip and reflowed the whole max-content/space-evenly header
-   tier. Right-align keeps °F from shifting too. */
-.reading-duo-solo .duo-num {
-  min-width: 4.6ch;
-  text-align: right;
-}
-
-
 .settings-access-tier {
   display: flex;
   flex-direction: column;
@@ -1992,13 +1971,8 @@ input[type="submit"]:hover {
     max-width: calc(100vw - 1rem);
   }
 
-  /* Anchor tooltip box to left edge of icon so it can't overflow the right side of the screen */
-  .tooltip-box {
-    left: 0;
-    right: auto;
-    transform: none;
-    max-width: min(280px, calc(100vw - 32px));
-  }
+  /* (tooltip-box viewport containment is handled by clampTooltipBox() in script.js —
+     a left-edge CSS anchor here overflowed the RIGHT side for right-half icons) */
 
   /* RPM Cap Table mode toggles — wrap "Charge Rate" and "Limit by" onto separate lines */
   .cap-mode-row {
@@ -2182,6 +2156,19 @@ input[type="submit"]:hover {
   color: #cccccc;
 }
 
+/* Header reading chips are white cards in light mode (.reading-duo background: white) */
+.dark-mode .reading-duo {
+  background: #24282b;
+  border-color: rgba(120, 200, 196, 0.28);
+  box-shadow: none;
+}
+
+/* --text-dark resolves to mid-gray in dark mode — too dim for the headline readouts */
+.dark-mode .duo-num,
+.dark-mode .duo-unit {
+  color: #d2d2d2;
+}
+
 .dark-mode .lock-status-locked {
   color: #ff6666 !important;
 }
@@ -2278,9 +2265,14 @@ input[type="submit"]:hover {
   white-space: normal;
   z-index: 999;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-  max-width: 300px;
+  max-width: min(300px, calc(100vw - 16px));
   min-width: 180px;
   width: fit-content;
+  /* the icon is user-select:none and iOS inherits that into children — re-enable so the
+     box text can be selected and copied (taps inside the box never close it) */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: auto;
 }
 
 .tooltip.active .tooltip-box {
@@ -2655,6 +2647,10 @@ input:focus {
    reads/writes it directly, and the pill/caption track programmatic .checked changes on load. */
 .seg-pill { display: flex; width: 100%; align-items: stretch; }
 .seg-pill > label {
+  /* Containing block for the hidden absolute radio below — without this, a broad
+     `input { width:100% }` rule (e.g. .pri-subsection's) sizes the radio against <body>,
+     widening the document and making phone webviews zoom out on tab entry. */
+  position: relative;
   flex: 1 1 0;
   min-width: 0;
   display: flex;
@@ -3121,6 +3117,32 @@ hr {
   animation: cloud-loading-bounce 1.2s infinite ease-in-out;
 }
 
+/* Registration-banner colors live in classes (not inline) so dark mode can theme them;
+   JS swaps info/error. Light values match the old inline #e3f2fd / #ffebee. */
+.cloud-banner-info {
+  background: #e3f2fd;
+  color: #1976d2;
+}
+
+.cloud-banner-error {
+  background: #ffebee;
+  color: #c62828;
+}
+
+.dark-mode .cloud-banner-info {
+  background: rgba(33, 150, 243, 0.12);
+  color: #64b5f6;
+}
+
+.dark-mode .cloud-banner-error {
+  background: rgba(244, 67, 54, 0.12);
+  color: #ef9a9a;
+}
+
+.dark-mode .cloud-loading-dot {
+  background: #64b5f6;
+}
+
 .cloud-loading-dot:nth-child(2) {
   animation-delay: 0.15s;
 }
@@ -3397,21 +3419,64 @@ input:checked+.slider:before {
   opacity: 0.9;
 }
 
-#wifi-wake-status {
-  bottom: 40px;
-}
-
-.corner-status-connected {
-  background-color: #00a19a;
-}
-
 .corner-status-warning {
   background-color: #00a19a;
-  /* Same as connected */
 }
 
-.corner-status-disconnected {
-  background-color: #F44336;
+/* Connection dot — replaced the WIFI CONNECTED/DISCONNECTED corner pill. Two instances
+   (collapsed strip lead, wordmark lead); updateInlineStatus() drives both by class. */
+.conn-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #00a19a;
+}
+
+@media (min-width: 768px) {
+  .conn-dot {
+    width: 10px;
+    height: 10px;
+  }
+}
+
+/* Wordmark row aligns to text baseline — the dot has no text, so center it instead */
+.header-wordmark .conn-dot {
+  align-self: center;
+  margin-right: 9px;
+}
+
+.conn-dot--down {
+  background: #F44336;
+  --conn-pulse: rgba(244, 67, 54, 0.55);
+}
+
+.conn-dot--offline {
+  background: #ff6600;
+  --conn-pulse: rgba(255, 102, 0, 0.55);
+}
+
+.conn-dot--down,
+.conn-dot--offline {
+  animation: conn-dot-pulse 1.6s ease-out infinite;
+}
+
+@keyframes conn-dot-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--conn-pulse);
+  }
+
+  100% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .conn-dot--down,
+  .conn-dot--offline {
+    animation: none;
+  }
 }
 
 /* Dark Mode */
@@ -3446,19 +3511,14 @@ input:checked+.slider:before {
   border-color: #444;
 }
 
-/* uPlot dark mode — axis labels, tick text, axis lines, grid */
+/* uPlot dark mode — DOM parts only (legend labels, title). Tick text, axis lines and
+   grid are canvas-drawn: script.js injects theme-resolving colors into every plot's
+   axes (see plotAxisTextColor/plotGridColor/plotTickColor). */
 .dark-mode .u-label {
   color: #cccccc !important;
 }
-.dark-mode .u-axis text {
-  fill: #cccccc !important;
-}
-.dark-mode .u-axis path {
-  stroke: #555555 !important;
-}
-.dark-mode .u-grid line,
-.dark-mode .u-ticks line {
-  stroke: #404040 !important;
+.dark-mode .u-title {
+  color: #d0d0d0;
 }
 
 .dark-mode input[type="text"],
@@ -4284,8 +4344,9 @@ input:checked+.slider:before {
   gap: 6px;
 }
 
-/* Input field styling */
-.pri-subsection .form-input input {
+/* Input field styling — text/number fields only; the seg-pill and orientation-card
+   radios in these subsections must not inherit field width/borders */
+.pri-subsection .form-input input:not([type="radio"]) {
   width: 100%;
   max-width: 200px;
   padding: 10px 12px;
@@ -4349,7 +4410,7 @@ input:checked+.slider:before {
     padding-top: 0;
   }
 
-  .pri-subsection .form-input input {
+  .pri-subsection .form-input input:not([type="radio"]) {
     max-width: 100%;
   }
 }
@@ -5473,3 +5534,241 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
     white-space: nowrap;
   }
 }
+
+/* ── Generated-file delivery feedback (see deliverFile in script.js) ──────────
+   Toast: confirmation after an anchor download (desktop/Android) or a completed
+   iOS share. Ready bar: iOS holds generated files for one tap that opens the
+   system share sheet — anchor clicks save nothing in the app's WKWebView, and
+   Safari drops programmatic clicks once the button tap's activation expires. */
+#file-toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  max-width: min(92vw, 480px);
+  background: rgba(40, 44, 46, 0.95);
+  color: #ffffff;
+  font-size: 13px;
+  padding: 9px 16px;
+  border-radius: 8px;
+  z-index: 10000;
+  opacity: 0;
+  transition: opacity 0.25s;
+  pointer-events: none;
+  text-align: center;
+}
+#file-toast.show { opacity: 1; }
+
+#file-ready-bar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(14px + env(safe-area-inset-bottom));
+  width: min(94vw, 520px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #ffffff;
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  padding: 10px 12px;
+  z-index: 10000;
+}
+.dark-mode #file-ready-bar { background: #24282b; }
+#file-ready-bar .frb-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-dark);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dark-mode #file-ready-bar .frb-text { color: #d2d2d2; }
+#file-ready-bar button { flex: none; }
+
+
+/* ================================== SETTINGS SEARCH ==================================
+   Trigger button in .main-tabs (index.html) + logic in the SETTINGS SEARCH block at the
+   end of script.js. All selectors ss-prefixed. */
+
+/* Trigger: extra button in the main tab row. Hidden on phones (pull-down gesture instead). */
+.ss-search-tab { display: none; }
+@media (min-width: 768px) {
+  .ss-search-tab {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    flex: 0 0 auto;             /* .main-tab sets flex:1 — Search must not steal tab width */
+    color: var(--text-muted);
+  }
+  .ss-search-tab:hover { color: var(--accent); border-color: var(--accent); }
+}
+.ss-icon { width: 15px; height: 15px; flex: 0 0 auto; }
+
+/* Surface: dimmed backdrop; centered spotlight card on desktop, top sheet on phones */
+.ss-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 9500;                /* above content/pills, below recovery + file-ready (10000) */
+  display: none;
+  align-items: flex-start;
+  justify-content: center;
+}
+.ss-backdrop.ss-open { display: flex; }
+.ss-panel {
+  margin-top: 9vh;
+  width: 620px;
+  max-width: calc(100vw - 32px);
+  background: var(--card-light);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  max-height: 72vh;
+}
+@media (max-width: 767.98px) {
+  .ss-panel {
+    margin-top: 0;
+    width: 100vw;
+    max-width: 100vw;
+    border-radius: 0 0 14px 14px;
+    border-bottom: 3px solid var(--accent);
+    max-height: 78vh;           /* leaves room for the on-screen keyboard */
+  }
+}
+.dark-mode .ss-panel { background: #1e1e1e; border: 1px solid #444; }
+
+.ss-inputrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px 11px;
+  border-bottom: 1px solid var(--border);
+}
+.dark-mode .ss-inputrow { border-color: #3a3a3a; }
+.ss-inputrow .ss-icon { width: 18px; height: 18px; color: var(--text-muted); }
+.ss-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 17px;              /* 16px+ so iOS never focus-zooms */
+  background: transparent;
+  color: var(--text-dark);
+  min-width: 0;
+}
+.dark-mode .ss-input { color: #e2e2e2; }
+.ss-input::placeholder { color: #a8b0b0; }
+.ss-close {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  background: transparent;
+  letter-spacing: 0.04em;
+}
+.dark-mode .ss-close { border-color: #444; color: #888; }
+
+.ss-chips {
+  display: flex;
+  gap: 7px;
+  padding: 9px 16px 3px;
+  flex-wrap: wrap;
+}
+.ss-chips:empty { padding: 0; }
+.ss-chip {
+  font-size: 12px;
+  border: 1px solid rgba(0, 161, 154, 0.4);
+  color: var(--accent);
+  background: rgba(0, 161, 154, 0.06);
+  border-radius: 12px;
+  padding: 3px 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ss-chip:hover { background: rgba(0, 161, 154, 0.15); }
+
+.ss-results {
+  overflow-y: auto;
+  padding: 6px 0 10px;
+  -webkit-overflow-scrolling: touch;
+}
+.ss-group {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 12px 18px 4px;
+}
+.dark-mode .ss-group { color: #8a8a8a; }
+.ss-row {
+  padding: 8px 18px 7px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+.ss-row:hover, .ss-row.ss-sel {
+  background: rgba(0, 161, 154, 0.07);
+  border-left-color: var(--accent);
+}
+.dark-mode .ss-row:hover, .dark-mode .ss-row.ss-sel { background: rgba(0, 161, 154, 0.12); }
+.ss-lab { font-size: 14px; line-height: 1.35; color: var(--text-dark); }
+.dark-mode .ss-lab { color: #dedede; }
+.ss-lab mark {
+  background: rgba(0, 161, 154, 0.22);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.ss-crumb { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.dark-mode .ss-crumb { color: #8f8f8f; }
+.ss-crumb .ss-sep { color: var(--accent); padding: 0 3px; }
+.ss-none {
+  padding: 26px 18px;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.ss-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 8px 18px;
+  border-top: 1px solid var(--border);
+}
+.dark-mode .ss-count { border-color: #3a3a3a; color: #8a8a8a; }
+
+/* Flash highlight on the landed-on setting row after navigation */
+@keyframes ss-flash-kf {
+  0%   { background-color: rgba(0, 161, 154, 0.35); }
+  100% { background-color: transparent; }
+}
+.ss-flash { animation: ss-flash-kf 2.4s ease-out; border-radius: 4px; }
+
+/* Pull-down badge: descends below the header while pulling; accent = past release point */
+.ss-pull {
+  position: fixed;
+  left: 50%;
+  top: 0;
+  transform: translate(-50%, -60px);
+  z-index: 9400;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--card-light);
+  border: 1.5px solid var(--border);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.dark-mode .ss-pull { background: #2a2a2a; border-color: #444; }
+.ss-pull.ss-ready { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+.ss-pull .ss-icon { width: 20px; height: 20px; }

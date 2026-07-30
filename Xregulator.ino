@@ -16,7 +16,7 @@
 
 // Must be strict semver ^\d+\.\d+\.\d+$ — no suffixes, no leading v. Compared as an integer
 // major*10000 + minor*100 + patch, so the ceiling is 999.99.99 (minor/patch cannot exceed 99).
-const char *FIRMWARE_VERSION = "0.0.2";
+const char *FIRMWARE_VERSION = "0.0.3";
 
 // OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
 // proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
@@ -2111,6 +2111,12 @@ bool sensorUploadInProgress = false;
 // the protections and the PID for the full duration of the op.
 // Readers: TempTask, testInternetSpeed, scheduled restart, OTA orchestration, the AFLM gate.
 volatile bool core0Busy = false;
+
+// Task-WDT panic window. Sized for the control loop; every blocking network call on a
+// WDT-subscribed task must complete inside it (httpsTask cloud ops cap each phase at 12 s for
+// this). An OTA attempt may legally block far longer, so performOTAUpdateToVersion() widens the
+// window for the attempt and restores this value on every exit.
+const uint32_t WDT_TIMEOUT_MS = 16000;
 
 // Dashboard mirror of sensorRingCount. Real cap is SENSOR_RING_SIZE (1000).
 int bufferedRecordCount = 0;
@@ -5247,6 +5253,7 @@ void setup() {
   altSeedClassKnobs();        // deferred first-creation seeding of the class-dependent registry knobs (same reason)
   bhInitSettings();           // Battery Health: DCIR test config + persisted DCIR/capacity blobs
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
+  runSettingsMigrations();    // settings-schema migration chain — must stay after the last NVS settings loader
   loadTuningLog();            // restore last session's tuning records from LittleFS
   loadCVTuningLog();          // restore CV tuning records from LittleFS
   loadSystemIDLog();          // restore plant-delay (SystemID) records from LittleFS
@@ -5330,9 +5337,9 @@ void setup() {
   Serial.println();
   Serial.println("Enabling watchdog protection...");
 
-  // Configure 16s watchdog
+  // Configure watchdog (window shared with the OTA widen/restore in performOTAUpdateToVersion)
   esp_task_wdt_config_t wdt_config = {
-    .timeout_ms = 16000,
+    .timeout_ms = WDT_TIMEOUT_MS,
     .idle_core_mask = 0,
     .trigger_panic = true
   };

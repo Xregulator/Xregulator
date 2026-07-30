@@ -3525,6 +3525,28 @@ bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataS
 
   return true;
 }
+// Link-quality floor for every OTA path (download, version report, forced-update check).
+// Deliberately set to "only refuse when the link is effectively dead" — an ESP32 rarely holds an
+// association past about -90, so on any usable link this never fires. That is the intent: RSSI is
+// a proxy for throughput and a bad one here (a crowded marina at -60 can carry less than a quiet
+// anchorage at -82 — SNR decides, not signal strength). The download is outcome-protected instead:
+// no-data abort, total-time cap, esp_ota_abort() + RSA verify before any commit. A 2.7 MB package
+// inside the cap needs only ~12 kbps, so slow is fine and only dead is fatal. Never tune this
+// hoping to fix a download problem; the timeouts below are the real limits.
+static const int OTA_MIN_RSSI_DBM = -90;
+
+// The 16 s task WDT (panic) cannot span an OTA attempt: one HTTPS GET below may legally block
+// for TCP connect (60 s) + TLS handshake (120 s) + header wait (60 s) with no way to feed
+// mid-call. performOTAUpdateToVersion() widens the panic window to this for the attempt and
+// restores WDT_TIMEOUT_MS on every exit — a true lwip wedge still panic-reboots the (field-off)
+// device within 5 min instead of never.
+static const uint32_t OTA_WDT_WINDOW_MS = 300000;
+static void otaSetWdtWindow(uint32_t ms) {
+  esp_task_wdt_config_t cfg = { .timeout_ms = ms, .idle_core_mask = 0, .trigger_panic = true };
+  esp_task_wdt_reconfigure(&cfg);
+  esp_task_wdt_reset();  // start the new window fresh; harmless error on the non-subscribed web-handler task
+}
+
 void prepareForOTA() {
   otaInProgress = true;
   // Close EventSource FIRST (before any heap measurements)
@@ -3623,8 +3645,15 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   int contentLength = 0;
   WiFiClient *stream = nullptr;
   const size_t CHUNK_SIZE = 1024;
-  const unsigned long OTA_STALL_TIMEOUT_MS = 60000;  // no-data idle limit — a half-open socket never trips !connected()
-  const unsigned long OTA_MAX_DOWNLOAD_MS = 900000;  // absolute cap on the whole download
+  // no-data idle limit — a half-open socket never trips !connected(). 120 s not 60 s: a deep fade or
+  // an AP roam can stall TCP well past a minute and still recover, and we would rather wait than
+  // throw away a part-done download. This is also the freeze window from the wedged-socket incident,
+  // so it stays bounded — the point is to be patient with a bad link, not to hang forever.
+  const unsigned long OTA_STALL_TIMEOUT_MS = 120000;
+  // absolute cap on the whole download. 30 min carries the 2.7 MB package at ~12 kbps, i.e. any link
+  // still passing traffic at all. Cost of the generosity: TempTask is deleted for this whole window,
+  // so alternator temperature is unmonitored until otaRestoreNormalOperation() rebuilds it.
+  const unsigned long OTA_MAX_DOWNLOAD_MS = 1800000;
   uint8_t inputBuffer[CHUNK_SIZE];
   int totalDownloaded = 0;
   unsigned long lastProgress = 0;
@@ -3677,14 +3706,14 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
     goto cleanup;
   }
 
+  // No RSSI gate here on purpose. By this point prepareForOTA() has already deleted TempTask and
+  // closed EventSource, the signature has already downloaded over this same link (proof it carries
+  // HTTPS), and on the ota_0 path we have already rebooted into factory. Refusing here pays every
+  // cost and saves nothing, and it would overrule a successful transfer with a guess. The
+  // OTA_MIN_RSSI_DBM pre-flight in performOTAUpdateToVersion runs before any teardown; that is the
+  // only place the check earns its keep.
   rssi = WiFi.RSSI();
-  if (rssi < -76) {
-    Serial.printf("OTA: WiFi too weak (%d dBm) - unsafe for firmware download\n", rssi);
-    queueConsoleMessage("OTA FAILED: WiFi signal too weak");
-    goto cleanup;
-  }
-
-  Serial.printf("WiFi status: %d, Signal: %d dBm\n", WiFi.status(), WiFi.RSSI());
+  Serial.printf("WiFi status: %d, Signal: %d dBm\n", WiFi.status(), rssi);
 
   downloadStartTime = millis();
 
@@ -3704,8 +3733,14 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   otaHeapMark("AFTER setInsecure");
 
   // CRITICAL: Set matching timeouts BEFORE connection attempt
-  client.setTimeout(30000);
-  client.setHandshakeTimeout(30);  // SECONDS (core multiplies by 1000) — matches setTimeout's 30000 ms
+  // Note client.setTimeout here is largely advisory: HTTPClient::connect() overwrites it with its own
+  // _tcpTimeout right after connecting, so the http.setTimeout below is what actually governs reads.
+  // Kept at the same value so the two agree either way.
+  client.setTimeout(60000);
+  // SECONDS (core multiplies by 1000). 120 s is the core's own default — the previous 30 was
+  // TIGHTENING it, which is backwards for a weak link. A handshake is several round trips of large
+  // records and is the step most likely to time out on a link that would still finish the download.
+  client.setHandshakeTimeout(120);
 
   Serial.println("8. Pre-flight memory check...");
   freeHeap = ESP.getFreeHeap();
@@ -3745,7 +3780,13 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   // Now safe to add headers
   http.addHeader("Device-ID", getDeviceId());
   http.addHeader("Current-Version", FIRMWARE_VERSION);
+  // setTimeout takes uint16_t — anything over 65535 silently wraps, so 60000 is the practical max
+  // and asking for 120000 would truncate to 54464 and be SHORTER than what we asked for.
   http.setTimeout(60000);
+  // The real bottleneck on a bad link: HTTPClient uses its own _connectTimeout (5 s default, NOT
+  // the client.setTimeout above) for the TCP connect + TLS handshake, so on a slow or lossy link the
+  // transfer died before a byte moved. int32_t here, so it takes a large value honestly.
+  http.setConnectTimeout(60000);
 
   httpCode = http.GET();
   otaHeapMark("AFTER http.GET");
@@ -3948,6 +3989,10 @@ void performOTAUpdate(const UpdateInfo &updateInfo) {
   HTTPClient http;
   Serial.printf("📥 Downloading signature from: %s\n", updateInfo.signatureUrl.c_str());
   // No 40K heap gate — see notes at firmware-download http.begin above.
+  // Timeouts were the 5 s HTTPClient defaults. This tiny fetch gates the whole update and runs AFTER
+  // prepareForOTA() has already torn things down, so a slow-link failure here wastes the teardown.
+  http.setConnectTimeout(60000);
+  http.setTimeout(60000);
   http.begin(client, updateInfo.signatureUrl);
   http.addHeader("Device-ID", getDeviceId());
   int httpCode = http.GET();
@@ -4075,17 +4120,25 @@ void performOTAUpdateToVersion(const char *targetVersion) {
     return;
   }
 
+  // Every network call from here on may block past the 16 s WDT window (testInternetSpeed's
+  // 10 s connect + 15 s read, then the 60/120 s OTA fetches), so widen for the whole attempt.
+  // Every return below this line must restore WDT_TIMEOUT_MS. Runs WDT-subscribed on the loop
+  // task (staged-update path) or unsubscribed on the web-handler task (factory path) — both safe.
+  otaSetWdtWindow(OTA_WDT_WINDOW_MS);
+
   if (!testInternetSpeed()) {
     Serial.println("OTA: Cannot update - internet too slow or unavailable");
     events.send("OTA: Cannot update - internet connection insufficient", "console", millis());
+    otaSetWdtWindow(WDT_TIMEOUT_MS);
     core0Busy = false;
     return;
   }
 
   int rssi = WiFi.RSSI();
-  if (rssi < -76) {
+  if (rssi < OTA_MIN_RSSI_DBM) {
     Serial.printf("OTA: WiFi too weak (%d dBm) - canceling update\n", rssi);
     events.send("OTA: WiFi signal too weak for safe download", "console", millis());
+    otaSetWdtWindow(WDT_TIMEOUT_MS);
     core0Busy = false;
     return;
   }
@@ -4117,6 +4170,7 @@ void performOTAUpdateToVersion(const char *targetVersion) {
   Serial.printf("  Internal: %u free, %u largest\n",
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  otaSetWdtWindow(WDT_TIMEOUT_MS);  // failed attempt returns here; success rebooted inside
   core0Busy = false;
 }
 bool isValidTarHeader(uint8_t *header) {
@@ -4166,7 +4220,7 @@ void executeUpdateFirmwareVersion() {
   }
 
   int rssi = WiFi.RSSI();
-  if (rssi < -80) {
+  if (rssi < OTA_MIN_RSSI_DBM) {
     Serial.printf("FW_UPDATE: WiFi too weak (%d dBm)\n", rssi);
     return;
   }
@@ -4175,9 +4229,21 @@ void executeUpdateFirmwareVersion() {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(8);
-
+  // Deliberately NOT client.setTimeout(): that call was dead here. HTTPClient::connect() uses its own
+  // _connectTimeout for the connect, then overwrites the client's timeout with _tcpTimeout right
+  // after — so the old client.setTimeout(8) never applied, which is lucky, because 8 ms would have
+  // failed every connect. setConnectTimeout here plus the setTimeout after begin() are the two that
+  // actually govern; the connect one was sitting at HTTPClient's 5 s default.
+  //
+  // 12 s per phase, no more: this runs on httpsTask, which is subscribed to the 16 s panic WDT
+  // and cannot feed mid-call — the TCP connect is a single select() for the full value. The WDT
+  // must stay armed here (it is the only recovery from a wedged op leaving core0Busy stuck with
+  // the field held off), so the timeouts fit inside its window instead of widening it. The
+  // handshake cap is SECONDS and bounds the mid-handshake stall loop, which otherwise retries
+  // 12 s recvs up to the core's 120 s default.
+  client.setHandshakeTimeout(12);
   HTTPClient http;
+  http.setConnectTimeout(12000);
   String url = String(SUPABASE_URL) + "/functions/v1/update-firmware-version";
 
   if (!http.begin(client, url)) {
@@ -4187,7 +4253,9 @@ void executeUpdateFirmwareVersion() {
 
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "Bearer " + String(SUPABASE_ANON_KEY));
-  http.setTimeout(8000);
+  http.setTimeout(12000);  // read timeout. Set AFTER begin() deliberately — this is the one that
+                           // governs; the setConnectTimeout above governs the connect. 12 s max:
+                           // must fit httpsTask's 16 s panic WDT (see connect note above).
 
   String payload = "{\"token\":\"" + authToken + "\",\"firmware_version_int\":" + String(firmwareVersionInt) + "}";
 
@@ -4224,7 +4292,7 @@ void executeCheckForcedUpdate() {
   }
 
   int rssi = WiFi.RSSI();
-  if (rssi < -80) {
+  if (rssi < OTA_MIN_RSSI_DBM) {
     Serial.printf("FORCED_UPDATE: WiFi too weak (%d dBm)\n", rssi);
     return;
   }
@@ -4233,9 +4301,11 @@ void executeCheckForcedUpdate() {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(8);
-
+  // client.setTimeout() would be dead here — see the note in executeUpdateFirmwareVersion.
+  // 12 s phases + handshake cap: must fit httpsTask's 16 s panic WDT — same note.
+  client.setHandshakeTimeout(12);
   HTTPClient http;
+  http.setConnectTimeout(12000);
   String url = String(SUPABASE_URL) + "/functions/v1/check-forced-update";
 
   if (!http.begin(client, url)) {
@@ -4245,7 +4315,9 @@ void executeCheckForcedUpdate() {
 
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "Bearer " + String(SUPABASE_ANON_KEY));
-  http.setTimeout(8000);
+  http.setTimeout(12000);  // read timeout. Set AFTER begin() deliberately — this is the one that
+                           // governs; the setConnectTimeout above governs the connect. 12 s max:
+                           // must fit httpsTask's 16 s panic WDT (see connect note above).
 
   String payload = "{\"token\":\"" + authToken + "\"}";
   int httpCode = http.POST(payload);
@@ -4350,9 +4422,11 @@ void executeClearForcedUpdate() {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(8);
-
+  // client.setTimeout() would be dead here — see the note in executeUpdateFirmwareVersion.
+  // 12 s phases + handshake cap: must fit httpsTask's 16 s panic WDT — same note.
+  client.setHandshakeTimeout(12);
   HTTPClient http;
+  http.setConnectTimeout(12000);
   String url = String(SUPABASE_URL) + "/functions/v1/clear-forced-update";
 
   if (!http.begin(client, url)) {
@@ -4362,7 +4436,9 @@ void executeClearForcedUpdate() {
 
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "Bearer " + String(SUPABASE_ANON_KEY));
-  http.setTimeout(8000);
+  http.setTimeout(12000);  // read timeout. Set AFTER begin() deliberately — this is the one that
+                           // governs; the setConnectTimeout above governs the connect. 12 s max:
+                           // must fit httpsTask's 16 s panic WDT (see connect note above).
 
   String payload = "{\"token\":\"" + authToken + "\"}";
   int httpCode = http.POST(payload);
@@ -4394,9 +4470,11 @@ void executeResetRpmAxis() {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(8);
-
+  // client.setTimeout() would be dead here — see the note in executeUpdateFirmwareVersion.
+  // 12 s phases + handshake cap: must fit httpsTask's 16 s panic WDT — same note.
+  client.setHandshakeTimeout(12);
   HTTPClient http;
+  http.setConnectTimeout(12000);
   String url = String(SUPABASE_URL) + "/functions/v1/reset-rpm-axis";
 
   if (!http.begin(client, url)) {
@@ -4406,7 +4484,9 @@ void executeResetRpmAxis() {
 
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "Bearer " + String(SUPABASE_ANON_KEY));
-  http.setTimeout(8000);
+  http.setTimeout(12000);  // read timeout. Set AFTER begin() deliberately — this is the one that
+                           // governs; the setConnectTimeout above governs the connect. 12 s max:
+                           // must fit httpsTask's 16 s panic WDT (see connect note above).
 
   String payload = "{\"token\":\"" + authToken + "\"}";
   int httpCode = http.POST(payload);
@@ -4610,10 +4690,13 @@ bool testInternetSpeed() {
 
   WiFiClient client;
 
-  Serial.println(">>> Test 1: Attempting to connect to 1.1.1.1:80 (3s timeout)");
+  // 10 s, up from 3: this is a reachability test, not a latency test, and a 3 s budget failed links
+  // that could have completed an OTA fine. It gates performOTAUpdateToVersion, so a false negative
+  // here blocks the update outright.
+  Serial.println(">>> Test 1: Attempting to connect to 1.1.1.1:80 (10s timeout)");
   Serial.flush();
   unsigned long connectStart = millis();
-  if (!client.connect("1.1.1.1", 80, 3000)) {
+  if (!client.connect("1.1.1.1", 80, 10000)) {
     Serial.printf(">>> Connection FAILED after %lu ms\n", millis() - connectStart);
     Serial.flush();
     queueConsoleMessage("Internet check failed: No internet access on WiFi network");
@@ -4630,7 +4713,7 @@ bool testInternetSpeed() {
   HTTPClient http;
   // Use a reliable small file (Cloudflare's trace - about 200-300 bytes)
   http.begin(client, "http://cloudflare.com/cdn-cgi/trace");
-  http.setTimeout(5000);
+  http.setTimeout(15000);  // 15 s, up from 5: a 300-byte fetch timing out says nothing about a 2.7 MB one
   unsigned long downloadStart = millis();
   int httpCode = http.GET();
   Serial.printf(">>> http.GET() returned code %d after %lu ms\n", httpCode, millis() - downloadStart);
@@ -4678,16 +4761,21 @@ bool testInternetSpeed() {
   Serial.printf(">>> Speed test result: %.2f Kbps (%d bytes in %lu ms)\n", kbps, bytesReceived, downloadTime);
   Serial.flush();
 
-  if (kbps < 5.0) {
-    Serial.printf(">>> Speed test FAILED: Connection too slow (%.2f Kbps < 5 Kbps minimum)\n", kbps);
+  // Reachability only — deliberately no throughput floor. The old "kbps < 5.0" test was invalid at
+  // this sample size: 300 bytes at 5 kbps means the whole GET (DNS + TCP + HTTP round trips to
+  // cloudflare.com) had to finish inside 480 ms, so it measured latency, not bandwidth, and refused
+  // any high-RTT link that would have carried the 2.7 MB package fine. Bytes arriving at all is the
+  // only thing this test can honestly assert. kbps is still logged as a rough field diagnostic.
+  if (bytesReceived == 0) {
+    Serial.println(">>> Speed test FAILED: connected but received no data");
     Serial.flush();
-    queueConsoleMessageF("Internet too slow: %.1f Kbps (need 5+ Kbps)", kbps);
+    queueConsoleMessage("Internet check failed: no data returned");
     return false;
   }
 
-  Serial.printf(">>> Speed test PASSED: %.2f Kbps\n", kbps);
+  Serial.printf(">>> Reachability PASSED: %d bytes, %.2f Kbps sample\n", bytesReceived, kbps);
   Serial.flush();
-  queueConsoleMessageF("Internet speed OK: %.1f Kbps", kbps);
+  queueConsoleMessageF("Internet reachable: %.1f Kbps sample", kbps);
 
   Serial.println("========================================");
   Serial.println(">>> testInternetSpeed() COMPLETE - PASSED");
