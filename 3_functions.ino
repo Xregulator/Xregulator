@@ -6139,14 +6139,14 @@ void setupServer() {
       inputMessage = request->getParam("TempWarnExcess")->value();
       settingWrite(NK_TempWarnExcess, inputMessage.c_str());
       TempWarnExcess = inputMessage.toFloat();
-      queueConsoleMessageF("Temp warning threshold set to: +%.1f°F above limit", TempWarnExcess);
+      queueConsoleMessageF("Temp warning threshold set to: +%.1f%s above limit", dispTempDeltaF(TempWarnExcess), dispTempUnit());
     }
     if (request->hasParam("TempCritExcess")) {
       foundParameter = true;
       inputMessage = request->getParam("TempCritExcess")->value();
       settingWrite(NK_TempCritExcess, inputMessage.c_str());
       TempCritExcess = inputMessage.toFloat();
-      queueConsoleMessageF("Temp critical threshold set to: +%.1f°F above limit", TempCritExcess);
+      queueConsoleMessageF("Temp critical threshold set to: +%.1f%s above limit", dispTempDeltaF(TempCritExcess), dispTempUnit());
     }
     if (request->hasParam("TempSustainedTimeout")) {
       foundParameter = true;

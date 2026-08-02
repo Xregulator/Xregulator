@@ -5704,11 +5704,13 @@ void reportFieldModeEvent(uint32_t nowMs, FieldControlMode mode, FieldEventReaso
   if (reason == REASON_TEMP_STALE || reason == REASON_TEMP_CRITICAL || reason == REASON_TEMP_WARNING || reason == REASON_TEMP_SUSTAINED) {
     // Temperature-related events
     snprintf(msg, sizeof(msg),
-             "FIELD: %s | %s | Temp=%.1f°F (Limit=%.1f°F) | PWM=%.1f%% | Field=%s | Lockout=%s",
+             "FIELD: %s | %s | Temp=%.1f%s (Limit=%.1f%s) | PWM=%.1f%% | Field=%s | Lockout=%s",
              modeToString(mode),
              reasonToString(reason),
-             tick.tempToUseF,
-             tick.tempLimitF,
+             dispTempF(tick.tempToUseF),
+             dispTempUnit(),
+             dispTempF(tick.tempLimitF),
+             dispTempUnit(),
              appliedDuty,
              fieldStatus,
              lockoutStatus);

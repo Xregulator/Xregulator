@@ -2038,14 +2038,8 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   // comparator (updateINA228OvervoltageThreshold: lithium Bulk + 0.3, else equal to this value).
   // Once written, the value is treated as user-set; a later system-class change re-derives it
   // in applyNominalVoltageChange.
-  // Migration: an old VoltageSpikeMargin key (a margin) converts to an absolute value.
   if (!settingExists(NK_AlternatorHardShutdownV)) {
-    if (settingExists(NK_VoltageSpikeMargin)) {
-      float oldMargin = settingRead(NK_VoltageSpikeMargin).toFloat();
-      AlternatorHardShutdownV = BulkVoltage + oldMargin;
-    } else {
-      AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)BATTERY_VOLTAGE / 12.0f);
-    }
+    AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)BATTERY_VOLTAGE / 12.0f);
     settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
   } else {
     AlternatorHardShutdownV = settingRead(NK_AlternatorHardShutdownV).toFloat();
@@ -2184,12 +2178,8 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     KHard = settingRead(NK_KHard).toFloat();
   }
-  // ReseedFrac (was IExcessReseedFrac) — migrates from old filename if present
   if (settingExists(NK_ReseedFrac)) {
     ReseedFrac = settingRead(NK_ReseedFrac).toFloat();
-  } else if (settingExists(NK_IExcessReseedFrac)) {
-    ReseedFrac = settingRead(NK_IExcessReseedFrac).toFloat();
-    settingWrite(NK_ReseedFrac, String(ReseedFrac, 2).c_str());
   } else {
     settingWrite(NK_ReseedFrac, String(ReseedFrac, 2).c_str());
   }
@@ -2203,21 +2193,13 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     settingWrite(NK_CvRecovClimb, String(CvRecovClimbRate, 2).c_str());
   }
-  // OvGroup1Enable — migrates from old OvLayer2Enable NVS key if found
   if (settingExists(NK_OvGroup1Enable)) {
     OvGroup1Enable = settingRead(NK_OvGroup1Enable).toInt() != 0;
-  } else if (settingExists(NK_OvLayer2Enable)) {
-    OvGroup1Enable = settingRead(NK_OvLayer2Enable).toInt() != 0;
-    settingWrite(NK_OvGroup1Enable, String((int)OvGroup1Enable).c_str());
   } else {
     settingWrite(NK_OvGroup1Enable, String((int)OvGroup1Enable).c_str());
   }
-  // OvGroup2Enable — migrates from old OvLayer3Enable NVS key if found
   if (settingExists(NK_OvGroup2Enable)) {
     OvGroup2Enable = settingRead(NK_OvGroup2Enable).toInt() != 0;
-  } else if (settingExists(NK_OvLayer3Enable)) {
-    OvGroup2Enable = settingRead(NK_OvLayer3Enable).toInt() != 0;
-    settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
   } else {
     settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
   }
@@ -2272,27 +2254,19 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TdPred = settingRead(NK_TdPred).toFloat();
   }
   if (!settingExists(NK_OvMeasMarginV)) {
-    if (settingExists(NK_VSoftMarginV)) { OvMeasMarginV = settingRead(NK_VSoftMarginV).toFloat(); }  // migrated value is already per-bus
-    else OvMeasMarginV *= seedVScale;
+    OvMeasMarginV *= seedVScale;
     settingWrite(NK_OvMeasMarginV, String(OvMeasMarginV, 3).c_str());
   } else {
     OvMeasMarginV = settingRead(NK_OvMeasMarginV).toFloat();
   }
   if (!settingExists(NK_OvPredMarginV)) {
-    if (settingExists(NK_VHardMarginV)) { OvPredMarginV = settingRead(NK_VHardMarginV).toFloat(); }  // migrated value is already per-bus
-    else OvPredMarginV *= seedVScale;
+    OvPredMarginV *= seedVScale;
     settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
   } else {
     OvPredMarginV = settingRead(NK_OvPredMarginV).toFloat();
   }
-  // DvdtTC (was DvdtAlpha) — migrates from old alpha-based file if present.
-  // Conversion: TC = 5ms × (1 − α) / α  (preserves behavior at 5ms nominal cadence).
   if (settingExists(NK_DvdtTC)) {
     DvdtTC = constrain(settingRead(NK_DvdtTC).toFloat(), 5.0f, 500.0f);
-  } else if (settingExists(NK_DvdtAlpha)) {
-    float oldAlpha = constrain(settingRead(NK_DvdtAlpha).toFloat(), 0.01f, 0.50f);
-    DvdtTC = constrain(5.0f * (1.0f - oldAlpha) / oldAlpha, 5.0f, 500.0f);
-    settingWrite(NK_DvdtTC, String(DvdtTC, 1).c_str());
   } else {
     settingWrite(NK_DvdtTC, String(DvdtTC, 1).c_str());
   }

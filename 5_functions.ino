@@ -1577,8 +1577,8 @@ void CheckAlarms() {
       alarmReason = "High alternator temperature";
       if (millis() - lastTempAlarmMsgMs >= 30000) {
         lastTempAlarmMsgMs = millis();
-        queueConsoleMessageF("High alternator temperature: %.1f°F (limit: %d°F)",
-                             TempToUse, TempAlarm);
+        queueConsoleMessageF("High alternator temperature: %.1f%s (limit: %.0f%s)",
+                             dispTempF(TempToUse), dispTempUnit(), dispTempF((float)TempAlarm), dispTempUnit());
       }
     } else {
       lastTempAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
@@ -1590,8 +1590,8 @@ void CheckAlarms() {
       alarmReason = "Low alternator temperature";
       if (millis() - lastTempLowAlarmMsgMs >= 30000) {
         lastTempLowAlarmMsgMs = millis();
-        queueConsoleMessageF("Low alternator temperature: %.1f°F (limit: %d°F)",
-                             TempToUse, TempAlarmLow);
+        queueConsoleMessageF("Low alternator temperature: %.1f%s (limit: %.0f%s)",
+                             dispTempF(TempToUse), dispTempUnit(), dispTempF((float)TempAlarmLow), dispTempUnit());
       }
     } else {
       lastTempLowAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
@@ -1604,8 +1604,8 @@ void CheckAlarms() {
       alarmReason = "Battery too cold to charge";
       if (millis() - lastColdChargeAlarmMsgMs >= 30000) {
         lastColdChargeAlarmMsgMs = millis();
-        queueConsoleMessageF("Cold-charge lockout: board temp %.1f°F below %.0f°F floor — charging disabled",
-                             ambientTemp, MinChargeTempF);
+        queueConsoleMessageF("Cold-charge lockout: board temp %.1f%s below %.0f%s floor — charging disabled",
+                             dispTempF(ambientTemp), dispTempUnit(), dispTempF(MinChargeTempF), dispTempUnit());
       }
     } else {
       lastColdChargeAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
@@ -2896,7 +2896,12 @@ void _ReadAnalogInputs_inner() {
                              break;
                            }
 
-                           temperatureThermistor = (int)(thermistorTempC(Channel3V) * 1.8f + 32.0f);  // °C → °F
+                           float thermC = thermistorTempC(Channel3V);
+                           if (thermC <= -98.5f) {  // -99.0f error sentinel (°C domain) — converting it would yield -146°F, which passes every != -99 check downstream
+                             temperatureThermistor = -99;
+                             break;
+                           }
+                           temperatureThermistor = (int)(thermC * 1.8f + 32.0f);  // °C → °F
 
                            if (temperatureThermistor > 500) {
                              temperatureThermistor = -99;
@@ -2963,8 +2968,11 @@ void _ReadAnalogInputs_inner() {
                  switch (bmpState) {
 
                    case BMP_IDLE:
-                     // 8s cycle keeps ambient/baro fresh well inside the 10s DATA_TIMEOUT window
-                     if (millis() - bmpLastCycleMs >= 8000) {
+                     // 4s cycle: max age 4s, one missed read 8s — both inside the 10s DATA_TIMEOUT.
+                     // At the old 8s a single missed read hit 16s, which dropped the battery-temp
+                     // gain derate to 1.0, skipped the cold-charge lockout check, and grayed the
+                     // header board-temp readout until the next good read.
+                     if (millis() - bmpLastCycleMs >= 4000) {
                        bmp388.startForcedConversion();  // returns immediately if sensor is in sleep
                        bmpTriggerMs = millis();
                        bmpState = BMP_WAIT_READY;
@@ -3280,17 +3288,24 @@ void ReadAnalogInputs_Fake() {
     if (RPM > RPMMax)         { RPMMax         = RPM; }
     if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; }
 
-    // Fake temperatures (10–110°C)
+    // Fake temperatures — fakeTemp walks in °C (10–110), converted to °F at storage to match
+    // the °F-native globals (previously stored raw °C, making the alternator read ~100°F
+    // hotter than its own thermistor in sim).
     fakeTemp += (random(-30, 30) / 10.0);
     if (fakeTemp < 10) fakeTemp = 10;
     if (fakeTemp > 110) fakeTemp = 110;
-    temperatureThermistor = fakeTemp;
-    ambientTemp = fakeTemp - (5 + random(-20, 20) / 10.0);
+    temperatureThermistor = (int)(fakeTemp * 1.8f + 32.0f);
+    ambientTemp = (fakeTemp - (5 + random(-20, 20) / 10.0)) * 1.8f + 32.0f;
+    // Floored well clear of MinChargeTempF (40°F): the walk above can reach ~37°F, and once
+    // IDX_AMBIENT_TEMP is marked fresh the cold-charge lockout acts on it and would kill the
+    // field in sim. Without the MARK_FRESH the board-temp and baro readouts stay grayed forever.
+    if (ambientTemp < 60.0f) ambientTemp = 60.0f;
 
     float tempC = fakeTemp + 10 + random(-20, 20) / 10.0;
     AlternatorTemperatureF = tempC * 9.0 / 5.0 + 32.0;
     MARK_FRESH(IDX_THERMISTOR_TEMP);
     MARK_FRESH(IDX_ALTERNATOR_TEMP);
+    MARK_FRESH(IDX_AMBIENT_TEMP);
 
     if (temperatureThermistor > MaxTemperatureThermistor)             MaxTemperatureThermistor             = temperatureThermistor;
     if (temperatureThermistor > MaxTemperatureThermistor_AllTime)     MaxTemperatureThermistor_AllTime     = temperatureThermistor;
@@ -3341,6 +3356,7 @@ void ReadAnalogInputs_Fake() {
 
     // Fake barometric pressure (wide, stormy)
     baroPressure = 1013 + (random(-200, 200) / 10.0);  // ±20 hPa
+    MARK_FRESH(IDX_BARO_PRESSURE);
 
     // Fake other channels
     Channel0V = BatteryV;
@@ -4254,7 +4270,7 @@ void seedSocFromVoltage() {
     // parallel Ah divides it, series blocks multiply it. Clamped so a bogus current reading
     // can't wreck the seed.
     // Reff also scales with temperature (~doubles per −20°C, both chemistries). ambientTemp is
-    // still NAN here on a cold boot (BMP388 runs an 8s cycle in ReadAnalogInputs and discards
+    // still NAN here on a cold boot (BMP388 runs a 4s cycle in ReadAnalogInputs and discards
     // its first sample), so take one blocking forced conversion — ~50ms once, only on the
     // fresh-NVS path, and the board hasn't self-heated yet so it's the best proxy it ever is.
     boardTempF = ambientTemp;

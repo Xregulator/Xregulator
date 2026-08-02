@@ -1204,7 +1204,7 @@ void altHealthSave() {
   altTrendPersist();                                                       // append-only committed-bucket log
   altPersistTrendBucket();                                                 // partial in-progress bucket (4 scalars)
   settingWrite(NK_altbaseSec, String(altTrendBaselineSec, 1).c_str());   // trend X-axis origin
-  settingWrite("altRefSrc", String((int)altRefSource).c_str());          // active reference source
+  settingWrite(NK_altRefSrc, String((int)altRefSource).c_str());          // active reference source
 }
 static void altLoad() {
   uint32_t uw = 0;
@@ -1221,7 +1221,7 @@ static void altLoad() {
   altTrendLoad();                                                          // committed buckets
   altRestoreTrendBucket();                                                 // partial in-progress bucket
   if (settingExists(NK_altbaseSec)) altTrendBaselineSec = settingRead(NK_altbaseSec).toFloat();
-  if (settingExists("altRefSrc")) altRefSource = (uint8_t)settingRead("altRefSrc").toInt();
+  if (settingExists(NK_altRefSrc)) altRefSource = (uint8_t)settingRead(NK_altRefSrc).toInt();
   if (altRefSource == 1 && !altHaveUpload) altRefSource = 0;               // no uploaded surface → fall back to My History
 }
 
@@ -1239,7 +1239,7 @@ bool altUploadFrontCsv(char *body, bool fixed) {
   altRefSource = 1;                             // grade session + trend against the uploaded surface
   altPaused = fixed ? 1.0f : 0.0f;              // Uploaded defaults Pause ON; user may keep learning My History
   settingWrite(NK_altPaused, fixed ? "1.0000" : "0.0000");
-  settingWrite("altRefSrc", "1");
+  settingWrite(NK_altRefSrc, "1");
   queueConsoleMessageF("AltFront: UPLOADED %d pts to Uploaded surface (%s); My History kept",
                        altFrontUp.count, fixed ? "Pause ON" : "still learning My History");
   altHealthSave();   // persist both surfaces now (field-off-safe)
@@ -1304,7 +1304,7 @@ void resetAlternatorHealth() {
   LittleFS.remove("/alttrend.bin");
   fsReleaseLock();
   settingWrite(NK_altbaseSec, String(altTrendBaselineSec, 1).c_str());
-  settingWrite("altRefSrc", "0");
+  settingWrite(NK_altRefSrc, "0");
   queueConsoleMessage("AltHealth: full reset (Reset / Start Over) — My History + trend + session cleared, baseline restarted");
 }
 
@@ -1470,10 +1470,10 @@ bool altSettingsHandle(AsyncWebServerRequest *request) {
         settingWrite(NK_altPaused, "1.0000");
       }
       altRefSource = 1;
-      settingWrite("altRefSrc", "1");
+      settingWrite(NK_altRefSrc, "1");
     } else {
       altRefSource = 0;
-      settingWrite("altRefSrc", "0");
+      settingWrite(NK_altRefSrc, "0");
     }
     handled = true;
   }
@@ -2867,10 +2867,13 @@ bool serveCachedAsset(AsyncWebServerRequest *request, const String &path, const 
   if (cf && cf->data && cf->size > 0) {
     // index.html must revalidate on every load. Cached without a network round trip it renders a
     // complete, live-looking dashboard off a device that is unreachable (wrong network, still in
-    // AP/config mode) — every reading dashed out and vesselInfoComplete stuck false. The other
-    // assets are only ever fetched by an index.html that already reached the device, so they keep
-    // the hour. The ETag makes the revalidation a 304, not a 164 KB re-download.
-    const char *cacheHdr = (path == "/index.html") ? "no-cache" : "public, max-age=3600";
+    // AP/config mode) — every reading dashed out and vesselInfoComplete stuck false.
+    // The rest of the bundle revalidates too (was max-age=3600): the five assets are a MATCHED SET,
+    // and a browser holding an hour-old styles.css against a just-updated index.html renders new
+    // markup with no rules for it — a viewBox-only <svg> with no matching CSS inflates to its
+    // container. loadFileToRAM always mints an ETag alongside the data, so every one of these is a
+    // 304 with no body, not a re-download.
+    const char *cacheHdr = "no-cache";
 
     if (cf->etag[0] && request->header("If-None-Match").indexOf(cf->etag) >= 0) {
       AsyncWebServerResponse *r304 = request->beginResponse(304);

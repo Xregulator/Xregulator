@@ -630,12 +630,18 @@ done:
 // tier 1 = exported AND imported (includes install topology and per-install calibration).
 // tier 3 = exported for fleet snapshot / support but NEVER imported — adopting another boat's
 // value would corrupt this device's own record.
+// Tiers gate IMPORT ONLY, and the import policy is provisional (it may move cloud-side
+// entirely). The EXPORT is never narrowed because of anything import does or might do.
 // The alt-health / boat-perf registry knobs (ALT_SETTINGS / PERF_SETTINGS, 7_functions.ino) are
 // tier-1 shareable too but save through generic loops a literal manifest can't reference, so they
-// are emitted/imported programmatically minus CFG_REGISTRY_SKIP — a new knob is covered for free.
-// The export deliberately captures nearly every persisted setting; paring down to what is appropriate
-// to apply happens at IMPORT time via the diff checkboxes, never by omitting from the export. Only
-// identity/secrets, device lifecycle/history, learned per-device state and momentary actions stay out
+// are emitted/imported programmatically — a new knob is covered for free. ALL of them export;
+// CFG_REGISTRY_SKIP only blocks import (it is the registry knobs' tier 3).
+// The export deliberately captures every persisted setting INCLUDING runtime/lifecycle/debug state
+// (tier 3) — the daily snapshot doubles as a remote debugging record. Paring down to what is
+// appropriate to apply happens at IMPORT time (tier gate + diff checkboxes), never by omitting from
+// the export. Only identity/secrets (WiFi, tokens, InstallId), the manual-GPS coordinates, and bulky
+// rings whose data already uploads by its own path (DCIR results ride the commissioning ledger;
+// alt-trend buckets ride the alt-health upload) stay out
 // — config_drift_check.py fails the build if a settingWrite key is in neither the manifest nor its
 // EXCLUDE list. User-editable RPM tables are raw "learning"-namespace blobs carried by a separate
 // "tables" section (exportTablesObject), not this manifest.
@@ -974,10 +980,51 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "imu_dist_cl_ft", NK_imuDistClFt, 3 },
   { "imu_height_wl_ft", NK_imuHtWlFt, 3 },
   { "vesselSaved", NK_vesselSaved, 3 },
+  // ── Debug/support state — persisted runtime intent, lifecycle and small result blobs.
+  //    Tier 3: rides every snapshot/export so a support session sees the device's full picture
+  //    (an engaged override, a half-done commissioning, a pending wipe), but applyImportConfig
+  //    never adopts any of it.
+  { "OnOff", NK_OnOff, 3 },
+  { "ManualFieldToggle", NK_ManualFieldToggle, 3 },
+  { "ManualDutyTarget", NK_ManualDutyTarget, 3 },
+  { "IgnitionOverride", NK_IgnitionOverride, 3 },
+  { "LimpHome", NK_LimpHome, 3 },
+  { "SwitchControlOverride", NK_SwitchControlOverride, 3 },
+  { "TuningMode", NK_TuningMode, 3 },
+  { "CVTuningMode", NK_CVTuningMode, 3 },
+  { "battMaxMode", NK_battMaxMode, 3 },
+  { "hardwarePresent", NK_hardwarePresent, 3 },
+  { "socInfoAvailable", NK_socInfoAvailable, 3 },
+  { "totalPowerCycles", NK_totalPowerCycles, 3 },
+  { "weatherDataValid", NK_weatherDataValid, 3 },
+  { "gpsManualActive", NK_gpsManualActive, 3 },   // flag only — LatitudeManual/LongitudeManual never export
+  { "LastResetReason", NK_LastResetReason, 3 },
+  { "cfgSchema", NK_cfgSchema, 3 },
+  { "lastAppldCfgId", NK_lastAppldCfgId, 3 },
+  { "imu_mnt_state", NK_imu_mnt_state, 3 },
+  { "RpmAxisWipeLoc", NK_RpmAxisWipeLoc, 3 },
+  { "RpmAxisWipePend", NK_RpmAxisWipePend, 3 },
+  { "SocSeedAck", NK_SocSeedAck, 3 },
+  { "SocSeedSnap", NK_SocSeedSnap, 3 },
+  { "commissionAgeAck", NK_cmAgeAck, 3 },
+  { "commissionChangeAck", NK_cmChangeFlag, 3 },
+  { "commissionState", NK_commissionState, 3 },
+  { "commissionPhase", NK_commissionPhase, 3 },
+  { "commissionDoneMask", NK_commissionDoneMask, 3 },
+  { "commissionManualMask", NK_commissionManualMask, 3 },
+  { "cxLedgerSeq", NK_cxLedgerSeq, 3 },
+  { "commissionSnap", NK_commissionSnap, 3 },
+  { "commissionStepSnap", NK_commissionStepSnap, 3 },
+  { "cvStressLast", NK_cvStressLast, 3 },
+  { "faCalGain", NK_faCalGain, 3 },
+  { "faCalOffA", NK_faCalOffA, 3 },
+  { "altbaseSec", NK_altbaseSec, 3 },
+  { "altRefSrc", NK_altRefSrc, 3 },
 };
 static const size_t CONFIG_MANIFEST_COUNT = sizeof(CONFIG_MANIFEST)/sizeof(CONFIG_MANIFEST[0]);
 
-// Registry knobs NEVER exported/imported (everything else in ALT_SETTINGS/PERF_SETTINGS is):
+// Registry knobs NEVER IMPORTED (everything in ALT_SETTINGS/PERF_SETTINGS exports, these included —
+// the snapshot doubles as a debugging record, so pause state must be visible):
 //   altPaused / perfPaused — learning pause state, runtime intent not a charge profile
 //   perfSpeedSrc — per-boat speed-sensor topology (STW vs SOG); importing it would bypass
 //     the Clear-All reset perfSettingsHandle fires on change, leaving the learned
@@ -1020,8 +1067,8 @@ static void cfgAppendFloatArr(String &out, const float *a, int n, int dec) {
 // Single source of truth for BOTH /exportConfig (sharing) and the daily fleet config
 // snapshot (buildConfigPayload's "settings") — so neither can drift as settings are added.
 // Keys never set are omitted.
-// The alt-health/boat-perf registries are appended generically (minus CFG_REGISTRY_SKIP),
-// so knobs added to those registries are covered without touching the manifest.
+// The alt-health/boat-perf registries are appended generically (ALL knobs — CFG_REGISTRY_SKIP
+// gates import only), so knobs added to those registries are covered without touching the manifest.
 String manifestConfigObject() {
   String j;
   j.reserve(18432);   // manifest + registry + learned-state blobs (DCIR up to ~5.6KB)
@@ -1043,7 +1090,6 @@ String manifestConfigObject() {
   // perfSettingsLoad exactly.
   #define CFG_EMIT_REGISTRY(REG, COUNT) \
     for (size_t i = 0; i < COUNT; i++) { \
-      if (cfgRegistrySkipped(REG[i].name)) continue; \
       char key[16]; \
       snprintf(key, sizeof(key), "%s", REG[i].name); \
       if (!settingExists(key)) continue; \
@@ -1240,7 +1286,24 @@ String exportConfigJson() {
   j += manifestConfigObject();
   j += ",\"tables\":";
   j += exportTablesObject();
-  j += "}";
+  // THIS device's authority on what import refuses: tier-3 manifest rows + the registry skip
+  // list. cfgDiffPreview (script.js) partitions its diff with this so device state can't pose
+  // as an importable change. Names only (no values) and none are ever looked up by
+  // applyImportConfig, so the array is inert to every importer including older firmware.
+  j += ",\"export_only\":[";
+  bool first = true;
+  for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
+    if (CONFIG_MANIFEST[i].tier != 3) continue;
+    if (!first) j += ',';
+    first = false;
+    j += '"'; j += CONFIG_MANIFEST[i].param; j += '"';
+  }
+  for (size_t i = 0; i < sizeof(CFG_REGISTRY_SKIP)/sizeof(CFG_REGISTRY_SKIP[0]); i++) {
+    if (!first) j += ',';
+    first = false;
+    j += '"'; j += CFG_REGISTRY_SKIP[i]; j += '"';
+  }
+  j += "]}";
   return j;
 }
 

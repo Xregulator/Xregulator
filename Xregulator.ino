@@ -2299,6 +2299,17 @@ const unsigned long THERMAL_UPDATE_INTERVAL = 10000;  // 10 seconds
 
 float WindingTempOffset = 50.0;  // User configurable winding temp offset (°F)
 uint8_t displayTempUnit = 0;     // 0 = °F, 1 = °C — display preference, no firmware math changes
+
+// Console/alarm message formatting only — all control math stays °F-native.
+float dispTempF(float tF) {
+  return displayTempUnit == 1 ? (tF - 32.0f) / 1.8f : tF;
+}
+float dispTempDeltaF(float dF) {  // spans/offsets: scale only, no -32 shift
+  return displayTempUnit == 1 ? dF / 1.8f : dF;
+}
+const char* dispTempUnit() {
+  return displayTempUnit == 1 ? "°C" : "°F";
+}
 float PulleyRatio = 2.0;         // User configurable pulley ratio
 int ManualLifePercentage = 100;  // Manual override for life remaining %
 

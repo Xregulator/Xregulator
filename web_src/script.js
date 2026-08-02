@@ -124,7 +124,12 @@ function plotTickColor() { return document.body.classList.contains('dark-mode') 
 // The timestamp payload sends every 3s, so any threshold below
 // ~6s will cause false stale flashes even with healthy sensors.
 const STALE_THRESHOLD_DEFAULT_MS = 6000;   // All sensors except temperature
-const STALE_THRESHOLD_TEMP_MS = 12000;  // Temp sensors read every 5s — allows one failed read
+const STALE_THRESHOLD_TEMP_MS = 12000;  // Alternator/thermistor temp read every 5s — allows one failed read
+// BMP388 board temp + barometric pressure run a 4s forced-conversion cycle. Set to the ESP32's
+// DATA_TIMEOUT so the gray appears exactly when firmware stops trusting the value (drops the
+// battery-temp gain derate, skips the cold-charge lockout) — not on some unrelated UI number.
+// 4s cycle means one missed read (8s) still reads fresh; two (12s) gray, same as firmware.
+const STALE_THRESHOLD_BOARD_MS = 10000;
 
 // Numerical-gauge render throttle. CSV1 LiveStream arrives every webgaugesinterval (~100ms)
 // for smooth plots, but rendering noisy gauges that fast makes the last digit unreadable.
@@ -150,6 +155,39 @@ function toDisplayTemp(val_f) {
 function toDisplayTempDelta(delta_f) {
     return displayTempUnit === 1 ? delta_f * 5 / 9 : delta_f;
 }
+function fromDisplayTemp(val_disp) {  // inverse of toDisplayTemp: display unit → native °F
+    return displayTempUnit === 1 ? val_disp * 9 / 5 + 32 : val_disp;
+}
+
+// Re-bake unit-dependent plot state after a display-unit flip. The live temp plot buffer
+// holds DISPLAY units — remap it in place; the thermal ring and LT store stay native °F
+// and re-convert at render, so those plots only need tearing down so labels regenerate.
+function retargetTempPlotsForUnit(prevUnit) {
+    const remap = prevUnit === 1 ? (v => v * 9 / 5 + 32) : (v => (v - 32) * 5 / 9);
+    if (typeof temperatureData !== 'undefined' && temperatureData && temperatureData[1]) {
+        const s = temperatureData[1];
+        for (let i = 0; i < s.length; i++) if (s[i] != null && Number.isFinite(s[i])) s[i] = remap(s[i]);
+        if (typeof plotInterp !== 'undefined' && plotInterp.temperature) {
+            const p = plotInterp.temperature;
+            if (p.prevY && Number.isFinite(p.prevY[0])) p.prevY[0] = remap(p.prevY[0]);
+            if (p.nextY && Number.isFinite(p.nextY[0])) p.nextY[0] = remap(p.nextY[0]);
+        }
+    }
+    if (typeof temperaturePlot !== 'undefined' && temperaturePlot) {
+        temperaturePlot.destroy();
+        initTemperaturePlot();
+        if (typeof recomputeAutoScales === 'function' && typeof autoScaleTemp !== 'undefined' && autoScaleTemp) recomputeAutoScales(true);
+    }
+    if (typeof thermalY !== 'undefined' && thermalY.p0 && thermalY.p0.temp) {  // session-local pin, typed in display units
+        thermalY.p0.temp = [remap(thermalY.p0.temp[0]), remap(thermalY.p0.temp[1])];
+    }
+    if (typeof thermalLogPlots !== 'undefined' && thermalLogPlots[0]) {
+        thermalLogPlots[0].destroy(); thermalLogPlots[0] = null;
+        thermalRenderAll();
+    }
+    if (typeof window.ltOnTempUnitChanged === 'function') window.ltOnTempUnitChanged(prevUnit);
+}
+let _plotsTempUnit = 0;   // unit currently baked into plot buffers/labels; updateAllTempUnitLabels reconciles
 function tempUnitLabel() {
     return displayTempUnit === 1 ? '°C' : '°F';
 }
@@ -157,6 +195,24 @@ function updateAllTempUnitLabels() {
     const lbl = tempUnitLabel();
     document.querySelectorAll('.temp-unit-label').forEach(el => { el.textContent = lbl; });
     document.querySelectorAll('.temp-rate-label').forEach(el => { el.textContent = lbl + '/s'; });
+    // Retarget HTML min/max validation to the display unit — the browser validates the
+    // display-unit value BEFORE onsubmit converts it, so °F-authored bounds mis-gate °C
+    // entries (e.g. min="0" blocked every sub-zero °C low-alarm). Bounds are authored in
+    // °F via data-tmin-f/data-tmax-f (data-tdelta="1" for spans: scale only, no -32 shift).
+    document.querySelectorAll('input[data-tmin-f], input[data-tmax-f]').forEach(inp => {
+        const conv = inp.dataset.tdelta === '1' ? toDisplayTempDelta : toDisplayTemp;
+        if (inp.dataset.tminF !== undefined) inp.min = Math.floor(conv(parseFloat(inp.dataset.tminF)));
+        if (inp.dataset.tmaxF !== undefined) inp.max = Math.ceil(conv(parseFloat(inp.dataset.tmaxF)));
+    });
+    document.querySelectorAll('input[data-tmin-c], input[data-tmax-c]').forEach(inp => {  // °C-native (capTempRef)
+        if (inp.dataset.tminC !== undefined) inp.min = Math.floor(toDisplayTempFromC(parseFloat(inp.dataset.tminC)));
+        if (inp.dataset.tmaxC !== undefined) inp.max = Math.ceil(toDisplayTempFromC(parseFloat(inp.dataset.tmaxC)));
+    });
+    if (_plotsTempUnit !== displayTempUnit) {
+        const prev = _plotsTempUnit;
+        _plotsTempUnit = displayTempUnit;
+        retargetTempPlotsForUnit(prev);
+    }
     const fBtn = document.getElementById('tempUnitF_btn');
     const cBtn = document.getElementById('tempUnitC_btn');
     if (fBtn && cBtn) {                              // segmented-control active pill
@@ -169,23 +225,45 @@ function updateAllTempUnitLabels() {
 function setTempUnit(unit) {
     displayTempUnit = unit;
     updateAllTempUnitLabels();
-    fetch(`/get?displayTempUnit=${unit}`).catch(() => {});
+    // buildURL is mandatory: a bare /get resolves to the app's own localhost origin under
+    // Capacitor, so the write never lands and the next CSV3 echo snaps the pill back to °F.
+    fetch(buildURL(`/get?displayTempUnit=${unit}`)).catch(() => {});
 }
 
 // Convert a form input value from display unit back to °F before GET submission.
 // Temporarily rewrites the input value, lets the form submit, then restores the display value.
-function convertTempFormIfNeeded(form, inputName, isDelta) {
+function convertTempFormIfNeeded(form, inputName, isDelta, zeroMeansOff) {
     if (displayTempUnit !== 1) return true;
     const input = form.querySelector(`[name="${inputName}"]`);
     if (!input) return true;
     const displayVal = parseFloat(input.value);
     if (isNaN(displayVal)) return true;
+    if (zeroMeansOff && displayVal === 0) return true;  // 0 = firmware disable sentinel, never a temperature
     const nativeVal = isDelta
         ? (displayVal * 9 / 5)           // delta: °C span → °F span
         : (displayVal * 9 / 5 + 32);     // absolute: °C → °F
     input.value = Math.round(nativeVal * 10) / 10;  // round to 1 decimal
+    // Restore on the next tick — the browser serializes the form synchronously right after this
+    // handler returns; a longer window let a second Set re-convert the visible °F value as °C.
     const originalDisplay = String(displayVal);
-    setTimeout(() => { input.value = originalDisplay; }, 500);
+    setTimeout(() => { input.value = originalDisplay; }, 0);
+    return true;
+}
+
+// capTempRef is the one °C-native setting (capTempRefC in firmware) — the mirror of the two
+// helpers above: convert °C→display for readouts, display→°C on submit when in °F mode.
+function toDisplayTempFromC(val_c) {
+    return displayTempUnit === 1 ? val_c : val_c * 9 / 5 + 32;
+}
+function convertTempFormCNative(form, inputName) {
+    if (displayTempUnit === 1) return true;  // display already °C
+    const input = form.querySelector(`[name="${inputName}"]`);
+    if (!input) return true;
+    const displayVal = parseFloat(input.value);
+    if (isNaN(displayVal)) return true;
+    input.value = Math.round((displayVal - 32) / 1.8 * 10) / 10;
+    const originalDisplay = String(displayVal);
+    setTimeout(() => { input.value = originalDisplay; }, 0);
     return true;
 }
 
@@ -1098,7 +1176,7 @@ function fetchKneeLearnState(){
                       + '<td>' + Number(b.floor).toFixed(1) + '</td>'
                       + '<td>' + Number(b.knee).toFixed(1) + '</td>'
                       + '<td>' + (locked ? 'yes' : '—') + '</td>'
-                      + '<td>' + (locked && learnT > 0 ? Math.round(learnT) : '—') + '</td>'
+                      + '<td>' + (locked && learnT > 0 ? Math.round(toDisplayTemp(learnT)) : '—') + '</td>'
                       + '<td>' + age + '</td>'
                       + '</tr>';
             });
@@ -1169,7 +1247,7 @@ function fetchZeroFitState(){
         const corr = Number(j.corrNow) || 0, slope = Number(j.b) || 0, r2 = Number(j.r2) || 0;
         const applied = Number(j.applied) === 1;
         st.textContent = 'Fit: ' + (j.sensor === 'alt' ? 'alt-temp' : 'board-temp')
-            + ', ' + slope.toFixed(4) + ' A/°F, R²' + r2.toFixed(2)
+            + ', ' + (displayTempUnit === 1 ? slope * 9 / 5 : slope).toFixed(4) + ' A/' + tempUnitLabel() + ', R²' + r2.toFixed(2)
             + ' → ' + (applied ? '' : 'would apply ') + corr.toFixed(2) + ' A'
             + (applied ? ' applied' : ' (Off)');
     }).catch(()=>{});
@@ -1224,26 +1302,69 @@ function updateAltHealth() {
   if (modeLbl) modeLbl.textContent = [altLive.source>=1 ? 'Uploaded reference' : '',
                                       altLive.paused>=1 ? 'learning paused' : '']
                                      .filter(Boolean).join(' · ');
-  setSeg(['alt-src-hist','alt-src-file'], altLive.source>=1?1:0);
-  setSeg(['alt-learn-on','alt-learn-off'], altLive.paused>=1?1:0);
-  setSeg(['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator segmented toggle in Setup (mirrors Vessel Performance)
+  setSegEcho('altSource', ['alt-src-hist','alt-src-file'], altLive.source>=1?1:0);
+  setSegEcho('altPaused', ['alt-learn-on','alt-learn-off'], altLive.paused>=1?1:0);
+  setSegEcho('altSimMode', ['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator segmented toggle in Setup (mirrors Vessel Performance)
 }
 
+// Write path for the echo-only controls on the two learning pages (Charging System Health +
+// Vessel Performance). The device echo over SSE stays the committed truth, but a click now
+// paints immediately (optimistic); the pendingToggles entry shields that paint from stale
+// echoes during the round-trip — same reconciliation as updateSegToggle, 2.5s grace from the
+// first stale echo — and a write that never lands reverts the paint and reports the failure.
+// `paint` draws the desired value; `repaint` restores the device's state after a failure.
+function optimisticEchoWrite(key, desired, query, what, paint, repaint){
+  if(DEMO_MODE){ repaint(); xAlert('Demo mode — no regulator is connected, so ' + what + ' cannot be changed.'); return; }
+  pendingToggles.set(key, { desiredValue: desired, baseRev: lastSeenRev });
+  paint(desired);
+  fetchWithTimeout(buildURL('/get?'+query),{},5000)
+    .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); })
+    .catch(()=>{
+      pendingToggles.delete(key);
+      repaint();
+      xAlert('Could not reach the regulator — ' + what + ' was NOT changed.');
+    });
+}
+// Echo-side gate: returns the echoed value to paint, or null while a stale (pre-confirmation)
+// echo should leave the optimistic paint alone. Both sides must feed it the SAME 0/1 domain.
+function echoReconcile(key, value){
+  const pending = pendingToggles.get(key);
+  if (!pending) return value;
+  if (pending.deadlineMs === undefined) pending.deadlineMs = Date.now() + 2500;
+  if (value !== pending.desiredValue && Date.now() <= pending.deadlineMs) return null;
+  pendingToggles.delete(key);   // confirmed, or grace expired — either way the device wins
+  return value;
+}
+function setSegEcho(key, ids, activeIdx){
+  if (echoReconcile(key, activeIdx) === null) return;
+  setSeg(ids, activeIdx);
+}
+// Non-optimistic fallback for a perfSet key with no PERF_OPTIMISTIC entry.
+function echoSettingWrite(query, what){
+  if(DEMO_MODE){ xAlert('Demo mode — no regulator is connected, so ' + what + ' cannot be changed.'); return; }
+  fetchWithTimeout(buildURL('/get?'+query),{},5000)
+    .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); })
+    .catch(()=>{ xAlert('Could not reach the regulator — ' + what + ' was NOT changed.'); });
+}
 // Simulator Off(0)/On(1) — segmented toggle in Setup, parallels Vessel Performance's perfSimMode.
 function altSetSim(v){
   if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/get?altSimMode='+(v?1:0)),{},5000).catch(()=>{});
+  optimisticEchoWrite('altSimMode', v?1:0, 'altSimMode='+(v?1:0), 'the simulator',
+                      i=>setSeg(['alt-sim-off','alt-sim-on'],i), updateAltHealth);
 }
 // Reference Source: My History (0) | Uploaded File (1). INDEPENDENT of Pause. Selecting Uploaded
-// defaults Pause = ON firmware-side (spec §4.3); the user can flip Continue afterward.
+// defaults Pause = ON firmware-side (spec §4.3); the user can flip Continue afterward. Only the
+// source pill paints optimistically — the paused knock-on moves on the echo alone.
 function altSetSource(src){
   if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/get?altSource='+(src?1:0)),{},5000).catch(()=>{});
+  optimisticEchoWrite('altSource', src?1:0, 'altSource='+(src?1:0), 'the reference source',
+                      i=>setSeg(['alt-src-hist','alt-src-file'],i), updateAltHealth);
 }
 // Pause / Continue Learning — independent of Reference Source (spec §4.1). Learning always writes My History.
 function altSetPaused(p){
   if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/get?altPaused='+(p?1:0)),{},5000).catch(()=>{});
+  optimisticEchoWrite('altPaused', p?1:0, 'altPaused='+(p?1:0), 'learning',
+                      i=>setSeg(['alt-learn-on','alt-learn-off'],i), updateAltHealth);
 }
 // One-button health export: everything behind BOTH Charging System Health plots plus the yardstick,
 // in one file. Concatenates the reference surface (/altcurve.csv — a BEFRONT1 block, kept FIRST so the
@@ -1450,15 +1571,24 @@ async function cfgDiffPreview(blobText, sourceLabel){
   const fullJ=await rFull.json();
   const curFull=fullJ.config||{};
   const curTables=fullJ.tables||{};
-  const changed=[],fresh=[];
+  const changed=[],fresh=[],refRows=[];
   let unchanged=0;
   // Read-only diagnostics/results the firmware exports but never applies on import — hide them
   // from the diff so they can't show as spurious "[object Object]" rows or no-op checkable rows.
   // vesselSaved is the "form completed" sentinel, not a value — it is tier 3 anyway, so a row would never apply.
   const CFG_NONSETTING=new Set(['learned_state','commissioning_results','cvComputedKp','cvComputedKi','cvComputedKd','vesselSaved']);
+  // THIS regulator's export-only key list (tier-3 manifest rows + registry skip), served inside
+  // /exportConfig so the firmware manifest stays the single source of truth. Import ignores these
+  // keys, so their diffs render in a separate reference-only section with no checkbox.
+  const exportOnly=new Set(Array.isArray(fullJ.export_only)?fullJ.export_only:[]);
   for(const k of Object.keys(incoming.config).sort()){
     if(CFG_NONSETTING.has(k)) continue;
     const nv=String(incoming.config[k]);
+    if(exportOnly.has(k)){
+      const cur=(k in curFull)?String(curFull[k]):'(not set)';
+      if(cur!==nv) refRows.push({k,cur,nv});
+      continue;
+    }
     if(k in curFull){
       if(String(curFull[k])===nv) unchanged++;
       else changed.push({k,cur:String(curFull[k]),nv});
@@ -1483,6 +1613,7 @@ async function cfgDiffPreview(blobText, sourceLabel){
   const vNow=(incoming.config&&incoming.config.BatteryVoltage)||(incoming.vessel&&incoming.vessel.battery_voltage);
   sum.innerHTML='Loading <b>'+_cfgEsc(sourceLabel)+'</b>'+(incoming.fw_version?' (saved on firmware '+_cfgEsc(incoming.fw_version)+')':'')+'.<br>'
     +'<b>'+nChange+'</b> settings change, <b>'+nFresh+'</b> are new here, <b>'+unchanged+'</b> already match.'
+    +(refRows.length?'<br><b>'+refRows.length+'</b> device-state values differ — listed at the bottom for reference; this regulator never adopts them.':'')
     +'<br>Only checked rows are applied.'
     +(vNow?'<br>Source system voltage: <b>'+_cfgEsc(vNow)+' V</b> — confirm this matches your bank.':'')
     +'<br><span style="color:#fca5a5;">Hardware and calibration settings (sensor/shunt/polarity/offsets) WILL be applied — uncheck them unless the hardware is identical.</span>';
@@ -1491,6 +1622,12 @@ async function cfgDiffPreview(blobText, sourceLabel){
     +'<td style="padding:3px 8px 3px 0; color:#9cc; word-break:break-all;">'+_cfgEsc(label)+'</td>'
     +'<td style="padding:3px 8px; color:#888; word-break:break-all;">'+_cfgEsc(cur)+'</td>'
     +'<td style="padding:3px 0; color:#fff; word-break:break-all;">'+_cfgEsc(nv)+'</td></tr>';
+  // Reference-only rows: no checkbox (a checkbox would promise an apply that cannot happen), dimmed.
+  const refRow=r=>'<tr>'
+    +'<td></td>'
+    +'<td style="padding:3px 8px 3px 0; color:#778; word-break:break-all;">'+_cfgEsc(r.k)+'</td>'
+    +'<td style="padding:3px 8px; color:#667; word-break:break-all;">'+_cfgEsc(r.cur)+'</td>'
+    +'<td style="padding:3px 0; color:#889; word-break:break-all;">'+_cfgEsc(r.nv)+'</td></tr>';
   let h='';
   if(nChange||nFresh){
     h='<table style="width:100%; border-collapse:collapse; font-size:0.85em;"><tr style="color:#aaa; text-align:left;"><th></th><th style="padding:3px 8px 3px 0;">Setting</th><th style="padding:3px 8px;">Now</th><th style="padding:3px 0;">New</th></tr>'
@@ -1500,6 +1637,12 @@ async function cfgDiffPreview(blobText, sourceLabel){
       +tblFresh.map(f=>row('tables',f.k,_CFG_TABLE_LABELS[f.k]||f.k,'(not set)',f.nv)).join('')+'</table>';
   } else {
     h='<div style="color:#888; font-size:0.9em; padding:8px 0;">No settings would change — this regulator already matches the file.</div>';
+  }
+  if(refRows.length){
+    h+='<div style="color:#889; font-size:0.85em; margin-top:12px; padding-top:8px; border-top:1px solid #333;">'
+      +'Device state in the source file — reference only, this regulator keeps its own:</div>'
+      +'<table style="width:100%; border-collapse:collapse; font-size:0.85em;"><tr style="color:#667; text-align:left;"><th></th><th style="padding:3px 8px 3px 0;">Key</th><th style="padding:3px 8px;">This device</th><th style="padding:3px 0;">Source file</th></tr>'
+      +refRows.map(refRow).join('')+'</table>';
   }
   body.innerHTML=h;
   const hasRows=!!(nChange||nFresh);
@@ -2004,7 +2147,7 @@ function renderAltSessPoint(i){
     + '<span style="color:#444;">'
     + 'RPM ' + Math.round(d.rpm)
     + ' · ' + n(d.measAmps != null ? d.measAmps : d.amps, 1, ' A') + ' output'
-    + ' · ' + n(d.tempF, 0, ' °F') + ' alt temp'
+    + ' · ' + n(d.tempF == null ? null : toDisplayTemp(d.tempF), 0, ' ' + tempUnitLabel()) + ' alt temp'
     + ' · ' + n(d.fieldPct, 0, '%') + ' field'
     + ' · expected ' + n(d.pred, 1, ' A')
     + '</span>';
@@ -2023,9 +2166,27 @@ let _perfPlotPending = false, _perfModelLastFetch = 0;
 
 function fetchPerfSchema(){ return fetch('/perfschema').then(r=>r.json()).then(j=>{ perfSchema=j; }).catch(()=>{}); }
 
+// Names for the failure message; a key with no entry falls back to a generic phrase.
+const PERF_SET_LABEL = { perfFoldSymmetric:'polar symmetry', perfSimMode:'the simulator',
+                         perfSpeedSrc:'the speed source', perfSource:'the reference source',
+                         perfPaused:'learning' };
+// Optimistic-paint config per control. idx maps the written value onto the SAME 0/1 the echo
+// painter computes — the two must stay in lockstep or echoReconcile never confirms.
+const PERF_OPTIMISTIC = {
+  perfSimMode:      { idx:v=>v?1:0,      paint:i=>setSeg(['perf-sim-off','perf-sim-on'],i), repaint:renderPerf },
+  perfSource:       { idx:v=>v>=1?1:0,   paint:i=>setSeg(['perf-ref-0','perf-ref-1'],i),    repaint:renderPerf },
+  perfSpeedSrc:     { idx:v=>v>=1.5?1:0, paint:i=>setSeg(['perf-src-1','perf-src-2'],i),    repaint:updatePerfControls },
+  perfFoldSymmetric:{ idx:v=>v>=0.5?0:1, paint:i=>setSeg(['perf-sym-1','perf-sym-0'],i),    repaint:updatePerfControls },
+  perfPaused:       { idx:v=>v?1:0,      paint:paintPerfLearnSwitch,                        repaint:renderPerf },
+};
 function perfSet(key, val){
-  if(!settingsUnlocked){ xAlert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/get?'+key+'='+val),{},5000).catch(()=>{});
+  const cfg = PERF_OPTIMISTIC[key];
+  // repaint on the locked path too: the learn switch is a native checkbox, so the browser has
+  // already flipped it visually — undo that from device state.
+  if(!settingsUnlocked){ xAlert('Please unlock settings first'); if(cfg) cfg.repaint(); return; }
+  const what = PERF_SET_LABEL[key] || 'that setting';
+  if(cfg) optimisticEchoWrite(key, cfg.idx(val), key+'='+val, what, cfg.paint, cfg.repaint);
+  else    echoSettingWrite(key+'='+val, what);
 }
 
 let perfView = 0;   // 0 = sailing, 1 = motoring (client-side display toggle)
@@ -2123,13 +2284,18 @@ function renderPerf(){
   setTxt('perf-sea-val', sea.toFixed(1)+'°'); setTxt('perf-sea-sub', seaWord(sea));
   // steady-state is shown by the "now" dot color (green = banking, orange = settling) + the header chip — see drawPerfPlot/drawMotorPlot
   // Learning switch (Live Data) + simulator/reference segmented toggles (Setup → Vessel Performance).
-  // All driven by perfLive, which always carries paused+sim+source.
-  const paused=perfLive.paused===1;
+  // All driven by perfLive, which always carries paused+sim+source; each gated through the
+  // pending-toggle reconciler so an in-flight optimistic click isn't reverted by a stale echo.
+  const pv = echoReconcile('perfPaused', perfLive.paused===1?1:0);
+  if (pv !== null) paintPerfLearnSwitch(pv);
+  setSegEcho('perfSimMode', ['perf-sim-off','perf-sim-on'], perfLive.sim===1?1:0);
+  setSegEcho('perfSource', ['perf-ref-0','perf-ref-1'], (L.source>=1)?1:0);
+}
+// Learning switch + label painter, shared by the echo path and the optimistic write path (0/1, 1 = paused).
+function paintPerfLearnSwitch(paused){
   const sw=document.getElementById('perf-learn-switch'); if(sw) sw.checked = !paused;
   const lbl=document.getElementById('perf-learn-label');
   if(lbl){ lbl.textContent = paused?'(paused)':'(active)'; lbl.style.color = paused?'#d9534f':'#5cb85c'; }
-  setSeg(['perf-sim-off','perf-sim-on'], perfLive.sim===1?1:0);
-  setSeg(['perf-ref-0','perf-ref-1'], (L.source>=1)?1:0);
 }
 function updatePerf(){ renderPerf(); }
 function updateMotor(){ renderPerf(); }
@@ -2138,8 +2304,8 @@ function setSeg(ids, activeIdx){
 }
 function updatePerfControls(){
   const s=perfSettings;
-  if(s.perfSpeedSrc!=null) setSeg(['perf-src-1','perf-src-2'], (s.perfSpeedSrc>=1.5)?1:0);   // <1.5 Water, ≥1.5 GPS (matches firmware threshold; never blank)
-  if(s.perfFoldSymmetric!=null) setSeg(['perf-sym-1','perf-sym-0'], (s.perfFoldSymmetric>=0.5)?0:1);
+  if(s.perfSpeedSrc!=null) setSegEcho('perfSpeedSrc', ['perf-src-1','perf-src-2'], (s.perfSpeedSrc>=1.5)?1:0);   // <1.5 Water, ≥1.5 GPS (matches firmware threshold; never blank)
+  if(s.perfFoldSymmetric!=null) setSegEcho('perfFoldSymmetric', ['perf-sym-1','perf-sym-0'], (s.perfFoldSymmetric>=0.5)?0:1);
 }
 // Switching STW↔SOG invalidates every learned point → the firmware does a Clear-All. Warn first.
 async function perfSetSpeedSrc(v){
@@ -4976,7 +5142,9 @@ function processCSVDataOptimized(data) {
         plotInterp.rpm.arrivalTime = performance.now();
 
         // ALWAYS UPDATE DATA STRUCTURES - Temperature plot data
-        const altTemp = 'AlternatorTemperatureF' in data ? parseFloat(data.AlternatorTemperatureF) / 100 : 0;
+        // Buffer holds DISPLAY units (converted at append; remapped in place on a unit flip by
+        // retargetTempPlotsForUnit) so every setData/autoscale path stays unit-agnostic.
+        const altTemp = 'AlternatorTemperatureF' in data ? toDisplayTemp(parseFloat(data.AlternatorTemperatureF) / 100) : 0;
 
         const prevY_temp = [
             temperatureData[1][temperatureData[1].length - 1],
@@ -5146,7 +5314,7 @@ function updatePlotConfiguration(data) {
         if (currentTempPlot && !autoScaleCurrent) currentTempPlot.setScale('current', { min: Ymin1, max: Ymax1 });
         if (voltagePlot && !autoScaleVoltage) voltagePlot.setScale('voltage', { min: Ymin2 / 100, max: Ymax2 / 100 });
         if (rpmPlot && !autoScaleRPM) rpmPlot.setScale('rpm', { min: Ymin3, max: Ymax3 });
-        if (temperaturePlot && !autoScaleTemp) temperaturePlot.setScale('temperature', { min: Ymin4, max: Ymax4 });
+        if (temperaturePlot && !autoScaleTemp) temperaturePlot.setScale('temperature', { min: toDisplayTemp(Ymin4), max: toDisplayTemp(Ymax4) });
 
         configChanged = true;
     }
@@ -5676,8 +5844,8 @@ function updateAllEchosOptimized(data) {
         { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'bmsLogicLevelOff', id: 'bmsLogicLevelOff_echo', transform: v => v == 0 ? 'Low' : 'High' },
         { key: 'AlarmActivate', id: 'AlarmActivate_echo', transform: v => v == 1 ? 'On' : 'Off' },
-        { key: 'TempAlarm', id: 'TempAlarm_echo', transform: v => Math.round(toDisplayTemp(v)) },
-        { key: 'TempAlarmLow', id: 'TempAlarmLow_echo', transform: v => Math.round(toDisplayTemp(v)) },
+        { key: 'TempAlarm', id: 'TempAlarm_echo', transform: v => Number(v) === 0 ? 'Off' : Math.round(toDisplayTemp(v)) },
+        { key: 'TempAlarmLow', id: 'TempAlarmLow_echo', transform: v => Number(v) === 0 ? 'Off' : Math.round(toDisplayTemp(v)) },
         { key: 'VoltageAlarmHigh', id: 'VoltageAlarmHigh_echo', transform: v => (v / 100).toFixed(2) },  // ×100 → V
         { key: 'VoltageAlarmLow', id: 'VoltageAlarmLow_echo', transform: v => (v / 100).toFixed(2) },    // ×100 → V
         { key: 'SocAlarmLow', id: 'SocAlarmLow_echo', transform: v => v },
@@ -7366,7 +7534,7 @@ function socSeedRender(s) {
     const inputs = '<div style="display:grid; grid-template-columns:1fr auto; row-gap:5px; column-gap:12px; font-size:13px;">'
         + '<span style="color:#999;">Battery terminal voltage</span><span style="text-align:right;">' + Number(s.v).toFixed(2) + ' V</span>'
         + '<span style="color:#999;">Battery current (&minus; = discharging)</span><span style="text-align:right;">' + Number(s.i).toFixed(1) + ' A</span>'
-        + '<span style="color:#999;">Board temperature</span><span style="text-align:right;">' + (s.tF == null ? 'unavailable' : Math.round(s.tF) + ' &deg;F') + '</span>'
+        + '<span style="color:#999;">Board temperature</span><span style="text-align:right;">' + (s.tF == null ? 'unavailable' : Math.round(toDisplayTemp(s.tF)) + ' ' + tempUnitLabel()) + '</span>'
         + '<span style="color:#999;">Chemistry</span><span style="text-align:right;">' + _cfgEsc(chemName) + '</span>'
         + '<span style="color:#999;">Bank capacity</span><span style="text-align:right;">' + (s.cap > 0 ? s.cap + ' Ah, ' : '') + s.sysV + ' V</span>'
         + '</div>';
@@ -7731,7 +7899,7 @@ function renderTuningLog(data) {
             <td style="padding:2px 5px;">${r.wp}</td>
             <td style="padding:2px 5px;">${r.wf != null ? r.wf : '—'}</td>
             <td style="padding:2px 5px;">${r.rpm.toFixed(0)}</td>
-            <td style="padding:2px 5px;">${r.temp.toFixed(1)}</td>
+            <td style="padding:2px 5px;">${toDisplayTemp(r.temp).toFixed(1)}</td>
             <td style="padding:2px 5px;">${r.worst.toFixed(1)}</td>
             <td style="padding:2px 5px;">${r.t.toFixed(0)}</td>
             <td style="padding:2px 5px;">${(r.bv != null ? r.bv : 0).toFixed(2)}</td>
@@ -7808,7 +7976,7 @@ function fetchAccState() {
                 + '\n   live: ' + liveLine(d.volt, '')
                 + '\n\nThermal loop\n   containment sessions: ' + d.therm.sessions
                 + ', binding ' + fmtT(d.therm.bindS) + ' (in band ' + fmtT(d.therm.inbandS) + ')'
-                + '\n   worst over limit: ' + d.therm.worstF.toFixed(1) + ' °F';
+                + '\n   worst over limit: ' + toDisplayTempDelta(d.therm.worstF).toFixed(1) + ' ' + tempUnitLabel();
         })
         .catch(() => { el.textContent = 'Not available.'; });
 }
@@ -8218,7 +8386,7 @@ function renderSystemIDLog(data) {
             <td style="padding:2px 4px;">${fmtA(qp[0])} / ${fmtA(qp[1])} / ${fmtA(qp[2])}</td>
             <td style="padding:2px 4px;">${(r.amp || 0).toFixed(1)}</td>
             <td style="padding:2px 4px;">${(r.rpm || 0).toFixed(0)}</td>
-            <td style="padding:2px 4px;">${(r.temp || 0).toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.temp > 0 ? toDisplayTemp(r.temp).toFixed(0) : '—'}</td>
             <td style="padding:2px 4px;">${fmtA(r.bv)}</td>
             <td style="padding:2px 4px;">${stageLabel(r.cs)}</td>
             <td style="padding:2px 4px;color:${aborted ? '#ef4444' : 'inherit'};">${abortLabel}</td>
@@ -8312,7 +8480,7 @@ function renderSysidSweepLog(data) {
             <td style="padding:2px 6px;">${fmt(r.floor, 1)}</td>
             <td style="padding:2px 6px;">${fmt(r.f0, 1)}–${fmt(r.f1, 1)}</td>
             <td style="padding:2px 6px;">${fmt(r.rpm, 0)}</td>
-            <td style="padding:2px 6px;">${fmt(r.temp, 0)}</td>
+            <td style="padding:2px 6px;">${r.temp > 0 ? toDisplayTemp(r.temp).toFixed(0) : '—'}</td>
             <td style="padding:2px 6px;">${fmt(r.bv, 2)}</td>
             <td style="padding:2px 6px;">${stageLabel(r.cs)}</td>
             <td style="padding:2px 6px;white-space:nowrap;">${fmtTuningTs(r.ts)}</td>
@@ -8421,7 +8589,7 @@ function renderTuningSweepLog(data) {
             <td style="padding:2px 6px;">${fmt(r.bv, 2)}</td>
             <td style="padding:2px 6px;">${fmt(r.rpm, 0)}</td>
             <td style="padding:2px 6px;">${fmt(r.rmin, 0)}–${fmt(r.rmax, 0)}</td>
-            <td style="padding:2px 6px;">${fmt(r.temp, 0)}</td>
+            <td style="padding:2px 6px;">${r.temp > 0 ? toDisplayTemp(r.temp).toFixed(0) : '—'}</td>
             <td style="padding:2px 6px;color:${cohColor};">${fmt(coh, 2)}</td>
             <td style="padding:2px 6px;color:${clipColor};">${r.clip ? 'YES' : 'no'}</td>
             <td style="padding:2px 6px;">${stageLabel(r.cs)}</td>
@@ -10345,7 +10513,7 @@ function initTemperaturePlot() {
         series: [
             { label: null, points: { show: false }, stroke: "transparent", width: 0 },
             {
-                label: "Alt. Temp (°F)",
+                label: "Alt. Temp (" + tempUnitLabel() + ")",
                 stroke: "#FF5722",
                 width: 2,
                 scale: "temperature"
@@ -10360,18 +10528,18 @@ function initTemperaturePlot() {
         ],
         scales: useTimestamps ? {
             x: { time: true, range: (u, dMin, dMax) => [dMax - liveWindowSec, dMax] },
-            temperature: { auto: false, range: () => [Ymin4, Ymax4] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
+            temperature: { auto: false, range: () => [toDisplayTemp(Ymin4), toDisplayTemp(Ymax4)] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging (Ymin4/Ymax4 stay native °F)
             pct: { auto: false, range: () => [pctMin4, pctMax4] }     // fn so click-to-edit Field % range survives redraws
         } : {
             x: { time: false, range: (u, dMin, dMax) => [-liveWindowSec, 0] },
-            temperature: { auto: false, range: () => [Ymin4, Ymax4] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
+            temperature: { auto: false, range: () => [toDisplayTemp(Ymin4), toDisplayTemp(Ymax4)] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging (Ymin4/Ymax4 stay native °F)
             pct: { auto: false, range: () => [pctMin4, pctMax4] }     // fn so click-to-edit Field % range survives redraws
         },
         axes: useTimestamps ? [
             { grid: { show: true } },
             {
                 scale: "temperature",
-                label: "F",
+                label: tempUnitLabel(),
                 grid: { show: true },
                 side: 3,
                 splits: edgeLabeledSplits(() => !autoScaleTemp)
@@ -10390,7 +10558,7 @@ function initTemperaturePlot() {
             },
             {
                 scale: "temperature",
-                label: "F",
+                label: tempUnitLabel(),
                 grid: { show: true },
                 side: 3,
                 splits: edgeLabeledSplits(() => !autoScaleTemp)
@@ -10411,7 +10579,7 @@ function initTemperaturePlot() {
                 init: [
                     (u) => {
                         createCustomLegend('temperature-plot', [
-                            { label: "Alt. Temp (°F)", color: "#FF5722" },
+                            { label: "Alt. Temp (" + tempUnitLabel() + ")", color: "#FF5722" },
                             { label: "Field %", color: "#9E9E9E" }
                         ], u);
 
@@ -10464,7 +10632,7 @@ function initTemperaturePlot() {
             lockBtnT.style.opacity = '0.6';
             _autoScaleTempLeft = null;
             _autoScaleTempRight = null;
-            temperaturePlot.setScale('temperature', { min: Ymin4, max: Ymax4 });
+            temperaturePlot.setScale('temperature', { min: toDisplayTemp(Ymin4), max: toDisplayTemp(Ymax4) });
             pctMin4 = 0; pctMax4 = 100;
             temperaturePlot.setScale('pct', { min: 0, max: 100 });
         } else {
@@ -10476,9 +10644,10 @@ function initTemperaturePlot() {
     attachYAxisEdit(temperaturePlot, [{
         scale: 'temperature', decimals: 0,
         apply: (mn, mx) => {
-            Ymin4 = Math.round(mn); Ymax4 = Math.round(mx);
+            // User types display-unit values; Ymin4/Ymax4 persist native °F on the regulator.
+            Ymin4 = Math.round(fromDisplayTemp(mn)); Ymax4 = Math.round(fromDisplayTemp(mx));
             if (asCbT.checked) { asCbT.checked = false; asCbT.dispatchEvent(new Event('change')); }
-            else temperaturePlot.setScale('temperature', { min: Ymin4, max: Ymax4 });
+            else temperaturePlot.setScale('temperature', { min: toDisplayTemp(Ymin4), max: toDisplayTemp(Ymax4) });
             sendYAxisSetting({ Ymin4: Ymin4, Ymax4: Ymax4 });
         }
     }, {
@@ -10710,7 +10879,7 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("header-alt-current", sa.measuredAmps);
     applyStaleStyleByAge("header-batt-current", sa.bcur);
     applyStaleStyleByAge("header-alt-temp", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
-    applyStaleStyleByAge("header-board-temp", sa.ambientTemp, STALE_THRESHOLD_TEMP_MS);
+    applyStaleStyleByAge("header-board-temp", sa.ambientTemp, STALE_THRESHOLD_BOARD_MS);
     updateHeaderLimiterColors(sa);
     applyStaleStyleByAge("header-rpm", sa.rpm);
     applyStaleStyleByAge("dutyCycleID3", sa.dutyCycle);
@@ -10741,10 +10910,10 @@ function updateAllStalenessStyles() {
     // there are no per-field spans to grey.
 
     // --- Baro / ambient — dedicated timestamps ---
-    // Both come from the BMP388 on an 8s read cycle. Use the 12s threshold for
-    // both so a single missed read does not flip the UI stale.
-    applyStaleStyleByAge("baroPressureID", sa.baroPressure, STALE_THRESHOLD_TEMP_MS);
-    applyStaleStyleByAge("ambientTempID", sa.ambientTemp, STALE_THRESHOLD_TEMP_MS);
+    // Both come from the BMP388 on a 4s read cycle, so they get their own threshold
+    // rather than borrowing the alternator-temp one.
+    applyStaleStyleByAge("baroPressureID", sa.baroPressure, STALE_THRESHOLD_BOARD_MS);
+    applyStaleStyleByAge("ambientTempID", sa.ambientTemp, STALE_THRESHOLD_BOARD_MS);
 
     // --- IMU — all displays share one timestamp ---
     applyStaleStyleByAge("imu_heel_deg_ID", sa.imu);
@@ -12747,7 +12916,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 10).toFixed(1);
                     }
                     else if (key === "faDomTempF" || key === "faSesPkpkTempF") {
-                        newTextContent = (value === -1) ? "—" : (value / 10).toFixed(0);  // -1 = SafeInt NaN sentinel (no probe at capture)
+                        newTextContent = (value === -1) ? "—" : Math.round(toDisplayTemp(value / 10));  // -1 = SafeInt NaN sentinel (no probe at capture)
                     }
                     else if (key === "faDomEpoch" || key === "faSesPkpkEpoch") {
                         newTextContent = (value > 1577836800) ? new Date(value * 1000).toLocaleDateString() : "—";
@@ -12806,7 +12975,8 @@ window.addEventListener("load", function () {
                     }
                     // Temperature fields (raw integer °F from firmware — convert to display unit)
                     else if (["MaxAlternatorTemperatureF", "temperatureThermistor", "MaxTemperatureThermistor",
-                        "ambientTemp", "MaxAlternatorTemperatureF_AllTime", "MaxTemperatureThermistor_AllTime"].includes(key)) {
+                        "ambientTemp", "MaxAlternatorTemperatureF_AllTime", "MaxTemperatureThermistor_AllTime",
+                        "wmIgn_altTempF_hi", "wmIgn_altTempF_lo", "wmIgn_ambient_hi", "wmIgn_ambient_lo"].includes(key)) {
                         newTextContent = Math.round(toDisplayTemp(value));
                     }
                     // Temperature PID input/setpoint scaled ×100 — convert to display unit
@@ -16981,7 +17151,9 @@ function thermalRenderAll() {
     for (let i = 0; i < n; i++) {
         t[i] = -(now - r.ts[i]) / 60000;          // minutes ago (ascending, oldest first)
     }
-    renderThermalPlot1([t, r.tempFilt, r.tempProjected, r.tempSetpoint, r.penalty, r.measAmps, r.uTarget], t[0]);
+    // Temp series display-converted here; _thermalRing stays native °F so thermallog.csv exports raw.
+    const cT = a => displayTempUnit === 1 ? a.map(v => v == null ? null : toDisplayTemp(v)) : a;
+    renderThermalPlot1([t, cT(r.tempFilt), cT(r.tempProjected), cT(r.tempSetpoint), r.penalty, r.measAmps, r.uTarget], t[0]);
     // State strip gets snapshot copies so a resize-redraw can't index a grown ring against a stale time axis.
     renderThermalPlotState([t, new Array(n).fill(null)], t[0], r.flags.slice(), r.antiWindup.slice(), r.stage.slice(), t);
     // Display-layer sign flip: firmware terms are penalty-signed (+ = cut amps); the plot
@@ -17124,17 +17296,17 @@ function renderThermalPlot1(data, tMin) {
             // Tableau 10 palette — one warm color per plot (filtered temp = the
             // headline signal gets red); setpoint is a neutral gray reference line.
             {
-                label: 'Temp Filtered (°F)', stroke: '#d62728', width: 2,
+                label: 'Temp Filtered (' + tempUnitLabel() + ')', stroke: '#d62728', width: 2,
                 scale: 'temp',
                 show: thermalSeriesVisible.tempFilt !== false
             },
             {
-                label: 'Temp Projected (°F)', stroke: '#e377c2', width: 1.5,
+                label: 'Temp Projected (' + tempUnitLabel() + ')', stroke: '#e377c2', width: 1.5,
                 scale: 'temp', dash: [4, 3],
                 show: thermalSeriesVisible.tempProjected !== false
             },
             {
-                label: 'Setpoint (°F)', stroke: '#7f7f7f', width: 1.5,
+                label: 'Setpoint (' + tempUnitLabel() + ')', stroke: '#7f7f7f', width: 1.5,
                 scale: 'temp', dash: [8, 4],
                 show: thermalSeriesVisible.tempSetpoint !== false
             },
@@ -17162,7 +17334,7 @@ function renderThermalPlot1(data, tMin) {
         },
         axes: [
             { label: 'Minutes Ago', grid: { show: true } },
-            { scale: 'temp', label: 'Temperature (°F)', side: 3, grid: { show: true },
+            { scale: 'temp', label: 'Temperature (' + tempUnitLabel() + ')', side: 3, grid: { show: true },
               splits: edgeLabeledSplits(() => thermalY.p0.temp !== null) },
             { scale: 'amps', label: 'Amps (A)', side: 1, grid: { show: false },
               splits: edgeLabeledSplits(() => thermalY.p0.amps !== null) }
@@ -20851,7 +21023,7 @@ function cxRenderKnee(b) {
 
     // Captured-so-far tables, labelled by which guided target produced each point.
     if (anchors.length) {
-        const rows = anchors.map((a, i) => '<tr><td>' + (CX_KNEE_STEPS[i] ? CX_KNEE_STEPS[i].tag : '—') + '</td><td>' + a.rpm.toFixed(0) + '</td><td>' + a.duty.toFixed(1) + '%</td><td>' + a.tempF.toFixed(0) + '°F</td></tr>').join('');
+        const rows = anchors.map((a, i) => '<tr><td>' + (CX_KNEE_STEPS[i] ? CX_KNEE_STEPS[i].tag : '—') + '</td><td>' + a.rpm.toFixed(0) + '</td><td>' + a.duty.toFixed(1) + '%</td><td>' + toDisplayTemp(a.tempF).toFixed(0) + tempUnitLabel() + '</td></tr>').join('');
         body += '<table style="width:100%;margin-top:12px;font-size:13px;border-collapse:collapse;"><tr style="text-align:left;color:#9aa;"><th>Target</th><th>RPM</th><th>Onset</th><th>Temp</th></tr>' + rows + '</table>';
     }
     const anyDrain = cx.fdRuns.some(r => r && r.ok);
@@ -24661,15 +24833,23 @@ window.addEventListener('load', function () {
       c._bin = b;   // crosshair legend reads cover/ah per binned point from here
       const data = [ b.t ];
       const scaleVals = {};   // scaleName → arrays feeding that scale (for explicit range calc)
+      // s.temp series convert °F→display here (ltData/bins stay native °F); the cursor
+      // legend reads u.data so it inherits the conversion, and the explicit scale ranges
+      // below are computed from the converted arrays.
+      const cT = a => (displayTempUnit === 1 && a) ? a.map(v => v == null ? null : toDisplayTemp(v)) : a;
       c.spec.series.forEach(s => {
         // s.on → engine-on-weighted line; s.dataKey → wall-avg companion series
         // (distinct s.key keeps legend-visibility persistence separate).
         const f = b.fields[s.dataKey || s.key];
         const src = s.on ? f.onAvg : f.avg;
-        const avg = s.unwrap ? unwrapAngles(src) : src;
+        let avg = s.unwrap ? unwrapAngles(src) : src;
+        if (s.temp) avg = cT(avg);
         data.push(avg);
         (scaleVals[s.scale] = scaleVals[s.scale] || []).push(avg);
-        if (s.band) { data.push(f.max); data.push(f.min); scaleVals[s.scale].push(f.max, f.min); }
+        if (s.band) {
+          const bMax = s.temp ? cT(f.max) : f.max, bMin = s.temp ? cT(f.min) : f.min;
+          data.push(bMax); data.push(bMin); scaleVals[s.scale].push(bMax, bMin);
+        }
       });
       c.plot.setData(data);          // rebuilds series paths (auto-scale may null out; we override below)
       c.plot.setScale('x', { min: fromSec, max: toSec });
@@ -24977,6 +25157,23 @@ window.addEventListener('load', function () {
     }
   }
 
+  // Display-unit flip: chart specs bake unit-dependent labels, and ltYOverride's F-scale
+  // values are typed in display units — remap the persisted override, then tear down and
+  // rebuild from the native-°F ltData at the same range.
+  window.ltOnTempUnitChanged = function (prevUnit) {
+    const ov = ltYOverride['lt-temp-plot'];
+    if (ov && ov.F) {
+      const remap = prevUnit === 1 ? (v => v * 9 / 5 + 32) : (v => (v - 32) * 5 / 9);
+      ov.F = [Math.round(remap(ov.F[0])), Math.round(remap(ov.F[1]))];
+      ltSaveYOverride();
+    }
+    if (!ltCharts.length) return;
+    ltCharts.forEach(c => { try { c.plot.destroy(); } catch (e) {} });
+    ltCharts.length = 0;
+    buildAllLtPlots();
+    if (ltCurRange) ltRenderAll(ltCurRange[0], ltCurRange[1]);
+  };
+
   function buildAllLtPlots() {
     if (!ltCharts.length) {
     // Groupings mirror the cloud "My History" viewer minus the eliminated fields
@@ -25008,11 +25205,12 @@ window.addEventListener('load', function () {
     });
     buildLtChart('lt-temp-plot', {
       title: 'Temperatures & Barometric Pressure',
-      scales: [ { name:'F', label:'°F', side:3 },
+      // temp:true series render display-converted in ltRenderAll; ltData stays native °F
+      scales: [ { name:'F', label:tempUnitLabel(), side:3 },
                 { name:'mb', label:'mbar', side:1 } ],
-      series: [ { key:'altTemp',   scale:'F',  color:'#F44336', label:'Alternator (°F)', band:true },
-                { key:'tempTherm', scale:'F',  color:'#FF9800', label:'Thermistor (°F)', band:true },
-                { key:'ambTemp',   scale:'F',  color:'#2196F3', label:'Board (°F)' },
+      series: [ { key:'altTemp',   scale:'F',  color:'#F44336', label:'Alternator (' + tempUnitLabel() + ')', band:true, temp:true },
+                { key:'tempTherm', scale:'F',  color:'#FF9800', label:'Thermistor (' + tempUnitLabel() + ')', band:true, temp:true },
+                { key:'ambTemp',   scale:'F',  color:'#2196F3', label:'Board (' + tempUnitLabel() + ')', temp:true },
                 { key:'baro',      scale:'mb', color:'#9C27B0', label:'Baro (mbar)' } ]
     });
     buildLtChart('lt-rpm-plot', {
@@ -26602,7 +26800,7 @@ function pollBatteryHealth() {
             '<td>' + (r.dwell ? (r.dwell / 1000).toFixed(1) : '—') + '</td>' +
             '<td>' + r.soc.toFixed(0) + '%</td>' +
             '<td>' + r.v.toFixed(2) + '</td>' +
-            '<td>' + r.tF.toFixed(0) + '</td>' +
+            '<td>' + toDisplayTemp(r.tF).toFixed(0) + '</td>' +
             '<td>' + r.low.toFixed(0) + '→' + (r.low + r.delta).toFixed(0) + 'A</td>' +
             '<td>' + r.edges + '</td></tr>';
         }
@@ -26637,7 +26835,7 @@ function pollBatteryHealth() {
     bhSet('capChgEff_echo', (Number(cfg.chgEff) * 100).toFixed(1) + '%');
     bhSet('capTempNorm_echo', cfg.tempNorm == 1 ? 'on' : 'off');
     bhSet('capTempCoeff_echo', cfg.tempCoeff + ' %/°C');
-    bhSet('capTempRef_echo', cfg.tempRef + ' °C');
+    bhSet('capTempRef_echo', Math.round(toDisplayTempFromC(Number(cfg.tempRef))) + ' ' + tempUnitLabel());
     if (j.ocv && j.ocvSoc) renderCapOcvTable(j.ocv, j.ocvSoc, Number(cfg.socLowMax));
   }).catch(() => { });
 }
@@ -27104,7 +27302,9 @@ function ssHl(text, q) {
     return html + ssEsc(text.slice(pos));
 }
 
-const SS_MAG_SVG = '<svg class="ss-icon" viewBox="0 0 24 24" aria-hidden="true">' +
+// width/height attributes are the no-CSS fallback size (see the same note on the tab-row
+// trigger in index.html); the .ss-icon rules still override them when the stylesheet is current.
+const SS_MAG_SVG = '<svg class="ss-icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">' +
     '<circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"></circle>' +
     '<line x1="15.5" y1="15.5" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"></line></svg>';
 

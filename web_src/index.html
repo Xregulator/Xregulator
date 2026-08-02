@@ -148,7 +148,7 @@
       <!-- Only path back to the Unlock Settings button while collapsed: the whole settings-access tier
            is display:none under .header-collapsed, so a locked+minimized session is otherwise a dead end.
            Shown by syncHeaderStrip only while settingsUnlocked is false. -->
-      <span id="hcs-unlock" class="hcs-unlock" style="display:none;" title="Expand the header and unlock settings" onclick="stripExpandToUnlock(event)"><svg class="lock-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 9V7a5 5 0 0 0-10 0v2H5v13h14V9h-2zm-8-2a3 3 0 0 1 6 0v2H9V7zm4 9.7V19h-2v-2.3a2 2 0 1 1 2 0z"/></svg><span class="u-long">Tap to unlock</span></span>
+      <span id="hcs-unlock" class="hcs-unlock" style="display:none;" title="Expand the header and unlock settings" onclick="stripExpandToUnlock(event)"><svg class="lock-glyph" width="15" height="15" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 9V7a5 5 0 0 0-10 0v2H5v13h14V9h-2zm-8-2a3 3 0 0 1 6 0v2H9V7zm4 9.7V19h-2v-2.3a2 2 0 1 1 2 0z"/></svg><span class="u-long">Tap to unlock</span></span>
       <!-- Alternator group -->
       <span class="hcs-m hcs-alt"><span id="hcs-alt">-</span><i>A</i></span>
       <span class="hcs-m hcs-temp"><span id="hcs-temp">-</span><i class="temp-unit-label">°F</i></span>
@@ -268,7 +268,7 @@
         <form onsubmit="return armSettings();">
           <div class="password-form">
             <div class="password-input-group">
-              <button type="submit" id="settings_arm_btn"><svg class="lock-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 9V7a5 5 0 0 0-10 0v2H5v13h14V9h-2zm-8-2a3 3 0 0 1 6 0v2H9V7zm4 9.7V19h-2v-2.3a2 2 0 1 1 2 0z"/></svg>Unlock Settings</button>
+              <button type="submit" id="settings_arm_btn"><svg class="lock-glyph" width="15" height="15" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 9V7a5 5 0 0 0-10 0v2H5v13h14V9h-2zm-8-2a3 3 0 0 1 6 0v2H9V7zm4 9.7V19h-2v-2.3a2 2 0 1 1 2 0z"/></svg>Unlock Settings</button>
             </div>
           </div>
           <div id="unlock-warning" style="font-size:11px;color:#b87b00;margin-top:4px;">⚠ Avoid parameter changes during rapid RPM or load swings — controls may briefly lag.</div>
@@ -292,8 +292,12 @@
     <!--<button class="main-tab" onclick="showMainTab('about-sourcecode')">Documentation</button> -->
     <button class="main-tab" onclick="showMainTab('cloudfeatures')"><span class="tab-label-full">Cloud Features</span><span class="tab-label-short">Cloud</span></button>
     <!-- SETTINGS SEARCH trigger. Hidden below 768px by .ss-search-tab; phones open search
-         with the pull-down-at-top gesture (SETTINGS SEARCH block at the end of script.js). -->
-    <button class="main-tab ss-search-tab" onclick="ssOpen()" title="Search all settings"><svg class="ss-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><line x1="15.5" y1="15.5" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg><span>Search</span></button>
+         with the pull-down-at-top gesture (SETTINGS SEARCH block at the end of script.js).
+         width/height are on the <svg> ON PURPOSE: an inline SVG with only a viewBox has no
+         intrinsic size, so if a browser pairs this HTML with a cached pre-search styles.css
+         (no .ss-icon rule) the glyph inflates to the full button width and blows the whole
+         tab row to ~300px tall. The CSS rule still wins when it is present. -->
+    <button class="main-tab ss-search-tab" onclick="ssOpen()" title="Search all settings"><svg class="ss-icon" width="15" height="15" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><line x1="15.5" y1="15.5" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg><span>Search</span></button>
   </div>
 
   <div id="settings" class="tab-content">
@@ -1236,13 +1240,13 @@
                           <span>Reference Temperature (<span class="temp-unit-label">°F</span>) (<span id="kneeTempRefF_echo">?</span>):
                             <span class="tooltip">ℹ️<span class="tooltip-box">The
                                   alternator case temperature the learned floors are referenced to (learning happens hot, so
-                                  ~180 °F is typical). The temperature correction lowers the floor below this and raises it
+                                  ~180 °F / ~82 °C is typical). The temperature correction lowers the floor below this and raises it
                                   above.</span></span>
                           </span>
                         </div>
                         <div class="form-input">
                           <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'kneeTempRefF',false)">
-                            <input name="kneeTempRefF" id="kneeTempRefF_input" type="number" step="1" min="-40" max="300" />
+                            <input name="kneeTempRefF" id="kneeTempRefF_input" type="number" step="1" min="-40" max="300" data-tmin-f="-40" data-tmax-f="300" />
                             <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                           </form>
                         </div>
@@ -1291,7 +1295,7 @@
                         </div>
                         <div class="form-input">
                           <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'kneeTempTolF',true)">
-                            <input name="kneeTempTolF" id="kneeTempTolF_input" type="number" step="0.5" min="0.5" max="50" />
+                            <input name="kneeTempTolF" id="kneeTempTolF_input" type="number" step="0.5" min="0.5" max="50" data-tmin-f="0.5" data-tmax-f="50" data-tdelta="1" />
                             <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                           </form>
                         </div>
@@ -1328,7 +1332,7 @@
                               <th>Floor (%)</th>
                               <th>Knee (%)</th>
                               <th>Locked</th>
-                              <th>Learn °F</th>
+                              <th>Learn <span class="temp-unit-label">°F</span></th>
                               <th>Last seen</th>
                             </tr>
                           </thead>
@@ -1724,7 +1728,7 @@
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TemperatureLimitF',false)">
-                      <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" />
+                      <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" data-tmin-f="0" data-tmax-f="350" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -1776,7 +1780,7 @@
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'MinChargeTempF',false)">
-                      <input name="MinChargeTempF" type="number" step="1" min="-40" max="120" />
+                      <input name="MinChargeTempF" type="number" step="1" min="-40" max="120" data-tmin-f="-40" data-tmax-f="120" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -1786,11 +1790,11 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">°F above the alternator temperature limit that triggers a WARNING. Field output ramps to zero and a lockout starts. If temperature stays above the warning level for the Temp Sustained Timeout, it escalates to a sustained-temperature shutdown and the field is cut once the output settles. Compares the raw sensor temperature, not the projected value.</span></span>
+                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers a WARNING. Field output ramps to zero and a lockout starts. If temperature stays above the warning level for the Temp Sustained Timeout, it escalates to a sustained-temperature shutdown and the field is cut once the output settles. Compares the raw sensor temperature, not the projected value.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
-                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" />
+                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -1800,11 +1804,11 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">°F above the alternator temperature limit that triggers an immediate field cut (no ramp, no settle wait). Compares the raw sensor temperature, not the projected value. Highest-priority thermal protection event.</span></span>
+                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers an immediate field cut (no ramp, no settle wait). Compares the raw sensor temperature, not the projected value. Highest-priority thermal protection event.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
-                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" />
+                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -1852,11 +1856,11 @@
                     <span>Internal Temp Offset (<span class="temp-unit-label">°F</span>) (<span id="WindingTempOffset_echo">?</span>):</span>
                     <span class="tooltip">ℹ️<span class="tooltip-box">ONLY
                         used for alternator component life physics models. How much hotter windings, bearings, brushes
-                        are than physically measured alternator case temperature. Typical: 40–60°F.</span></span>
+                        are than physically measured alternator case temperature. Typical: 40–60°F (22–33°C).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'WindingTempOffset',true)">
-                      <input name="WindingTempOffset" type="number" step="0.1" min="0" max="100" />
+                      <input name="WindingTempOffset" type="number" step="0.1" min="0" max="100" data-tmin-f="0" data-tmax-f="100" data-tdelta="1" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -3353,7 +3357,7 @@
                     <th style="padding:4px 6px;text-align:left;">Quiet PP (A)</th>
                     <th style="padding:4px 6px;text-align:left;">Setup (%)</th>
                     <th style="padding:4px 6px;text-align:left;">RPM</th>
-                    <th style="padding:4px 6px;text-align:left;">Alt Temp (°F)</th>
+                    <th style="padding:4px 6px;text-align:left;">Alt Temp (<span class="temp-unit-label">°F</span>)</th>
                     <th style="padding:4px 6px;text-align:left;" title="Bus voltage at commit">Bus V</th>
                     <th style="padding:4px 6px;text-align:left;" title="Charge stage at commit">Stage</th>
                     <th style="padding:4px 6px;text-align:left;">Abort</th>
@@ -3392,7 +3396,7 @@
                     <th style="padding:4px 6px;">Wave Floor (A)</th>
                     <th style="padding:4px 6px;">Sweep (Hz)</th>
                     <th style="padding:4px 6px;">RPM</th>
-                    <th style="padding:4px 6px;">Alt Temp (°F)</th>
+                    <th style="padding:4px 6px;">Alt Temp (<span class="temp-unit-label">°F</span>)</th>
                     <th style="padding:4px 6px;" title="Bus voltage during the sweep">Bus V</th>
                     <th style="padding:4px 6px;" title="Charge stage at commit">Stage</th>
                     <th style="padding:4px 6px;" title="Wall-clock date/time the run was committed (— if the clock was not set)">Date/Time</th>
@@ -3907,7 +3911,7 @@
                         <th style="padding:3px 5px;">Per</th>
                         <th style="padding:3px 5px;" title="Wave Floor — operating-point trough the wave sat on (A)">Floor</th>
                         <th style="padding:3px 5px;">RPM</th>
-                        <th style="padding:3px 5px;">Temp°F</th>
+                        <th style="padding:3px 5px;">Temp<span class="temp-unit-label">°F</span></th>
                         <th style="padding:3px 5px;">Worst</th>
                         <th style="padding:3px 5px;">t(s)</th>
                         <th style="padding:3px 5px;" title="Bus voltage during the test">BusV</th>
@@ -3955,7 +3959,7 @@
                           <th style="padding:4px 6px;" title="Bus voltage during the sweep">Bus V</th>
                           <th style="padding:4px 6px;">RPM</th>
                           <th style="padding:4px 6px;" title="RPM range during the sweep — wide spread = operating point moved = smeared Bode">RPM min–max</th>
-                          <th style="padding:4px 6px;">Temp°F</th>
+                          <th style="padding:4px 6px;">Temp<span class="temp-unit-label">°F</span></th>
                           <th style="padding:4px 6px;" title="Worst per-point fit coherence (0–1). Below ~0.7 = noisy/unreliable point in this run">Coh</th>
                           <th style="padding:4px 6px;" title="Field duty hit 0%/100% during the sweep — the sine was clipped, gain understated">Clip</th>
                           <th style="padding:4px 6px;" title="Charge stage at the moment the run was logged">Stage</th>
@@ -5166,7 +5170,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">PID Setpoint
                         <span class="tooltip">ℹ️
-                          <span class="tooltip-box">Active temperature setpoint the PID controls against. When the 60-second slope buffer is full (~65s after startup or reset), this is TemperatureLimit − 7°F. During warmup it is TemperatureLimit − 20°F, giving a wider margin while slope prediction is unavailable.</span>
+                          <span class="tooltip-box">Active temperature setpoint the PID controls against. When the 60-second slope buffer is full (~65s after startup or reset), this is TemperatureLimit − 7°F (3.9°C). During warmup it is TemperatureLimit − 20°F (11°C), giving a wider margin while slope prediction is unavailable.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="tempPIDSetpoint_display">?</span> <span class="temp-unit-label">°F</span></span>
@@ -5214,9 +5218,9 @@
                     </div>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Temp Slope (°F/s)
+                      <span class="metric-label telemetry-label">Temp Slope (<span class="temp-rate-label">°F/s</span>)
                         <span class="tooltip">ℹ️
-                          <span class="tooltip-box">Temperature rate of change in °F/s, computed as a backward difference over the Thermal Slope Window. Zero while the buffer fills after startup or reset. Readings implying more than ±0.5 °F/s are rejected as sensor noise and the previous rate is held. Used to compute: projected temperature = current temperature + rate × Thermal Lookahead.</span>
+                          <span class="tooltip-box">Temperature rate of change (shown in your display unit per second), computed as a backward difference over the Thermal Slope Window. Zero while the buffer fills after startup or reset. Readings implying more than ±0.5 °F/s (±0.28 °C/s) are rejected as sensor noise and the previous rate is held. Used to compute: projected temperature = current temperature + rate × Thermal Lookahead.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="thermalSlopeFPerSec_display">?</span> <span class="temp-rate-label">°F/s</span></span>
@@ -5280,7 +5284,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
                     <span class="tooltip">ℹ️<span
-                        class="tooltip-box">Proportional gain (A per °F of temperature error). The error is the controlled temperature — the higher of projected and present — minus the control target (7 °F below the temperature limit). Higher values derate current more aggressively as the controlled temperature approaches the limit.</span></span>
+                        class="tooltip-box">Proportional gain (A per °F of temperature error). The error is the controlled temperature — the higher of projected and present — minus the control target (7 °F / 3.9 °C below the temperature limit). Higher values derate current more aggressively as the controlled temperature approaches the limit.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -7542,8 +7546,8 @@
               <div class="form-row">
                 <div class="form-label">High Temp Alarm (<span class="temp-unit-label">°F</span>) (<span id="TempAlarm_echo">0</span>):</div>
                 <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarm',false)">
-                    <input name="TempAlarm" type="number" step="1" min="0" max="350" />
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarm',false,true)">
+                    <input name="TempAlarm" type="number" step="1" min="0" max="350" data-tmin-f="0" data-tmax-f="350" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
@@ -7553,8 +7557,8 @@
               <div class="form-row">
                 <div class="form-label">Low Temp Alarm (<span class="temp-unit-label">°F</span>) (<span id="TempAlarmLow_echo">0</span>):</div>
                 <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarmLow',false)">
-                    <input name="TempAlarmLow" type="number" step="1" min="0" max="350" />
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarmLow',false,true)">
+                    <input name="TempAlarmLow" type="number" step="1" min="0" max="350" data-tmin-f="0" data-tmax-f="350" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
@@ -10415,7 +10419,7 @@
             <div class="metric-row">
               <span class="metric-label">Board Temperature
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Temperature measured in the regulator, will often be 5-25 deg hotter than
+                  <span class="tooltip-box">Temperature measured in the regulator, will often be 5-25°F (3-14°C) hotter than
                     ambient depending on location and electrical demands</span>
                 </span>
               </span>
@@ -12197,7 +12201,7 @@
           <span style="margin-left:auto;font-size:12px;color:var(--text-muted);white-space:nowrap;"><span id="faCellsUsed_ID" style="font-weight:600;">?</span> cells learned</span>
           <button type="button" class="btn-secondary btn-sm" onclick="downloadRippleBundle()">Download CSV</button>
           <button type="button" class="btn-danger-ghost btn-sm"
-            onclick="if(!settingsUnlocked){xAlert('Please unlock settings first');return;} xConfirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});rippleMapClearVisual();}})">Clear Map</button>
+            onclick="if(!settingsUnlocked){xAlert('Please unlock settings first');return;} xConfirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?FastAltClearMatrix=1'),{},5000).then(()=>{rippleMapClearVisual();}).catch(()=>{xAlert('Could not reach the regulator — the ripple map was NOT cleared.');});}})">Clear Map</button>
         </div>
       </div>
 
@@ -12234,7 +12238,7 @@
                 <th style="padding:4px 8px; font-weight:600; text-align:right;">Tone (Hz)</th>
                 <th style="padding:4px 8px; font-weight:600; text-align:right;">RPM</th>
                 <th style="padding:4px 8px; font-weight:600; text-align:right;">Output Current (A)</th>
-                <th style="padding:4px 8px; font-weight:600; text-align:right;">Alt Temp (°F)</th>
+                <th style="padding:4px 8px; font-weight:600; text-align:right;">Alt Temp (<span class="temp-unit-label">°F</span>)</th>
                 <th style="padding:4px 8px; font-weight:600; text-align:right;">Date</th>
               </tr>
             </thead>
@@ -12395,7 +12399,7 @@
         <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
 
         <div class="metric-row">
-          <span class="metric-label" style="font-size:0.85em;">Thermal loop (°F)
+          <span class="metric-label" style="font-size:0.85em;">Thermal loop (<span class="temp-unit-label">°F</span>)
             <span id="accThermCov" style="display:block;font-size:0.82em;color:var(--text-muted);font-weight:normal;">—</span>
           </span>
           <span class="metric-value" style="display:flex;gap:10px;">
@@ -12695,7 +12699,7 @@
                             <th>Dwell (s)</th>
                             <th>SoC</th>
                             <th>Batt V</th>
-                            <th>Board °F</th>
+                            <th>Board <span class="temp-unit-label">°F</span></th>
                             <th>Step</th>
                             <th>Steps</th>
                           </tr>
@@ -12822,8 +12826,8 @@
 
                       <hr />
                       <div class="form-row">
-                        <div class="form-label"><span>Temp reference (°C) (<span id="capTempRef_echo">?</span>):</span></div>
-                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input name="capTempRef" type="number" step="1" min="-20" max="50" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                        <div class="form-label"><span>Temp reference (<span class="temp-unit-label">°F</span>) (<span id="capTempRef_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormCNative(this,'capTempRef')"><input name="capTempRef" type="number" step="1" min="-4" max="122" data-tmin-c="-20" data-tmax-c="50" /><input type="submit" value="Set" class="btn-primary" /></form></div>
                       </div>
 
                       <hr />
