@@ -200,8 +200,9 @@ void recomputeCcGains() {
 // Universal anti-oscillation damper (Hunt_Governor_Spec.md). A marginally-stable loop meeting a
 // speed-rotated plant (idle knee: each %duty sags rpm, the sag cancels the field gain → plant
 // ~quadrature) rings at 0.3–3 Hz. Detect the symptom, derate inner Ki in ×0.8 steps, and keep the
-// derate ONLY if the wobble measurably dies — an externally-forced wobble (cyclic load, faulty
-// governor) does not respond to our gain, so the episode reverts in full and stands down.
+// derate ONLY if the wobble measurably responds — fully quiet, or held at ≤ HG_HALF_FRAC of its
+// confirmed starting amplitude — because an externally-forced wobble (cyclic load, faulty governor)
+// does not respond to our gain, so that episode reverts in full and stands down.
 #define HG_RING_N 128            // 6.4 s at 50 ms — two periods of the lowest bin (hard floor for 0.31 Hz selectivity)
 #define HG_EVAL_EVERY 32         // evaluate every 1.6 s (window/4)
 #define HG_NBINS 6
@@ -212,6 +213,8 @@ void recomputeCcGains() {
 #define HG_TRIG_RATIO 3.0f       // peak vs median of other bins — rejected a 2.22% broadband load transient amplitude alone would have flagged
 #define HG_QUIET_AMP 0.3f
 #define HG_QUIET_RATIO 2.0f
+#define HG_HALF_FRAC 0.5f        // partial-success bar: amplitude ≤ this ×a0 for 3 consecutive evals holds the derate (gain floor is ×0.41, so a non-responding wobble can't fake this)
+#define HG_ADJ_EVALS 8           // evals allowed after the final step (~12.8 s) for quiet/halved to confirm before the external-suspected revert
 #define HG_STANDDOWN_MS 600000UL
 #define HG_EPISODE_TIMEOUT_MS 90000UL
 static const float HG_BIN_HZ[HG_NBINS] = { 0.31f, 0.47f, 0.70f, 1.05f, 1.56f, 2.34f };
@@ -251,46 +254,119 @@ void huntGovObserve(float dutyApplied, bool closedLoopOk) {
   if (contam) hgContamTick = hgTick;
 }
 
-static void hgLedgerAppend(const char *verdict, float freqHz, float a0, float aEnd, uint8_t steps) {
-  const char *hdr = "epoch,rpm,cv,freqHz,a0_pct,aEnd_pct,steps,verdict,derateExit";
-  if (!fsExists("/huntledger.csv")) {
+// ── Episode ledger ────────────────────────────────────────────────────────────────────────
+// The verdict fires inside the control path, so it must NEVER touch flash: a LittleFS append can
+// erase a sector and stall tens of ms, and fsExists() alone can block up to 5 s on the FS mutex.
+// Verdicts therefore only push a record into this RAM queue (O(1), no allocation); huntLedgerService()
+// does every byte of flash work, and the main loop calls it under the same field-off-settled gate
+// the commissioning ledger uses. /huntledger serves file + queue so a Refresh sees both.
+struct HgLedgerRec {
+  uint32_t epoch;
+  float freqHz, a0, aEnd, derate;
+  int16_t rpm;
+  uint8_t cv, steps;
+  char verdict[20];
+};
+#define HG_LEDGER_QUEUE_N 12       // episodes that can wait in RAM for the engine to stop; past this the oldest are counted and dropped
+#define HG_LEDGER_MAX_BYTES 6144   // hard file cap (~100 rows). At the cap the oldest half is dropped, so the ledger can never grow without bound
+static const char *HG_LEDGER_HDR = "epoch,rpm,cv,freqHz,a0_pct,aEnd_pct,steps,verdict,derateExit";
+static HgLedgerRec hgQueue[HG_LEDGER_QUEUE_N];
+static uint8_t hgQueueN = 0;
+static uint16_t hgQueueDropped = 0;
+
+static void hgLedgerQueue(const char *verdict, float freqHz, float a0, float aEnd, uint8_t steps) {
+  if (hgQueueN >= HG_LEDGER_QUEUE_N) {
+    hgQueueDropped++;
+    return;
+  }
+  HgLedgerRec &r = hgQueue[hgQueueN++];
+  r.epoch = (uint32_t)time(nullptr);  // stamped at the verdict, not at the flush
+  r.freqHz = freqHz;
+  r.a0 = a0;
+  r.aEnd = aEnd;
+  r.derate = g_huntDerate;
+  r.rpm = (int16_t)RPM;
+  r.cv = voltageControlActive ? 1 : 0;
+  r.steps = steps;
+  strncpy(r.verdict, verdict, sizeof(r.verdict) - 1);
+  r.verdict[sizeof(r.verdict) - 1] = '\0';
+}
+
+uint8_t hgLedgerPendingCount() {
+  return hgQueueN;
+}
+
+// Render the queued (not yet on flash) records as ledger CSV lines. Read-only — used by the
+// /huntledger handler so the UI never has to wait for a flush to see a fresh episode.
+size_t hgLedgerPendingCsv(char *out, size_t cap) {
+  size_t n = 0;
+  for (uint8_t i = 0; i < hgQueueN && n < cap; i++) {
+    const HgLedgerRec &r = hgQueue[i];
+    int w = snprintf(out + n, cap - n, "%lu,%d,%d,%.2f,%.2f,%.2f,%u,%s,%.2f\n",
+                     (unsigned long)r.epoch, (int)r.rpm, (int)r.cv, r.freqHz, r.a0, r.aEnd,
+                     (unsigned)r.steps, r.verdict, r.derate);
+    if (w <= 0 || (size_t)w >= cap - n) break;
+    n += (size_t)w;
+  }
+  return n;
+}
+
+// The ONLY code that writes the ledger to flash. Main loop, field-off-settled gate only.
+void huntLedgerService() {
+  if (hgQueueN == 0) return;
+  fsTakeLock();  // fsExists()/fsRead() take this same non-recursive mutex — use raw LittleFS inside
+  if (!LittleFS.exists("/huntledger.csv")) {
     File h = LittleFS.open("/huntledger.csv", "w");
     if (h) {
-      h.println(hdr);
+      h.println(HG_LEDGER_HDR);
       h.close();
     }
   } else {
     File c = LittleFS.open("/huntledger.csv", "r");
-    if (c && c.size() > 6144) {  // cap the ledger: drop the oldest half, keep whole lines
-      c.readStringUntil('\n');
-      c.seek(c.size() / 2);
-      c.readStringUntil('\n');
-      String keep = c.readString();
-      c.close();
-      File w = LittleFS.open("/huntledger.csv", "w");
-      if (w) {
-        w.println(hdr);
-        w.print(keep);
-        w.close();
+    if (c) {
+      uint32_t sz = c.size();
+      if (sz > HG_LEDGER_MAX_BYTES) {  // cap the ledger: drop the oldest half, keep whole lines
+        c.seek(sz / 2);
+        c.readStringUntil('\n');  // resync to the next line boundary
+        uint32_t rem = sz - (uint32_t)c.position();
+        char *tmp = (char *)ps_malloc(rem);  // PSRAM: a ~3 KB trim buffer must not fragment the internal heap
+        uint32_t kept = (tmp && rem) ? c.read((uint8_t *)tmp, rem) : 0;
+        c.close();
+        File w = LittleFS.open("/huntledger.csv", "w");
+        if (w) {
+          w.println(HG_LEDGER_HDR);
+          if (kept) w.write((uint8_t *)tmp, kept);
+          w.close();
+        }
+        if (tmp) free(tmp);
+      } else {
+        c.close();
       }
-    } else if (c) {
-      c.close();
     }
   }
   File f = LittleFS.open("/huntledger.csv", "a");
-  if (!f) return;
-  f.printf("%lu,%d,%d,%.2f,%.2f,%.2f,%u,%s,%.2f\n", (unsigned long)time(nullptr), (int)RPM,
-           voltageControlActive ? 1 : 0, freqHz, a0, aEnd, (unsigned)steps, verdict, g_huntDerate);
-  f.close();
+  if (f) {
+    for (uint8_t i = 0; i < hgQueueN; i++) {
+      const HgLedgerRec &r = hgQueue[i];
+      f.printf("%lu,%d,%d,%.2f,%.2f,%.2f,%u,%s,%.2f\n", (unsigned long)r.epoch, (int)r.rpm,
+               (int)r.cv, r.freqHz, r.a0, r.aEnd, (unsigned)r.steps, r.verdict, r.derate);
+    }
+    f.close();
+    hgQueueN = 0;  // cleared only on a successful open — a failed write retries next pass
+    if (hgQueueDropped) {
+      queueConsoleMessageF("Oscillation damper: %u episode record(s) were lost before the engine stopped long enough to save them", (unsigned)hgQueueDropped);
+      hgQueueDropped = 0;
+    }
+  }
+  fsReleaseLock();
 }
 
 // Evaluation + state machine. Called every loop() pass from Xregulator.ino; self-gates to one
 // Goertzel pass (6 bins × 128 samples, tens of µs) per HG_EVAL_EVERY control ticks.
 void runHuntGovernor() {
   static uint32_t lastEvalTick = 0;
-  static uint8_t hgState = 0;  // 0 idle, 1 episode, 2 hold(creep toward session ceiling), 3 standdown
-  static uint8_t consec = 0, quietCnt = 0, steps = 0, evalsSinceStep = 0;
-  static float a0 = 0.0f, baseDerate = 1.0f, sessCeil = 1.0f, rpmAtVerify = 0.0f, rpmEma = 0.0f;
+  static uint8_t consec = 0, quietCnt = 0, halfCnt = 0, steps = 0, evalsSinceStep = 0;
+  static float a0 = 0.0f, aConfMax = 0.0f, baseDerate = 1.0f, sessCeil = 1.0f, rpmAtVerify = 0.0f, rpmEma = 0.0f;
   static uint32_t standdownUntilMs = 0, episodeStartMs = 0;
   static float hann[HG_RING_N];
   static bool hannInit = false;
@@ -300,7 +376,7 @@ void runHuntGovernor() {
       g_huntDerate = 1.0f;
       recomputeCcGains();
     }
-    hgState = 0;
+    g_huntState = 0;
     consec = 0;
     sessCeil = 1.0f;
     g_huntFreqHz = 0.0f;
@@ -317,11 +393,11 @@ void runHuntGovernor() {
   // A large rpm-regime change voids the session ceiling — the pocket that justified it moved.
   if (sessCeil < 0.999f && rpmAtVerify > 1.0f && (rpmEma < 0.75f * rpmAtVerify || rpmEma > 1.33f * rpmAtVerify)) sessCeil = 1.0f;
 
-  if (hgState == 3) {
+  if (g_huntState == 3) {
     if ((int32_t)(millis() - standdownUntilMs) < 0) return;
-    hgState = 0;
+    g_huntState = 0;
   }
-  if (hgState == 2) {
+  if (g_huntState == 2) {
     if (g_huntDerate < sessCeil) {
       g_huntDerate = fminf(sessCeil, g_huntDerate + 0.0032f);  // +0.2%/s at the 1.6 s cadence
       recomputeCcGains();
@@ -329,15 +405,15 @@ void runHuntGovernor() {
     if (g_huntDerate >= 0.999f) {
       g_huntDerate = 1.0f;
       recomputeCcGains();
-      hgState = 0;
+      g_huntState = 0;
     }
   }
-  if (hgState == 1 && (uint32_t)(millis() - episodeStartMs) > HG_EPISODE_TIMEOUT_MS) {
+  if (g_huntState == 1 && (uint32_t)(millis() - episodeStartMs) > HG_EPISODE_TIMEOUT_MS) {
     // Stalled — usually a mid-episode transient froze evaluation. Revert, no standdown.
     g_huntDerate = baseDerate;
     recomputeCcGains();
-    hgLedgerAppend("aborted", g_huntFreqHz, a0, 0.0f, steps);
-    hgState = 0;
+    hgLedgerQueue("aborted", g_huntFreqHz, a0, 0.0f, steps);
+    g_huntState = 0;
     consec = 0;
     return;
   }
@@ -397,48 +473,67 @@ void runHuntGovernor() {
   bool hunt = (aPk > HG_TRIG_AMP) && (aPk > HG_TRIG_RATIO * aMed);
   bool quiet = (aPk < HG_QUIET_AMP) || (aPk < HG_QUIET_RATIO * aMed);
 
-  if (hgState == 1) {
+  if (g_huntState == 1) {
     evalsSinceStep++;
     quietCnt = quiet ? (uint8_t)(quietCnt + 1) : 0;
+    halfCnt = (aPk <= HG_HALF_FRAC * a0) ? (uint8_t)(halfCnt + 1) : 0;
     if (quietCnt >= 3) {
       sessCeil = fminf(1.0f, g_huntDerate * 1.1f);  // recovery creep parks just above the verified quiet point for this session
       rpmAtVerify = rpmEma;
-      hgLedgerAppend("damped", g_huntFreqHz, a0, aPk, steps);
+      hgLedgerQueue("damped", g_huntFreqHz, a0, aPk, steps);
       queueConsoleMessageF("Oscillation damper: %.2f Hz wobble gone at %d%% current-loop gain", g_huntFreqHz, (int)(g_huntDerate * 100.0f));
-      hgState = 2;
-    } else if (!quiet && evalsSinceStep >= 3) {  // 3 evals ≈ window refilled with post-step data
-      if (steps < HG_MAX_STEPS) {
+      g_huntState = 2;
+    } else if (steps < HG_MAX_STEPS) {
+      if (!quiet && evalsSinceStep >= 3) {  // 3 evals ≈ window refilled with post-step data
         steps++;
         evalsSinceStep = 0;
+        halfCnt = 0;
         g_huntDerate = fmaxf(HG_FLOOR, g_huntDerate * HG_STEP);
         recomputeCcGains();
-      } else {
-        g_huntDerate = baseDerate;
-        recomputeCcGains();
-        hgLedgerAppend("external-suspected", g_huntFreqHz, a0, aPk, steps);
-        queueConsoleMessageF("Oscillation damper: gain cuts did not calm the %.2f Hz wobble — restored full gain (external cyclic load or engine issue suspected)", g_huntFreqHz);
-        standdownUntilMs = millis() + HG_STANDDOWN_MS;
-        hgState = 3;
-        consec = 0;
       }
+    } else if (halfCnt >= 3 && evalsSinceStep >= 3) {
+      // Partial success: not quiet, but the cuts have verified traction — amplitude held at ≤ half
+      // the confirmed start for 3 evals against a ×0.41 gain cut. Hold the derate; the hold-state
+      // re-confirmation path re-adjudicates from here if the wobble regrows during the creep.
+      sessCeil = fminf(1.0f, g_huntDerate * 1.1f);
+      rpmAtVerify = rpmEma;
+      hgLedgerQueue("damped-partial", g_huntFreqHz, a0, aPk, steps);
+      queueConsoleMessageF("Oscillation damper: %.2f Hz wobble cut from %.1f%% to %.1f%% duty swing — holding %d%% current-loop gain", g_huntFreqHz, a0, aPk, (int)(g_huntDerate * 100.0f));
+      g_huntState = 2;
+    } else if (evalsSinceStep >= HG_ADJ_EVALS) {  // adjudication window expired with neither quiet nor halved confirmed
+      g_huntDerate = baseDerate;
+      recomputeCcGains();
+      hgLedgerQueue("external-suspected", g_huntFreqHz, a0, aPk, steps);
+      queueConsoleMessageF("Oscillation damper: gain cuts did not calm the %.2f Hz wobble — restored full gain (external cyclic load or engine issue suspected)", g_huntFreqHz);
+      standdownUntilMs = millis() + HG_STANDDOWN_MS;
+      g_huntState = 3;
+      consec = 0;
     }
     return;
   }
   // Idle / hold: confirmation counter. A hold-state re-confirmation opens a new episode from the
   // current derate, so a failed follow-up reverts to the verified level, never below it.
-  consec = hunt ? (uint8_t)(consec + 1) : 0;
+  if (hunt) {
+    consec = (uint8_t)(consec + 1);
+    aConfMax = fmaxf(aConfMax, aPk);
+  } else {
+    consec = 0;
+    aConfMax = 0.0f;
+  }
   if (consec >= 2) {
     baseDerate = g_huntDerate;
-    a0 = aPk;
+    a0 = aConfMax;  // max over the confirming evals — a trough-sampled reference would make the half-amplitude bar unfairly strict
+    aConfMax = 0.0f;  // next episode builds its own reference: after a damped-partial exit the residual wobble can keep hunt true through the hold, so the !hunt reset never fires and a re-opened episode would inherit this episode's ~2× larger a0 (half-amplitude bar then passes without the new cuts proving anything)
     g_huntFreqHz = HG_BIN_HZ[pk];
     steps = 1;
     evalsSinceStep = 0;
     quietCnt = 0;
+    halfCnt = 0;
     episodeStartMs = millis();
     g_huntDerate = fmaxf(HG_FLOOR, baseDerate * HG_STEP);
     recomputeCcGains();
     queueConsoleMessageF("Oscillation damper: %.2f Hz wobble detected (%.1f%% duty swing) — reducing current-loop gain", g_huntFreqHz, a0);
-    hgState = 1;
+    g_huntState = 1;
     consec = 0;
   }
 }
@@ -1524,8 +1619,9 @@ void commitSystemIDRecord(bool aborted) {
   rec.setupStepAmplitude = SystemIDStepAmplitude;
   rec.abortReason        = systemIDAbortReason;
   rec.abortPhase         = systemIDAbortPhase;
-  // Conditions snapshot at commit (no per-test accumulator exists for SystemID)
-  rec.avgRPM       = (float)RPM;
+  // Conditions at commit — RPM is the true sine-phase mean when one was accumulated (step
+  // tests and pre-sine aborts have none → snapshot).
+  rec.avgRPM       = (systemIDRpmAvg > 0.0f) ? systemIDRpmAvg : (float)RPM;
   rec.avgAltTempF  = isnan(AlternatorTemperatureF) ? 0.0f : AlternatorTemperatureF;
   rec.battV        = BatteryV;
   rec.chargeStage  = getChargeStageDisplayCode();
@@ -1720,7 +1816,7 @@ void commitTuningSweepRecord() {
   rec.sweepEndHz   = tuningSweepEnd;
   rec.cycles       = tuningSweepCycles;
   rec.nPoints      = tuningBodeCount;
-  rec.avgRPM       = (float)RPM;
+  rec.avgRPM       = tuningSweepRpmN ? (float)(tuningSweepRpmSum / tuningSweepRpmN) : (float)RPM;
   rec.avgAltTempF  = isnan(AlternatorTemperatureF) ? 0.0f : AlternatorTemperatureF;
   // Run-condition snapshot — waveform params + how trustworthy the sweep was.
   rec.sineAmpA       = tuningSweepAmpA;
@@ -3586,9 +3682,25 @@ void AdjustFieldLearnMode() {
         // CV stress test (commissioning stage 8 / standalone Tuning ▸ Stress Test): force CV at the achievable target it computed —
         // same hook as TargetVoltageMode — so the throttle snap can push the bus over a REACHABLE setpoint.
         // All current/thermal/OV limits stay fully active; the test only pins the voltage target.
-        if (cvStressForceCV) {
-          voltageControlActive = true;
-          ChargingVoltageTargetReq = cvStressTargetV;
+        {
+          static bool lastCvStressForce = false;
+          if (cvStressForceCV) {
+            // Bumpless handoff onto the pinned target (rising edge, CV already active). Phase 1 parks
+            // cv_I at ~icvHi − Kp·boost·e — satHi blocks pre-build while Icv rails against the
+            // unreachable stage target — so without a re-seed the whole P-boost contribution (~19 A at
+            // auto gains) leaves the command as the target lands: 0.4 V dip + bare-Ki crawl back
+            // (08-05 bench). Seed against the PINNED target's error (not the still-slewing
+            // ChargingVoltageTarget), capped at delivered current so the handoff can only shed.
+            // A CV-inactive start is left to the enteringCV seed below.
+            if (!lastCvStressForce && lastVoltageControlActive) {
+              float e_seed = cvStressTargetV - IBV;
+              float seedHi = (e_seed < 0.0f) ? fminf((float)uTargetAmps, g_pidI_filtered) : (float)uTargetAmps;
+              cv_I = clamp_f(g_pidI_filtered - VoltageKp_active * cvRecovBoostMult(e_seed) * e_seed, 0.0f, seedHi);
+            }
+            voltageControlActive = true;
+            ChargingVoltageTargetReq = cvStressTargetV;
+          }
+          lastCvStressForce = cvStressForceCV;
         }
         // Detect CV entry so the voltage loop fires immediately on the first CV tick.
         // (lastVoltageControlActive is a global: the MANUAL branch and the shutdown/
@@ -3759,8 +3871,11 @@ void AdjustFieldLearnMode() {
           // 150 mV/s glide vs 68 mV/s achievable bus opened the gap to the G2 margin — 4 fires,
           // 2026-07-22 131Drop log). Hold the descent while the bus lags more than the lead. Pace on
           // getFiltV, never g_ovIbvFilt: ripple troughs on the comparator's own signal would ratchet
-          // the floor down and crests re-open the gap. Tests keep their deliberate target trajectories.
-          if (!cvManualTest && !g_autoTestActive) {
+          // the floor down and crests re-open the gap. Tests keep their deliberate target trajectories —
+          // except the stress test's settle, which pins one target and waits (nothing graded): it keeps
+          // the floor, because CvStressDropV (0.10) equals the shipped OvMeasMarginV (0.100) and an
+          // unpaced landing puts the still-settled bus exactly on the G2 line.
+          if (!cvManualTest && (!g_autoTestActive || cvStressForceCV)) {
             float paceFloor = getFiltV() - CV_TGT_PACE_LEAD_V * ((float)BATTERY_VOLTAGE / 12.0f);
             tgtDn = fminf(fmaxf(tgtDn, paceFloor), ChargingVoltageTarget);
           }
@@ -4210,6 +4325,10 @@ void AdjustFieldLearnMode() {
               // drop the ceiling one tick after release. Hold the window; the walk lifts the
               // ceiling from bus truth and held-at-target / walk-to-ceiling / a new fire end it.
               if ((cv_I >= recovCvGoal - 0.5f && !recovGoalCollapsed) || recovHeldTicks >= 10) {
+                // Bumpless handoff: the flared ceiling is what was holding the bus; cv_I above it
+                // is refill banked before the flare tightened (freeze stops growth, never drains)
+                // and would step the setpoint at release (08-05: +5A bank → 14.41V on a 14.00 target).
+                cv_I = fminf(cv_I, cvRecovFlaredCeil(recovCvGoal, shortfallF));
                 recovActive = false;
                 recovWalking = false;
               } else if (!recovWalking && recovStarveTicks >= 5) {
@@ -4237,6 +4356,7 @@ void AdjustFieldLearnMode() {
                                  * clamp_f((shortfallF / clsRec - cvRecovDeepBandV) / fmaxf(cvRecovDeepBandV, 0.05f), 0.0f, 1.0f);
                 recovCvGoal += walkMult * (0.5f + 0.010f * ceilNow) * ((float)g_voltLoopActualIntervalMs * 0.001f);
                 if (recovCvGoal >= ceilNow) {
+                  cv_I = fminf(cv_I, cvRecovFlaredCeil(recovCvGoal, shortfallF));  // same bumpless handoff; no-op here in practice
                   recovActive = false;
                   recovWalking = false;
                 }
@@ -4706,8 +4826,12 @@ void AdjustFieldLearnMode() {
   // the bus +350 mV AFTER the command cut (13.4 V event, 2026-07-12). Duty falls to MinDuty
   // (PID outMin) for the life of the clamp; the release reseed in the bumpless block restores
   // the measured floor in one step.
+  // cvpfCcActive: the plant-fit's settle/pilot/practice phases drive this loop to currents whose
+  // duty can sit BELOW the learned Min% floor's output — a stale floor otherwise pins all three
+  // phases at one current, both captured duties come out identical, and every pulse edge drops
+  // ("no clean current step", bench 2026-08-04). The pulse phases already bypass via sysIDRunning.
   float dutyNewFloat = governor_apply(lastAppliedDuty, dutyRequest, govMode,
-                                      (sysIDRunning || fastOvClampActive) ? 0.0f : tick.rpmMinDuty,
+                                      (sysIDRunning || fastOvClampActive || cvpfCcActive) ? 0.0f : tick.rpmMinDuty,
                                       true, actualDtSec);
   pidLog_dutyApplied = dutyNewFloat;
 
@@ -4725,9 +4849,9 @@ void AdjustFieldLearnMode() {
   // Auto Min% learning: observe the applied floor vs. output to walk rpmMinDutyTable toward
   // (knee - margin). Observer only; gated to normal AUTO charging (no fault/shutdown/manual/sysID).
   {
-    bool kneeModeOk = (sysMode == SYS_MODE_AUTO) && !sysIDRunning && tick.chargingEnabled
+    bool kneeModeOk = (sysMode == SYS_MODE_AUTO) && !sysIDRunning && !cvPlantFitActive && tick.chargingEnabled
                       && !tick.inLockout && !IgnoreTemperature && (hardwarePresent == 1)
-                      && !tick.currentDataStale;
+                      && !tick.currentDataStale;   // cvPlantFitActive: floor-bypassed test operation must not train the knee
     kneeLearnObserve(RPM, dutyNewFloat, TempToUse, MeasuredAmps,
                      dutyRequest, tick.rpmMinDuty, kneeModeOk);
   }

@@ -2354,6 +2354,12 @@ void cvLog_tick(uint32_t nowMs) {
   e.pTerm_x10 = (int16_t)clamp_f(g_cvPTerm * 10.0f, -32767.0f, 32767.0f);      // P contribution to Icv (A); I=cv_I_x10, D=kdTrim_x1000
   e.cvKdFiltV_x100 = (int16_t)clamp_f(g_cvKdFiltV * 100.0f, -32767.0f, 32767.0f);  // D term's dedicated filtered voltage
 
+  // Oscillation damper: the inner-Ki derate is the reason a CV transient can look sluggish here
+  // without any gain setting having changed, so it belongs on the same timeline as the loop it moves.
+  e.huntDerate_pct = (uint8_t)clamp_f(g_huntDerate * 100.0f, 0.0f, 255.0f);
+  e.huntFreq_x100 = (uint8_t)clamp_f(g_huntFreqHz * 100.0f, 0.0f, 255.0f);
+  e.huntState = g_huntState;
+
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;
 }
@@ -2952,6 +2958,8 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint32_t lastSineSampleMs = 0;   // decimation clock so a long/low-freq sweep can't overflow the buffer
   static uint32_t sysidEaseStartMs = 0;   // EASE phase: gentle field ramp-down on exit
   static float    sysidEaseFromDuty = 0.0f;
+  static double   sidRpmSum = 0.0;        // engine-speed stats over the sine phase → systemIDRpm* globals
+  static uint32_t sidRpmN   = 0;
 
   // One-shot debug on request arrival
   static bool lastReqState = false;
@@ -3029,6 +3037,8 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     stabRingIdx = 0;
     stabRingCount = 0;
     systemIDResultsReady = false;
+    sidRpmSum = 0.0; sidRpmN = 0;
+    systemIDRpmMin = systemIDRpmMax = systemIDRpmAvg = 0.0f;
     baseDuty = lastAppliedDuty;
     holdMs = SYSID_STEP_HOLD_MS;
 
@@ -3149,6 +3159,16 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     float drive = SystemIDStepAmplitude * (1.0f + sinf(2.0f * (float)M_PI * f * tSec));
     float d = constrain(baseDuty + drive, 0.0f, 100.0f);
     dutyOut = d;
+
+    // Engine-speed stats over the sine phase — advisory context for /sysidbode, never gated on.
+    float rNow = (float)RPM;
+    if (sidRpmN == 0) { systemIDRpmMin = rNow; systemIDRpmMax = rNow; }
+    else {
+      if (rNow < systemIDRpmMin) systemIDRpmMin = rNow;
+      if (rNow > systemIDRpmMax) systemIDRpmMax = rNow;
+    }
+    sidRpmSum += rNow; sidRpmN++;
+    systemIDRpmAvg = (float)(sidRpmSum / sidRpmN);
 
     // Frequency-adaptive decimation: record ~24 samples per cycle of the current tone.
     // At high frequencies this is essentially every CH1 sample (interval below the ~3ms
@@ -4210,6 +4230,21 @@ bool protTest_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 // saturation knee and proposes SystemIDStabilizeAmps / SystemIDStepAmplitude placed in
 // the linear region below the knee. Results are read by the dashboard via /fieldcurve.csv;
 // the user clicks Apply (show-before-write) — the firmware does NOT auto-write the settings.
+// Whole-run engine-speed stats for the last ramp (fed at the same settled samples as amps,
+// so they describe the data actually captured). Advisory only — served, never gated on.
+static double   fcRunRpmSum = 0.0;
+static uint32_t fcRunRpmN   = 0;
+static void fcRunRpmSample() {
+  float r = (float)RPM;
+  if (fcRunRpmN == 0) { fieldCurveRpmMin = r; fieldCurveRpmMax = r; }
+  else {
+    if (r < fieldCurveRpmMin) fieldCurveRpmMin = r;
+    if (r > fieldCurveRpmMax) fieldCurveRpmMax = r;
+  }
+  fcRunRpmSum += r; fcRunRpmN++;
+  fieldCurveRpmAvg = (float)(fcRunRpmSum / fcRunRpmN);
+}
+
 bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint8_t  phase = 0;          // 0=idle, 1=ramp, 2=ease-out
   static float    stepDuty = 0.0f;
@@ -4265,6 +4300,8 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     fieldCurveCeilingLimited = false;
     fieldCurveKneeDuty = -1.0f;
     fieldCurveKneeAmps = -1.0f;
+    fcRunRpmSum = 0.0; fcRunRpmN = 0;
+    fieldCurveRpmMin = fieldCurveRpmMax = fieldCurveRpmAvg = 0.0f;
     onsetBaseline = 0.0f;
     if (fieldCurveOnsetMode) { kneeSweepKneeDuty = -1.0f; kneeSweepOk = false; }
     stepDuty = FIELDCURVE_DUTY_START;
@@ -4322,6 +4359,7 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       ampSum += ampsRaw;
       rpmSum += RPM;
       ampN++;
+      fcRunRpmSample();
     }
 
     if ((nowMs - stepStartMs) >= FIELDCURVE_DWELL_MS) {
@@ -4459,7 +4497,7 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   // high = field stays primed). Bounded: at most one coarse step's worth of fine steps.
   if (phase == 3) {
     dutyOut = stepDuty;
-    if ((nowMs - stepStartMs) >= (FIELDCURVE_DWELL_MS / 2)) { ampSum += ampsRaw; rpmSum += RPM; ampN++; }
+    if ((nowMs - stepStartMs) >= (FIELDCURVE_DWELL_MS / 2)) { ampSum += ampsRaw; rpmSum += RPM; ampN++; fcRunRpmSample(); }
     if ((nowMs - stepStartMs) >= FIELDCURVE_DWELL_MS) {
       float avgAmps = (ampN > 0) ? (float)(ampSum / ampN) : ampsRaw;
       float avgRpm  = (ampN > 0) ? (float)(rpmSum / ampN) : RPM;
@@ -4568,6 +4606,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
       // Reset whole-sweep run-condition trackers (captured into the record at commit).
       tuningSweepBaseA = baseA; tuningSweepAmpA = ampA;
       tuningSweepRpmMin = (float)RPM; tuningSweepRpmMax = (float)RPM;
+      tuningSweepRpmSum = 0.0; tuningSweepRpmN = 0;
       tuningSweepBattV = BatteryV;
       tuningSweepDutyRailed = false;
       tuningSweepWorstCoh = 1.0f; gMaxSeen = 0.0f;
@@ -4611,6 +4650,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
     float rpmNow = (float)RPM;
     if (rpmNow < tuningSweepRpmMin) tuningSweepRpmMin = rpmNow;
     if (rpmNow > tuningSweepRpmMax) tuningSweepRpmMax = rpmNow;
+    tuningSweepRpmSum += rpmNow; tuningSweepRpmN++;
     // High rail is the live ceiling (MaxDuty ~50%@24V / ~25%@48V) — a fixed 99.5 could never
     // fire there and a clipped sweep would be accepted as a valid plant fit.
     if (dutyCycle <= MinDuty + 0.5f || dutyCycle >= ccDutyCeiling() - 0.5f) tuningSweepDutyRailed = true;

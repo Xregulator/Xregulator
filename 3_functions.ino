@@ -64,8 +64,10 @@ enum Csv1Index {
   CSV1_cvKdTrim,         // CV loop D back-off applied at the Icv output (A ×100); plotted negated as the D contribution
   CSV1_cvKdFiltV,        // IBV smoothed by CvKdVoltFiltTC (V ×100) — the D term's slope input; "Voltage for D term" trace
   CSV1_huntDerate,       // hunt-governor live Ki derate (×100; 100 = full gain)
+  CSV1_huntFreqHz,       // hunt-governor last confirmed wobble frequency (Hz ×100; 0 = none seen this session). Rides CSV1 rather than CSV4 so the Diag live row can never show a fresh derate beside a stale frequency
+  CSV1_huntState,        // hunt-governor state: 0 watching, 1 damping episode, 2 verified/recovering, 3 standing down
 
-  CSV1_FIELD_COUNT  // = 47
+  CSV1_FIELD_COUNT  // = 49
 };
 
 enum Csv2Index {
@@ -426,6 +428,8 @@ enum Csv2Index {
   CSV2_ft_altFold_ses,
   CSV2_ft_boatPerf_win,
   CSV2_ft_boatPerf_ses,
+  CSV2_ft_huntGov_win,
+  CSV2_ft_huntGov_ses,
   CSV2_systemIDActive,
   CSV2_systemIDResultsReady,
   CSV2_systemIDStepAmp_0,
@@ -641,6 +645,9 @@ enum Csv2Index {
   CSV2_accThermWorst,   // worst over-temp vs limit (°F ×100) — unconditional
   CSV2_imuInstallCode,  // 0=OK 1=never zeroed 2=mount not vertical 3=zeroed pre-mount-check 4=no IMU
   CSV2_cvKdCount,       // CV D-term engagement episodes this session (rising edge, ≥1s quiet re-arm)
+  CSV2_littleFsFreeKb,  // free space on the userdata LittleFS partition, kB; -1 until first ~60s refresh
+  CSV2_cloudUpAgeS,     // seconds since last ack-confirmed cloud payload upload; -1 = never this boot
+  CSV2_deviceEpoch,     // regulator wall clock, UTC epoch seconds; 0 = clock never set this boot
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1786,6 +1793,7 @@ const char *cloudFailReason(int code) {
 static String perfUploadBuf;
 static String altUploadBuf;   // same, for /altUploadFront (alternator-health Load CSV)
 static String importConfigBuf;   // body accumulator for POST /importConfig (config sharing)
+static String trackBodyBuf;   // body accumulator for POST /track (app-usage analytics deltas)
 
 void setupServer() {
 
@@ -2182,9 +2190,49 @@ void setupServer() {
   });
 
   // ── Hunt-governor episode ledger (Hunt_Governor_Spec.md): one CSV line per damping episode ──
+  // Serves what is on flash PLUS the episodes still queued in RAM — queued rows only reach flash
+  // once the field has been off for 10 s (huntLedgerService), and a Refresh must not have to wait
+  // for that to show a fresh episode. Read-only by design: this handler never writes flash. Runs on
+  // the async web-server task, so the ~6 KB read costs the control loop nothing.
   server.on("/huntledger", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (fsExists("/huntledger.csv")) request->send(LittleFS, "/huntledger.csv", "text/plain");
-    else request->send(200, "text/plain", "no hunt episodes recorded");
+    uint8_t pendN = hgLedgerPendingCount();
+    size_t pendCap = (size_t)pendN * 96 + 96;
+    fsTakeLock();
+    File f = LittleFS.open("/huntledger.csv", "r");
+    size_t fsz = f ? f.size() : 0;
+    if (fsz == 0 && pendN == 0) {
+      if (f) f.close();
+      fsReleaseLock();
+      request->send(200, "text/plain", "no hunt episodes recorded");
+      return;
+    }
+    char *buf = (char *)ps_malloc(fsz + pendCap + 1);  // file is hard-capped at HG_LEDGER_MAX_BYTES
+    size_t n = 0;
+    if (buf) {
+      if (fsz) n = f.read((uint8_t *)buf, fsz);
+      else n = (size_t)snprintf(buf, pendCap, "%s\n", "epoch,rpm,cv,freqHz,a0_pct,aEnd_pct,steps,verdict,derateExit");
+    }
+    if (f) f.close();
+    fsReleaseLock();
+    if (!buf) {
+      request->send(503, "text/plain", "hunt ledger unavailable — out of memory");
+      return;
+    }
+    if (n && buf[n - 1] != '\n') buf[n++] = '\n';
+    n += hgLedgerPendingCsv(buf + n, pendCap);
+    // Streamed straight out of PSRAM — passing a char* to send() would copy the whole ledger into
+    // an Arduino String on the internal heap. The shared_ptr deleter frees on any completion path.
+    std::shared_ptr<char> sp(buf, free);
+    AsyncWebServerResponse *response = request->beginResponse("text/plain", n,
+      [sp, n](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= n) return 0;
+        size_t tw = n - index;
+        if (tw > maxLen) tw = maxLen;
+        memcpy(out, sp.get() + index, tw);
+        return tw;
+      });
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
   });
 
   // ── Console history: device-side source of truth for the Download Logs console file ──
@@ -2469,6 +2517,24 @@ void setupServer() {
   server.on("/installid", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/plain", installId + "|" + FIRMWARE_VERSION);
   });
+  // Network identity for the ESP32 tab's Connectivity & Cloud card — SSID/IP are strings,
+  // so they ride this tiny JSON instead of the numeric CSV channels. Fetched on tab open.
+  server.on("/netinfo", HTTP_GET, [](AsyncWebServerRequest *request) {
+    bool client = (currentMode == MODE_CLIENT);
+    String ss = client ? WiFi.SSID() : esp32_ap_ssid;
+    String j = "{\"ssid\":\"";
+    for (size_t i = 0; i < ss.length(); i++) {
+      char c = ss[i];
+      if (c == '"' || c == '\\') j += '\\';
+      j += c;
+    }
+    j += "\",\"ip\":\"";
+    j += client ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+    j += "\",\"mode\":";
+    j += String((int)currentMode);
+    j += "}";
+    request->send(200, "application/json", j);
+  });
   // Auto Min% learning ("knee tracker") state: knobs + live status + per-bin learned floors.
   server.on("/kneeLearnState", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", kneeLearnStateJson());
@@ -2743,6 +2809,30 @@ void setupServer() {
       request->send(403, "text/plain", "Settings not armed"); return;
     }
     request->send(200, "application/json", exportConfigJson());
+  });
+
+  // App-usage analytics delta from the web UI / Capacitor app (page dwell, button counts).
+  // Deliberately NOT arm-gated: pure counter increments, no settings touched, works in AP
+  // and Client mode. sendBeacon posts land here too (text/plain — content type is ignored).
+  server.on("/track", HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (trackBodyBuf.length() < 2) {
+        trackBodyBuf = ""; request->send(400, "text/plain", "empty"); return;
+      }
+      bool ok = usageMergeDelta(trackBodyBuf.c_str());
+      trackBodyBuf = "";
+      request->send(ok ? 200 : 400, "text/plain", ok ? "ok" : "bad");
+    },
+    NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (total > 4096) return;   // a real delta is a few hundred bytes; reject anything absurd
+      if (index == 0) { trackBodyBuf = ""; trackBodyBuf.reserve(total + 1); }
+      trackBodyBuf.concat((const char *)data, len);
+    });
+
+  // App Usage card (Live Data → ESP32): period + lifetime stats. Read-only, so not arm-gated.
+  server.on("/trackstats", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "application/json", usageStatsJson());
   });
 
   // Config Sharing — apply an imported config blob (POST the /exportConfig JSON as the body).
@@ -6575,6 +6665,7 @@ void setupServer() {
       ft_altHealth.worstSession = 0;
       ft_altFold.worstSession = 0;
       ft_boatPerf.worstSession = 0;
+      ft_huntGov.worstSession = 0;
       VeTime2 = 0;
       cpuLoadCore0Max = 0;
       cpuLoadCore1Max = 0;
@@ -6788,10 +6879,16 @@ void setupServer() {
   // Explicit routes for all static web assets — served directly, never hit onNotFound
   // PSRAM-preload-failed fallback still has to carry no-cache, or the flash path reintroduces the
   // stale-dashboard-off-an-unreachable-device problem serveCachedAsset() closes.
-  auto sendIndexFromFlash = [](AsyncWebServerRequest *request) {
-    AsyncWebServerResponse *resp = request->beginResponse(webFS, "/index.html", "text/html");
+  // The other four assets carry it for the matched-set reason instead: this path has no ETag and
+  // no Last-Modified (AsyncFileResponse sets neither, unlike serveStatic), so a browser has no
+  // validator to revalidate with and refetches anyway — the header only makes that explicit.
+  auto sendAssetFromFlash = [](AsyncWebServerRequest *request, const char *path, const char *type) {
+    AsyncWebServerResponse *resp = request->beginResponse(webFS, path, type);
     resp->addHeader("Cache-Control", "no-cache");
     request->send(resp);
+  };
+  auto sendIndexFromFlash = [sendAssetFromFlash](AsyncWebServerRequest *request) {
+    sendAssetFromFlash(request, "/index.html", "text/html");
   };
   server.on("/", HTTP_GET, [sendIndexFromFlash](AsyncWebServerRequest *request) {
     if (!serveCachedAsset(request, "/index.html", "text/html"))
@@ -6801,21 +6898,21 @@ void setupServer() {
     if (!serveCachedAsset(request, "/index.html", "text/html"))
       sendIndexFromFlash(request);
   });
-  server.on("/styles.css", HTTP_GET, [](AsyncWebServerRequest *request) {
+  server.on("/styles.css", HTTP_GET, [sendAssetFromFlash](AsyncWebServerRequest *request) {
     if (!serveCachedAsset(request, "/styles.css", "text/css"))
-      request->send(webFS, "/styles.css", "text/css");
+      sendAssetFromFlash(request, "/styles.css", "text/css");
   });
-  server.on("/uPlot.min.css", HTTP_GET, [](AsyncWebServerRequest *request) {
+  server.on("/uPlot.min.css", HTTP_GET, [sendAssetFromFlash](AsyncWebServerRequest *request) {
     if (!serveCachedAsset(request, "/uPlot.min.css", "text/css"))
-      request->send(webFS, "/uPlot.min.css", "text/css");
+      sendAssetFromFlash(request, "/uPlot.min.css", "text/css");
   });
-  server.on("/uPlot.iife.min.js", HTTP_GET, [](AsyncWebServerRequest *request) {
+  server.on("/uPlot.iife.min.js", HTTP_GET, [sendAssetFromFlash](AsyncWebServerRequest *request) {
     if (!serveCachedAsset(request, "/uPlot.iife.min.js", "application/javascript"))
-      request->send(webFS, "/uPlot.iife.min.js", "application/javascript");
+      sendAssetFromFlash(request, "/uPlot.iife.min.js", "application/javascript");
   });
-  server.on("/script.js", HTTP_GET, [](AsyncWebServerRequest *request) {
+  server.on("/script.js", HTTP_GET, [sendAssetFromFlash](AsyncWebServerRequest *request) {
     if (!serveCachedAsset(request, "/script.js", "application/javascript"))
-      request->send(webFS, "/script.js", "application/javascript");
+      sendAssetFromFlash(request, "/script.js", "application/javascript");
   });
   server.onNotFound([](AsyncWebServerRequest *request) {
     if (currentMode == MODE_CONFIG) {
@@ -7346,10 +7443,13 @@ void setupServer() {
                       i > 0 ? "," : "",
                       tuningBode[i].freqHz, tuningBode[i].gain, tuningBode[i].phaseDeg);
     }
-    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"done\":%d,\"coh\":%.3f,\"railed\":%d,\"fs\":%.1f}",
+    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"done\":%d,\"coh\":%.3f,\"railed\":%d,\"fs\":%.1f,"
+                    "\"rpmAvg\":%.0f,\"rpmMin\":%.0f,\"rpmMax\":%.0f}",
                     tuningSweepActive ? 1 : 0, tuningSweepDone ? 1 : 0,
                     tuningSweepWorstCoh, tuningSweepDutyRailed ? 1 : 0,
-                    tuningSweepFsHz > 0.0f ? tuningSweepFsHz : ch1SampleHz());
+                    tuningSweepFsHz > 0.0f ? tuningSweepFsHz : ch1SampleHz(),
+                    tuningSweepRpmN ? (float)(tuningSweepRpmSum / tuningSweepRpmN) : 0.0f,
+                    tuningSweepRpmMin, tuningSweepRpmMax);
     request->send(200, "application/json", buf);
   });
 
@@ -7369,12 +7469,14 @@ void setupServer() {
     // "aborted" = protection-abort latch (systemIDAbortRequested), reported independently of "active":
     // a protection cut leaves systemIDActive set until systemID_tick clears it, and that tick is gated
     // out during the fault/lockout, so the plant-fit poller would otherwise wait the full 240s timeout.
-    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"ready\":%d,\"aborted\":%d,\"amp\":%.1f,\"fs\":%.1f}",
+    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"ready\":%d,\"aborted\":%d,\"amp\":%.1f,\"fs\":%.1f,"
+                    "\"rpmAvg\":%.0f,\"rpmMin\":%.0f,\"rpmMax\":%.0f}",
                     active ? 1 : 0,
                     (systemIDResultsReady && systemIDTestType == 1) ? 1 : 0,
                     systemIDAbortRequested ? 1 : 0,
                     SystemIDStepAmplitude,
-                    systemIDFsHz > 0.0f ? systemIDFsHz : ch1SampleHz());
+                    systemIDFsHz > 0.0f ? systemIDFsHz : ch1SampleHz(),
+                    systemIDRpmAvg, systemIDRpmMin, systemIDRpmMax);
     request->send(200, "application/json", buf);
   });
 
@@ -7401,13 +7503,15 @@ void setupServer() {
     pos += snprintf(buf + pos, 2048 - pos,
                     "],\"active\":%d,\"ready\":%d,\"ok\":%d,\"kneeDuty\":%.1f,\"kneeAmps\":%.2f,"
                     "\"targetA\":%.1f,\"propStabA\":%.1f,\"propStepPct\":%.2f,\"ceilLimited\":%d,\"aborted\":%d,\"abort\":\"%s\","
-                    "\"abortWhy\":%d,\"abortNext\":%d,\"abortV\":%.2f,\"abortD\":%.1f}",
+                    "\"abortWhy\":%d,\"abortNext\":%d,\"abortV\":%.2f,\"abortD\":%.1f,"
+                    "\"rpmAvg\":%.0f,\"rpmMin\":%.0f,\"rpmMax\":%.0f}",
                     fieldCurveActive != 0 ? 1 : 0, fieldCurveResultsReady ? 1 : 0, fieldCurveOk ? 1 : 0,
                     fieldCurveKneeDuty, fieldCurveKneeAmps, fieldCurveTargetLimitA,
                     fieldCurvePropStabA, fieldCurvePropStepPct, fieldCurveCeilingLimited ? 1 : 0,
                     fieldCurveAbortRequested ? 1 : 0, fieldCurveAbortMsg,
                     (int)fieldCurveAbortReason, (int)fieldCurveAbortFollowOn,
-                    fieldCurveAbortVolts, fieldCurveAbortDuty);
+                    fieldCurveAbortVolts, fieldCurveAbortDuty,
+                    fieldCurveRpmAvg, fieldCurveRpmMin, fieldCurveRpmMax);
     request->send(200, "application/json", buf);
   });
 
@@ -7455,11 +7559,11 @@ void setupServer() {
     snprintf(buf, 960,
              "{\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"aborted\":%d,"
              "\"K_mVpA\":%.1f,\"Ka_mVpA\":%.2f,\"Kb_mVpA\":%.2f,\"dV_mV\":%.0f,\"dI\":%.2f,\"snr\":%.0f,\"horizonS\":%.1f,"
-             "\"Kp\":%.2f,\"Ki\":%.2f,\"stepA\":%.1f,\"capHeadroomA\":%.1f,\"rpmAtFit\":%.0f,\"battVAtFit\":%.2f,\"socAtFit\":%.0f,\"diMaxA\":%.1f,\"warn\":%d,"
+             "\"Kp\":%.2f,\"Ki\":%.2f,\"stepA\":%.1f,\"capHeadroomA\":%.1f,\"rpmAtFit\":%.0f,\"rpmMinAtFit\":%.0f,\"rpmMaxAtFit\":%.0f,\"battVAtFit\":%.2f,\"socAtFit\":%.0f,\"diMaxA\":%.1f,\"warn\":%d,"
              "\"eK\":[%s],\"eS\":[%s],\"abort\":\"%s\"}",
              cvPlantFitActive ? 1 : 0, (int)cvpfPhase, cvpfReady ? 1 : 0, cvpfOk ? 1 : 0, (cvpfState == 3) ? 1 : 0,
              cvpfK * 1000.0f, cvpfKa * 1000.0f, cvpfKb * 1000.0f, cvpfDV * 1000.0f, cvpfDI, cvpfSNR, cvpfHorizonS,
-             cvpfKp, cvpfKi, cvpfStepA, cvpfCapHeadroomA, cvpfRpmAtFit, cvpfBattVAtFit, cvpfSocAtFit, cvpfDiMaxA, (int)cvpfWarn, eK, eS, cvpfAbortMsg);
+             cvpfKp, cvpfKi, cvpfStepA, cvpfCapHeadroomA, cvpfRpmAtFit, cvpfRpmMinAtFit, cvpfRpmMaxAtFit, cvpfBattVAtFit, cvpfSocAtFit, cvpfDiMaxA, (int)cvpfWarn, eK, eS, cvpfAbortMsg);
     request->send(200, "application/json", buf);
   });
 
@@ -8240,7 +8344,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason; +4: cvPTerm, cvIterm, cvKdTrim, cvKdFiltV; +1: huntDerate
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason; +4: cvPTerm, cvIterm, cvKdTrim, cvKdFiltV; +1: huntDerate; +2: huntFreqHz, huntState
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -8290,7 +8394,9 @@ void SendWifiData() {
                                SafeInt(cv_I, 100),             // CSV1_cvIterm — I contribution to Icv (A ×100)
                                SafeInt(g_cvKdTrimLive, 100),   // CSV1_cvKdTrim — D back-off at the Icv output (A ×100)
                                SafeInt(g_cvKdFiltV, 100),      // CSV1_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC (V ×100)
-                               SafeInt(g_huntDerate, 100)      // CSV1_huntDerate — hunt-governor live Ki derate (×100)
+                               SafeInt(g_huntDerate, 100),     // CSV1_huntDerate — hunt-governor live Ki derate (×100)
+                               SafeInt(g_huntFreqHz, 100),     // CSV1_huntFreqHz — last confirmed wobble frequency (Hz ×100)
+                               (int)g_huntState                // CSV1_huntState — 0 watching, 1 damping, 2 holding/recovering, 3 standing down
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
@@ -8439,7 +8545,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
@@ -8794,6 +8900,8 @@ void SendWifiData() {
                                SafeInt(ft_altFold.worstSession),
                                SafeInt(ft_boatPerf.worstWindow),
                                SafeInt(ft_boatPerf.worstSession),
+                               SafeInt(ft_huntGov.worstWindow),
+                               SafeInt(ft_huntGov.worstSession),
                                (int)systemIDActive,
                                (int)systemIDResultsReady,
                                (int)(systemIDStepAmp_A[0] * 10),
@@ -8988,7 +9096,10 @@ void SendWifiData() {
                                (int)accThermSessions,
                                SafeInt(accThermWorstOverF, 100),
                                (int)imuInstallCode(),
-                               SafeInt(g_cvKdCount));
+                               SafeInt(g_cvKdCount),
+                               LittleFsFreeKb,
+                               (lastCloudUploadOkMs == 0) ? -1 : (int)((millis() - lastCloudUploadOkMs) / 1000UL),
+                               (int)getCurrentTimestamp());
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)

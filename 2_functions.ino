@@ -955,6 +955,18 @@ size_t fsUsedBytes() {
   return result;
 }
 
+// Short-try variant for the main loop's periodic free-space stat: a busy mutex means
+// skip this round (caller keeps the previous value) rather than stalling the loop.
+// Zero-tick take: this runs in the control path with field possibly on, so it must never
+// wait on a Core-0 holder (a /huntledger read, console flush) even briefly.
+bool fsStatsTry(size_t &total, size_t &used) {
+  if (!fsMutex || xSemaphoreTake(fsMutex, 0) != pdTRUE) return false;
+  total = LittleFS.totalBytes();
+  used = LittleFS.usedBytes();
+  xSemaphoreGive(fsMutex);
+  return true;
+}
+
 void fsTakeLock() {
   if (fsMutex) {
     if (xSemaphoreTake(fsMutex, pdMS_TO_TICKS(10000)) != pdTRUE) {
@@ -1535,7 +1547,7 @@ void httpsTask(void *param) {
     HttpsRequest request;
     if (xQueueReceive(httpsQueue, &request, pdMS_TO_TICKS(1000))) {
 
-      if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG || request.type == HTTPS_UPLOAD_BOATPERF || request.type == HTTPS_UPLOAD_ALTHEALTH || request.type == HTTPS_UPLOAD_CX_LEDGER) {
+      if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG || request.type == HTTPS_UPLOAD_BOATPERF || request.type == HTTPS_UPLOAD_ALTHEALTH || request.type == HTTPS_UPLOAD_CX_LEDGER || request.type == HTTPS_UPLOAD_USAGE) {
         size_t payloadLen = request.payload ? strlen(request.payload) : 0;
         // payloadCap is the ps_malloc'd capacity (NOT sizeof a pointer); free + skip on any bad payload.
         if (!request.payload || payloadLen >= request.payloadCap || payloadLen == 0) {
@@ -1567,6 +1579,9 @@ void httpsTask(void *param) {
           break;
         case HTTPS_UPLOAD_CX_LEDGER:
           opSuccess = executeUploadCxLedger(request.payload);  // sets cxLedgerUpState itself (2 = trim due, -1 = retry)
+          break;
+        case HTTPS_UPLOAD_USAGE:
+          opSuccess = executeUploadUsage(request.payload);
           break;
         case HTTPS_FETCH_WEATHER:
           executeFetchWeatherData();
@@ -2540,6 +2555,7 @@ done_headers:
   // Log only non-200 codes — success is the common path and was noisy.
   if (httpCode != 200) Serial.printf("Upload: HTTP %d\n", httpCode);
   lastHttpResponseCode = httpCode;
+  if (httpCode == 200 && ackConfirmed) lastCloudUploadOkMs = millis();
 
   // ===== Handle PSRAM-ring slot based on response code =====
   // sensorRingInFlightIndex was set by uploadBufferedRecords() when it queued
@@ -3873,6 +3889,351 @@ done_headers_ah:
     }
     return success;
   }
+}
+
+// ── App-usage analytics ──────────────────────────────────────────────────────
+// Accumulator globals + design rationale live with the struct in Xregulator.ino.
+
+// Keys arrive from the client; sanitize so a stray quote/backslash can never break
+// the hand-built payload JSON (which then needs no escaping anywhere).
+static void usageMakeKey(char *out, size_t outSize, char prefix, const char *name) {
+  size_t o = 0;
+  if (outSize < 4) { if (outSize) out[0] = '\0'; return; }
+  out[o++] = prefix;
+  out[o++] = ':';
+  for (const char *c = name; *c && o < outSize - 1; c++) {
+    char ch = *c;
+    bool ok = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
+              || ch == '_' || ch == ':' || ch == '.' || ch == '-';
+    out[o++] = ok ? ch : '_';
+  }
+  out[o] = '\0';
+}
+
+// Linear scan is fine: ≤192 slots, touched only on /track posts (≈1/min/client) and the daily build.
+static void usageAdd(const char *key, uint32_t n, uint32_t ms) {
+  for (uint16_t i = 0; i < usageSlotCount; i++) {
+    if (strcmp(usageSlots[i].key, key) == 0) {
+      usageSlots[i].n += n;
+      usageSlots[i].ms += ms;
+      return;
+    }
+  }
+  if (usageSlotCount < USAGE_SLOTS) {
+    UsageSlot &s = usageSlots[usageSlotCount++];
+    strncpy(s.key, key, sizeof(s.key) - 1);
+    s.key[sizeof(s.key) - 1] = '\0';
+    s.n = n;
+    s.ms = ms;
+  } else {
+    usageOverflowN += n;
+  }
+}
+
+// Merge one /track delta POST: {"o":1,"a":1,"p":{"<page>":{"n":1,"ms":1234}},"b":{"<btn>":2}}
+// Runs on the async_tcp task — pure counter increments under the mutex, no I/O.
+bool usageMergeDelta(const char *body) {
+  if (!usageSlots || !usageMutex) return false;
+  DynamicJsonDocument doc(6144);
+  if (deserializeJson(doc, body)) return false;
+  if (xSemaphoreTake(usageMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+  uint32_t o = doc["o"] | 0U;
+  bool isApp = (doc["a"] | 0) != 0;
+  usageOpens += o;
+  UsageOpens_AllTime += o;
+  if (isApp) {
+    usageOpensApp += o;
+    usageAppSeen = true;
+  }
+  JsonObject p = doc["p"];
+  for (JsonPair kv : p) {
+    uint32_t n = kv.value()["n"] | 0U;
+    uint32_t ms = kv.value()["ms"] | 0U;
+    if (ms > 14400000UL) ms = 14400000UL;  // one delta can't claim >4 h of dwell (client-bug guard)
+    char key[32];
+    usageMakeKey(key, sizeof(key), 'p', kv.key().c_str());
+    usageAdd(key, n, ms);
+    UsageOpenTime_AllTime += ms / 1000.0;
+  }
+  JsonObject b = doc["b"];
+  for (JsonPair kv : b) {
+    uint32_t n = kv.value() | 0U;
+    char key[32];
+    usageMakeKey(key, sizeof(key), 'b', kv.key().c_str());
+    usageAdd(key, n, 0);
+  }
+  if (usagePeriodStartEpoch == 0) {
+    time_t nowEp = time(NULL);
+    if (nowEp > 1700000000LL) usagePeriodStartEpoch = nowEp;  // period opens at first data with a valid clock
+  }
+  usageDirty = true;
+  xSemaphoreGive(usageMutex);
+  return true;
+}
+
+void resetUsageAccum(time_t newStart) {
+  if (!usageMutex || xSemaphoreTake(usageMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
+  usageSlotCount = 0;
+  usageOverflowN = 0;
+  usageOpens = 0;
+  usageOpensApp = 0;
+  usageAppSeen = false;
+  usagePeriodStartEpoch = newStart;
+  usageDirty = true;
+  xSemaphoreGive(usageMutex);
+}
+
+// Daily payload for track-behavior. Keys are pre-sanitized so no JSON escaping is needed.
+bool buildUsagePayload(char *buf, uint32_t cap) {
+  if (!usageSlots || !usageMutex) return false;
+  if (xSemaphoreTake(usageMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+  uint64_t totalMs = 0;
+  for (uint16_t i = 0; i < usageSlotCount; i++)
+    if (usageSlots[i].key[0] == 'p') totalMs += usageSlots[i].ms;
+  int off = snprintf(buf, cap,
+                     "{\"device_uid\":\"%s\",\"token\":\"%s\",\"payload_v\":1,"
+                     "\"fw_version_int\":%d,\"web_version\":\"%s\",\"app_seen\":%d,"
+                     "\"period_start\":%lld,\"period_end\":%lld,"
+                     "\"opens\":%u,\"opens_app\":%u,\"total_ms\":%llu,\"overflow\":%u,\"pages\":{",
+                     device_id_hex, authToken.c_str(), firmwareVersionInt, FIRMWARE_VERSION,
+                     usageAppSeen ? 1 : 0, (long long)usagePeriodStartEpoch, (long long)time(NULL),
+                     usageOpens, usageOpensApp, (unsigned long long)totalMs, usageOverflowN);
+  bool first = true;
+  for (uint16_t i = 0; i < usageSlotCount && off > 0 && off < (int)cap; i++) {
+    if (strncmp(usageSlots[i].key, "p:", 2) != 0) continue;
+    off += snprintf(buf + off, cap - off, "%s\"%s\":{\"n\":%u,\"ms\":%u}",
+                    first ? "" : ",", usageSlots[i].key + 2, usageSlots[i].n, usageSlots[i].ms);
+    first = false;
+  }
+  if (off > 0 && off < (int)cap) off += snprintf(buf + off, cap - off, "},\"btns\":{");
+  first = true;
+  for (uint16_t i = 0; i < usageSlotCount && off > 0 && off < (int)cap; i++) {
+    if (strncmp(usageSlots[i].key, "b:", 2) != 0) continue;
+    off += snprintf(buf + off, cap - off, "%s\"%s\":%u",
+                    first ? "" : ",", usageSlots[i].key + 2, usageSlots[i].n);
+    first = false;
+  }
+  if (off > 0 && off < (int)cap) off += snprintf(buf + off, cap - off, "}}");
+  xSemaphoreGive(usageMutex);
+  return (off > 0 && off < (int)cap - 1);
+}
+
+bool executeUploadUsage(const char *payload) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.RSSI() < -80) return false;
+  if (!isRegistered || authToken.isEmpty()) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT / 1000);  // this API takes seconds
+
+  uint32_t start = millis();
+  esp_task_wdt_reset();
+
+  IPAddress hostIP;  // pre-resolve: keep DNS out of the connect's unfed-WDT window (see executeUploadPayload)
+  if (!WiFi.hostByName(host, hostIP)) {
+    Serial.println("Usage: DNS fail");
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  if (!client.connect(host, port, CONNECT_TIMEOUT)) {
+    Serial.println("Usage: Connect fail");
+    client.stop();
+    return false;
+  }
+  if (millis() - start > GLOBAL_TIMEOUT) {
+    client.stop();
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  client.printf(
+    "POST /functions/v1/track-behavior HTTP/1.1\r\n"
+    "Host: %s\r\n"
+    "Content-Type: application/json\r\n"
+    "Authorization: Bearer %s\r\n"
+    "Connection: close\r\n"
+    "Content-Length: %u\r\n\r\n",
+    host, SUPABASE_ANON_KEY, (unsigned)strlen(payload));
+
+  size_t payloadLen = strlen(payload);
+  if (client.write((const uint8_t *)payload, payloadLen) != payloadLen) {
+    Serial.println("Usage: Payload send fail");
+    client.stop();
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  // Response body is ignored — only the status code matters.
+  int httpCode = 0;
+  uint32_t readStart = millis();
+  char statusBuf[64];
+  size_t statusLen = 0;
+  while (client.connected() && (millis() - readStart < READ_TIMEOUT)) {
+    esp_task_wdt_reset();
+    while (client.available()) {
+      char c = (char)client.read();
+      readStart = millis();
+      if (statusLen < sizeof(statusBuf) - 1) statusBuf[statusLen++] = c;
+      if (c == '\n') {
+        statusBuf[statusLen] = '\0';
+        if (strncmp(statusBuf, "HTTP/", 5) == 0) {
+          const char *sp = strchr(statusBuf, ' ');
+          if (sp) httpCode = atoi(sp + 1);
+        }
+        goto done_status_us;
+      }
+    }
+    if (millis() - start > GLOBAL_TIMEOUT) break;
+    delay(1);
+  }
+done_status_us:
+  client.stop();
+  esp_task_wdt_reset();
+
+  bool success = (httpCode == 200);
+  if (success) {
+    queueConsoleMessage("App-usage analytics uploaded");
+  } else if (httpCode > 0) {
+    snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Usage upload failed HTTP %d", httpCode);
+    queueConsoleMessage(messageBuffer);
+  }
+  return success;
+}
+
+// /trackstats JSON for the Live Data → ESP32 "App Usage" card: period scalars,
+// top-5 pages by dwell, top-5 buttons by count, lifetime totals.
+String usageStatsJson() {
+  String out;
+  out.reserve(1200);
+  if (!usageSlots || !usageMutex || xSemaphoreTake(usageMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+    return String("{\"err\":1}");
+  }
+  uint64_t totalMs = 0;
+  for (uint16_t i = 0; i < usageSlotCount; i++)
+    if (usageSlots[i].key[0] == 'p') totalMs += usageSlots[i].ms;
+  out += "{\"today\":{\"opens\":";
+  out += usageOpens;
+  out += ",\"ms\":";
+  out += (unsigned long)totalMs;
+  out += ",\"pages\":[";
+  bool used[USAGE_SLOTS] = {};
+  for (int rank = 0; rank < 5; rank++) {  // selection by dwell — N≤192, once per tab open
+    int best = -1;
+    for (uint16_t i = 0; i < usageSlotCount; i++) {
+      if (used[i] || strncmp(usageSlots[i].key, "p:", 2) != 0) continue;
+      if (best < 0 || usageSlots[i].ms > usageSlots[best].ms) best = i;
+    }
+    if (best < 0 || usageSlots[best].ms == 0) break;
+    used[best] = true;
+    if (rank) out += ",";
+    out += "[\"";
+    out += (usageSlots[best].key + 2);
+    out += "\",";
+    out += usageSlots[best].n;
+    out += ",";
+    out += usageSlots[best].ms;
+    out += "]";
+  }
+  out += "],\"btns\":[";
+  memset(used, 0, sizeof(used));
+  for (int rank = 0; rank < 5; rank++) {
+    int best = -1;
+    for (uint16_t i = 0; i < usageSlotCount; i++) {
+      if (used[i] || strncmp(usageSlots[i].key, "b:", 2) != 0) continue;
+      if (best < 0 || usageSlots[i].n > usageSlots[best].n) best = i;
+    }
+    if (best < 0 || usageSlots[best].n == 0) break;
+    used[best] = true;
+    if (rank) out += ",";
+    out += "[\"";
+    out += (usageSlots[best].key + 2);
+    out += "\",";
+    out += usageSlots[best].n;
+    out += "]";
+  }
+  out += "]},\"life\":{\"opens\":";
+  out += UsageOpens_AllTime;
+  out += ",\"s\":";
+  out += (unsigned long)UsageOpenTime_AllTime;
+  out += ",\"days\":";
+  out += UsageDays_AllTime;
+  out += "}}";
+  xSemaphoreGive(usageMutex);
+  return out;
+}
+
+// Period persistence across the maintenance restart. Layout change auto-invalidates
+// via the sizeof-XORed magic (same trick as the reset black box). Lifetime totals are
+// NOT in this file — they ride saveNVSDataFull like every other *_AllTime.
+struct UsageFileHdr {
+  uint32_t magic;
+  uint32_t opens, opensApp, overflowN;
+  int64_t periodStart;
+  uint8_t appSeen;
+  uint8_t _pad[3];
+  uint16_t slotCount;
+  uint16_t _pad2;
+};
+#define USAGE_FILE_MAGIC (0x55534741UL ^ (uint32_t)sizeof(UsageSlot) ^ ((uint32_t)sizeof(UsageFileHdr) << 8))
+#define USAGE_FILE_PATH "/usage.bin"
+
+void dumpUsageAccum() {
+  if (!usageSlots || !usageDirty) return;
+  if (!usageMutex || xSemaphoreTake(usageMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
+  fsTakeLock();
+  File f = LittleFS.open(USAGE_FILE_PATH, "w");
+  if (f) {
+    UsageFileHdr h = {};
+    h.magic = USAGE_FILE_MAGIC;
+    h.opens = usageOpens;
+    h.opensApp = usageOpensApp;
+    h.overflowN = usageOverflowN;
+    h.periodStart = usagePeriodStartEpoch;
+    h.appSeen = usageAppSeen ? 1 : 0;
+    h.slotCount = usageSlotCount;
+    bool ok = f.write((const uint8_t *)&h, sizeof(h)) == sizeof(h);
+    if (ok && usageSlotCount > 0) {
+      size_t bytes = (size_t)usageSlotCount * sizeof(UsageSlot);
+      ok = f.write((const uint8_t *)usageSlots, bytes) == bytes;
+    }
+    f.close();
+    if (ok) usageDirty = false;
+    else LittleFS.remove(USAGE_FILE_PATH);  // never leave a torn file for boot to trust
+  }
+  fsReleaseLock();
+  xSemaphoreGive(usageMutex);
+}
+
+// Boot restore (setup(), before the web server exists — no mutex contention possible).
+void loadUsageAccum() {
+  if (!usageSlots) return;
+  fsTakeLock();
+  File f = LittleFS.open(USAGE_FILE_PATH, "r");
+  if (f) {
+    UsageFileHdr h = {};
+    bool ok = f.read((uint8_t *)&h, sizeof(h)) == sizeof(h)
+              && h.magic == USAGE_FILE_MAGIC && h.slotCount <= USAGE_SLOTS;
+    if (ok && h.slotCount > 0) {
+      size_t bytes = (size_t)h.slotCount * sizeof(UsageSlot);
+      ok = f.read((uint8_t *)usageSlots, bytes) == bytes;
+    }
+    if (ok) {
+      usageOpens = h.opens;
+      usageOpensApp = h.opensApp;
+      usageOverflowN = h.overflowN;
+      usagePeriodStartEpoch = h.periodStart;
+      usageAppSeen = h.appSeen != 0;
+      usageSlotCount = h.slotCount;
+      for (uint16_t i = 0; i < usageSlotCount; i++)
+        usageSlots[i].key[sizeof(usageSlots[i].key) - 1] = '\0';  // a corrupt file must not yield an unterminated key
+      usageDirty = false;
+      Serial.printf("Usage accumulator restored: %u keys, opens=%u\n", (unsigned)usageSlotCount, (unsigned)usageOpens);
+    }
+    f.close();
+  }
+  fsReleaseLock();
 }
 
 void syncTimeFromNTP() {

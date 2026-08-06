@@ -1,4 +1,4 @@
-<!-- XREG_START
+<!--
  * AI_SUMMARY: Alternator Regulator Project - This file is the html for the interface, served by the ESP32 to a browser.  This is mostly HTML, only some minimal embedded JS.  Full JS and CSS files are separate.
  * AI_PURPOSE: Realtime control of GPIO (settings always have echos) and viewing of sensor data and calculated values.  
  * AI_INPUTS: Payloads from the ESP32.  Server-Sent Events via /events endpoint
@@ -99,8 +99,9 @@
        packet (see hideWaitingForRegulator()) or when demo mode starts — no platform
        check, so it works regardless of whether window.Capacitor is detected. In a
        normal browser the device-served page connects instantly, so the first packet
-       clears it almost immediately (boat_loader.webp ships only in the app bundle,
-       so the browser may show a missing image for that instant). The boat's bottom
+       clears it almost immediately (boat_loader.webp ships only in the app bundle —
+       the ESP32 never serves it — so onerror hides the boat and reflection there,
+       leaving the sea/sky scene instead of a broken-image icon). The boat's bottom
        edge is its real waterline, so it floats. -->
   <div id="waiting-for-regulator" class="wfr-light" style="display:block;">
    <div class="bl-stage">
@@ -109,8 +110,8 @@
     <div class="bl-sun"></div>
     <div class="bl-clouds"><span></span><span></span></div>
     <div class="bl-brand"><span class="wm-X">X</span><span class="wm-rest">Engineering</span></div>
-    <div class="bl-reflection"><img src="boat_loader.webp" alt=""></div>
-    <div class="bl-boat"><img src="boat_loader.webp" alt="Sailboat"></div>
+    <div class="bl-reflection"><img src="boat_loader.webp" alt="" onerror="this.parentNode.style.display='none'"></div>
+    <div class="bl-boat"><img src="boat_loader.webp" alt="Sailboat" onerror="this.parentNode.style.display='none'"></div>
     <div class="bl-sea"><div class="bl-shine"></div></div>
     <div class="bl-waterline"></div>
     <div class="bl-wake"></div>
@@ -291,13 +292,15 @@
     <button class="main-tab" onclick="showMainTab('plots')">Plots</button>
     <!--<button class="main-tab" onclick="showMainTab('about-sourcecode')">Documentation</button> -->
     <button class="main-tab" onclick="showMainTab('cloudfeatures')"><span class="tab-label-full">Cloud Features</span><span class="tab-label-short">Cloud</span></button>
-    <!-- SETTINGS SEARCH trigger. Hidden below 768px by .ss-search-tab; phones open search
-         with the pull-down-at-top gesture (SETTINGS SEARCH block at the end of script.js).
+    <!-- SETTINGS SEARCH trigger. NOT a .main-tab on purpose — it is a bare icon in the gutter at
+         the right end of the row (see .ss-search-tab), shown only where a mouse/trackpad exists;
+         touch devices open search with the pull-down-at-top gesture (SETTINGS SEARCH block at the
+         end of script.js).
          width/height are on the <svg> ON PURPOSE: an inline SVG with only a viewBox has no
          intrinsic size, so if a browser pairs this HTML with a cached pre-search styles.css
          (no .ss-icon rule) the glyph inflates to the full button width and blows the whole
          tab row to ~300px tall. The CSS rule still wins when it is present. -->
-    <button class="main-tab ss-search-tab" onclick="ssOpen()" title="Search all settings"><svg class="ss-icon" width="15" height="15" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><line x1="15.5" y1="15.5" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg><span>Search</span></button>
+    <button class="ss-search-tab" onclick="ssOpen()" title="Search all settings" aria-label="Search all settings"><svg class="ss-icon" width="19" height="19" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><line x1="15.5" y1="15.5" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
   </div>
 
   <div id="settings" class="tab-content">
@@ -4045,7 +4048,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Oscillation Damper (<span id="HuntGovEnable_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Watches for sustained slow hunting — a steady wobble in field drive, engine speed, and voltage that some engine/alternator/belt combinations develop at low engine speed under heavy load — and temporarily reduces the current loop's integral gain until the wobble dies. The change is verified: if reducing gain does not calm the wobble (for example a cycling load or an engine problem is the cause), full gain is restored automatically and the event is noted in the console. Nothing is stored permanently; every episode is logged at /huntledger. <strong>Off:</strong> hunting persists at full gain until conditions change.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Watches for sustained slow hunting — a steady wobble in field drive, engine speed, and voltage that some engine/alternator/belt combinations develop at low engine speed under heavy load — and temporarily reduces the current loop's integral gain until the wobble dies. The change is verified: the reduced gain is kept only when the wobble measurably responds — dies out entirely, or at least halves and stays halved. If reducing gain does not calm the wobble (for example a cycling load or an engine problem is the cause), full gain is restored automatically and the event is noted in the console. Nothing is stored permanently; live state and every past episode are shown under Live Data ▸ Diag ▸ Oscillation Damper. <strong>Off:</strong> hunting persists at full gain until conditions change.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -10367,10 +10370,29 @@
     <!-- ESP32 Live Data Sub-tab -->
     <div id="livedata-esp32" class="sub-tab-content">
       <div class="settings-card">
-        <div style="margin-bottom: 12px;">
+        <!-- Page-scope reset: deliberately sits above every section because it clears counters
+             in all three of them. The tooltip is the contract for what it touches. -->
+        <div class="diag-toolbar">
           <button type="button" class="btn-secondary" onclick="handleResetPerfCounters()">Reset Peak Values</button>
+          <span class="tooltip">ℹ️
+            <span class="tooltip-box">Clears every worst-case, maximum and error count on this whole page at
+              once, and restarts the "since reset" window used by the Function Timing table.
+              <br><br>
+              <strong>System Overview:</strong> CPU Load Max, Max Loop Time.<br>
+              <strong>Sensor Health:</strong> ADS1115 and INA228 I2C error counts, INA bus-read worst and
+              slow-read count, IMU fetch worst.<br>
+              <strong>Timing &amp; Diagnostics:</strong> every Function Timing worst case, the current- and
+              voltage-loop interval ladders, RPM/voltage read-gap worsts, CSV2 build and send worsts, and the
+              NVS full-save duration and count.
+              <br><br>
+              It does <strong>not</strong> touch the temperature-sensor counters (their own button in Sensor
+              Health), the ripple analyzer's session peaks, or any lifetime record on the Statistics
+              pages.</span>
+          </span>
         </div>
 
+        <details class="esp32-sec" id="esp32SecOverview" open>
+          <summary>System Overview</summary>
         <div class="grid">
           <!-- SYSTEM -->
           <div class="card-group">
@@ -10432,26 +10454,28 @@
               </span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Buffered Records (count)
+              <span class="metric-label">Clock / GPS Source
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Data buffered when WiFi disconnected. Will upload to Cloud at next
-                    opportunity. Resetting might take a few tries, brute force works.</span>
+                  <span class="tooltip-box">Where the regulator's clock and position are coming from right now. A
+                    "drifting" or "estimated" clock means no time source is available — history timestamps may
+                    have gaps until GPS, phone, or internet (NTP) time returns.</span>
                 </span>
               </span>
-              <span class="metric-value" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
-                <span><span id="BufferedRecordCountID">0</span>/<span id="BufferedRecordCapID">?</span></span>
-                <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
-                  <form action="/get" method="GET" target="hidden-form" style="display:inline;">
-                    <input type="hidden" name="forceCloudFlush" value="1">
-                    <input type="submit" value="Upload Now" class="btn-primary" id="cloudUploadNowBtn"
-                      title="Force-upload buffered records to the cloud immediately. RECOMMENDED with field OFF. If field is ON: control loop is held for up to 10s during each upload, banner will show WAITING CLOUD. Hardware over-voltage protection stays armed, but a load transient mid-upload could trigger a hard cut. Avoid during dynamic events (RPM ramps, sudden load changes). Bypasses the 70s field-off settle and 13s interval throttle." />
-                  </form>
-                  <form action="/get" method="GET" target="hidden-form" style="display:inline;">
-                    <input type="hidden" name="ClearBuffer" value="1">
-                    <input onclick="handleClearBuffer(this.form); return false;" type="submit" value="Clear" class="btn-secondary"
-                      title="Delete all buffered sensor uploads" />
-                  </form>
+              <span class="metric-value" style="font-size:13px;white-space:normal;text-align:right;"><span id="esp32TimeSourceID">?</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Device Clock
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">The regulator's own clock. The regulator itself keeps UTC and has no time
+                    zone setting, so the time here is converted into the zone of the phone or computer you are reading
+                    this on — that zone is named beside it. If the regulator's clock disagrees with the screen you are
+                    viewing from by more than half a minute, the difference is shown underneath. Everything the
+                    regulator timestamps — history records, cloud uploads, alarm logs — uses this clock.</span>
                 </span>
+              </span>
+              <span class="metric-value" style="text-align:right;">
+                <span id="deviceClockID">?</span><span id="deviceClockTzID" class="clock-tz"></span>
+                <span id="deviceClockSkewID" class="clock-skew"></span>
               </span>
             </div>
             <div class="metric-row">
@@ -10462,134 +10486,87 @@
               </span>
               <span class="metric-value"><span id="totalPowerCyclesID">0</span></span>
             </div>
-
-
+          </div>
+          <!-- CONNECTIVITY & CLOUD -->
+          <div class="card-group">
+            <p class="card-group-title">Connectivity &amp; Cloud</p>
             <div class="metric-row">
-              <span class="metric-label">ADS1115 I2C Error Count
+              <span class="metric-label">Network (SSID)
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Count for this power cycle only, does not persist thru power loss</span>
+                  <span class="tooltip-box">The WiFi network the regulator is connected to. In Access Point mode this
+                    is the name of the hotspot the regulator itself is broadcasting.</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="adsI2CErrorCount_ID">0</span></span>
+              <span class="metric-value" style="font-size:13px;white-space:normal;word-break:break-word;text-align:right;"><span id="netSsidID">?</span></span>
             </div>
-
             <div class="metric-row">
-              <span class="metric-label">INA Bus-Only Read Worst (ms)
+              <span class="metric-label">IP Address
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Time spent in JUST the two INA228 I2C reads. Compare to the "INA228" row in Function Timing (shown in ms): if they roughly match, a loop stall is the bus itself; if this is much smaller, the loop is being preempted mid-read by other work. Resets with Reset Peak Values.</span>
+                  <span class="tooltip-box">The regulator's address on the network — useful for bookmarking or
+                    connecting directly if name-based discovery fails.</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="inaBusReadWorstUs_ID">0</span></span>
+              <span class="metric-value" style="font-family:monospace;font-size:13px;"><span id="netIpID">?</span></span>
             </div>
-
-            <div class="metric-row">
-              <span class="metric-label">INA Bus Reads &gt; 15 ms
+            <div class="metric-row ap-hide-row">
+              <span class="metric-label">Strength (dBm)
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">How many INA228 bus reads took longer than 15 ms (one Wire-timeout's worth) since the last Reset Peak Values. Non-zero means real bus stalls are happening, not just a one-off worst case.</span>
+                  <span class="tooltip-box">Above -67dBm good. Below -75dBm unstable</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="inaBusSlowCount_ID">0</span></span>
+              <span class="metric-value"><span id="WifiStrengthID">0</span></span>
             </div>
-
-            <div class="metric-row">
-              <span class="metric-label">INA228 Dropped Reads
+            <div class="metric-row ap-hide-row">
+              <span class="metric-label">Client Disconnects (count)
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">INA228 reads thrown away because the value was implausible (timeout/garbage). The counterpart to the ADS1115 error count. If this climbs during a stall, transactions are truly failing (electrical); if it stays 0 while reads are still slow, the bus is completing but starved. Resets with Reset Peak Values.</span>
+                  <span class="tooltip-box">WiFi connection losses detected by ESP32 (router drops, signal loss,
+                    network
+                    issues)</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="ina228ErrorCount_ID">0</span></span>
+              <span class="metric-value"><span id="wifiReconnectsTotalID">0</span></span>
             </div>
-
             <div class="metric-row">
-              <span class="metric-label">IMU Bus-Only Fetch Worst (ms)
+              <span class="metric-label">Heartbeat (count)
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Time spent in JUST the IMU FIFO read (Get_FIFO_Sample), excluding the sample-parsing loop. Compare to the "IMU FIFO Drain" row in Function Timing the same way as the INA bus-only timer. Resets with Reset Peak Values.</span>
+                  <span class="tooltip-box">Increments with each packet sent</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="imuFifoFetchWorstUs_ID">0</span></span>
+              <span class="metric-value"><span id="WifiHeartBeatID">0</span></span>
             </div>
-
+            <div class="metric-row ap-hide-row">
+              <span class="metric-label">Last Cloud Upload
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Time since the last confirmed telemetry upload to the cloud. Uploads run
+                    periodically when WiFi and internet are available; a growing value with WiFi connected points at
+                    an internet or cloud-side problem rather than a local one.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="cloudUpAgeID">?</span></span>
+            </div>
             <div class="metric-row">
-              <span class="metric-label">IMU Worst-Fetch Sample Count
-                <span class="tooltip">ℹ
-                  <span class="tooltip-box">How many samples were in the read that produced the worst fetch time above. Each sample is 7 bytes, so 6 samples = 42 bytes = ~1 ms of real bus time at 400 kHz. If the worst fetch shows a large microsecond value but only 6 samples here, the time was NOT spent moving bytes — the read was stalled on the shared bus or the loop was preempted (e.g. by WiFi/TCP on Core 1), not transfer-bound. Resets with Reset Peak Values.</span>
+              <span class="metric-label">Buffered Records (count)
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Data buffered when WiFi disconnected. Will upload to Cloud at next
+                    opportunity. Resetting might take a few tries, brute force works.</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="imuFifoWorstSamples_ID">0</span></span>
-            </div>
-
-            <div class="metric-row">
-              <span class="metric-label">RPM Read Gap — Last (ms)
-                <span class="tooltip">ℹ
-                  <span class="tooltip-box">Milliseconds since the previous valid RPM (ADS channel 2) reading. RPM is a time-shared channel: with the continuous-mode sampler it is read on a brief mux excursion off the parked current channel. Target is under 30 ms so RPM stays smooth for the control logic that uses it. Glitch/out-of-range reads do not count.</span>
+              <span class="metric-value" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+                <span><span id="BufferedRecordCountID">0</span>/<span id="BufferedRecordCapID">?</span></span>
+                <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+                  <form class="ap-hide-inline" action="/get" method="GET" target="hidden-form" style="display:inline;">
+                    <input type="hidden" name="forceCloudFlush" value="1">
+                    <input type="submit" value="Upload Now" class="btn-primary" id="cloudUploadNowBtn"
+                      title="Force-upload buffered records to the cloud immediately. RECOMMENDED with field OFF. If field is ON: control loop is held for up to 10s during each upload, banner will show WAITING CLOUD. Hardware over-voltage protection stays armed, but a load transient mid-upload could trigger a hard cut. Avoid during dynamic events (RPM ramps, sudden load changes). Bypasses the 70s field-off settle and 13s interval throttle." />
+                  </form>
+                  <form action="/get" method="GET" target="hidden-form" style="display:inline;">
+                    <input type="hidden" name="ClearBuffer" value="1">
+                    <input onclick="handleClearBuffer(this.form); return false;" type="submit" value="Clear Buffer" class="btn-secondary"
+                      title="Permanently delete the buffered records counted above — the sensor history queued on the device that has not reached the cloud yet. Nothing else on this page is affected, and history already uploaded stays in the cloud." />
+                  </form>
                 </span>
               </span>
-              <span class="metric-value"><span id="ch2GapLast_ID">0</span></span>
             </div>
-
-            <div class="metric-row">
-              <span class="metric-label">RPM Read Gap — Worst (ms)
-                <span class="tooltip">ℹ
-                  <span class="tooltip-box">Largest gap between valid RPM readings since the last Reset Peak Values. Confirms the excursion scheduler is not starving RPM. Should stay under ~30 ms; a spike means a heavy loop pass stretched the excursion. Resets with Reset Peak Values.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="ch2GapWorst_ID">0</span></span>
-            </div>
-
-            <div class="metric-row">
-              <span class="metric-label">Voltage Read Gap — Last (ms)
-                <span class="tooltip">ℹ
-                  <span class="tooltip-box">Milliseconds since the previous valid ADS battery-voltage (channel 0) reading. This is the secondary voltage used only as a sanity cross-check against the INA228; like RPM it is read on a brief mux excursion. Target is under 30 ms. Out-of-range reads do not count.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="ch0GapLast_ID">0</span></span>
-            </div>
-
-            <div class="metric-row">
-              <span class="metric-label">Voltage Read Gap — Worst (ms)
-                <span class="tooltip">ℹ
-                  <span class="tooltip-box">Largest gap between valid ADS battery-voltage readings since the last Reset Peak Values. Confirms the cross-check voltage channel is not starved by the excursion scheduler. Resets with Reset Peak Values.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="ch0GapWorst_ID">0</span></span>
-            </div>
-
-            <div class="metric-row">
-              <span class="metric-label">CSV2 Build — Last (ms)
-                <span class="tooltip">ℹ
-                  <span class="tooltip-box">Time to BUILD the ~548-field CSV2 diagnostic payload (the snprintf) on the most recent send, ~every 5 s. This is the CPU half of the WiFi-send cost. If this dominates the WiFi Send timer, the win is chunking/offloading the build; if it's small, the cost is in the send instead.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="csv2BuildLast_ID">0</span></span>
-            </div>
-
-            <div class="metric-row">
-              <span class="metric-label">CSV2 Build — Worst (ms)
-                <span class="tooltip">ℹ
-                  <span class="tooltip-box">Worst CSV2 build (snprintf) time since the last Reset Peak Values. Resets with Reset Peak Values.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="csv2BuildWorst_ID">0</span></span>
-            </div>
-
-            <div class="metric-row">
-              <span class="metric-label">CSV2 Send — Last (ms)
-                <span class="tooltip">ℹ
-                  <span class="tooltip-box">Time to SEND the CSV2 payload (events.send → AsyncTCP) on the most recent send. This is the transport half of the WiFi-send cost. If this dominates, the win is splitting CSV2 into smaller events; if the build dominates instead, chunk/offload the build.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="csv2SendLast_ID">0</span></span>
-            </div>
-
-            <div class="metric-row">
-              <span class="metric-label">CSV2 Send — Worst (ms)
-                <span class="tooltip">ℹ
-                  <span class="tooltip-box">Worst CSV2 send (events.send) time since the last Reset Peak Values. Resets with Reset Peak Values.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="csv2SendWorst_ID">0</span></span>
-            </div>
-
           </div>
           <!-- MEMORY -->
           <div class="card-group">
@@ -10660,6 +10637,17 @@
                 </span>
               </span>
               <span class="metric-value"><span id="HeapfragID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Free Data Storage (kB)
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Free space on the internal flash filesystem holding history rings, logs,
+                    and buffered cloud uploads. Oldest data is pruned automatically, so this should stabilize rather
+                    than run to zero. Refreshes about once a minute while the alternator is idle; measuring it reads
+                    flash, which is never touched while charging, so the value holds still during a charge.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="LittleFsFreeKbID">?</span></span>
             </div>
           </div>
           <!-- CPU LOAD -->
@@ -10740,12 +10728,16 @@
               <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Reset Reason
                   <span class="tooltip">ℹ️
-                    <span class="tooltip-box">Common reset reasons: Scheduled Restart (11) is automatic maintenance
-                      every 4 hours (normal operation). Software Reset (1) is an unscheduled restart from crash
-                      recovery or manual commands. Task Watchdog (4) means the main program froze for over 16
-                      seconds. Power On (0) occurs after battery disconnect/reconnect. Most frequently seen:
-                      Scheduled Restart during normal operation. Note: Sessions following OTA updates may show
-                      inaccurate reset reasons.
+                    <span class="tooltip-box">Common reset reasons: Scheduled Restart (11) is the automatic
+                      maintenance reboot — after a day of continuous running, the regulator restarts itself at the
+                      first quiet moment that holds for 5 minutes (engine off, not charging, nobody connected,
+                      battery healthy, uploads finished). After 2 days it no longer waits for you to disconnect.
+                      If no quiet moment appears it restarts anyway after 3 days — even under way and
+                      charging — showing a 10-minute countdown banner first. Low contiguous RAM can request one
+                      before the 1-day mark. Software Reset (1) is an unscheduled restart from crash recovery or manual commands.
+                      Task Watchdog (4) means the main program froze for over 16 seconds. Power On (0) occurs
+                      after battery disconnect/reconnect. Most frequently seen: Scheduled Restart during normal
+                      operation. Note: Sessions following OTA updates may show inaccurate reset reasons.
                     </span>
                   </span>
                 </div>
@@ -10756,43 +10748,268 @@
               </div>
             </div>
           </div>
-          <!-- WIFI STATUS -->
+        </div>
+        </details>
+
+        <details class="esp32-sec" id="esp32SecSensorHealth">
+          <summary>Sensor Health</summary>
+          <div class="grid">
+            <!-- SENSOR BUS HEALTH -->
+            <div class="card-group">
+              <p class="card-group-title">Sensor Bus Health</p>
+              <div class="metric-row">
+                <span class="metric-label">ADS1115 I2C Error Count
+                  <span class="tooltip">ℹ️
+                    <span class="tooltip-box">Count for this power cycle only, does not persist thru power loss</span>
+                  </span>
+                </span>
+                <span class="metric-value"><span id="adsI2CErrorCount_ID">0</span></span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">INA Bus-Only Read Worst (ms)
+                  <span class="tooltip">ℹ️
+                    <span class="tooltip-box">Time spent in JUST the two INA228 I2C reads. Compare to the "INA228" row in Function Timing (shown in ms): if they roughly match, a loop stall is the bus itself; if this is much smaller, the loop is being preempted mid-read by other work. Resets with Reset Peak Values.</span>
+                  </span>
+                </span>
+                <span class="metric-value"><span id="inaBusReadWorstUs_ID">0</span></span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">INA Bus Reads &gt; 15 ms
+                  <span class="tooltip">ℹ️
+                    <span class="tooltip-box">How many INA228 bus reads took longer than 15 ms (one Wire-timeout's worth) since the last Reset Peak Values. Non-zero means real bus stalls are happening, not just a one-off worst case.</span>
+                  </span>
+                </span>
+                <span class="metric-value"><span id="inaBusSlowCount_ID">0</span></span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">INA228 Dropped Reads
+                  <span class="tooltip">ℹ️
+                    <span class="tooltip-box">INA228 reads thrown away because the value was implausible (timeout/garbage). The counterpart to the ADS1115 error count. If this climbs during a stall, transactions are truly failing (electrical); if it stays 0 while reads are still slow, the bus is completing but starved. Resets with Reset Peak Values.</span>
+                  </span>
+                </span>
+                <span class="metric-value"><span id="ina228ErrorCount_ID">0</span></span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">IMU Bus-Only Fetch Worst (ms)
+                  <span class="tooltip">ℹ️
+                    <span class="tooltip-box">Time spent in JUST the IMU FIFO read (Get_FIFO_Sample), excluding the sample-parsing loop. Compare to the "IMU FIFO Drain" row in Function Timing the same way as the INA bus-only timer. Resets with Reset Peak Values.</span>
+                  </span>
+                </span>
+                <span class="metric-value"><span id="imuFifoFetchWorstUs_ID">0</span></span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">IMU Worst-Fetch Sample Count
+                  <span class="tooltip">ℹ
+                    <span class="tooltip-box">How many samples were in the read that produced the worst fetch time above. Each sample is 7 bytes, so 6 samples = 42 bytes = ~1 ms of real bus time at 400 kHz. If the worst fetch shows a large microsecond value but only 6 samples here, the time was NOT spent moving bytes — the read was stalled on the shared bus or the loop was preempted (e.g. by WiFi/TCP on Core 1), not transfer-bound. Resets with Reset Peak Values.</span>
+                  </span>
+                </span>
+                <span class="metric-value"><span id="imuFifoWorstSamples_ID">0</span></span>
+              </div>
+            </div>
+          <!-- ACCELEROMETER / IMU -->
           <div class="card-group">
-            <p class="card-group-title">WiFi Status</p>
+            <p class="card-group-title">Accelerometer / IMU</p>
             <div class="metric-row">
-              <span class="metric-label">Strength (dBm)
+              <span class="metric-label">FIFO Overruns
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Above -67dBm good. Below -75dBm unstable</span>
+                  <span class="tooltip-box">Count of times the IMU FIFO filled before it could be drained. Indicates
+                    loop() is too slow to keep up with the sensor output rate.</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="WifiStrengthID">0</span></span>
+              <span class="metric-value"><span id="imu_fifo_overrun_count_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Client Disconnects (count)
+              <span class="metric-label">80 MHz Worst Loop (5 s)
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">WiFi connection losses detected by ESP32 (router drops, signal loss,
-                    network
-                    issues)</span>
+                  <span class="tooltip-box">Slowest single loop pass during engine-off low-power mode (the CPU drops to
+                    80 MHz to save power), over the last 5 seconds, in milliseconds. A few ms is normal. It becomes a
+                    concern as it climbs toward 38 ms — the point where the accelerometer can start filling its buffer
+                    faster than it's emptied. Blank/0 means the boat hasn't been in low-power mode recently.</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="wifiReconnectsTotalID">0</span></span>
+              <span class="metric-value"><span id="loopWorst80Win_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Heartbeat (count)
+              <span class="metric-label">80 MHz Worst Loop (Session)
                 <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Increments with each packet sent</span>
+                  <span class="tooltip-box">Slowest single low-power (80 MHz) loop pass since the last Reset Peak Values,
+                    in milliseconds. Catches one-off spikes such as a flash write happening while the boat is asleep. A
+                    single high value is harmless; it's only a problem if it repeatedly sits above ~38 ms — watch the
+                    near-miss count below.</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="WifiHeartBeatID">0</span></span>
+              <span class="metric-value"><span id="loopWorst80Ses_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Accel Drain Near-Misses
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">How many engine-off (80 MHz) loop passes ran longer than ~38 ms — where the
+                    accelerometer buffer fills faster than it drains — followed by the total number of low-power passes.
+                    A handful is harmless: the buffer is deep and absorbs brief spikes. A steadily rising count is the
+                    early warning that the accelerometer could begin dropping samples; if that actually happens, the
+                    FIFO Overruns counter above starts incrementing. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="loopOver80ImuLimit_ID">0</span> of <span id="loop80IterCount_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">I²C Errors
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Cumulative I²C communication failures on the IMU bus since boot. A rising
+                    count here points to bus contention or signal integrity issues.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="imu_i2c_error_count_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Unknown Tags
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">FIFO samples with unrecognised tag bytes. Expected to be zero — a non-zero
+                    value suggests a FIFO configuration mismatch or hardware issue.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="imu_unknown_tag_count_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Accel Ring Drops
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Accelerometer samples discarded because the ring buffer was full. Should be
+                    zero during normal operation.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="imu_accel_dropped_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Gyro Ring Drops
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Gyroscope samples discarded because the ring buffer was full. Should be zero
+                    during normal operation.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="imu_gyro_dropped_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Total Accel Samples
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Cumulative accelerometer samples successfully pushed to the ring buffer
+                    since boot.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="imu_total_samples_accel_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Total Gyro Samples
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Cumulative gyroscope samples successfully pushed to the ring buffer since
+                    boot.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="imu_total_samples_gyro_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">IMU Read Time (last call)
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Duration of the most recent IMU FIFO drain in milliseconds. Previously
+                    labelled "current" — now reflects the last completed call via the FuncTiming lastCall field.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="IMUReadTime2_ID">0</span> ms</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">IMU Read Time (worst 5s)
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Worst IMU FIFO drain duration in the rolling 5-second window. Resets every 5
+                    seconds alongside all other function timing windows.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="IMUReadTime_ID">0</span> ms</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Accel Ring Usage
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Current accelerometer ring buffer fill level as a percentage of total
+                    capacity.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="accel_ring_usage_ID">0</span>%</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Gyro Ring Usage
+                <span class="tooltip">ℹ️
+                  <span class="tooltip-box">Current gyroscope ring buffer fill level as a percentage of total
+                    capacity.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="gyro_ring_usage_ID">0</span>%</span>
             </div>
           </div>
-        </div>
+          <!-- DS18B20 Sensor Health -->
+          <div class="card-group span-all">
+            <p class="card-group-title">Alternator Temperature Sensor Health (DS18B20)</p>
+            <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Counts since boot. One read failure on startup is normal. Persistent failures need attention; occasional CRC recoveries are fine.</p>
+            <div class="sensor-health-grid">
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">Read Failures</span>
+              <span class="metric-value telemetry-value"><span id="tempReadFailCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">CRC Failures</span>
+              <span class="metric-value telemetry-value"><span id="tempCrcFailCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">CRC Recovered (retry)</span>
+              <span class="metric-value telemetry-value"><span id="tempCrcRecoveredCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">All-0xFF Reads</span>
+              <span class="metric-value telemetry-value"><span id="tempAllFFCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">Power-On 85°C Reads</span>
+              <span class="metric-value telemetry-value"><span id="tempPowerOn85CountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">Out of Range Reads</span>
+              <span class="metric-value telemetry-value"><span id="tempOutOfRangeCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">Request Failures</span>
+              <span class="metric-value telemetry-value"><span id="tempRequestFailCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">Connected Check Failures</span>
+              <span class="metric-value telemetry-value"><span id="tempConnectedFailCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">Resolution Auto-Fixes</span>
+              <span class="metric-value telemetry-value"><span id="tempResolutionFixCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">Re-read Failures</span>
+              <span class="metric-value telemetry-value"><span id="tempRereadFailCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">Resolution Fix CRC Failures</span>
+              <span class="metric-value telemetry-value"><span id="tempResolutionFixCrcFailCountID">?</span></span>
+            </div>
+            <div class="metric-row telemetry-row">
+              <span class="metric-label telemetry-label">Enumerate Failures</span>
+              <span class="metric-value telemetry-value"><span id="tempEnumerateFailCountID">?</span></span>
+            </div>
+            </div>
+            <div style="margin-top:10px;">
+              <button onclick="resetTempTaskCounters()" class="btn-secondary"
+                title="Zero only the DS18B20 temperature-sensor counters listed in this card (read failures, CRC errors and recoveries, enumerate failures). The I2C bus counters above and every timing peak on this page are left alone — those clear with Reset Peak Values at the top of the page.">Reset Temperature Sensor Counters</button>
+            </div>
+          </div>
+          </div>
+        </details>
 
-        <details>
-          <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Timing &amp; Diagnostics</summary>
+        <details class="esp32-sec" id="esp32SecTiming">
+          <summary>Timing &amp; Diagnostics</summary>
         <div class="grid">
           <!-- FUNCTION TIMING — WORST CASE -->
-          <div class="card-group" style="grid-column: 1 / -1;">
+          <div class="card-group span-all">
             <p class="card-group-title">
               <span>Function Timing — Worst Case (ms)</span>
               <span class="tooltip">
@@ -11366,6 +11583,26 @@
                 </div>
               </div>
 
+              <!-- Oscillation Damper -->
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Oscillation Damper
+                  <span class="tooltip">ℹ️
+                    <span class="tooltip-box">The wobble detector that sits inline in the control loop. It
+                      records one field-drive sample per control tick and runs its frequency analysis only
+                      once every 32 ticks (~1.6 s), so almost every pass costs nothing and the worst pass is
+                      the analysis itself. It never writes flash — episode records are queued in memory and
+                      saved only once the field has been off for ten seconds. If this number is ever more
+                      than a fraction of a millisecond, something is wrong.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_huntGov_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_huntGov_ses_ID">0</span>
+                </div>
+              </div>
+
               <!-- Efficiency Tracker -->
               <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Efficiency Tracker
@@ -11639,6 +11876,74 @@
               <span class="interval-val"><span id="vl_over2x_at_ID">—</span></span>
             </div>
           </div>
+          <!-- READ GAPS & TELEMETRY TIMING -->
+          <div class="card-group">
+            <p class="card-group-title">Read Gaps &amp; Telemetry Timing</p>
+            <div class="metric-row">
+              <span class="metric-label">RPM Read Gap — Last (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Milliseconds since the previous valid RPM (ADS channel 2) reading. RPM is a time-shared channel: with the continuous-mode sampler it is read on a brief mux excursion off the parked current channel. Target is under 30 ms so RPM stays smooth for the control logic that uses it. Glitch/out-of-range reads do not count.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch2GapLast_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">RPM Read Gap — Worst (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Largest gap between valid RPM readings since the last Reset Peak Values. Confirms the excursion scheduler is not starving RPM. Should stay under ~30 ms; a spike means a heavy loop pass stretched the excursion. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch2GapWorst_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Voltage Read Gap — Last (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Milliseconds since the previous valid ADS battery-voltage (channel 0) reading. This is the secondary voltage used only as a sanity cross-check against the INA228; like RPM it is read on a brief mux excursion. Target is under 30 ms. Out-of-range reads do not count.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch0GapLast_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Voltage Read Gap — Worst (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Largest gap between valid ADS battery-voltage readings since the last Reset Peak Values. Confirms the cross-check voltage channel is not starved by the excursion scheduler. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch0GapWorst_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">CSV2 Build — Last (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Time to BUILD the ~548-field CSV2 diagnostic payload (the snprintf) on the most recent send, ~every 5 s. This is the CPU half of the WiFi-send cost. If this dominates the WiFi Send timer, the win is chunking/offloading the build; if it's small, the cost is in the send instead.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="csv2BuildLast_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">CSV2 Build — Worst (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Worst CSV2 build (snprintf) time since the last Reset Peak Values. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="csv2BuildWorst_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">CSV2 Send — Last (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Time to SEND the CSV2 payload (events.send → AsyncTCP) on the most recent send. This is the transport half of the WiFi-send cost. If this dominates, the win is splitting CSV2 into smaller events; if the build dominates instead, chunk/offload the build.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="csv2SendLast_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">CSV2 Send — Worst (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Worst CSV2 send (events.send) time since the last Reset Peak Values. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="csv2SendWorst_ID">0</span></span>
+            </div>
+          </div>
           <!-- NVS FULL-SAVE DIAGNOSTICS -->
           <div class="card-group">
             <p class="card-group-title">
@@ -11681,204 +11986,77 @@
               <span class="metric-value"><span id="nvsFullSaveCount_ID">0</span></span>
             </div>
           </div>
-          <!-- ACCELEROMETER / IMU -->
-          <div class="card-group">
-            <p class="card-group-title">Accelerometer / IMU</p>
-            <div class="metric-row">
-              <span class="metric-label">FIFO Overruns
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Count of times the IMU FIFO filled before it could be drained. Indicates
-                    loop() is too slow to keep up with the sensor output rate.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="imu_fifo_overrun_count_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">80 MHz Worst Loop (5 s)
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Slowest single loop pass during engine-off low-power mode (the CPU drops to
-                    80 MHz to save power), over the last 5 seconds, in milliseconds. A few ms is normal. It becomes a
-                    concern as it climbs toward 38 ms — the point where the accelerometer can start filling its buffer
-                    faster than it's emptied. Blank/0 means the boat hasn't been in low-power mode recently.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="loopWorst80Win_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">80 MHz Worst Loop (Session)
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Slowest single low-power (80 MHz) loop pass since the last Reset Peak Values,
-                    in milliseconds. Catches one-off spikes such as a flash write happening while the boat is asleep. A
-                    single high value is harmless; it's only a problem if it repeatedly sits above ~38 ms — watch the
-                    near-miss count below.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="loopWorst80Ses_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Accel Drain Near-Misses
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">How many engine-off (80 MHz) loop passes ran longer than ~38 ms — where the
-                    accelerometer buffer fills faster than it drains — followed by the total number of low-power passes.
-                    A handful is harmless: the buffer is deep and absorbs brief spikes. A steadily rising count is the
-                    early warning that the accelerometer could begin dropping samples; if that actually happens, the
-                    FIFO Overruns counter above starts incrementing. Resets with Reset Peak Values.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="loopOver80ImuLimit_ID">0</span> of <span id="loop80IterCount_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">I²C Errors
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Cumulative I²C communication failures on the IMU bus since boot. A rising
-                    count here points to bus contention or signal integrity issues.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="imu_i2c_error_count_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Unknown Tags
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">FIFO samples with unrecognised tag bytes. Expected to be zero — a non-zero
-                    value suggests a FIFO configuration mismatch or hardware issue.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="imu_unknown_tag_count_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Accel Ring Drops
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Accelerometer samples discarded because the ring buffer was full. Should be
-                    zero during normal operation.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="imu_accel_dropped_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Gyro Ring Drops
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Gyroscope samples discarded because the ring buffer was full. Should be zero
-                    during normal operation.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="imu_gyro_dropped_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Total Accel Samples
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Cumulative accelerometer samples successfully pushed to the ring buffer
-                    since boot.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="imu_total_samples_accel_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Total Gyro Samples
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Cumulative gyroscope samples successfully pushed to the ring buffer since
-                    boot.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="imu_total_samples_gyro_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">IMU Read Time (last call)
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Duration of the most recent IMU FIFO drain in milliseconds. Previously
-                    labelled "current" — now reflects the last completed call via the FuncTiming lastCall field.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="IMUReadTime2_ID">0</span> ms</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">IMU Read Time (worst 5s)
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Worst IMU FIFO drain duration in the rolling 5-second window. Resets every 5
-                    seconds alongside all other function timing windows.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="IMUReadTime_ID">0</span> ms</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Accel Ring Usage
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Current accelerometer ring buffer fill level as a percentage of total
-                    capacity.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="accel_ring_usage_ID">0</span>%</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Gyro Ring Usage
-                <span class="tooltip">ℹ️
-                  <span class="tooltip-box">Current gyroscope ring buffer fill level as a percentage of total
-                    capacity.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="gyro_ring_usage_ID">0</span>%</span>
-            </div>
-          </div>
         </div>
         </details>
-      </div>
 
-      <!-- DS18B20 Sensor Health -->
-      <div class="settings-card" style="margin-top:16px;">
-        <p class="card-group-title">Alternator Temperature Sensor Health (DS18B20)</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Counts since boot. One read failure on startup is normal. Persistent failures need attention; occasional CRC recoveries are fine.</p>
-        <div class="sensor-health-grid">
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Read Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempReadFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">CRC Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempCrcFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">CRC Recovered (retry)</span>
-          <span class="metric-value telemetry-value"><span id="tempCrcRecoveredCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">All-0xFF Reads</span>
-          <span class="metric-value telemetry-value"><span id="tempAllFFCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Power-On 85°C Reads</span>
-          <span class="metric-value telemetry-value"><span id="tempPowerOn85CountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Out of Range Reads</span>
-          <span class="metric-value telemetry-value"><span id="tempOutOfRangeCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Request Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempRequestFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Connected Check Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempConnectedFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Resolution Auto-Fixes</span>
-          <span class="metric-value telemetry-value"><span id="tempResolutionFixCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Re-read Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempRereadFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Resolution Fix CRC Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempResolutionFixCrcFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Enumerate Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempEnumerateFailCountID">?</span></span>
-        </div>
-        </div>
-        <div style="margin-top:10px;">
-          <button onclick="resetTempTaskCounters()" class="btn-secondary">Reset Sensor Health Counters</button>
-        </div>
+        <details class="esp32-sec" id="esp32SecAppUsage" ontoggle="if (this.open && typeof usageFetchStats === 'function') usageFetchStats();">
+          <summary>App Usage</summary>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">How this interface gets used. "Today" counts
+            reset at the daily cloud upload; lifetime totals persist on the device.</p>
+          <div class="grid">
+            <div class="card-group">
+              <p class="card-group-title">Time &amp; Opens</p>
+              <div class="metric-row">
+                <span class="metric-label">Open Time (Today)</span>
+                <span class="metric-value"><span id="usageTodayTime">--</span></span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">Opens (Today)</span>
+                <span class="metric-value"><span id="usageTodayOpens">--</span></span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">Open Time (Lifetime)</span>
+                <span class="metric-value"><span id="usageLifeTime">--</span></span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">Opens (Lifetime)</span>
+                <span class="metric-value"><span id="usageLifeOpens">--</span></span>
+              </div>
+              <div class="metric-row">
+                <span class="metric-label">Days Uploaded</span>
+                <span class="metric-value"><span id="usageLifeDays">--</span></span>
+              </div>
+            </div>
+            <div class="card-group">
+              <p class="card-group-title">Top Pages (Today)</p>
+              <div id="usageTopPages">
+                <div class="metric-row"><span class="metric-label">No data yet</span></div>
+              </div>
+            </div>
+            <div class="card-group">
+              <p class="card-group-title">Top Buttons (Today)</p>
+              <div id="usageTopBtns">
+                <div class="metric-row"><span class="metric-label">No data yet</span></div>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <details class="esp32-sec" id="esp32SecAbout">
+          <summary>About</summary>
+          <div style="font-size:13px;line-height:1.6;max-width:560px;padding:4px 2px;">
+            <p style="margin:0 0 10px;"><strong>X Engineering Alternator Regulator</strong><br>
+              Copyright (C) 2026 X Engineering LLC<br>
+              Contact: joe@xengineering.net</p>
+            <p style="margin:0 0 10px;">This program is free software: you can redistribute it and/or modify it under
+              the terms of the GNU General Public License as published by the Free Software Foundation, version 3 of
+              the License.</p>
+            <p style="margin:0 0 10px;">This program is distributed WITHOUT ANY WARRANTY; without even the implied
+              warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+              See the GNU General Public License for more details: www.gnu.org/licenses</p>
+            <p style="margin:0 0 10px;">This regulator is an accessory to a charging system, not a safety device. It
+              must not be relied upon as the sole means of protecting batteries, alternators, wiring, or the vessel.
+              Overcurrent protection, wire sizing, and installation practice conforming to applicable standards remain
+              the responsibility of the owner and installer. Performance, navigation, and health data are provided for
+              informational purposes only and must not be used for navigation or any safety-critical decision.</p>
+            <p style="margin:0;font-size:12px;color:var(--text-muted);">Source code and third-party license notices:
+              <a href="https://docs.xengineering.net/software/licenses/" target="_blank"
+                rel="noopener">docs.xengineering.net</a> &nbsp;·&nbsp;
+              <a href="https://xengineering.net/privacy.html" target="_blank" rel="noopener">Privacy Policy</a>
+              &nbsp;·&nbsp;
+              <a href="https://xengineering.net/terms.html" target="_blank" rel="noopener">Terms of Sale</a></p>
+          </div>
+        </details>
       </div>
     </div>
 
@@ -12275,6 +12453,69 @@
         </div>
         <div id="faActionableResult" style="font-size:13px; color:#555; margin-top:4px;">Run a Plant Delay sine sweep in Commissioning to evaluate this.</div>
       </div>
+      </details>
+
+<!-- Oscillation Damper — hunt-governor live state (CSV1) + episode ledger (/huntledger.csv) -->
+      <details class="diag-section" ontoggle="if (this.open) fetchHuntLedger()">
+        <summary class="diag-section-title">Oscillation Damper</summary>
+        <div class="settings-card">
+          <p style="font-size:0.8em;color:var(--text-muted);margin:0 0 10px 0;">
+            Some engine, alternator and belt combinations develop a slow wobble at low engine speed
+            under heavy load — a steady swing, somewhere between about a third of a cycle and two
+            cycles per second, in field drive, engine speed and voltage together. The damper watches
+            field drive for that wobble and temporarily reduces the current loop's integral gain
+            until it dies. Every reduction is verified: it is kept only if the wobble measurably
+            responds. If it does not respond, the cause is outside the regulator — a cycling load, or
+            the engine's own governor — and full gain is restored. No gain change is ever stored
+            permanently; everything here clears on restart. The damper is switched on or off under
+            Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters.
+          </p>
+
+          <div class="metric-row telemetry-row" style="align-items:flex-start;">
+            <span class="metric-label telemetry-label">Status
+              <span class="sinfo" data-sinfo="huntGov"></span>
+            </span>
+            <span id="hgStateText" style="font-size:13px;font-weight:700;color:var(--accent);text-align:right;line-height:1.35;padding-left:14px;">—</span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+          <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Current-loop gain now, as a share of your PID Ki
+              <span class="tooltip">ℹ️
+                <span class="tooltip-box">The integral gain the current loop is actually running at, as a percentage of the PID Ki you set. 100% is your full setting; anything less is the damper holding it down. It climbs back at about 0.2% per second, and after a verified episode it parks just above the level that proved quiet — so it will not reach 100% again until engine speed moves well away from where the wobble happened, or the regulator restarts.</span></span>
+            </span>
+            <span class="metric-value telemetry-value"><span id="hgGainPct">—</span></span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+          <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Wobble frequency
+              <span class="tooltip">ℹ️
+                <span class="tooltip-box">The frequency of the most recent wobble the damper confirmed, in cycles per second. It stays on screen after the episode ends as the last thing seen this session, so it is a live measurement only while the Status line says a wobble is being damped.</span></span>
+            </span>
+            <span class="metric-value telemetry-value"><span id="hgFreqNow">—</span></span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+          <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Episodes on record</span>
+            <span class="metric-value telemetry-value"><span id="hgEpisodeCount">—</span></span>
+          </div>
+
+          <!-- Stacked entries, not a table: every diag-section is capped at 600px, and the seven
+               facts per episode only fit a table by horizontally scrolling the outcome off-screen. -->
+          <div id="hgLedgerList" style="margin-top:12px;font-size:0.84em;">
+            <div style="padding:6px 0;color:var(--text-muted);">—</div>
+          </div>
+          <p style="font-size:0.74em;color:var(--text-muted);margin:10px 0 0 0;">
+            Field swing is how far field drive was swinging when the episode opened and when it
+            closed. Gain left at is where the current loop's integral gain stood when the episode
+            ended. The list survives restarts; it holds roughly the last hundred episodes, and once
+            full it drops the oldest half. The raw file is also served at
+            <a id="hgRawLink" href="/huntledger" target="_blank" rel="noopener">/huntledger</a>.
+          </p>
+
+          <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+            <button type="button" class="btn-secondary" onclick="fetchHuntLedger()">↺ Refresh</button>
+          </div>
+        </div>
       </details>
 
       <!-- Not checkpoints — these two show in the All view only -->
@@ -13813,7 +14054,6 @@
     <div id="commission-modal-panel" style="pointer-events:auto; position:absolute; top:20px; left:20px; background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); overflow-y:auto;">
       <div id="commission-drag-handle" style="cursor:move; padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
         <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Commissioning</span>
-        <span id="cx-mode-pill" style="display:none; font-size:11px; font-weight:600; padding:2px 10px; border-radius:10px; margin-left:auto; margin-right:10px;"></span>
         <button onclick="closeCommissionModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
       </div>
       <div style="padding:20px;">
@@ -13822,12 +14062,13 @@
              body's innerHTML re-render each phase never wipes it. Fed off CSV1 (cxRpmSparkOnCsv1).
              Hidden while the Disturbances sweep game owns the screen (cxGameStart/cxGameStop) — the game
              draws the same trace + live RPM itself. -->
-        <div id="cx-rpm-strip" style="margin-bottom:14px; padding:8px 10px; background:#222; border-radius:6px;">
-          <div style="display:flex; align-items:center; justify-content:space-between; font-size:11px; color:#888; margin-bottom:4px;">
-            <span>Engine RPM (last ~15 s) — hold steady during tests</span>
-            <strong id="cx-rpm-spark-val" style="color:#2ec4b6; font-size:13px;">—</strong>
-          </div>
+        <!-- Live value is an overlay pinned to the sparkline's bottom-right corner (translucent so the
+             trace reads through it) — the per-phase label sentence wraps freely above without ever
+             moving the number. -->
+        <div id="cx-rpm-strip" style="position:relative; margin-bottom:14px; padding:8px 10px; background:#222; border-radius:6px;">
+          <div id="cx-rpm-strip-label" style="font-size:11px; color:#888; margin-bottom:4px;">Engine RPM (last ~15 s)</div>
           <canvas id="cxRpmSpark" style="display:block; width:100%; height:48px;"></canvas>
+          <strong id="cx-rpm-spark-val" style="position:absolute; right:10px; bottom:8px; color:#2ec4b6; font-size:13px; font-variant-numeric:tabular-nums; background:rgba(30,30,30,0.55); border-radius:4px; padding:0 4px; pointer-events:none;">—</strong>
         </div>
         <div id="commission-body" style="font-size:0.92em; line-height:1.5; color:#ddd;"></div>
         <div id="commission-abort-row" style="margin-top:16px; padding-top:10px; border-top:1px solid #333; display:none;">
@@ -13862,12 +14103,10 @@
       <div style="padding:20px;">
         <!-- Same permanent RPM strip as the commissioning modal (shared ring, cxRpmSparkOnCsv1) —
              the operator holds idle until ARMED, then snaps the throttle, all without leaving the dialog. -->
-        <div style="margin-bottom:14px; padding:8px 10px; background:#222; border-radius:6px;">
-          <div style="display:flex; align-items:center; justify-content:space-between; font-size:11px; color:#888; margin-bottom:4px;">
-            <span>Engine RPM (last ~15 s)</span>
-            <strong id="cvs-rpm-spark-val" style="color:#2ec4b6; font-size:13px;">—</strong>
-          </div>
+        <div style="position:relative; margin-bottom:14px; padding:8px 10px; background:#222; border-radius:6px;">
+          <div style="font-size:11px; color:#888; margin-bottom:4px;">Engine RPM (last ~15 s)</div>
           <canvas id="cvsRpmSpark" style="display:block; width:100%; height:48px;"></canvas>
+          <strong id="cvs-rpm-spark-val" style="position:absolute; right:10px; bottom:8px; color:#2ec4b6; font-size:13px; font-variant-numeric:tabular-nums; background:rgba(30,30,30,0.55); border-radius:4px; padding:0 4px; pointer-events:none;">—</strong>
         </div>
         <div id="cvs-body" style="font-size:0.92em; line-height:1.5; color:#ddd;"></div>
       </div>
@@ -13914,6 +14153,99 @@
       </div>
     </div>
   </div><!-- END battdef-modal-overlay -->
+
+  <!-- Maintenance-restart acknowledgement: first Vessel Info save only, after the SoC popup and
+       before the Commissioning Prerequisites screen. Static body; maintAckClose() resolves the
+       save-chain promise. -->
+  <div id="maint-ack-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9200; align-items:flex-start; justify-content:flex-start; overflow:auto; padding:20px; box-sizing:border-box;">
+    <div style="position:relative; margin:auto 0; background:#1e1e1e; color:#ddd; width:470px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); display:flex; flex-direction:column;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Automatic Maintenance Restarts</span>
+        <button onclick="maintAckClose()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
+      </div>
+      <div style="padding:18px 20px 16px; font-size:0.92em; line-height:1.5; overflow-y:auto; flex:1; min-height:0;">
+        <p style="margin:0 0 15px; font-size:14px;">
+          The regulator periodically reboots itself. There is no fixed schedule: it waits for
+          non-interrupting moments, and forces an immediate reboot only if a better moment wasn't found.
+          This is normal maintenance, not a fault.
+        </p>
+
+        <!-- Steps mirror the three uptime tiers in checkAndRestart() (5_functions.ino): 24 h fully quiet
+             + 5-min hold + silent, 48 h drops noClient/SoC (countdown only when a client is watching),
+             72 h drops engine/field/client and skips the hold, brown-out floor + OTA + g_autoTestActive
+             still defer. The pre-1-day note is the maintRebootHealthReq heap requester. Keep in sync. -->
+
+        <div style="display:grid; grid-template-columns:24px 1fr; column-gap:11px; align-items:start;">
+          <div style="width:24px; height:24px; border-radius:50%; background:#22403c; border:1px solid #3d6b64; color:#6fd3c6; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; line-height:1;">1</div>
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#e6e6e6; margin-bottom:4px;">From 1 day on &mdash; only when nothing at all is happening</div>
+            <div style="font-size:12.5px; color:#b6b6b6; line-height:1.45;">
+              All of these have to be true at once for a full 5 minutes: engine off, not charging, nobody
+              connected to the app or dashboard, cloud uploads finished (offline, there is nothing to wait
+              for), SOC above 30% if it is known, and battery voltage above 11.8 V on a 12 V system
+              (scaled for 24 V and 48 V).
+            </div>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:24px 1fr; column-gap:11px; margin:10px 0;">
+          <div style="display:flex; justify-content:center; color:#5c5c5c; font-size:13px;">&darr;</div>
+          <div style="font-size:11.5px; color:#8a8a8a; font-style:italic; align-self:center;">If that quiet moment never arrives&hellip;</div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:24px 1fr; column-gap:11px; align-items:start;">
+          <div style="width:24px; height:24px; border-radius:50%; background:#22403c; border:1px solid #3d6b64; color:#6fd3c6; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; line-height:1;">2</div>
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#e6e6e6; margin-bottom:4px;">From 2 days on &mdash; it stops waiting for you to disconnect</div>
+            <div style="font-size:12.5px; color:#b6b6b6; line-height:1.45;">
+              Having the app open no longer holds it off, and the state of charge no longer matters.
+              Everything else from step 1 still applies.
+            </div>
+            <div style="font-size:12px; color:#8b8b8b; margin-top:5px;">
+              <span style="font-size:10.5px; letter-spacing:0.05em; text-transform:uppercase; color:#777; font-weight:600;">You'll see</span>
+              &nbsp;A 10-minute countdown if you are connected; nothing if you are not.
+            </div>
+          </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:24px 1fr; column-gap:11px; margin:10px 0;">
+          <div style="display:flex; justify-content:center; color:#5c5c5c; font-size:13px;">&darr;</div>
+          <div style="font-size:11.5px; color:#8a8a8a; font-style:italic; align-self:center;">If it still has not restarted&hellip;</div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:24px 1fr; column-gap:11px; align-items:start;">
+          <div style="width:24px; height:24px; border-radius:50%; background:#3d3320; border:1px solid #6b5730; color:#f0b86a; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; line-height:1;">3</div>
+          <div>
+            <div style="font-size:13px; font-weight:600; color:#f0b86a; margin-bottom:4px;">At 3 days &mdash; it restarts even under way and charging</div>
+            <div style="font-size:12.5px; color:#b6b6b6; line-height:1.45;">
+              Engine running, charging, connected: none of it defers the restart any longer, and there is
+              no 5-minute wait. Charging is switched off first, then it reboots. Three things still hold
+              it back: a firmware update installing, a guided test or wizard running, or a battery too
+              flat to survive the reboot (below 11.5 V on a 12 V system, scaled for 24 V and 48 V).
+            </div>
+          </div>
+        </div>
+
+        <hr style="border:none; border-top:1px solid #333; margin:15px 0 12px;">
+        <p style="margin:0 0 11px; font-size:12.5px; color:#999;">
+          <strong style="color:#ccc; font-weight:600;">One case forces restart quicker than the above
+          schedule:</strong> if the regulator finds its own working memory has stayed fragmented for 30
+          minutes straight, it takes the very next quiet window rather than waiting for the 1-day mark.
+          The step 1 conditions still have to be met, so you would not notice that one either.
+        </p>
+        <p style="margin:0; font-size:12.5px; color:#999;">
+          <strong style="color:#ccc; font-weight:600;">Nothing is lost in reboot.</strong> Settings, history,
+          statistics and anything not yet uploaded are written to storage before it goes down. It comes
+          back about 30 seconds later, still on or off exactly as you left it, and an open dashboard
+          reconnects on its own.
+        </p>
+      </div>
+      <div style="padding:12px 20px 16px; border-top:1px solid #333;">
+        <button type="button" onclick="maintAckClose()"
+                style="display:block; width:100%; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:14px; border:none; border-radius:5px; padding:10px 16px; cursor:pointer;">Got it</button>
+      </div>
+    </div>
+  </div><!-- END maint-ack-overlay -->
 
   <!-- Commissioning Prerequisites: after the battery-defaults popup on a first Vessel Info save,
        collects the sensor/current settings commissioning depends on before the wizard measures them.
@@ -13999,9 +14331,11 @@
       </div>
       <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; overflow-y:auto;">
         <div id="restart-popup-text" style="font-size:14px; line-height:1.5; margin-bottom:14px;">
-          The regulator will perform its scheduled maintenance reboot within the next 10 minutes.
-          Field will be cleanly ramped down, settings are saved automatically, and the device will
-          return to its current operating mode after restart. Any active tests will be aborted.
+          The regulator restarts itself for maintenance, normally at a quiet moment when nobody would
+          notice. It has been running long enough that it will now restart within the next 10 minutes.
+          Charging is switched off first, settings and data are saved, and the device comes back in the
+          same on/off state about 30 seconds later. Starting a guided test or wizard postpones the
+          restart; so does starting the engine, unless it has been running for 3 days.
         </div>
         <button type="button" onclick="document.getElementById('restart-popup-overlay').style.display='none';"
                 style="display:block; width:100%; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:14px; border:none; border-radius:5px; padding:10px 16px; cursor:pointer;">OK</button>
@@ -14025,4 +14359,3 @@
 </body>
 
 </html>
-<!-- XREG_END -->

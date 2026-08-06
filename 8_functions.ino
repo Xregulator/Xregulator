@@ -1620,7 +1620,8 @@ void bhServiceCompletion() {
 // Ohmic-anchor pulse train (spec: CV_Gain_Ohmic_Anchor_Redesign_Spec.md): SETTLE (CC, capture baseDuty) →
 // PILOT (probe + size the step under the OV/gassing/cap-table guards) → HOLD (CC practice run, capture
 // stepDuty) → PULSES (4× abrupt base/step duty squares; the 2 s holds give settled baselines either side
-// of every edge) → RELEASE. Fit = per-edge settled ΔV(150-250 ms)/ΔI, median of 8 edges → cvpfKa.
+// of every edge) → RELEASE. Fit = per-edge settled ΔV (CVPF_EDGE_V0/V1_MS window, 550-650 ms)/ΔI,
+// median of 8 edges → cvpfKa.
 static const uint32_t CVPF_SAMPLE_INTERVAL_MS = 40;    // CC phases — ample for settled means; bounds buffer fill
 static const uint32_t CVPF_SAMPLE_FAST_MS = 10;        // PULSES/RELEASE — tick-cadence sampling across the edges
 static const uint32_t CVPF_SETTLE_MIN_MS = 2000;
@@ -1660,6 +1661,12 @@ void cvpfSample(uint32_t nowMs) {
 // pulse segments (one high step, one low base), so every sample sits on a stable current level — a
 // steady-state average centered on the operating point, never an instant or a transient.
 static void cvpfAccumConditions() {
+  float r = (float)RPM;
+  if (cvpfCondN == 0) { cvpfRpmMinAtFit = r; cvpfRpmMaxAtFit = r; }
+  else {
+    if (r < cvpfRpmMinAtFit) cvpfRpmMinAtFit = r;
+    if (r > cvpfRpmMaxAtFit) cvpfRpmMaxAtFit = r;
+  }
   cvpfRpmSum += RPM; cvpfBattVSum += IBV; cvpfSocSum += SOC_percent / 100.0f; cvpfCondN++;
 }
 
@@ -1704,7 +1711,11 @@ static void cvpfSizeStep() {
   float headroom = fmaxf(0.05f, AlternatorHardShutdownV - cvpfPilotVbase - CVPF_V_RESERVE);
   float di = cvpfDiMaxA;
   di = fminf(di, headroom / fmaxf(1e-3f, Kupper));
-  di = fminf(di, cvpfTargetDV / fmaxf(1e-3f, Klong));
+  // Target-ΔV sizing — skipped on an operator-boosted re-run (diMax raised), whose whole point is a
+  // bigger swing for SNR; the OV-headroom and cap-table clamps still bound it, and the gassing gate
+  // judges the projected peak. Never skipped after an OV fallback re-size (headroom already proved tight).
+  if (cvpfDiMaxA <= CVPF_DI_MAX_DEFAULT || cvpfFellBack)
+    di = fminf(di, cvpfTargetDV / fmaxf(1e-3f, Klong));
   // Never command past what the alternator cap table allows at this RPM (the step rides on top of cvpfBaseA).
   // Skip when g_I_cap is unset/tiny (low RPM) — the delivery-short warn catches under-delivery instead.
   if (g_I_cap > cvpfBaseA + cvpfPilotA + CVPF_CAP_MARGIN_A)
@@ -1719,6 +1730,9 @@ static void cvpfSizeStep() {
 static float    cvpfAmpsEma = 0.0f;
 static uint32_t cvpfInBandMs = 0;
 static int8_t   cvpfSeg = -1;      // current pulse segment; even = base duty, odd = step duty
+static float    cvpfBaseAmps = 0.0f;    // settled output at SETTLE exit — pinned-output diagnostics reference
+static float    cvpfSettleRpm = 0.0f;   // RPM at SETTLE exit — reported when drift wrecks the pulse replay
+static char     cvpfDiagBuf[256];       // composed diagnostic aborts (cvpfAbortMsg points here); longest message + UTF-8 dashes reaches ~220 bytes
 
 // Called every control tick from the duty-override block in AdjustField (like fieldCut_tick). Returns
 // true only while PULSES/RELEASE own duty; CC phases return false. Ends by clearing cvPlantFitActive.
@@ -1736,6 +1750,7 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
       bool settled = (elapsed >= CVPF_SETTLE_MIN_MS) && cvpfInBandMs && (nowMs - cvpfInBandMs >= CVPF_INBAND_MS);
       if (settled || elapsed >= CVPF_SETTLE_TIMEOUT_MS) {
         cvpfBaseDuty = lastAppliedDuty;
+        cvpfBaseAmps = cvpfAmpsEma; cvpfSettleRpm = (float)RPM;
         cvpfPhase = 1; cvpfPhaseStartMs = nowMs;
       }
       break; }
@@ -1748,17 +1763,28 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
         cvpfWinStats(nowMs - 1500, nowMs - 200, 0, vP,  sl, rs);                          // last ~1.3s of PILOT
         cvpfWinStats(nowMs - 1500, nowMs - 200, 1, iPn, sl, rs);
         float dIp = iPn - iBn, dVp = vP - vB;
-        cvpfPilotK     = (dIp > 0.5f && dVp > 0.0f) ? (dVp / dIp) : (cvpfTargetDV / fmaxf(1.0f, cvpfPilotA));
+        // Pilot moved (almost) no current → the main step can't either (output ceiling, a limiter, or
+        // the field circuit). Abort with the numbers now — the old silent fallback K sized a tiny step
+        // and doomed the whole pulse train to flat, all-dropped edges (bench 2026-08-04).
+        if (dIp < 2.0f) {
+          snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
+                   "the +%.0f A pilot pulse moved output only %.1f A — alternator at its output ceiling for this RPM, a limiter capping current, or the field circuit not carrying the step; fix and re-run",
+                   cvpfPilotA, dIp);
+          cvpfAbort(cvpfDiagBuf);
+          break;
+        }
+        cvpfPilotK     = (dVp > 0.0f) ? (dVp / dIp) : (cvpfTargetDV / fmaxf(1.0f, cvpfPilotA));
         cvpfPilotVbase = isnan(vB) ? IBV : vB;
+        cvpfSizeStep();
         // Gassing gate: past ~2.37 V/cell some charge current goes to oxygen evolution (Tafel resistance
         // ∝ 1/I_gas), dragging measured dV/dI DOWN → over-gained loop. Refuse rather than measure; judged
-        // on baseline + the step about to be commanded (the step's peak gasses, not the rest voltage).
+        // on baseline + the projected peak of the step actually sized (stepA·pilotK — tracks boosted
+        // re-runs that exceed the fixed ΔV target, and cap-clamped steps smaller than it).
         if (cvpfChemGasses() && isfinite(cvpfPilotVbase)
-            && cvpfPilotVbase + cvpfTargetDV > CVPF_GASSING_V_12V * (float)BATTERY_VOLTAGE / 12.0f) {
+            && cvpfPilotVbase + cvpfStepA * cvpfPilotK > CVPF_GASSING_V_12V * (float)BATTERY_VOLTAGE / 12.0f) {
           cvpfAbort("bank too full to measure — the step would drive it into gassing, which reads the resistance low and over-tunes the loop. Draw the bank down with some loads, then re-run.");
           break;
         }
-        cvpfSizeStep();
         cvpfPhase = 2; cvpfPhaseStartMs = nowMs; cvpfInBandMs = 0;
         queueConsoleMessageF("CV plant-fit: pilotK=%.1f mV/A -> pulse step %.0f A; practice run through the current loop",
                              cvpfPilotK * 1000.0f, cvpfStepA);
@@ -1786,7 +1812,27 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
       if (inBand) { if (cvpfInBandMs == 0) cvpfInBandMs = nowMs; } else cvpfInBandMs = 0;
       bool settled = (elapsed >= CVPF_SETTLE_MIN_MS) && cvpfInBandMs && (nowMs - cvpfInBandMs >= CVPF_INBAND_MS);
       // Timeout = step unreachable here (railed PID): proceed — the fit divides by MEASURED ΔI.
+      // Exception: (almost) nothing delivered above the settled base ⇒ the replayed pulses would be
+      // flat and every edge would drop; abort with the numbers instead of burning the 18 s train.
+      // (settled implies in-band delivery, so this only fires on the timeout path.)
       if (settled || elapsed >= CVPF_HOLD_TIMEOUT_MS) {
+        // Proven bench failure 2026-08-04: RPM rose between the base capture and here, the plant-gain
+        // shift ate the entire duty delta (base 23.3% / step 23.4%), and every replayed edge was flat.
+        // Duty delta itself can't be gated (a big machine legitimately steps 8 A in <1% duty) — RPM can.
+        if (cvpfSettleRpm > 100.0f && fabsf((float)RPM - cvpfSettleRpm) > 0.08f * cvpfSettleRpm) {
+          snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
+                   "RPM moved %.0f -> %.0f between learning the base and step field levels — the replayed pulses would mis-step; hold RPM steady and re-run",
+                   cvpfSettleRpm, (float)RPM);
+          cvpfAbort(cvpfDiagBuf);
+          break;
+        }
+        if (cvpfAmpsEma - cvpfBaseAmps < 2.0f) {
+          snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
+                   "practice step didn't raise output (%.1f -> %.1f A with +%.0f A commanded) — alternator at its output ceiling for this RPM, or the field circuit didn't carry it; re-run once output can move",
+                   cvpfBaseAmps, cvpfAmpsEma, cvpfStepA);
+          cvpfAbort(cvpfDiagBuf);
+          break;
+        }
         cvpfStepDuty = lastAppliedDuty;
         // Restore the pre-test setpoint BEFORE first returning true — the SystemID resume snapshot fires
         // on this tick's rising edge and must not capture the test current (same trick as fieldCut_tick).
@@ -1844,7 +1890,7 @@ static float cvpfMedian(const float *v, int n) {
   return (n & 1) ? s[n / 2] : 0.5f * (s[n / 2 - 1] + s[n / 2]);
 }
 
-// Per edge: ΔV = mean[tE+150,250 ms] − pre-edge baseline; ΔI = settled means either side (so current-
+// Per edge: ΔV = mean[tE+550,650 ms] − pre-edge baseline; ΔI = settled means either side (so current-
 // sensor SPEED is irrelevant — the fast transient is all on the INA228 voltage). K = ΔV/ΔI, median over
 // edges: a stretched tick or a load switch under one edge drops that edge instead of biasing the fit.
 void cvpfProcess() {
@@ -1877,10 +1923,27 @@ void cvpfProcess() {
     ripSum += rip; ripN++;
     nK++;
   }
+  float dIaltMed = (nAlt > 0) ? cvpfMedian(dIalts, nAlt) : 0.0f;
   if (nK < 3) {
     cvpfOk = false; cvpfState = 3;
-    cvpfAbortMsg = noShunt ? "pulse edges unusable — no clean current step (weak alternator? raise RPM and re-run)"
-                           : "pulse edges unusable — no clean battery-current step; re-run with loads steady";
+    // Diagnose from what the run recorded instead of guessing: identical captured duties = the
+    // setup phases were pinned (floor/ceiling/limiter); duty stepped but current didn't = ceiling
+    // or field circuit; current stepped but edges still dropped = disturbed/starved voltage windows.
+    float dStepPct = cvpfStepDuty - cvpfBaseDuty;
+    if (dStepPct < 1.5f) {
+      snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
+               "pulse edges unusable — the setup phases learned two nearly identical field levels (%.1f%% / %.1f%%): RPM or load shifted during setup, or output was pinned (RPM %.0f -> %.0f during the test). Hold RPM steady and re-run",
+               cvpfBaseDuty, cvpfStepDuty, cvpfSettleRpm, (float)RPM);
+      cvpfAbortMsg = cvpfDiagBuf;
+    } else if (dIaltMed < 1.0f) {
+      snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
+               "pulse edges unusable — field duty stepped %.1f%% -> %.1f%% but output current moved only %.1f A: alternator at its output ceiling for this RPM, or the field circuit didn't carry the step. Check the field connection and re-run",
+               cvpfBaseDuty, cvpfStepDuty, dIaltMed);
+      cvpfAbortMsg = cvpfDiagBuf;
+    } else {
+      cvpfAbortMsg = noShunt ? "pulse edges unusable — current stepped but the voltage read windows were disturbed; hold RPM and loads steady and re-run"
+                             : "pulse edges unusable — no clean battery-current step; re-run with loads steady";
+    }
     return;
   }
   cvpfKa = cvpfMedian(Ks, nK);
@@ -1892,7 +1955,6 @@ void cvpfProcess() {
   cvpfSNR = cvpfDV / fmaxf(1e-4f, ripple);
   // advisory gates (never block — the wizard shows them and the user still chooses Apply)
   if (nK < 5) cvpfWarn |= 0x04;                                          // edges dropped (stretched ticks / disturbances)
-  float dIaltMed = (nAlt > 0) ? cvpfMedian(dIalts, nAlt) : 0.0f;
   if (dIaltMed / fmaxf(1e-3f, cvpfStepA) < 0.6f) cvpfWarn |= 0x01;       // delivery came up short
   if (cvpfSNR < 12.0f) cvpfWarn |= 0x02;                                 // weak signal vs ripple
   if (!noShunt && dIaltMed > 0.5f
@@ -1941,6 +2003,7 @@ bool cvpfStartTest(float diMaxReq) {
   cvpfReady = false; cvpfOk = false; cvpfWarn = 0; cvpfAbortMsg = "";
   cvpfK = cvpfDV = cvpfDI = cvpfSNR = 0.0f; cvpfKp = cvpfKi = 0.0f;
   cvpfRpmSum = cvpfBattVSum = cvpfSocSum = 0.0; cvpfCondN = 0;
+  cvpfRpmMinAtFit = cvpfRpmMaxAtFit = 0.0f;
   cvpfCcActive = true;
   cvPlantFitActive = true;
   queueConsoleMessage("CV plant-fit: started (settle -> size -> practice run -> 4 abrupt duty pulses, ~0.6s stiffness read)");
@@ -3307,7 +3370,7 @@ void cxLedgerLogCvpf() {
     d += '}';
   } else {
     d = "{\"test\":\"cv_plant_fit\",\"ok\":0,\"abort\":\"";
-    d += cvpfAbortMsg;   // fixed literals, no quote characters
+    d += cvpfAbortMsg;   // fixed literals or cvpfDiagBuf-composed diagnostics — neither contains quote characters
     d += "\"}";
   }
   cxLedgerAppend("test", -1, d);

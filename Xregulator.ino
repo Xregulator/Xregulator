@@ -134,6 +134,7 @@ CachedAsset cachedIndex, cachedCss, cachedJs, cachedUplotCss, cachedUplotJs;
 
 // ============= HTTPS TASK SYSTEM =============
 int lastHttpResponseCode = 0;  // Track last HTTP response for failure handling
+volatile uint32_t lastCloudUploadOkMs = 0;  // millis() of last ack-confirmed payload upload; 0 = never this boot. Written on Core 0 HTTPS task, read by CSV2 build.
 QueueHandle_t httpsQueue;
 TaskHandle_t httpsTaskHandle;
 
@@ -157,7 +158,8 @@ enum HttpsRequestType {
   HTTPS_GET_PENDING_CONFIG,    // admin config push: fetch a queued config at boot
   HTTPS_CLEAR_PENDING_CONFIG,  // clear the queued config after applying it
   HTTPS_RESET_RPM_AXIS,        // tach rescaled: delete the device's RPM-indexed cloud data
-  HTTPS_UPLOAD_CX_LEDGER       // commissioning-ledger event batch → log-commissioning-event
+  HTTPS_UPLOAD_CX_LEDGER,      // commissioning-ledger event batch → log-commissioning-event
+  HTTPS_UPLOAD_USAGE           // daily app-usage analytics blob → track-behavior
 };
 
 struct HttpsRequest {
@@ -625,21 +627,70 @@ const unsigned long ALTHEALTH_UPLOAD_INTERVAL = 900000;  // 15 min — field-off
 unsigned long lastAltHealthUploadTime = 0;
 int64_t lastAltHealthSyncEpoch = 0;   // unix sec of last SUCCESSFUL alt-health cloud sync this boot (0 = none) — for "synced N ago"
 int64_t lastBoatPerfSyncEpoch  = 0;   // unix sec of last SUCCESSFUL boat-perf cloud sync this boot
-const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
-//const unsigned long RESTART_INTERVAL = 21600000;   // 6 hours (TEST)
-//const unsigned long RESTART_INTERVAL= 1800000;     // 30 mins(TEST)
+// Maintenance reboot ladder (checkAndRestart, 5_functions.ino). All state is uptime-relative
+// (millis), nothing persists — every boot restarts the ladder. 24 h: reboot only in a fully
+// quiet window (engine+field off, no SSE client, battery OK, cloud queue drained) held 5 min.
+// 48 h: drop the no-client and SoC preferences — engine+field off + voltage floor still
+// required; a watching client gets the 10-min countdown banner. 72 h: reboot regardless of
+// engine state (graceful field-down first); only OTA / active test / brown-out voltage defer.
+// 72 h must stay far below the 49.7-day millis() wrap — other timers aren't wrap-audited.
+const unsigned long REBOOT_OPPORTUNISTIC_MS = 86400000UL;   // 24 h
+const unsigned long REBOOT_RELAXED_MS       = 172800000UL;  // 48 h
+const unsigned long REBOOT_HARD_MS          = 259200000UL;  // 72 h
+const unsigned long REBOOT_QUIET_HOLD_MS    = 300000UL;     // quiet window must hold this long
+const int   REBOOT_SOC_FLOOR_X100  = 3000;   // quiet-tier SoC preference (SOC_percent is %×100)
+const float REBOOT_VBAT_FLOOR_V    = 11.8f;  // ×(BATTERY_VOLTAGE/12) — quiet/relaxed battery floor
+const float REBOOT_VBAT_BROWNOUT_V = 11.5f;  // ×(BATTERY_VOLTAGE/12) — hard tier: a reboot's WiFi
+                                             // startup current spike into a near-dead battery risks
+                                             // a brown-out boot-loop / NVS write corruption
+const int   REBOOT_HEAP_FLOOR_KB       = 20;          // largest contiguous internal block below this = TLS effectively dead (HTTPS preflight skips <15 KB)
+const unsigned long REBOOT_HEAP_LOW_HOLD_MS = 1800000UL;  // 30 min continuously low before requesting — handshake dips recover in seconds
+const unsigned long FORCED_RECHECK_INTERVAL_MS = 21600000UL;  // 6 h — periodic forced-update/version re-check (boot check alone is too slow at 24-72 h uptimes)
 
 //Configuration Snapshot Stuff
 char *configPayloadBuffer;
 
 unsigned long lastConfigSnapshotTime = 0;
 // Event-driven snapshot request: starts true so the first field-off window after boot uploads
-// one (the 24 h uptime timer alone never fires — RESTART_INTERVAL reboots at 12 h). Also set by
+// one; the 24 h CONFIG_SNAPSHOT_INTERVAL backstop covers the rest of a 24-72 h uptime. Also set by
 // saveVesselInfoToNvs() and a successful /registerProfile, so the user_profiles vessel
 // projection (update-config-snapshot) is fresh on Save instead of next-boot. Cleared only when
 // a payload is actually queued, so a failed gate retries next pass.
 bool configSnapshotRequested = true;
 unsigned long queueDrainHoldStart = 0;  // millis() when we started waiting for queue to drain before low power; 0 = not waiting
+
+// App-usage analytics: page dwell / button-press counters POSTed by the web UI to /track,
+// merged into a fixed PSRAM pool of opaque string keys ("p:<page>" / "b:<button>" — the
+// firmware never knows what the names mean, so new pages/buttons need no firmware change).
+// Uploaded to track-behavior once per epoch day — the period boundary is wall-clock, not a
+// millis timer, so it is immune to maintenance reboots, and for the same reason the pool is
+// persisted to /usage.bin at the shutdown/restart flush points and reloaded at boot.
+// Accumulates in every mode (AP included); only the upload requires Client mode + cloud.
+struct UsageSlot {
+  char key[32];
+  uint32_t n;   // event count (page opens / button presses)
+  uint32_t ms;  // visible dwell time, pages only
+};
+const int USAGE_SLOTS = 192;
+const int USAGE_PAYLOAD_SIZE = 16384;
+const unsigned long USAGE_UPLOAD_PERIOD_S = 86400;
+UsageSlot *usageSlots = nullptr;  // ps_malloc'd in setup()
+uint16_t usageSlotCount = 0;
+uint32_t usageOverflowN = 0;  // increments that arrived after all slots were taken
+uint32_t usageOpens = 0;      // period app-open count (all clients)
+uint32_t usageOpensApp = 0;   // subset from Capacitor clients
+int64_t usagePeriodStartEpoch = 0;  // 0 = clock has never been valid this period
+bool usageAppSeen = false;          // a Capacitor client posted this period
+bool usageDirty = false;            // accumulator changed since last dumpUsageAccum()
+unsigned long lastUsageUploadAttempt = 0;
+SemaphoreHandle_t usageMutex = NULL;  // /track runs on async_tcp (Core 0 tree), build/reset on loop() — cross-core
+// Lifetime totals (NVS "storage" namespace via saveNVSDataFull, same pattern as EngineRunTime_AllTime)
+double UsageOpenTime_AllTime = 0.0;  // seconds of visible app time
+uint32_t UsageOpens_AllTime = 0;
+uint32_t UsageDays_AllTime = 0;  // completed upload periods (periods with data)
+int32_t prev_UsageOpenTime_AllTime = 0;
+int32_t prev_UsageOpens_AllTime = 0;
+int32_t prev_UsageDays_AllTime = 0;
 
 uint64_t chipid;
 int firmwareVersionInt = 0;
@@ -720,6 +771,7 @@ int FreeInternalRam = 0;  // in KB
 int Heapfrag = 0;         // 0–100 %, integer only
 uint32_t FreePSRAM = 0;   // KB of free PSRAM
 size_t TotalInternalRam, LargestInternalBlock, TotalPSRAM;
+int LittleFsFreeKb = -1;  // free space on the userdata LittleFS partition, KB; -1 until first refresh (~60s cadence, skipped when fsMutex is busy)
 
 
 // ===== TASK STACK MONITORING =====
@@ -938,6 +990,9 @@ struct SysIDBodePoint { float freqHz; float gainApPct; float phaseDeg; };  // ga
 SysIDBodePoint systemIDBode[SYSID_SINE_NPOINTS] = {};
 uint8_t systemIDBodeCount = 0;         // valid Bode points after a sine run (served by /sysidbode)
 float   systemIDFsHz      = 0.0f;      // CH1 sample rate at the last plant sweep's start; 0 = not measured
+// Engine speed across the last sweep's sine phase — advisory context served by /sysidbode
+// (the wizard warns loosely on speed offset/wander; never gated or aborted on).
+float   systemIDRpmMin = 0.0f, systemIDRpmMax = 0.0f, systemIDRpmAvg = 0.0f;
 
 // SystemID open-loop sine-sweep history (50-record ring, /sysidsweeplog.bin).
 struct SysIDSweepRecord {
@@ -1067,6 +1122,10 @@ float fieldCurveKneeAmps   = -1.0f;
 float fieldCurveTargetLimitA = 0.0f;           // table limit-at-speed used for the 50/75% targets (A)
 float fieldCurvePropStabA  = 0.0f;             // proposed SystemIDStabilizeAmps (A)
 float fieldCurvePropStepPct = 0.0f;            // proposed SystemIDStepAmplitude (% duty)
+// Engine speed across the last ramp's settled dwells — advisory context served by /fieldcurve.json.
+// The avg is the reference speed the wizard suggests holding for the downstream sweeps (loose ±500
+// RPM advisory, never a gate). Reset at each start; valid for the last run until reboot.
+float fieldCurveRpmMin = 0.0f, fieldCurveRpmMax = 0.0f, fieldCurveRpmAvg = 0.0f;
 bool  fieldCurveOk = false;                     // true if a usable linear region + proposals were found
 bool  fieldCurveCeilingLimited = false;         // true if the ramp was capped by the Max Field % limit
                                                 // (MaxDuty, the real per-bus cap) BEFORE reaching the amp target —
@@ -2711,6 +2770,7 @@ FuncTiming ft_ReadVEData;
 FuncTiming ft_altHealth;
 FuncTiming ft_altFold;     // 200 Hz alt fold (IDW eval cost) — distinct from ft_altHealth (SSE wrapper)
 FuncTiming ft_boatPerf;
+FuncTiming ft_huntGov;  // oscillation-damper evaluation — self-gated to one Goertzel pass per 32 control ticks; instrumented because it sits inline in the control loop
 FuncTiming ft_fastAltDrain;     // fast alt-current channel bounded DMA drain (~1 ms cap per loop pass)
 FuncTiming ft_faMatrixFlush;    // fast alt-current disturbance matrix → flash (field-off gated, like the long-term ring)
 FuncTiming ft_faDetector;       // fast alt-current failure-detector verdict consume on Core 1 (analysis runs on the Core-0 faDetTask); ~0 cost
@@ -2805,14 +2865,18 @@ uint32_t loop80IterCount = 0;          // total 80MHz passes since reset (denomi
 
 
 
-// Global variable to track ESP32 restart time
-unsigned long lastRestartTime = 0;
+// Health-requested maintenance reboot: latched by checkAndRestart() when contiguous internal
+// RAM sits below REBOOT_HEAP_FLOOR_KB for 30 min straight. Executes at the next quiet window
+// regardless of the 24 h ladder minimum (a wedged TLS stack shouldn't wait a day). Only a
+// reboot clears it.
+bool maintRebootHealthReq = false;
 bool systemShuttingDown = false;
 // Deferred reboot via /get?RebootRegulator — flag set in handler, restart done in loop()
 // so the HTTP response flushes first and we don't restart inside the async TCP callback
 volatile bool rebootRequested = false;
 unsigned long rebootRequestedAt = 0;
-// Scheduled-restart user warning. 0 = outside the 10-min warning window (dashboard hides banner).
+// Maintenance-reboot user warning. 0 = no countdown running (dashboard hides banner). Only the
+// relaxed/hard reboot tiers run a countdown — quiet-tier reboots have no client by construction.
 // Updated each loop tick by checkAndRestart(); published via CSV2.
 uint32_t restartRemainingSec = 0;
 const unsigned long RESTART_WARNING_WINDOW_MS = 600000UL;  // 10 minutes
@@ -3000,7 +3064,7 @@ float    cvpfDV       = 0.0f;             // V — median per-edge ΔV
 float    cvpfDI       = 0.0f;             // A — median per-edge settled current step (alt or battery)
 float    cvpfSNR      = 0.0f;
 float    cvpfKp       = 0.0f, cvpfKi = 0.0f;   // display gains (recomputeCvGains is authoritative on Apply)
-float    cvpfHorizonS = 0.2f;             // s — the fixed ~200 ms edge readout window (display only)
+float    cvpfHorizonS = 0.6f;             // s — the fixed ~0.6 s edge readout window; cvpfStartTest recomputes from CVPF_EDGE_V0/V1_MS (display only)
 uint8_t  cvpfWarn     = 0;                 // bit0 delivery bit1 SNR bit2 edges-dropped bit3 gap-drift bit4 OV-fallback
 const char *cvpfAbortMsg = "";
 // phase-machine internals (init in cvpfStartTest, advanced in cvpf_tick)
@@ -3016,6 +3080,7 @@ float    cvpfEdgeK[8]   = { 0 };   // per-edge stiffness mV/A for the wizard tab
 uint8_t  cvpfEdgeStat[8] = { 4, 4, 4, 4, 4, 4, 4, 4 };  // 0 used · 1 weak step · 2 wrong-way · 3 window starved · 4 not fired
 float    cvpfDiMaxA = 40.0f;       // per-run current-step ceiling (A); raised only when the operator accepts the weak-signal re-run, reset each start
 float    cvpfRpmAtFit = 0.0f;      // mean RPM over the two middle pulse segments — re-run RPM advice + result-card conditions
+float    cvpfRpmMinAtFit = 0.0f, cvpfRpmMaxAtFit = 0.0f;  // RPM extremes over the same windows — result-card context only
 float    cvpfBattVAtFit = 0.0f;    // mean IBV over the two middle pulse segments — result-card "test conditions" only
 float    cvpfSocAtFit = -1.0f;     // mean SOC% over the two middle pulse segments (−1 when socInfoAvailable false) — result-card only
 double   cvpfRpmSum = 0.0, cvpfBattVSum = 0.0, cvpfSocSum = 0.0;   // accumulators, summed over the settled tail of the mid high+low segments
@@ -3093,6 +3158,8 @@ float tuningSweepBaseA      = 0.0f;    // operating-point center of the sine (A)
 float tuningSweepAmpA       = 0.0f;    // perturbation amplitude of the sine (A)
 float tuningSweepRpmMin     = 0.0f;
 float tuningSweepRpmMax     = 0.0f;
+double   tuningSweepRpmSum  = 0.0;     // with tuningSweepRpmN → true run-average RPM (record avgRPM + /tuningbode)
+uint32_t tuningSweepRpmN    = 0;
 float tuningSweepBattV      = 0.0f;    // bus voltage snapshot during the sweep
 bool  tuningSweepDutyRailed = false;   // field duty hit 0%/100% on any sine peak
 float tuningSweepWorstCoh   = 1.0f;    // min IN-BAND fit coherence (0..1, 1=clean); rolled-off points excluded so slow alternators don't false-fail
@@ -3764,6 +3831,7 @@ uint8_t reseedCorrEnable = 1;      // demand-corrected reseed (07-22, the 8-fire
 uint8_t HuntGovEnable = 1;           // 1 = watch applied duty for a sustained 0.3–3 Hz hunt (idle-knee speed-coupled plant, 07-22 22:16 AGM logs) and derate the inner-loop Ki until it dies; an episode gain cuts cannot quiet is reverted in full (external cyclic source)
 volatile float g_huntDerate = 1.0f;  // live Ki multiplier [0.25..1]; applied inside recomputeCcGains so every SetTunings path preserves it. Session-only — never persisted
 float g_huntFreqHz = 0.0f;           // last confirmed wobble frequency (CSV1/ledger)
+uint8_t g_huntState = 0;  // 0 idle, 1 episode, 2 hold(creep toward session ceiling), 3 standdown — the state machine's own variable, file-global so CSV1 can stream it to the Diag panel (derate alone can't tell "watching at reduced gain" from "actively damping")
 float cvRecovSec = 2.5f;     // retired timed-window ramp span, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovEmaxV = 0.25f;  // retired timed-window error cap, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovKiMax = 5.0f;   // refill Ki multiplier at the moment of release (M tapers linearly to 1× as the deficit heals). Clamp [1,10]
@@ -4300,7 +4368,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 // CV / Voltage Tuner Log
 // Logs every CH1 sample (fresh CH1 arrives 5–25ms apart, assume ~30ms) — no internal rate limiter.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
-// 57 bytes/entry × 6000 entries = 342 KB PSRAM → ~28 sec at full rate.
+// 60 bytes/entry × 6000 entries = 360 KB PSRAM → ~28 sec at full rate.
 
 // Field order/offsets must stay in lockstep with parseCvBin() in script.js.
 // Unnamed scales: battV/targV/vPred ×100, vErrorMv ×1000, fastOvCap/uTarget/spLimited/iMeas/duty ×10.
@@ -4334,8 +4402,11 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t targSlewed_x100;         // voltageTargetSlewed × 100 (V) — rise-governor output; the setpoint the CV PI tracks
   int16_t pTerm_x10;               // g_cvPTerm × 10 (A) — P contribution to Icv (VoltageKp_active × error); I=cv_I_x10, D=kdTrim_x1000
   int16_t cvKdFiltV_x100;          // g_cvKdFiltV × 100 (V) — IBV smoothed by CvKdVoltFiltTC; the D term's slope input ("Voltage for D term")
+  uint8_t huntDerate_pct;          // g_huntDerate × 100 (25..100; 100 = full inner Ki). Byte-sized on purpose: the damper's whole range fits, and cvlog is 6000 entries deep
+  uint8_t huntFreq_x100;           // g_huntFreqHz × 100 — the six detector bins land on 31..234, so a byte is exact; 0 = no wobble confirmed this session
+  uint8_t huntState;               // 0 watching, 1 damping episode, 2 verified/recovering, 3 standing down
 };
-static_assert(sizeof(CvLogEntry) == 57, "CvLogEntry must be 57 bytes");
+static_assert(sizeof(CvLogEntry) == 60, "CvLogEntry must be 60 bytes");
 
 
 struct CvBinDLState {
@@ -4884,6 +4955,14 @@ uint32_t writePsramBlob(const char *path, uint32_t magic, uint32_t version,
 uint32_t readPsramBlob(const char *path, uint32_t magic, uint32_t version,
                        void *destBase, size_t recordSize, uint32_t destCapacity,
                        uint32_t *userWordOut, bool deleteAfter);
+// App-usage analytics (2_functions.ino)
+bool usageMergeDelta(const char *body);
+bool buildUsagePayload(char *buf, uint32_t cap);
+bool executeUploadUsage(const char *payload);
+void resetUsageAccum(time_t newStart);
+void dumpUsageAccum();
+void loadUsageAccum();
+String usageStatsJson();
 void setupWiFi();
 void enterLowPowerStandby();
 bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout);
@@ -5019,6 +5098,10 @@ void setup() {
   if (!messageBuffer) Serial.println("FATAL: messageBuffer ps_malloc failed");
   consoleQueue = (ConsoleMessage *)ps_malloc(CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   if (!consoleQueue) Serial.println("FATAL: consoleQueue ps_malloc failed");
+  usageSlots = (UsageSlot *)ps_malloc(USAGE_SLOTS * sizeof(UsageSlot));
+  if (!usageSlots) Serial.println("FATAL: usageSlots ps_malloc failed");
+  else memset(usageSlots, 0, USAGE_SLOTS * sizeof(UsageSlot));
+  usageMutex = xSemaphoreCreateMutex();
   consoleHist = (ConsoleHistEntry *)ps_malloc(CONSOLE_HIST_SIZE * sizeof(ConsoleHistEntry));
   if (!consoleHist) Serial.println("FATAL: consoleHist ps_malloc failed");
   else memset(consoleHist, 0, CONSOLE_HIST_SIZE * sizeof(ConsoleHistEntry));
@@ -5203,6 +5286,7 @@ void setup() {
   memset(&ft_altHealth, 0, sizeof(FuncTiming));
   memset(&ft_altFold, 0, sizeof(FuncTiming));
   memset(&ft_boatPerf, 0, sizeof(FuncTiming));
+  memset(&ft_huntGov, 0, sizeof(FuncTiming));
   memset(&ft_fastAltDrain, 0, sizeof(FuncTiming));
   memset(&ft_faMatrixFlush, 0, sizeof(FuncTiming));
   memset(&ft_faDetector, 0, sizeof(FuncTiming));
@@ -5222,6 +5306,7 @@ void setup() {
   loadNVSData();                   // Load persistent variables from NVS- everything from last session is restored
   initNVSCache();                  // Sync change-detection cache with loaded NVS values to prevent false writes
   restoreSoftClock();              // Re-establish a usable timebase (retained RTC, else NVS epoch) so AP-mode/no-internet Long Term records aren't stamped 0 and rendered as phantom gaps. Snaps to truth when a real source reports.
+  loadUsageAccum();                // App-usage accumulator survives the maintenance restart (dumped at the shutdown flush points)
   // Black box beats the NVS copy for last-session stats: NVS full-saves fire only at the
   // field-off edge / shutdown, so a session that ends in a crash or reset leaves SessionDur/
   // MaxLoop/MinHeap holding an older session's values. The snapshot is exact at death.
@@ -5533,6 +5618,27 @@ void loop() {
       otaCheckDone = true;
     }
   }
+  // Periodic forced-update/version re-check (~6 h). The boot check above is one-shot, which was
+  // fine at 12 h uptimes — at 24-72 h a forced update staged in the cloud sits dormant until the
+  // next reboot, and a CANCELLED push keeps the boot-cached modal stuck. Re-reporting the version
+  // and re-reading the flag mid-uptime fixes both; install stays user-triggered (the check only
+  // raises/clears hasForcedUpdate for the dashboard modal). Version FIRST — the cloud auto-clears
+  // a satisfied forced flag on the version report, so the forced read then sees the cleared row.
+  // Queue-full: retry in 60 s (a duplicate version report is harmless).
+  static unsigned long lastForcedRecheck = 0;
+  if (otaCheckDone && millis() - lastForcedRecheck >= FORCED_RECHECK_INTERVAL_MS
+      && currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered
+      && currentPartitionType != 0 && !core0Busy && !otaInProgress
+      && fieldOffSettled(20000) && WiFi.RSSI() >= -80) {
+    HttpsRequest verReq = { .type = HTTPS_UPDATE_FW_VERSION };
+    HttpsRequest forcedReq = { .type = HTTPS_CHECK_FORCED_UPDATE };
+    if (xQueueSend(httpsQueue, &verReq, 0) == pdTRUE
+        && xQueueSend(httpsQueue, &forcedReq, 0) == pdTRUE) {
+      lastForcedRecheck = millis();
+    } else {
+      lastForcedRecheck = millis() - FORCED_RECHECK_INTERVAL_MS + 60000UL;
+    }
+  }
   // // === END OTA UPDATE ===
 
   // Cloud half of the tach-rescale wipe. Retried until it returns 200; front sync stays suppressed
@@ -5800,6 +5906,7 @@ void loop() {
               dumpSensorRingToLittleFS();
             }
             TIMED_CALL(ft_dumpLongTermRing, dumpLongTermRing());  // durable month-long plot cache → flash (final)
+            dumpUsageAccum();  // app-usage counters survive a breaker cut during standby
             pendingShutdownFlush = false;
             shutdownNVSFlushDone = false;
             shutdownCloudDeadlineMs = 0;
@@ -5919,7 +6026,7 @@ void loop() {
       // that stall is logged as a fast-mode (field-on) read interval. gpio4IsLow reflects field
       // state set inside the call above.
       if (gpio4IsLow) { pfHasPrev = false; inaResetIntervalBaseline(); }
-      runHuntGovernor();  // hunt-detector evaluation (self-gated to every 32 control ticks; never inside the control call)
+      TIMED_CALL(ft_huntGov, runHuntGovernor());  // hunt-detector evaluation (self-gated to every 32 control ticks; never inside the control call)
       TIMED_CALL(ft_altHealth, altHealth_tick(millis()));
       TIMED_CALL(ft_boatPerf, boatPerf_tick(millis()));   // Phase 3 boat performance (timing exposed via PerfLive registry)
       if (hardwarePresent == 1) drainIMUFifo();  // skip in fake mode — no hardware means 15ms I2C timeout per call floods the loop
@@ -6096,12 +6203,48 @@ void loop() {
           }
         }
 
+        // App-usage analytics — one small POST per epoch day (the boundary is wall-clock, so
+        // maintenance restarts can't stretch or skip a period). Same gates as the config
+        // snapshot; retries at most once per minute while a gate fails. An empty period just
+        // rolls forward without uploading. Reset happens at queue time: a send that later
+        // fails loses that day (lossy by design, matches the accumulator's power-cut policy).
+        if (hardwarePresent == 1 && fieldOffSettled(10000)
+            && millis() - lastUsageUploadAttempt >= 60000) {
+          time_t usageNowEp = time(NULL);
+          if (usageNowEp > 1700000000LL && usagePeriodStartEpoch > 0
+              && usageNowEp - usagePeriodStartEpoch >= (time_t)USAGE_UPLOAD_PERIOD_S) {
+            lastUsageUploadAttempt = millis();
+            if (usageSlotCount == 0 && usageOpens == 0) {
+              resetUsageAccum(usageNowEp);  // nothing happened this period — just start the next one
+              dumpUsageAccum();
+            } else if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -80) {
+              HttpsRequest req = {};
+              req.type = HTTPS_UPLOAD_USAGE;
+              req.payloadCap = USAGE_PAYLOAD_SIZE;
+              req.payload = (char *)ps_malloc(req.payloadCap);
+              if (req.payload && buildUsagePayload(req.payload, req.payloadCap)) {
+                if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
+                  UsageDays_AllTime++;
+                  resetUsageAccum(usageNowEp);
+                  dumpUsageAccum();  // file must not resurrect the closed period after a reboot
+                } else {
+                  free(req.payload);
+                  queueConsoleMessage("Usage upload: HTTPS queue full, will retry next interval");
+                }
+              } else if (req.payload) {
+                free(req.payload);
+              }
+            }
+          }
+        }
+
         // Commissioning-ledger drain (COMMISSIONING_LEDGER_SPEC.md): queued stage/sweep events →
         // log-commissioning-event. Deliberately NEVER fires during commissioning itself — rows wait
         // on flash until the boat is idle; the network gates live inside the service, the flash-safety
         // gates (hardware + field-off settled) here, because the post-send file trim is a flash write.
         if (hardwarePresent == 1 && fieldOffSettled(10000)) {
           cxLedgerDrainService();
+          huntLedgerService();  // hunt-episode records queued in RAM by the control path → flash, here only
         }
       }
       TIMED_CALL(ft_ch1_compute_stats, ch1_compute_stats());
@@ -6171,6 +6314,7 @@ void loop() {
     ft_altHealth.worstWindow = 0;
     ft_altFold.worstWindow = 0;
     ft_boatPerf.worstWindow = 0;
+    ft_huntGov.worstWindow = 0;
     loopWorst80Win = 0;  // 80MHz low-power loop worst — rolling 5s window
     loopFieldOnWin = 0;  // field-ON loop worst — rolling 5s window
 

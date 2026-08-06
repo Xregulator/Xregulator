@@ -182,6 +182,7 @@ numeric_cols = [
     "targSlewed_V",
     "pTerm_A", "cvKdFiltV_V",
     "kdArmed", "kdActive", "kdDeadband_Vps", "kdArmAboveV",
+    "huntDerate", "huntFreq_Hz", "huntState",
 ]
 
 for col in numeric_cols:
@@ -1377,11 +1378,143 @@ else:
     print(_msg)
 
 
+# ===========================================================================
+# PLOT 7 — Oscillation Damper (hunt governor)
+# ===========================================================================
+# The damper scales the INNER current-loop Ki, which no gain setting in the header reflects. A CV
+# transient that looks sluggish for no reason on Plots 1/4 is explained here: read the derate trace
+# at the same instant. Column absent on logs predating the damper — the whole figure is then skipped
+# rather than drawn empty, so a missing window means "this log has no damper data", not "no wobble".
+_have_hunt = "huntDerate" in df.columns and df["huntDerate"].notna().any()
+
+if _have_hunt:
+    from matplotlib.patches import Patch  # also imported by Plot 6; this figure must not depend on that
+    _hs = df["huntState"].fillna(0).astype(int) if "huntState" in df.columns else pd.Series(0, index=df.index)
+    _hd_pct = df["huntDerate"] * 100.0
+
+    fig7 = plt.figure(figsize=(18, 9), num="Plot 7 — Oscillation Damper")
+    gs7  = gridspec.GridSpec(3, 1, height_ratios=[3.0, 2.0, 0.9], hspace=0.12)
+    ax7  = fig7.add_subplot(gs7[0])
+    ax7b = fig7.add_subplot(gs7[1], sharex=ax7)
+    ax7s = fig7.add_subplot(gs7[2], sharex=ax7)
+    plt.setp(ax7.get_xticklabels(), visible=False)
+    plt.setp(ax7b.get_xticklabels(), visible=False)
+    fig7.suptitle(f"Plot 7 — Oscillation Damper  |  {outer_label}", fontsize=14, y=0.99)
+    add_subtitle(fig7,
+        "Inner current-loop Ki as a share of the configured PID Ki. "
+        "Red band = damping episode in progress; grey band = standing down after a wobble that did not respond.")
+    fig7.subplots_adjust(top=0.90, right=0.80)
+
+    # --- 7a: the action (derate) against the signal it reacts to (field duty) ---
+    ax7.plot(df["t_plot"], _hd_pct,
+             color="#c62828", lw=2.4, label="Inner-loop Ki derate (% of configured PID Ki)")
+    ax7.axhline(y=100, color="#9e9e9e", linestyle="--", lw=1.0, alpha=0.7)
+    ax7.axhline(y=25, color="#c62828", linestyle=":", lw=1.0, alpha=0.5,
+                label="Derate floor (25% — stacked episodes stop here)")
+    ax7.set_ylabel("Inner Ki (% of setting)")
+    ax7.set_ylim(0, 110)
+    ax7.grid(**GRID_KW)
+    ax7.set_title("Field duty is the detector's own input — the wobble it reacts to is visible on the right axis",
+                  fontsize=10, color="#444444", style="italic", pad=4)
+    ax7_d = add_duty_axis(ax7)
+    # add_duty_axis pins 0–115% so duty reads as an absolute across the other plots. Here the whole
+    # point is a wobble the detector fires on at 0.5% peak, which is invisible on a 115% span — so
+    # this one panel scales the duty axis to the data. Deliberate: read duty here as a SHAPE, and on
+    # any other plot for its absolute level.
+    if "duty_pct" in df.columns and df["duty_pct"].notna().any():
+        _dlo, _dhi = df["duty_pct"].min(), df["duty_pct"].max()
+        _pad = max(0.5, (_dhi - _dlo) * 0.35)
+        ax7_d.set_ylim(_dlo - _pad, _dhi + _pad)
+        ax7_d.set_ylabel("Field duty (%) — zoomed to show shape", color=DUTY_COLOR, fontsize=11)
+
+    # Episode / stand-down bands. bridge_s covers the 1.6 s evaluation cadence: state only updates on
+    # an eval, so consecutive samples inside one episode are contiguous but a slow log can gap.
+    _t7 = df["t_plot"].values
+    _ep_spans = _bool_spans(_t7, (_hs == 1).values, bridge_s=2.0)
+    _sd_spans = _bool_spans(_t7, (_hs == 3).values, bridge_s=2.0)
+    for _a7, _b7 in _ep_spans:
+        for _axx in (ax7, ax7b):
+            _axx.axvspan(_a7, _b7, color="#c62828", alpha=0.12, zorder=0)
+    for _a7, _b7 in _sd_spans:
+        for _axx in (ax7, ax7b):
+            _axx.axvspan(_a7, _b7, color="#616161", alpha=0.12, zorder=0)
+
+    _h7 = [l for l in ax7.get_lines() if not l.get_label().startswith("_")]
+    _h7_duty = [l for l in ax7_d.get_lines() if not l.get_label().startswith("_")]
+    _p7 = []
+    if _ep_spans:
+        _p7.append(Patch(color="#c62828", alpha=0.12, label="Damping episode"))
+    if _sd_spans:
+        _p7.append(Patch(color="#616161", alpha=0.12, label="Standing down (wobble was not ours)"))
+    _leg7 = ax7.legend(_h7 + _h7_duty + _p7,
+                       [a.get_label() for a in _h7 + _h7_duty + _p7],
+                       loc="lower left", fontsize=9)
+    _leg7.set_draggable(True)
+
+    # --- 7b: the speed-coupled side — engine speed against the confirmed wobble frequency ---
+    ax7b.plot(df["t_plot"], df["rpm"], color="#1565c0", lw=1.8, label="Engine speed (rpm)")
+    ax7b.set_ylabel("Engine speed (rpm)")
+    ax7b.grid(**GRID_KW)
+    ax7b.set_title("The idle-knee hunt is speed-coupled — read the confirmed frequency against the rpm it appeared at",
+                   fontsize=10, color="#444444", style="italic", pad=4)
+    ax7b_f = ax7b.twinx()
+    _hf = df["huntFreq_Hz"] if "huntFreq_Hz" in df.columns else pd.Series(np.nan, index=df.index)
+    # 0 means "nothing confirmed yet this session" — plotting it as a real 0 Hz reading would invent
+    # a measurement the firmware never made.
+    ax7b_f.plot(df["t_plot"], _hf.where(_hf > 0),
+                color="#6a1b9a", lw=1.8, linestyle="--", alpha=0.9,
+                label="Confirmed wobble frequency (Hz)")
+    ax7b_f.set_ylabel("Wobble frequency (Hz)", color="#6a1b9a", fontsize=12)
+    ax7b_f.set_ylim(0, 2.6)
+    ax7b_f.tick_params(axis="y", colors="#6a1b9a", labelsize=11)
+    _h7b = [l for l in ax7b.get_lines() + ax7b_f.get_lines() if not l.get_label().startswith("_")]
+    _leg7b = ax7b.legend(_h7b, [a.get_label() for a in _h7b], loc="upper right", fontsize=9)
+    _leg7b.set_draggable(True)
+
+    _cb7 = _make_checkbox_panel(fig7, _h7 + _h7_duty + _h7b)
+    draw_flag_bars(ax7s, df)
+
+    # Episode summary — the console prints a verdict per episode, but this recovers the same story
+    # from the log alone, including episodes whose verdict never reached flash.
+    if _ep_spans:
+        print(f"Oscillation damper: {len(_ep_spans)} episode(s) in this log")
+        for _i7, (_a7, _b7) in enumerate(_ep_spans, 1):
+            _m7 = (df["t_plot"] >= _a7) & (df["t_plot"] <= _b7)
+            _g7 = df[_m7]
+            _f7 = _g7.loc[_g7["huntFreq_Hz"] > 0, "huntFreq_Hz"]
+            _lo = _hd_pct[_m7].min()          # deepest cut — matches the ledger's derateExit
+            # Recovery ceiling: the highest the creep got back to before the NEXT episode opened (or
+            # the end of the log). This is the number that explains a loop still running soft an hour
+            # later, and it is not in the ledger at all.
+            _nxt = next((a for a, _ in _ep_spans if a > _b7), None)
+            _tail = _hd_pct[(df["t_plot"] > _b7) & ((df["t_plot"] < _nxt) if _nxt is not None else True)]
+            _ceil = _tail.max() if len(_tail) else _lo
+            _fs = f"{_f7.iloc[0]:.2f} Hz" if len(_f7) else "frequency not logged"
+            print(f"  #{_i7}: t={_g7['t_s'].iloc[0]:.1f}–{_g7['t_s'].iloc[-1]:.1f}s  {_fs}  "
+                  f"rpm {_g7['rpm'].min():.0f}–{_g7['rpm'].max():.0f}  "
+                  f"Ki cut to {_lo:.0f}%, recovered to {_ceil:.0f}% by "
+                  f"{'the next episode' if _nxt is not None else 'end of log'}")
+        if _sd_spans:
+            print(f"  {len(_sd_spans)} stand-down window(s) — those episodes reverted to full gain "
+                  f"(external cyclic load or engine governor suspected)")
+    elif (_hd_pct < 99.5).any():
+        print(f"Oscillation damper: no episode opened in this log, but Ki was already held at "
+              f"{_hd_pct.min():.0f}% — an episode earlier in the session set a recovery ceiling")
+    else:
+        print("Oscillation damper: never engaged in this log — inner Ki stayed at 100% throughout")
+else:
+    fig7 = None
+    print("Oscillation damper: no huntDerate column — log predates the damper telemetry")
+
+
 # ---------------------------------------------------------------------------
 # Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
 # ---------------------------------------------------------------------------
 _all_primary_axes = [ax1, ax2a, ax3, ax4, ax5, ax6]
 _all_figs         = [fig1, fig2, fig3, fig4, fig5, fig6]
+if _have_hunt:
+    _all_primary_axes.append(ax7)
+    _all_figs.append(fig7)
 _syncing = [False]
 
 def _on_xlim_changed(changed_ax):

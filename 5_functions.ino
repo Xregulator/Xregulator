@@ -530,29 +530,106 @@ void ReadVEData() {
   VeTime = end1 - start1;
   lastVEDataRead = currentTime;
 }
+// Maintenance reboot engine. Tier constants + full ladder description live with
+// REBOOT_OPPORTUNISTIC_MS in Xregulator.ino. Runs every loop pass.
 void checkAndRestart() {
-  unsigned long currentMillis = millis();
+  unsigned long up = millis();  // device boots at millis()=0, so uptime IS millis(); the 72 h cap keeps us far from the 49.7-day wrap
 
-  // Handle millis wraparound
-  if (currentMillis < lastRestartTime) {
-    lastRestartTime = 0;
+  // Health requester: LargestInternalBlock (KB, sampled ~4 s by the heap sampler) below the
+  // TLS-death floor continuously for 30 min. Brief HTTPS-handshake dips recover in seconds and
+  // reset the timer, so this only latches when the heap is genuinely fragmented.
+  static unsigned long heapLowSince = 0;
+  if (LargestInternalBlock > 0 && LargestInternalBlock < (size_t)REBOOT_HEAP_FLOOR_KB) {
+    if (heapLowSince == 0) heapLowSince = up;
+    if (!maintRebootHealthReq && up - heapLowSince >= REBOOT_HEAP_LOW_HOLD_MS) {
+      maintRebootHealthReq = true;
+      queueConsoleMessage("Maintenance: contiguous RAM low for 30 min - reboot at next quiet window");
+    }
+  } else {
+    heapLowSince = 0;
   }
 
-  unsigned long elapsedMs = currentMillis - lastRestartTime;
+  static unsigned long quietSince = 0;      // continuous-hold start of the current quiet window
+  static unsigned long countdownStart = 0;  // 10-min warning start (relaxed/hard tiers only)
 
-  // Warning window: publish remaining seconds for the dashboard banner + popup.
-  // 0 = outside window. Floors at 1 until the actual reboot fires.
-  if (elapsedMs + RESTART_WARNING_WINDOW_MS >= RESTART_INTERVAL && elapsedMs < RESTART_INTERVAL) {
-    unsigned long remainingMs = RESTART_INTERVAL - elapsedMs;
-    uint32_t sec = (uint32_t)(remainingMs / 1000UL);
-    restartRemainingSec = (sec == 0) ? 1 : sec;
-  } else if (elapsedMs < RESTART_INTERVAL) {
+  bool wantReboot = maintRebootHealthReq || up >= REBOOT_OPPORTUNISTIC_MS;
+  if (!wantReboot) {
     restartRemainingSec = 0;
+    return;
   }
 
-  if (elapsedMs >= RESTART_INTERVAL) {
+  // Absolute holds — no tier reboots through an OTA install or a running guided test
+  // (g_autoTestActive covers commissioning + battery-health + resonance + system-ID + field-cut
+  // + CV stress + protection tests; each is bounded by its own timeout).
+  if (otaInProgress || g_autoTestActive) {
+    quietSince = 0;
+    countdownStart = 0;
+    restartRemainingSec = 0;
+    return;
+  }
+
+  float vScale = BATTERY_VOLTAGE / 12.0f;
+  bool vValid = (IBV > 5.0f);  // a dead/absent INA228 reads ~0 V; sensor-dead must not block the ladder forever
+  bool engineOff = !engineSpinning();
+  bool fieldOff = (fieldActiveStatus == 0);
+  bool noClient = (events.count() == 0);
+  bool cloudReachable = (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered);
+  // Offline there is nothing to wait for — the flush below dumps the un-uploaded ring to flash.
+  bool cloudIdle = !core0Busy && (bufferedRecordCount == 0 || !cloudReachable);
+  bool socOk = (!socInfoAvailable || SOC_percent >= REBOOT_SOC_FLOOR_X100);
+  bool vQuietOk = (!vValid || IBV >= REBOOT_VBAT_FLOOR_V * vScale);
+  bool vBrownOk = (!vValid || IBV >= REBOOT_VBAT_BROWNOUT_V * vScale);
+
+  bool hardTier = (up >= REBOOT_HARD_MS);
+  bool relaxedTier = (up >= REBOOT_RELAXED_MS);
+
+  bool windowOk;
+  if (hardTier) {
+    windowOk = vBrownOk;  // engine/clients no longer defer; brown-out risk is the only battery hold
+  } else if (relaxedTier) {
+    windowOk = engineOff && fieldOff && cloudIdle && vQuietOk;
+  } else {
+    windowOk = engineOff && fieldOff && noClient && cloudIdle && socOk && vQuietOk;
+  }
+
+  if (!windowOk) {
+    quietSince = 0;
+    countdownStart = 0;
+    restartRemainingSec = 0;
+    return;
+  }
+
+  // Quiet/relaxed tiers: the window must hold 5 min continuously (lets the field-off upload
+  // burst fire at 60-75 s and drain before we commit). Hard tier skips the hold — its 10-min
+  // countdown is the notice period.
+  if (!hardTier) {
+    if (quietSince == 0) quietSince = up;
+    if (up - quietSince < REBOOT_QUIET_HOLD_MS) {
+      restartRemainingSec = 0;
+      return;
+    }
+  }
+
+  // Countdown only when someone could be watching: always in the hard tier, and in the relaxed
+  // tier when a client is connected. Quiet-tier reboots are silent — a client connecting
+  // mid-window breaks noClient and aborts above. Window conditions keep being enforced during
+  // the countdown, so an engine start or brown-out mid-countdown aborts it.
+  if (hardTier || (relaxedTier && !noClient)) {
+    if (countdownStart == 0) {
+      countdownStart = up;
+      queueConsoleMessage("Maintenance reboot in 10 minutes");
+    }
+    unsigned long cdElapsed = up - countdownStart;
+    if (cdElapsed < RESTART_WARNING_WINDOW_MS) {
+      uint32_t sec = (uint32_t)((RESTART_WARNING_WINDOW_MS - cdElapsed) / 1000UL);
+      restartRemainingSec = (sec == 0) ? 1 : sec;
+      return;
+    }
+  }
+
+  {
     restartRemainingSec = 1;  // keep banner visible through the shutdown sequence
-    Serial.println("=== SCHEDULED RESTART APPROACHING ===");
+    Serial.println("=== MAINTENANCE RESTART ===");
 
     // Graceful field-down: zero PWM immediately and gate the PID via OnOff=0.
     // OnOff is RAM-only here — LittleFS is not touched, so on reboot the device
@@ -603,12 +680,22 @@ void checkAndRestart() {
       resetSensorWindow();
     }
 
-    // Persist the long-term plot ring so the 12 h restart doesn't shed up to 15 min of
+    // Un-uploaded telemetry (offline/AP case — cloudIdle waives the drain when the cloud is
+    // unreachable): bulk-dump the PSRAM ring to flash, same as shutdown Phase 4; setup()
+    // restores and deletes the file on next boot.
+    if (!ringIsEmpty()) {
+      Serial.printf("Maintenance restart: ring still has %u records - dumping to LittleFS\n",
+                    (unsigned)sensorRingCount);
+      dumpSensorRingToLittleFS();
+    }
+
+    // Persist the long-term plot ring so the maintenance restart doesn't shed up to 15 min of
     // unflushed records (the periodic flush only fires every LONGTERM_DUMP_INTERVAL_MS).
     dumpLongTermRing();
+    dumpUsageAccum();  // app-usage period counters span the restart via /usage.bin
 
     if (WiFi.getMode() != WIFI_OFF) {
-      events.send("Performing scheduled restart", "console");
+      events.send("Performing maintenance restart", "console");
       events.send("Device restarting. Will reconnect shortly.", "status");
       delay(500);             // Give events time to actually send
       events.close();         // Close all SSE connections
@@ -4078,6 +4165,19 @@ void saveNVSDataFull() {
   if (prev_AltOnTime_AllTime != (int32_t)AlternatorOnTime_AllTime)          { nvs_set_i32(h, "AltOnTime_AT",   (int32_t)AlternatorOnTime_AllTime);             prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime;          chg = true; }
   if (prev_ChargeCycles != (int32_t)ChargeCycles)                           { nvs_set_i32(h, "ChrgCycles",     (int32_t)ChargeCycles);                         prev_ChargeCycles = (int32_t)ChargeCycles;                           chg = true; }
   if (prev_ChargeCycles_AllTime != (int32_t)ChargeCycles_AllTime)           { nvs_set_i32(h, "ChrgCyc_AT",     (int32_t)ChargeCycles_AllTime);                 prev_ChargeCycles_AllTime = (int32_t)ChargeCycles_AllTime;           chg = true; }
+  // App-usage lifetime totals (UsgTime_AT is seconds of visible app time). UsageOpenTime_AllTime is a
+  // double written on the web-server task under usageMutex; an unguarded cross-core read can tear, and a
+  // torn value saved here would be restored as truth at the next boot if power died before the following
+  // save. Snapshot under the mutex; on contention skip these rows (they retry at the next save).
+  if (usageMutex && xSemaphoreTake(usageMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    int32_t usgTime  = (int32_t)UsageOpenTime_AllTime;
+    int32_t usgOpens = (int32_t)UsageOpens_AllTime;
+    int32_t usgDays  = (int32_t)UsageDays_AllTime;
+    xSemaphoreGive(usageMutex);
+    if (prev_UsageOpenTime_AllTime != usgTime)                              { nvs_set_i32(h, "UsgTime_AT",     usgTime);                                       prev_UsageOpenTime_AllTime = usgTime;                                chg = true; }
+    if (prev_UsageOpens_AllTime != usgOpens)                                { nvs_set_i32(h, "UsgOpens_AT",    usgOpens);                                      prev_UsageOpens_AllTime = usgOpens;                                  chg = true; }
+    if (prev_UsageDays_AllTime != usgDays)                                  { nvs_set_i32(h, "UsgDays_AT",     usgDays);                                       prev_UsageDays_AllTime = usgDays;                                    chg = true; }
+  }
   // Travel + SOC session
   if (prev_TotalDist != (int32_t)TotalDistance)                             { nvs_set_i32(h, "TotalDist",      (int32_t)TotalDistance);                        prev_TotalDist = (int32_t)TotalDistance;                             chg = true; }
   if (prev_AvgSpeed != (int32_t)(AvgSpeed * 100))                           { nvs_set_i32(h, "AvgSpeed",       (int32_t)(AvgSpeed * 100));                     prev_AvgSpeed = (int32_t)(AvgSpeed * 100);                           chg = true; }
@@ -4401,6 +4501,11 @@ void loadNVSData() {
 
   if (nvs_get_i32(nvs_handle, "ChrgCyc_AT", &temp_int32) == ESP_OK) ChargeCycles_AllTime = temp_int32;
 
+  // App-usage lifetime totals
+  if (nvs_get_i32(nvs_handle, "UsgTime_AT", &temp_int32) == ESP_OK) UsageOpenTime_AllTime = temp_int32;
+  if (nvs_get_i32(nvs_handle, "UsgOpens_AT", &temp_int32) == ESP_OK) UsageOpens_AllTime = temp_int32;
+  if (nvs_get_i32(nvs_handle, "UsgDays_AT", &temp_int32) == ESP_OK) UsageDays_AllTime = temp_int32;
+
   // Session Travel Statistics
   if (nvs_get_i32(nvs_handle, "TotalDist", &temp_int32) == ESP_OK) TotalDistance = temp_int32;
   if (nvs_get_i32(nvs_handle, "AvgSpeed", &temp_int32) == ESP_OK) AvgSpeed = temp_int32 / 100.0f;
@@ -4634,6 +4739,9 @@ void initNVSCache() {
   prev_EngineCycles_AllTime = (int32_t)EngineCycles_AllTime;
   prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime;
   prev_ChargeCycles_AllTime = (int32_t)ChargeCycles_AllTime;
+  prev_UsageOpenTime_AllTime = (int32_t)UsageOpenTime_AllTime;
+  prev_UsageOpens_AllTime = (int32_t)UsageOpens_AllTime;
+  prev_UsageDays_AllTime = (int32_t)UsageDays_AllTime;
   prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;
   prev_AvgSpeed_AllTime = (int32_t)(AvgSpeed_AllTime * 100);
   prev_spdAccum_AllTime = speedAccumulator_AllTime;

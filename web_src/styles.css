@@ -1,5 +1,4 @@
-/* XREG_START */
-/* 
+/*
  * AI_SUMMARY: Alternator Regulator Project - This file is the styling for the served page
  * AI_PURPOSE: 
  * AI_INPUTS: 
@@ -840,6 +839,29 @@ details.diag-section > summary.diag-section-title::after {
 }
 details.diag-section[open] > summary.diag-section-title::after {
   transform: rotate(-180deg);
+}
+
+/* Live Data -> ESP32 Diagnostics — top-level collapsible sections. Values match the inline
+   style the sibling Live Data pages still carry on their bare <details>, so the ESP32 page
+   headers stay visually identical to those while being one class here. */
+details.esp32-sec > summary {
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 16px;
+  padding: 10px 0;
+  border-bottom: 2px solid var(--accent);
+  margin: 14px 0 10px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Page-scope control row above the first section (Reset Peak Values + its scope tooltip) */
+.diag-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
 }
 
 /* History Row (bucket stats) */
@@ -1967,7 +1989,7 @@ input[type="submit"]:hover {
      container (e.g. caused by cap-mode-row overflow on another panel). */
   .telemetry-groups,
   .grid {
-    grid-template-columns: 1fr !important;
+    columns: 1 !important;
     max-width: calc(100vw - 1rem);
   }
 
@@ -2585,15 +2607,43 @@ input:focus {
   border-color: var(--accent);
 }
 
+/* Card grids pack like masonry, not like grid rows. CSS Grid stretched every card in a
+   row to the tallest card in that row, so a short card sitting beside a long one carried
+   a slab of dead space inside its own border. Multi-column flows each card to its natural
+   height and starts the next one immediately below it.
+   column-width keeps the same responsive column count auto-fit used to give; column-count
+   is capped by child count (:has) because multicol — unlike auto-fit — will happily render
+   an EMPTY trailing column when there are fewer cards than columns would fit. */
 .grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
+  display: block;
+  columns: 220px;
+  column-gap: 10px;
 }
 
+.grid > * {
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  margin-bottom: 10px;
+}
+
+/* Full-width card inside a masonry grid (replaces the old grid-column: 1 / -1). A lone
+   card gets it for free — one card must never render as a narrow first column. */
+.grid > .span-all,
+.grid > *:only-child {
+  column-span: all;
+}
+
+/* Thresholds are deliberately conservative — 3 cards get 2 columns, not 3, because one of
+   them is often a .span-all banner and because multicol balancing parks two short cards in
+   one column and leaves the third empty. */
+.grid:not(:has(> :nth-child(2)))                      { column-count: 1; }
+.grid:has(> :nth-child(2)):not(:has(> :nth-child(4))) { column-count: 2; }
+.grid:has(> :nth-child(4))                            { column-count: 3; }
+
 @media (min-width: 769px) and (max-width: 1000px) {
+  /* !important so it beats the :has() child-count caps above, which are more specific */
   .grid {
-    grid-template-columns: repeat(2, 1fr);
+    column-count: 2 !important;
   }
 }
 
@@ -3246,7 +3296,7 @@ hr {
   }
 
   .grid {
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    column-width: 150px;
   }
 }
 
@@ -3942,6 +3992,30 @@ input:checked+.slider:before {
 }
 .dark-mode .wm-inline { color: #888; }
 .dark-mode .wm-inline .arr { color: #5a5a5a; }
+
+/* Zone abbreviation beside the Device Clock time. Smaller and non-breaking so
+   "2:32:07 PM EDT" can only wrap between the time and the zone, never inside either. */
+.clock-tz {
+  font-size: 10px;
+  font-weight: 600;
+  color: #a0a0a0;
+  letter-spacing: 0.02em;
+  margin-left: 3px;
+  white-space: nowrap;
+}
+.dark-mode .clock-tz { color: #888; }
+
+/* Date + clock-skew note under the Device Clock readout (System card). Its own line so a
+   long skew string ("Aug 6 · +4 min vs this screen") never widens the metric row. */
+.clock-skew {
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
+  color: #a0a0a0;
+  letter-spacing: 0.02em;
+  white-space: normal;
+}
+.dark-mode .clock-skew { color: #888; }
 
 #reconnect-button {
   position: fixed;
@@ -5508,8 +5582,6 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
   border-color: rgba(0, 161, 154, 0.4) !important;
 }
 
-/* XREG_END */
-
 /* Motion-sensor install warning (Comfort & Motion). Amber for a real problem, muted while still validating. */
 .imu-install-warn { font-size: 12px; line-height: 1.4; font-weight: 600; color: #a06b12; margin: 6px 0 10px; }
 .imu-install-warn.info { font-weight: 400; color: var(--text-muted); }
@@ -5593,20 +5665,31 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
    Trigger button in .main-tabs (index.html) + logic in the SETTINGS SEARCH block at the
    end of script.js. All selectors ss-prefixed. */
 
-/* Trigger: extra button in the main tab row. Hidden on phones (pull-down gesture instead). */
+/* Trigger: bare icon in a gutter at the right end of the main tab row — deliberately not a tab
+   box, so the real tabs keep their full width and it never reads as a fourth tab that cannot
+   become active. Gated on a mouse/trackpad, NOT on width: touch devices (phone browsers and the
+   iOS app) open search with the pull-down-at-top gesture, and the old min-width:768px gate left
+   a narrow non-touch browser window with no way in at all. */
 .ss-search-tab { display: none; }
-@media (min-width: 768px) {
+@media (hover: hover) and (pointer: fine) {
   .ss-search-tab {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 7px;
-    flex: 0 0 auto;             /* .main-tab sets flex:1 — Search must not steal tab width */
+    flex: 0 0 auto;
+    align-self: stretch;        /* matches the tab row height without hard-coding it */
+    width: 42px;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
     color: var(--text-muted);
+    border-radius: var(--radius) var(--radius) 0 0;
   }
-  .ss-search-tab:hover { color: var(--accent); border-color: var(--accent); }
+  .ss-search-tab:hover { color: var(--accent); background: var(--card-light); }
 }
 .ss-icon { width: 15px; height: 15px; flex: 0 0 auto; }
+.ss-search-tab .ss-icon { width: 19px; height: 19px; }
 
 /* Surface: dimmed backdrop; centered spotlight card on desktop, top sheet on phones */
 .ss-backdrop {

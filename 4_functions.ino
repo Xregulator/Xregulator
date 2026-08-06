@@ -121,6 +121,21 @@ void updateSystemHealthStats() {
     // Deliberately no low-contiguous-RAM console warning: every HTTPS handshake briefly
     // dips largest-block under 34 KB and recovers, so it would re-fire constantly.
     // The heap figures above surface it live in the ESP32 Stats panel.
+
+    // LittleFS free space, every 15th heap walk (~60 s) — and ONLY once the field is off and
+    // settled: usedBytes() is a full filesystem traversal (thousands of flash reads, ms-scale),
+    // never allowed in the live control path. Stale while charging by design — the ESP32 card
+    // tooltip says so. While charging this costs one bool check per walk.
+    static uint8_t fsFreeCountdown = 0;
+    if (fsFreeCountdown > 0) {
+      fsFreeCountdown--;
+    } else if (fieldOffSettled(0)) {
+      fsFreeCountdown = 15;
+      size_t fsTotal = 0, fsUsed = 0;
+      if (fsStatsTry(fsTotal, fsUsed) && fsTotal >= fsUsed) {
+        LittleFsFreeKb = (int)((fsTotal - fsUsed) / 1024);
+      }
+    }
   }
 }
 
