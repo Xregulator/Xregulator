@@ -3717,9 +3717,25 @@ function enableDemoMode() {
     DEMO_MODE = true;
     console.log('[DEMO MODE] Enabled - Generating simulated data');
 
+    // Hard-sever the device link: demo must never actuate real hardware — field
+    // enable, alarm GPIO, reboot, OTA — even if a regulator appears on the network
+    // AFTER demo latched. RFC-2606 .invalid can never resolve, so every fetch and
+    // re-synced form action dies at DNS; the remembered base in localStorage stays
+    // untouched for the next real launch. The capture-phase listener also swallows
+    // form submits outright (their hidden target iframe would otherwise render a
+    // WKWebView error page).
+    API_BASE_URL = 'http://demo.invalid';
+    syncFormActionsToDevice();
+    document.addEventListener('submit', function (e) {
+        if (DEMO_MODE) { e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+
     // Demo feeds handleCSVData() directly (bypassing the CSVData listener that
-    // normally hides the boat splash), so clear the splash here too.
+    // normally hides the boat splash), so clear the splash here too. Same for the
+    // Connection Lost dialog — the failed-rediscovery path can raise it before
+    // demo's patience window expires.
     hideWaitingForRegulator();
+    closeRecovery();
 
     // Add visual demo banner. padding-top includes env(safe-area-inset-top) so
     // the warning isn't hidden under the iPhone notch / Dynamic Island.
@@ -3732,15 +3748,102 @@ function enableDemoMode() {
     // Adjust body padding to account for banner (also notch-aware).
     document.body.style.paddingTop = 'calc(40px + env(safe-area-inset-top))';
 
+    // Demo has no device to fetch vessel_info.json from, so vesselInfoComplete is
+    // false and the Setup-only tab lock would trap the user on Vessel Info. Vessel
+    // info is meaningless without hardware — mark it complete, pin the landing
+    // (demo bypasses the CSVData listener, so maybeApplyLanding never runs), and
+    // go straight to Live Data → Alternator with free navigation.
+    vesselInfoComplete = true;
+    window._landingApplied = true;
+    showMainTab('livedata');
+    showSubTab('livedata', 'alternator');
+
+    // The settings arm-gate lives in firmware, so without hardware the Unlock
+    // button can never succeed (and the submit swallower above blocks its form
+    // anyway) — unlock outright so the button disappears and every pane is
+    // browsable. Registered=true opens the Cloud Features sub-tab gate; Fleet
+    // Stats / Leaderboards / Config Sharing are public cloud iframes that load
+    // fine over the phone's own internet. The cloud tab gets a prominent
+    // everything-here-is-fake banner.
+    applySettingsUnlockUI();
+    isDeviceRegistered = true;
+    demoInjectCloudBanner();
+    demoFillCloudPanes();
+
     startDemoData();
 
+}
+
+// Prominent disclosure pinned above the Cloud Features sub-tabs while demo is live.
+// The profile below it is simulated; the iframes (leaderboards etc.) are real public pages.
+function demoInjectCloudBanner() {
+    if (document.getElementById('demo-cloud-banner')) return;
+    const tab = document.getElementById('cloudfeatures');
+    if (!tab) return;
+    const b = document.createElement('div');
+    b.id = 'demo-cloud-banner';
+    b.style.cssText = 'background:#ff9800;color:#000;font-weight:bold;font-size:14px;text-align:center;padding:10px 12px;border-radius:6px;margin:8px 0;';
+    b.textContent = 'DEMO MODE - Everything on this page is simulated. Nothing is real, saved, or sent.';
+    tab.insertBefore(b, tab.firstChild);
+}
+
+// Brief static mockups for the Cloud Features sub-tabs. The real panes are cloud
+// iframes keyed to a registered device token, so in demo the iframes stay hidden
+// and these render into each pane's status element instead. Buttons are decorative
+// (disabled) — demo is navigate-and-look, not click.
+function demoFillCloudPanes() {
+    const th = 'text-align:left;padding:6px 10px;border-bottom:1px solid rgba(128,128,128,0.35);';
+    const td = 'padding:6px 10px;border-bottom:1px solid rgba(128,128,128,0.2);';
+    const row3 = (a, b, c) => `<tr><td style="${td}">${a}</td><td style="${td}">${b}</td><td style="${td}">${c}</td></tr>`;
+    const table = (h3, rows) => `<table style="border-collapse:collapse;margin:6px 0 16px;"><tr><th style="${th}">#</th><th style="${th}">Vessel</th><th style="${th}">${h3}</th></tr>${rows}</table>`;
+    const set = (id, html) => {
+        const el = document.getElementById(id);
+        if (el) { el.innerHTML = html; el.style.color = 'inherit'; el.style.display = 'block'; }
+    };
+    set('leaderboards-status',
+        '<strong>Deepest Anchorage</strong>'
+        + table('Depth', row3(1, 'Meridian', '142 ft') + row3(2, 'Blue Heron', '118 ft') + row3(3, 'DemoBoat', '96 ft'))
+        + '<strong>Longest Passage</strong>'
+        + table('Distance', row3(1, 'Wanderer', '1,240 nm') + row3(2, 'Meridian', '980 nm') + row3(3, 'DemoBoat', '610 nm')));
+    set('fleetstats-status',
+        '<strong>Fleet Overview</strong>'
+        + '<div style="line-height:1.9;margin-top:6px;">Registered vessels: 47<br>'
+        + 'Combined engine hours: 12,840<br>'
+        + 'Average alternator output: 61 A<br>'
+        + 'Energy charged this month: 3.9 MWh<br>'
+        + 'Most common battery: LiFePO4 400 Ah</div>');
+    const cfgBtn = '<button class="btn-secondary" disabled style="opacity:0.5;">Load</button>';
+    const cfgRow = (name, by) => `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 4px;border-bottom:1px solid rgba(128,128,128,0.2);"><span>${name}<br><small style="opacity:0.7;">shared by ${by}</small></span>${cfgBtn}</div>`;
+    set('configsharing-status',
+        '<strong>Shared Configurations</strong>'
+        + cfgRow('LiFePO4 600 Ah / 12 V coastal cruiser', 'Blue Heron')
+        + cfgRow('AGM 400 Ah / 12 V bluewater setup', 'Meridian')
+        + cfgRow('LiFePO4 300 Ah / 24 V catamaran', 'Wanderer'));
+    demoRenderSoftwareUpdate();
+}
+
+function demoRenderSoftwareUpdate() {
+    const cur = document.getElementById('current-version-display');
+    if (cur) cur.textContent = '0.0.48';
+    const cur2 = document.getElementById('current-version-display-2');
+    if (cur2) cur2.textContent = '0.0.48';
+    const loading = document.getElementById('version-loading');
+    if (loading) loading.style.display = 'none';
+    const list = document.getElementById('version-list');
+    if (list) {
+        const vrow = (v, note, cta) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 4px;border-bottom:1px solid rgba(128,128,128,0.2);"><span>${v}${note}</span><button class="btn-secondary" disabled style="opacity:0.5;">${cta}</button></div>`;
+        list.innerHTML = vrow('0.0.48', ' — installed', 'Reinstall') + vrow('0.0.47', '', 'Install') + vrow('0.0.46', '', 'Install');
+        list.style.display = 'block';
+    }
 }
 
 function startDemoData() {
     sendFakeCSVData();
 
-    // Continue every 2 seconds (same as typical ESP32 update rate)
-    demoInterval = setInterval(sendFakeCSVData, 2000);
+    // 200 ms = the firmware's default CSV1 broadcast period. Anything slower than the
+    // plots' stream-gap limit (max(4×interval, 1500 ms)) stamps a gap marker and breaks
+    // the line on EVERY frame — a 2 s demo cadence rendered as all markers, no traces.
+    demoInterval = setInterval(sendFakeCSVData, 200);
 }
 
 function sendFakeCSVData() {
@@ -3759,44 +3862,113 @@ function sendFakeCSVData() {
         updateInlineStatus(true);
     }
 
-    const values = new Array(50).fill(0);
-
-    values[0] = 75 + Math.random() * 20;
-    values[1] = 50 + Math.random() * 30;
-    values[2] = 12.5 + Math.random() * 0.8;
-    values[3] = 40 + Math.random() * 30;
-    values[4] = 1800 + Math.random() * 600;
-    values[21] = 0;
-    values[22] = 1;
-    values[25] = 2000;
-
+    // Registry-driven: CSV1/CSV2 frames are `count,` + one value per *_FIELDS entry,
+    // and the handlers DISCARD any frame whose count mismatches — a positional array
+    // rots on every schema change (the old 50-slot version died that way). Values are
+    // fixed-point exactly as firmware sends them (×100 unless noted); unnamed keys
+    // default to 0. Slow sine walks + jitter paint a plausible charge scene:
+    // ~55 A into the bank at ~13.9 V, ~1900 RPM, field ~40%.
+    const t = Date.now() / 1000;
+    const rpm = 1900 + 300 * Math.sin(t / 19) + (Math.random() * 60 - 30);
+    const ampsClean = 55 + 9 * Math.sin(t / 13);              // filtered/PV traces ride this
+    const amps = ampsClean + (Math.random() * 2 - 1);         // raw sensor adds jitter
+    const voltsClean = 13.9 + 0.25 * Math.sin(t / 37);
+    const volts = voltsClean + (Math.random() * 0.02 - 0.01);
+    const duty = 40 + 7 * Math.sin(t / 13 + 0.6) + Math.random();
+    const spl = 59 + Math.sin(t / 97);                        // post-limit setpoint, just under the 60 A target
+    const csv1 = {
+        AlternatorTemperatureF: Math.round((168 + 8 * Math.sin(t / 53)) * 100),
+        dutyCycle: Math.round(duty * 100),
+        BatteryV: Math.round(volts * 100),
+        MeasuredAmps: Math.round(amps * 100),
+        RPM: Math.round(rpm),
+        Channel3V: Math.round((12.82 + 0.03 * Math.sin(t / 41)) * 100),
+        IBV: Math.round((volts - 0.04) * 100),
+        Bcur: Math.round((amps - 22) * 100),   // house loads eat part of the output
+        VictronVoltage: Math.round((volts - 0.03) * 100),
+        FreeHeap: 148000,
+        fieldActiveStatus: 1,
+        // CC current-PID group (PID tuning plot): PV = filtered amps chasing the limited setpoint
+        setpointLimited: Math.round(spl * 100),
+        uTargetAmps: 6000,
+        pidInput: Math.round(ampsClean * 100),
+        pidOutput: Math.round(duty * 100),
+        pidError: Math.round((spl - ampsClean) * 100),
+        pidAltPV: Math.round(ampsClean * 100),
+        // CV loop group (CV tuning + Voltage plots): below-target CC cruise, ceiling parked high
+        voltageTarget: 1440,
+        Icv: Math.round(6000 + 150 * Math.sin(t / 71)),
+        cvPTerm: Math.round((14.4 - voltsClean) * 8 * 100),
+        cvIterm: Math.round(5600 + 300 * Math.sin(t / 61)),
+        cvKdTrim: Math.max(0, Math.round(150 * Math.sin(t / 7) - 100)),   // occasional small D back-off
+        cvKdFiltV: Math.round(voltsClean * 100),
+        vvout: Math.round(duty / 100 * volts * 100),
+        iiout: Math.round((2.0 + duty / 25) * 100),
+        Ignition: 1,
+        // iExcess detector sparkline (A ×10): excess breathing well under its threshold
+        mExcessEma: Math.round(6 + 4 * Math.sin(t / 17)),
+        iExcessThreshold: 80,
+        mExcessEmaPeak: Math.round(11 + 4 * Math.sin(t / 17)),
+        iExcessThreshMin: 75,
+        WifiHeartBeat: (window._demoHeartbeat = (window._demoHeartbeat || 0) + 1),
+    };
+    const v1 = CSV1_FIELDS.map(k => csv1[k] !== undefined ? csv1[k] : 0);
     const csvHandler = window._csvDataHandler;
     if (csvHandler) {
-        csvHandler({ data: values.join(',') });
+        csvHandler({ data: v1.length + ',' + v1.join(',') });
+    }
+
+    // CSV2 rides its real ~5 s cadence (SOC + peaks for the header/battery panes);
+    // at 200 ms it would spam the heavier CSV2-side renderers.
+    const csv2Handler = window._csv2DataHandler;
+    if (csv2Handler && (!window._demoLastCsv2 || Date.now() - window._demoLastCsv2 >= 5000)) {
+        window._demoLastCsv2 = Date.now();
+        const csv2 = {
+            IBVMax: 1452,
+            MeasuredAmpsMax: 9100,
+            RPMMax: 3450,
+            SOC_percent: Math.round((76 + 2 * Math.sin(t / 240)) * 100),
+            EngineRunTime: 19800,
+            temperatureThermistor: 92,   // board temp, raw °F
+            MaxTemperatureThermistor: 118,
+        };
+        const v2 = CSV2_FIELDS.map(k => csv2[k] !== undefined ? csv2[k] : 0);
+        csv2Handler({ data: v2.length + ',' + v2.join(',') });
     }
 }
 
 
 function checkForDemoMode() {
-    // Wait 10 seconds after load, then check if ESP32 connected.
-    // CONNECTING is intentionally NOT a trigger — slow-WiFi users can sit in
-    // CONNECTING for many seconds, and tripping demo on that state pinned a
-    // permanent demo banner over real data.
+    // First check 10 s after load, then re-arm every 3 s until a verdict: real data
+    // (never demo), demo enabled, or user chose Continue Offline. CONNECTING is NOT
+    // a demo trigger — slow-WiFi users can sit in CONNECTING for many seconds, and
+    // tripping demo on that state once pinned a permanent demo banner over real
+    // data — but it only DEFERS the check, never disarms it: after a failed scan
+    // the SSE retries http://alternator.local and lives in CONNECTING, so a
+    // one-shot check never fired demo on any WiFi network without the device
+    // (App Review phones are exactly that). Past 30 s with zero packets ever,
+    // CONNECTING stops deferring — that long with no open is a dead address, not
+    // a slow join.
+    const t0 = performance.now();
     const check = () => {
-        if (source && source.readyState !== EventSource.CLOSED) return;
-        if (discoveryInProgress) {
+        if (window._firstCsvPacketReceived || DEMO_MODE || isOfflineMode) return;
+        const patient = performance.now() - t0 < 30000;
+        const st = source ? source.readyState : EventSource.CLOSED;
+        if (discoveryInProgress || st === EventSource.OPEN || (st === EventSource.CONNECTING && patient)) {
             // A /24 sweep can outlast the 10 s grace — demo mode must not win
             // the race against a discovery that's about to find the device.
             setTrackedTimeout(check, 3000);
             return;
         }
-        // No SSE. no-cors probe of the AP gateway distinguishes "on the setup
+        // No live SSE. no-cors probe of the AP gateway distinguishes "on the setup
         // hotspot mid-provisioning" (show the browser hint) from "no device at
         // all" (App Review — MUST still get demo mode).
         fetchWithTimeout('http://192.168.4.1/', { mode: 'no-cors' }, 2500)
             .then(() => showHotspotSetupHint())
             .catch(() => {
-                console.log('[DEMO MODE] No ESP32 detected after 10 seconds - enabling demo mode');
+                // Re-test after the 2.5 s probe window — a connection may have landed mid-probe.
+                if (window._firstCsvPacketReceived || DEMO_MODE || isOfflineMode) return;
+                console.log('[DEMO MODE] No ESP32 detected - enabling demo mode');
                 enableDemoMode();
             });
     };
@@ -4299,6 +4471,7 @@ async function testInternetConnectivity() {
 }
 
 async function loadAvailableVersions() {
+    if (DEMO_MODE) { demoRenderSoftwareUpdate(); return; }
     const versionList = document.getElementById('version-list');
     const versionLoading = document.getElementById('version-loading');
 
@@ -6388,6 +6561,15 @@ let settingsUnlocked = false;
 // ===== CLOUD FEATURES - Profile Management =====
 
 async function initializeProfileTab() {
+    if (DEMO_MODE) {
+        // /checkRegistration needs hardware — show a simulated, clearly-labeled profile.
+        demoInjectCloudBanner();
+        populateProfileForm({ username: 'DemoBoat', email: 'demo@xengineering.net' });
+        const pf = document.getElementById('profile-form');
+        const submit = pf && pf.querySelector('input[type="submit"]');
+        if (submit) submit.value = 'Update Profile';
+        return;
+    }
     if (!settingsUnlocked) {
         diagLog("Settings locked, returning early");
         return;
@@ -9539,6 +9721,7 @@ function broadcastThemeToCloudIframes() {
 // ============================================
 // CLOUD FEATURES - Leaderboards
 async function loadLeaderboardsInIframe() {
+    if (DEMO_MODE) { demoFillCloudPanes(); return; }   // static mockup; iframe needs a device token
     const statusEl = document.getElementById('leaderboards-status');
     const iframe = document.getElementById('leaderboards-iframe');
 
@@ -9572,6 +9755,7 @@ async function loadLeaderboardsInIframe() {
 // ===== CLOUD FEATURES - Fleet Stats =====
 
 async function loadFleetStatsInIframe() {
+    if (DEMO_MODE) { demoFillCloudPanes(); return; }
     const statusEl = document.getElementById('fleetstats-status');
     const iframe = document.getElementById('fleetstats-iframe');
 
@@ -9598,6 +9782,7 @@ async function loadFleetStatsInIframe() {
 // can offer "load onto my regulator", which it relays back via a LOAD_CONFIG_TO_DEVICE
 // postMessage (handled below) — the cloud page can't reach the LAN device directly.
 async function loadConfigSharingInIframe() {
+    if (DEMO_MODE) { demoFillCloudPanes(); return; }
     const statusEl = document.getElementById('configsharing-status');
     const iframe = document.getElementById('configsharing-iframe');
     if (statusEl) statusEl.textContent = 'Loading shared configurations...';
@@ -12937,7 +13122,7 @@ window.addEventListener("load", function () {
             }
         }, false);
 
-        source.addEventListener('CSVData2', function (e) {
+        source.addEventListener('CSVData2', window._csv2DataHandler = function (e) {   // ref stored for demo mode
             const raw = e.data.split(',').map(Number);
 
             const declaredCount = raw[0];
@@ -16850,6 +17035,7 @@ function saveLogFile(name, text, mime = 'text/plain') {
 }
 
 async function downloadLogs() {
+    if (DEMO_MODE) return;   // deliberate no-op: log pulls hog a device that isn't there
     const ts = getLogTimestamp();
     const sfx = getLogNameSuffix();
     // Commissioning-wizard rest hold rides a 2 s heartbeat; these transfers hog the device server

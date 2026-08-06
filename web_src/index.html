@@ -39,10 +39,19 @@
     // iOS zooms the whole page when a <16px input gets focus and the zoom sticks after
     // the keyboard closes, leaving permanent sideways scroll. A permanent maximum-scale=1
     // suppresses that but also kills pinch zoom inside the Capacitor WKWebView (Safari
-    // ignores it for pinch; WKWebView enforces it). So the clamp is applied only around
-    // text-entry focus: touchstart on an editable control fires BEFORE WebKit reads the
-    // viewport for its focus zoom → clamp; when focus leaves form controls → restore
-    // pinch. UA-gated because Android would honor the clamp with no auto-zoom to prevent.
+    // ignores it for pinch; WKWebView enforces it). Two mechanisms share that one lever:
+    //   PREVENT — touchstart or focusin on an editable control swaps in maximum-scale=1
+    //     before (or just after) WebKit computes its focus zoom; restored when focus
+    //     leaves form controls so pinch stays free.
+    //   RESET — WKWebView's enforcement is RETROACTIVE: applying the clamp while the
+    //     page is zoomed snaps it back to 1x. Focus paths with no touchstart on the
+    //     input itself (label taps, keyboard next-field arrows, programmatic focus)
+    //     used to slip past a touch-only clamp and leave the page stuck zoomed; the
+    //     focusin clamp + the blur-time snap-back now undo those automatically.
+    //   preFocusScale is the arbiter: recorded BEFORE focus lands. ~1.0 means any zoom
+    //     seen later is iOS's focus zoom (undo it); >1.05 means the user deliberately
+    //     pinch-zoomed before typing (leave their zoom alone, never clamp).
+    // UA-gated because Android would honor the clamp with no auto-zoom to prevent.
     (function () {
       if (!(/iPhone|iPad|iPod/.test(navigator.userAgent) ||
             (navigator.userAgent.includes('Mac') && navigator.maxTouchPoints > 1))) return;  // iPadOS 13+ masquerades as Mac
@@ -50,6 +59,8 @@
       var FREE = 'width=device-width, initial-scale=1.0, viewport-fit=cover';
       var CLAMP = FREE + ', maximum-scale=1.0';
       var TEXTY = { text: 1, number: 1, password: 1, search: 1, email: 1, url: 1, tel: 1 };
+      var preFocusScale = null;
+      function scaleNow() { return window.visualViewport ? window.visualViewport.scale : 1; }
       function editable(el) {
         if (!el || !el.tagName) return false;
         var t = el.tagName;
@@ -57,14 +68,36 @@
                (t === 'INPUT' && TEXTY[(el.getAttribute('type') || 'text').toLowerCase()] === 1);
       }
       function restoreIfNotTyping() {
-        if (!editable(document.activeElement)) meta.setAttribute('content', FREE);
+        if (editable(document.activeElement)) return;  // still typing — keep the clamp
+        if (preFocusScale != null && preFocusScale <= 1.05 && scaleNow() > 1.05) {
+          // Zoom appeared during typing = stuck focus zoom. Clamp to snap back to 1x,
+          // then free the viewport again so pinch works.
+          meta.setAttribute('content', CLAMP);
+          setTimeout(function () { meta.setAttribute('content', FREE); }, 250);
+        } else {
+          meta.setAttribute('content', FREE);
+        }
+        preFocusScale = null;
       }
       document.addEventListener('touchstart', function (e) {
-        if (e.touches && e.touches.length > 1) { restoreIfNotTyping(); return; }  // pinch, not a tap
-        // Already pinch-zoomed = deliberate; don't yank the page back to 1x just to type.
-        var zoomed = window.visualViewport && window.visualViewport.scale > 1.05;
-        if (!zoomed && editable(e.target)) meta.setAttribute('content', CLAMP);
+        if (e.touches && e.touches.length > 1) {  // pinch, not a tap — never snap back mid-gesture
+          if (!editable(document.activeElement)) { meta.setAttribute('content', FREE); preFocusScale = null; }
+          return;
+        }
+        if (editable(e.target)) {
+          preFocusScale = scaleNow();
+          // Already pinch-zoomed = deliberate; don't yank the page back to 1x just to type.
+          if (preFocusScale <= 1.05) meta.setAttribute('content', CLAMP);
+        }
       }, { capture: true, passive: true });
+      // Backstop for focus without a touchstart on the input itself: label taps, the
+      // keyboard's next-field arrows, programmatic focus (settings search). Clamping
+      // here may land after the zoom starts — retroactive enforcement undoes it anyway.
+      document.addEventListener('focusin', function (e) {
+        if (!editable(e.target)) return;
+        if (preFocusScale == null) preFocusScale = scaleNow();
+        if (preFocusScale <= 1.05) meta.setAttribute('content', CLAMP);
+      });
       // Focus lands within ms of touchend; 400ms later either the input has focus (keep the
       // clamp until focusout) or the touch was a scroll/cancelled tap (unclamp — otherwise a
       // drag that merely STARTED on an input would leave pinch dead indefinitely).
