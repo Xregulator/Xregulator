@@ -976,7 +976,9 @@ void fsTakeLock() {
 }
 
 void fsReleaseLock() {
-  if (fsMutex) {
+  // Only give if this task actually holds it: after a fsTakeLock timeout, giving a mutex
+  // owned by another task trips configASSERT in xTaskPriorityDisinherit (panic/reboot).
+  if (fsMutex && xSemaphoreGetMutexHolder(fsMutex) == xTaskGetCurrentTaskHandle()) {
     xSemaphoreGive(fsMutex);
   }
 }
@@ -1014,6 +1016,7 @@ uint32_t writePsramBlob(const char *path, uint32_t magic, uint32_t version,
     Serial.printf("writePsramBlob: open failed (%s)\n", path);
     return 0;
   }
+  fsFreeDirty = true;
 
   PsramBlobHeader hdr = { magic, version, count, (uint32_t)recordSize, userWord };
   bool ok = (f.write((const uint8_t *)&hdr, sizeof(hdr)) == sizeof(hdr));
@@ -1109,6 +1112,7 @@ uint32_t appendRingBlob(const char *path, const void *base, size_t recordSize,
   fsTakeLock();
   File f = LittleFS.open(path, "a");
   if (!f) { fsReleaseLock(); return 0; }
+  fsFreeDirty = true;
   const uint8_t *bytes = (const uint8_t *)base;
   bool ok = true;
   for (uint32_t i = delta; i >= 1 && ok; i--) {          // i=delta → oldest new record, i=1 → newest
@@ -2754,6 +2758,7 @@ uint16_t dumpSensorRingToLittleFS() {
     Serial.println("dumpSensorRingToLittleFS: open failed");
     return 0;
   }
+  fsFreeDirty = true;
   SensorRingBackupHeader hdr = {
     SENSOR_RING_BACKUP_MAGIC,
     SENSOR_RING_BACKUP_VER,
@@ -3099,7 +3104,7 @@ void zeroLogResetAll() {
   zeroLogFileRecords = 0; zeroLogPushSeq = 0; zeroLogFlushedSeq = 0;   // file removed → next flush compacts fresh
   if (zeroLogRing) memset(zeroLogRing, 0, ZEROLOG_RING_SIZE * sizeof(ZeroLogRecord));
   fsTakeLock();
-  if (fsExists(ZEROLOG_PATH)) LittleFS.remove(ZEROLOG_PATH);
+  LittleFS.remove(ZEROLOG_PATH);  // raw call — fsExists() would re-take the non-recursive fsMutex and block 5 s
   fsReleaseLock();
   Serial.println("Cleared zero-drift log + backup");
 }
@@ -3145,10 +3150,12 @@ void zeroLogService() {
     }
   }
 
-  // FLUSH — field-off only (60 s settled), every 30 min, only when the ring actually changed.
+  // FLUSH — field gate physically cut (fieldCutSettled, never the duty-based
+  // fieldOffSettled), every 30 min, only when the ring actually changed. The ring wraps by
+  // design, so deferred flushes cost only power-cut durability of this diagnostic.
   static bool prevFieldOff = false;
   static uint32_t lastFlushMs = 0;
-  bool ffSettled = fieldOffSettled(0);
+  bool ffSettled = fieldCutSettled(0);
   bool rising    = (ffSettled && !prevFieldOff);
   bool periodic  = (ffSettled && (now - lastFlushMs >= ZEROLOG_FLUSH_MS));
   if ((rising || periodic) && prev_zeroLogHead != zeroLogHead) {
@@ -3172,9 +3179,7 @@ void clearSensorBuffer() {
   portEXIT_CRITICAL(&sensorRingMux);
 
   fsTakeLock();
-  if (fsExists(SENSOR_RING_BACKUP_PATH)) {
-    LittleFS.remove(SENSOR_RING_BACKUP_PATH);
-  }
+  LittleFS.remove(SENSOR_RING_BACKUP_PATH);  // raw call — fsExists() would re-take the non-recursive fsMutex and block 5 s
   fsReleaseLock();
 
   Serial.println("Cleared sensor ring + shutdown backup");
@@ -4185,6 +4190,7 @@ void dumpUsageAccum() {
   fsTakeLock();
   File f = LittleFS.open(USAGE_FILE_PATH, "w");
   if (f) {
+    fsFreeDirty = true;
     UsageFileHdr h = {};
     h.magic = USAGE_FILE_MAGIC;
     h.opens = usageOpens;
@@ -5811,7 +5817,7 @@ void faMatrixMaybeFlush() {
   }
   static bool prevOff = false;
   static unsigned long lastFlushMs = 0;
-  bool off = fieldOffSettled(0);
+  bool off = fieldCutSettled(0);  // hardware gate — the duty-based fieldOffSettled reads "off" during a live duty-0 CV hold
   bool rising = off && !prevOff;
   bool periodic = off && (millis() - lastFlushMs >= FA_MATRIX_FLUSH_MS);
   prevOff = off;

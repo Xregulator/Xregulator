@@ -1442,10 +1442,22 @@ int applyImportConfig(const char *body) {
   }
   // Only nag once a pass has actually been finished (epoch stamped) — a fresh device has
   // nothing to invalidate, and every key looks "changed" there because none existed.
-  if (CommissionEpoch > 0 && (settingRead(NK_BatteryVoltage)     != preClass
-                              || settingRead(NK_BatteryCapacity_Ah) != preCap
-                              || settingRead(NK_batteryType)        != preChem)) {
-    raiseRecommissionNag();
+  if (CommissionEpoch > 0) {
+    bool classChanged = (settingRead(NK_BatteryVoltage) != preClass);
+    if (classChanged || settingRead(NK_BatteryCapacity_Ah) != preCap
+        || settingRead(NK_batteryType) != preChem) {
+      raiseRecommissionNag();
+    }
+    // Voltage-class change: the knee-learned Min% floors are duty values learned at the OLD
+    // class (~2x field per class step) and are NOT in the import payload — the boot rebuild
+    // would re-apply them over the imported minDutyTable. Reset to defaults (Auto Min%
+    // re-learns them); the advisory nag above stays the only recommission prompt. Same pair
+    // as the imported-breakpoints-moved path in applyImportTables.
+    if (classChanged) {
+      kneeLearnResetDefaults();
+      commissionClearStage(7);
+      queueConsoleMessage("IMPORT WARNING: battery voltage class changed - learned Min% field floors reset to safe defaults; recommissioning recommended");
+    }
   }
   // Registry knobs — generic import mirroring the export side.
   // Macro for the same auto-prototype reason as the emit.
@@ -2557,42 +2569,28 @@ void capTrackOnFull(uint32_t epoch, float tempC) {
   capLowAnchorValid = false;                       // consume the anchor
 }
 
-// Persist DCIR results + capacity ring to NVS. Caller gates on field-off.
+// Persist DCIR results + capacity ring to LittleFS blobs. Caller gates on field-off.
+// Dirty flags stay set on a failed write so the next flush retries instead of losing history.
 void bhFlushCapNVS() {
-  if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM ring is synthetic/empty — keep the real NVS blob
+  if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM ring is synthetic/empty — keep the real flash blob
   if (bhCapDirty) {
-    settingWrite(NK_bhCapBlob, bhSerializeCap().c_str());
+    uint32_t start = (bhCapCount < bhCapCap) ? 0 : (uint32_t)bhCapHead;
+    uint32_t n = writePsramBlob(BHCAP_PATH, BHCAP_MAGIC, BHCAP_VER, 0,
+                                bhCapRing, sizeof(BattCapPoint), bhCapCap, start, bhCapCount);
     settingWrite(NK_bhBaseline, String(bhBaselineCapacityAh, 3).c_str());
-    bhCapDirty = false;
+    if (n == (uint32_t)bhCapCount) bhCapDirty = false;
+    else queueConsoleMessage("Battery health: capacity history save failed - will retry");
   }
   if (bhResultsDirty) {
-    settingWrite(NK_bhResults, bhSerializeResults().c_str());
-    bhResultsDirty = false;
+    uint32_t start = (bhResultCount < bhResultCap) ? 0 : (uint32_t)bhResultHead;
+    uint32_t n = writePsramBlob(BHRES_PATH, BHRES_MAGIC, BHRES_VER, 0,
+                                bhResults, sizeof(BattHealthResult), bhResultCap, start, bhResultCount);
+    if (n == (uint32_t)bhResultCount) bhResultsDirty = false;
+    else queueConsoleMessage("Battery health: DCIR history save failed - will retry");
   }
 }
 
-// ── Serialize / deserialize (compact CSV; records joined by ';') ────────────────
-String bhSerializeResults() {
-  String out; out.reserve(bhResultCount * 56);
-  int start = (bhResultCount < bhResultCap) ? 0 : bhResultHead;
-  for (int n = 0; n < bhResultCount; n++) {
-    BattHealthResult &r = bhResults[(start + n) % bhResultCap];
-    if (n) out += ';';
-    out += String(r.epoch);            out += ',';
-    out += String(r.dcir_mOhm, 2);     out += ',';
-    out += (isnan(r.soh_pct) ? String("nan") : String(r.soh_pct, 1)); out += ',';
-    out += String(r.boardTempF, 1);    out += ',';
-    out += String(r.soc_pct, 1);       out += ',';
-    out += String(r.battV, 2);         out += ',';
-    out += String(r.stepLowA, 1);      out += ',';
-    out += String(r.stepDeltaA, 1);    out += ',';
-    out += String((int)r.edgesUsed);   out += ',';
-    out += String((unsigned)r.dwellMsUsed); out += ',';
-    out += String(r.fitSpread_mOhm, 3);
-  }
-  return out;
-}
-
+// ── Deserialize (legacy NVS-string migration only; records joined by ';') ────────
 static float bhTok(const String &s, int &pos) {   // next comma/semicolon-delimited float
   int e = pos;
   while (e < (int)s.length() && s[e] != ',' && s[e] != ';') e++;
@@ -2621,22 +2619,6 @@ void bhDeserializeResults(const String &blob) {
     r.fitSpread_mOhm = bhTok(blob, pos);
     BH_APPEND_RESULT(r);
   }
-}
-
-String bhSerializeCap() {
-  String out; out.reserve(bhCapCount * 32);
-  int start = (bhCapCount < bhCapCap) ? 0 : bhCapHead;
-  for (int n = 0; n < bhCapCount; n++) {
-    BattCapPoint &p = bhCapRing[(start + n) % bhCapCap];
-    if (n) out += ';';
-    out += String(p.epoch);         out += ',';
-    out += String(p.capacityAh, 1); out += ',';
-    out += String(p.capPct, 1);     out += ',';
-    out += String(p.socLow, 1);     out += ',';
-    out += String(p.tempC, 1);      out += ',';
-    out += String((int)p.conf);
-  }
-  return out;
 }
 
 void bhDeserializeCap(const String &blob) {
@@ -2704,8 +2686,28 @@ void bhInitSettings() {
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
   if (bhStepDeltaA < 5.0f) bhStepDeltaA = 5.0f;   // ΔV must clear ripple/noise; also guards the ΔI validity gate
   if (bhDwellMs < bhMinDwellMs()) bhDwellMs = bhMinDwellMs();
-  if (settingExists(NK_bhResults)) bhDeserializeResults(settingRead(NK_bhResults));
-  if (settingExists(NK_bhCapBlob)) bhDeserializeCap(settingRead(NK_bhCapBlob));
+  // Rings restore from LittleFS blobs; a legacy NVS string (pre-blob firmware) migrates once —
+  // deserialized, key removed, dirty flag set so the next field-off flush writes the blob.
+  {
+    uint32_t nRes = readPsramBlob(BHRES_PATH, BHRES_MAGIC, BHRES_VER,
+                                  bhResults, sizeof(BattHealthResult), bhResultCap, nullptr, false);
+    bhResultCount = (int)nRes;
+    bhResultHead  = (nRes >= (uint32_t)bhResultCap) ? 0 : (int)nRes;
+    if (nRes == 0 && settingExists(NK_bhResults)) {
+      bhDeserializeResults(settingRead(NK_bhResults));
+      settingRemove(NK_bhResults);
+      bhResultsDirty = true;
+    }
+    uint32_t nCap = readPsramBlob(BHCAP_PATH, BHCAP_MAGIC, BHCAP_VER,
+                                  bhCapRing, sizeof(BattCapPoint), bhCapCap, nullptr, false);
+    bhCapCount = (int)nCap;
+    bhCapHead  = (nCap >= (uint32_t)bhCapCap) ? 0 : (int)nCap;
+    if (nCap == 0 && settingExists(NK_bhCapBlob)) {
+      bhDeserializeCap(settingRead(NK_bhCapBlob));
+      settingRemove(NK_bhCapBlob);
+      bhCapDirty = true;
+    }
+  }
 
   // Capacity tracker config (Pattern B) + the editable OCV table
   if (!settingExists(NK_capRestFrac))   settingWrite(NK_capRestFrac, String(capRestCurrentFrac, 4).c_str());   else capRestCurrentFrac = settingRead(NK_capRestFrac).toFloat();
@@ -3439,6 +3441,7 @@ void cxLedgerFlush() {
     f.write((uint8_t *)rows, n);
     f.close();
   }
+  fsFreeDirty = true;
   fsReleaseLock();
 }
 
@@ -3473,6 +3476,7 @@ void cxLedgerDrainService() {
         if (tmp) free(tmp);
       }
     }
+    fsFreeDirty = true;
     fsReleaseLock();
     cxLedgerUpBytes = 0;
     cxLedgerUpState = 0;

@@ -358,6 +358,7 @@ void huntLedgerService() {
       hgQueueDropped = 0;
     }
   }
+  fsFreeDirty = true;
   fsReleaseLock();
 }
 
@@ -1290,6 +1291,7 @@ void saveTuningLog() {
   if (!tuningLog) return;
   File f = LittleFS.open("/tuninglog.bin", "w");
   if (!f) return;
+  fsFreeDirty = true;
   f.write((uint8_t *)&tuningLogCount, sizeof(tuningLogCount));
   f.write((uint8_t *)&tuningLogHead, sizeof(tuningLogHead));
   f.write((uint8_t *)&tuningRunCounter, sizeof(tuningRunCounter));
@@ -1387,6 +1389,7 @@ void saveCVTuningLog() {
   if (!cvTuningLog) return;
   File f = LittleFS.open("/cvtuninglog.bin", "w");
   if (!f) return;
+  fsFreeDirty = true;
   f.write((uint8_t *)&cvTuningLogCount, sizeof(cvTuningLogCount));
   f.write((uint8_t *)&cvTuningLogHead, sizeof(cvTuningLogHead));
   f.write((uint8_t *)&cvTuningRunCounter, sizeof(cvTuningRunCounter));
@@ -1559,6 +1562,7 @@ void saveSystemIDLog() {
   if (!systemIDLog) return;
   File f = LittleFS.open("/systemidlog.bin", "w");
   if (!f) return;
+  fsFreeDirty = true;
   f.write((uint8_t *)&systemIDLogCount,   sizeof(systemIDLogCount));
   f.write((uint8_t *)&systemIDLogHead,    sizeof(systemIDLogHead));
   f.write((uint8_t *)&systemIDRunCounter, sizeof(systemIDRunCounter));
@@ -1669,6 +1673,7 @@ void saveSysidSweepLog() {
   if (!sysidSweepLog) return;
   File f = LittleFS.open("/sysidsweeplog.bin", "w");
   if (!f) return;
+  fsFreeDirty = true;
   f.write((uint8_t *)&sysidSweepLogCount,   sizeof(sysidSweepLogCount));
   f.write((uint8_t *)&sysidSweepLogHead,    sizeof(sysidSweepLogHead));
   f.write((uint8_t *)&sysidSweepRunCounter, sizeof(sysidSweepRunCounter));
@@ -1769,6 +1774,7 @@ void saveTuningSweepLog() {
   if (!tuningSweepLog) return;
   File f = LittleFS.open("/tuningsweeplog.bin", "w");
   if (!f) return;
+  fsFreeDirty = true;
   f.write((uint8_t *)&tuningSweepLogCount,   sizeof(tuningSweepLogCount));
   f.write((uint8_t *)&tuningSweepLogHead,    sizeof(tuningSweepLogHead));
   f.write((uint8_t *)&tuningSweepRunCounter, sizeof(tuningSweepRunCounter));
@@ -2087,7 +2093,10 @@ void AdjustFieldLearnMode() {
   // slow-ramp for ~30s while still energized — coupling PWM noise into the LM2907 RPM sense
   // (phantom RPM spikes). Placed pre-CH1-gate so it fires at full loop rate regardless of
   // current-sensor freshness. Forced reason RPM_TOO_LOW so the log/telemetry name the cause.
-  if (tick.engineFullyStopped && !gpio4IsLow) {
+  // Manual field mode is exempt: the arbiter puts MANUAL above the RPM gate, so this cut and
+  // the manual path fought at loop rate (GPIO4 oscillation), and manual exists precisely for
+  // engine-off wiring/diagnostic tests (same doctrine as manual-beats-lockout).
+  if (tick.engineFullyStopped && !tick.manualMode && !gpio4IsLow) {
     applyImmediateCut(tick, REASON_RPM_TOO_LOW);
     return;
   }
@@ -7017,6 +7026,16 @@ bool kneeCurveApply() {
     kneeFrozen[b] = true;
     kneeLearnTempF[b] = tempAvg;
     rpmMinDutyTable[b] = floorB;
+  }
+
+  // SAFETY: interpolateRPMTable holds the LAST bin flat for every RPM beyond the table, so when
+  // the ceiling anchor lands at/above the last breakpoint no bin is "above ceiling" and a
+  // non-zero floor would ride to unlimited overspeed. Force the last bin to zero in that case —
+  // the floor tapers out one bin early, which errs in the safe direction.
+  if (ceilingRPM >= (float)rpmTableRPMPoints[RPM_TABLE_SIZE - 1]) {
+    kneeKnee[RPM_TABLE_SIZE - 1] = 0.0f;
+    kneeFloor[RPM_TABLE_SIZE - 1] = 0.0f;
+    rpmMinDutyTable[RPM_TABLE_SIZE - 1] = 0.0f;
   }
 
   kneeStateDirty = true;            // persist knee blobs on the next field-off flush

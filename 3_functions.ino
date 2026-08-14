@@ -645,7 +645,7 @@ enum Csv2Index {
   CSV2_accThermWorst,   // worst over-temp vs limit (°F ×100) — unconditional
   CSV2_imuInstallCode,  // 0=OK 1=never zeroed 2=mount not vertical 3=zeroed pre-mount-check 4=no IMU
   CSV2_cvKdCount,       // CV D-term engagement episodes this session (rising edge, ≥1s quiet re-arm)
-  CSV2_littleFsFreeKb,  // free space on the userdata LittleFS partition, kB; -1 until first ~60s refresh
+  CSV2_littleFsFreeKb,  // free space on the userdata LittleFS partition, kB; -1 until the boot seed; refreshed after each file write once the field gate is cut
   CSV2_cloudUpAgeS,     // seconds since last ack-confirmed cloud payload upload; -1 = never this boot
   CSV2_deviceEpoch,     // regulator wall clock, UTC epoch seconds; 0 = clock never set this boot
 
@@ -1553,22 +1553,28 @@ void setupWiFiConfigServer() {
       esp32_ap_ssid = "ALTERNATOR_WIFI";
     }
 
-    settingWrite(NK_ssid, ssid);
-    settingWrite(NK_pass, password);
+    // Blank client SSID = user only came for AP settings — leave stored client creds untouched
+    // (mirrors the blank-hotspot_ssid handling; an unconditional write here wiped working WiFi).
+    if (ssid[0] != '\0') {
+      settingWrite(NK_ssid, ssid);
+      settingWrite(NK_pass, password);
 
-    strncpy(cached_wifi_ssid, ssid, sizeof(cached_wifi_ssid) - 1);
-    cached_wifi_ssid[sizeof(cached_wifi_ssid) - 1] = '\0';
+      strncpy(cached_wifi_ssid, ssid, sizeof(cached_wifi_ssid) - 1);
+      cached_wifi_ssid[sizeof(cached_wifi_ssid) - 1] = '\0';
 
-    strncpy(cached_wifi_pass, password, sizeof(cached_wifi_pass) - 1);
-    cached_wifi_pass[sizeof(cached_wifi_pass) - 1] = '\0';
+      strncpy(cached_wifi_pass, password, sizeof(cached_wifi_pass) - 1);
+      cached_wifi_pass[sizeof(cached_wifi_pass) - 1] = '\0';
 
-    cached_wifi_creds_valid = (cached_wifi_ssid[0] != '\0');
+      cached_wifi_creds_valid = true;
+    }
 
     Serial.printf("Verification - SSID: '%s'\n", cached_wifi_ssid);
     Serial.printf("Verification - Password: '%s'\n", cached_wifi_pass);
     delay(1000);
 
-    request->send(200, "text/plain", "Configuration saved! Device will restart in 3 seconds.");
+    request->send(200, "text/plain", ssid[0] != '\0'
+                                       ? "Configuration saved! Device will restart in 3 seconds."
+                                       : "Configuration saved (client WiFi credentials unchanged). Device will restart in 3 seconds.");
 
     Serial.println("=== CONFIGURATION SAVED - RESTARTING ===");
     settingWrite(NK_first_config_done, "1");
@@ -2191,7 +2197,7 @@ void setupServer() {
 
   // ── Hunt-governor episode ledger (Hunt_Governor_Spec.md): one CSV line per damping episode ──
   // Serves what is on flash PLUS the episodes still queued in RAM — queued rows only reach flash
-  // once the field has been off for 10 s (huntLedgerService), and a Refresh must not have to wait
+  // once the field gate has been cut ~30 s (huntLedgerService), and a Refresh must not have to wait
   // for that to show a fresh episode. Read-only by design: this handler never writes flash. Runs on
   // the async web-server task, so the ~6 KB read costs the control loop nothing.
   server.on("/huntledger", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -5330,20 +5336,23 @@ void setupServer() {
     if (request->hasParam("bhStartOver")) {
       foundParameter = true;   // battery replaced: re-baseline + wipe history
       bhBaselineCapacityAh = 0.0f;
-      bhResultCount = 0; bhResultHead = 0;
+      bhResultCount = 0; bhResultHead = 0; bhResultsDirty = false;
       bhCapCount = 0; bhCapHead = 0; bhCapDirty = false;
       bhTestState = 0;
       capLowAnchorValid = false; capLastPct = NAN; capLastUpdateEpoch = 0;  // reset the capacity anchor/measurement state
-      settingWrite(NK_bhResults, "");
-      settingWrite(NK_bhCapBlob, "");
+      fsRemove(BHRES_PATH);
+      fsRemove(BHCAP_PATH);
+      settingRemove(NK_bhResults);  // legacy NVS copies — keep the boot migration from resurrecting them
+      settingRemove(NK_bhCapBlob);
       settingWrite(NK_bhBaseline, "0");
       queueConsoleMessage("BATT HEALTH: history cleared, baseline reset (battery replaced)");
     }
     if (request->hasParam("bhClearHistory")) {
       foundParameter = true;   // wipe ONLY the resistance-test table; capacity baseline + trend untouched
-      bhResultCount = 0; bhResultHead = 0;
+      bhResultCount = 0; bhResultHead = 0; bhResultsDirty = false;
       bhLastResultDcir = 0.0f;
-      settingWrite(NK_bhResults, "");
+      fsRemove(BHRES_PATH);
+      settingRemove(NK_bhResults);
       queueConsoleMessage("BATT HEALTH: resistance-test history cleared");
     }
     // ── Capacity tracker config + OCV table ──
@@ -5368,7 +5377,8 @@ void setupServer() {
       bhBaselineCapacityAh = 0.0f;
       bhCapCount = 0; bhCapHead = 0; bhCapDirty = false;
       capLowAnchorValid = false; capLastPct = NAN; capLastUpdateEpoch = 0;
-      settingWrite(NK_bhCapBlob, "");
+      fsRemove(BHCAP_PATH);
+      settingRemove(NK_bhCapBlob);
       settingWrite(NK_bhBaseline, "0");
       queueConsoleMessage("BATT CAP: capacity trend + baseline cleared");
     }

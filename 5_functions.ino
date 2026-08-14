@@ -452,6 +452,9 @@ void ReadVEData() {
   int veDrainBudget = 256;  // cap per-tick drain so a chatty Victron can't starve the loop
   while (veDrainBudget-- > 0 && Serial1.available()) {
     myve.rxData(Serial1.read());
+    // Lib resets frameIndex only when an intact "Checksum" record parses; on corrupted frames
+    // it climbs past tempName[frameLen] and the next record strcpy's out of bounds. Clamp it.
+    if (myve.frameIndex >= frameLen) myve.frameIndex = 0;
     for (int i = 0; i < myve.veEnd; i++) {
       if (strcmp(myve.veName[i], "V") == 0) {
         float newVoltage = (atof(myve.veValue[i]) / 1000);
@@ -2287,7 +2290,7 @@ void handleAltZeroReset() {
     zfLastEpoch = 0; zfFlipStreak = 0; zfFlipPending = ZF_BOARD;
     zeroFitHistCount = 0; zeroFitHistHead = 0; prev_zeroFitHistHead = 0xFFFF;
     fsTakeLock();
-    if (fsExists(ZFIT_PATH)) LittleFS.remove(ZFIT_PATH);
+    LittleFS.remove(ZFIT_PATH);  // raw call — fsExists() would re-take the non-recursive fsMutex and block 5 s
     fsReleaseLock();
     ResetDynamicAltZero = 0;  // Clear the momentary flag
     queueConsoleMessage("Zero correction: learned fit + history cleared");
@@ -3059,7 +3062,7 @@ void _ReadAnalogInputs_inner() {
                      // At the old 8s a single missed read hit 16s, which dropped the battery-temp
                      // gain derate to 1.0, skipped the cold-charge lockout check, and grayed the
                      // header board-temp readout until the next good read.
-                     if (millis() - bmpLastCycleMs >= 4000) {
+                     if (!BMP388Disconnected && millis() - bmpLastCycleMs >= 4000) {
                        bmp388.startForcedConversion();  // returns immediately if sensor is in sleep
                        bmpTriggerMs = millis();
                        bmpState = BMP_WAIT_READY;
@@ -4331,6 +4334,29 @@ bool fieldOffSettled(uint32_t extraMs) {
   return (millis() - fieldOffAt >= 60000UL + extraMs);
 }
 
+// Hardware-gate variant for flash work on the loop. fieldOffSettled keys off fieldActiveStatus,
+// which the control path zeroes whenever applied duty <= 0.01% — true during a live duty-0 CV
+// hold with GPIO4 still up and every field-on clock running (2026-08-13 loop-stall incident:
+// usedBytes/ledger writes fired mid-control at ~100ms). This one requires the field gate
+// physically cut. Anything that touches LittleFS from loop() must gate on THIS.
+// 20s baseline = 2x the fast-OV lockout cap (nextFastOvLockoutMs, 10s) — OV cut/retry churn,
+// crank dips, and the LM2907 ~4.6s false-zero can never reach flash work; must grow if that
+// ladder's cap grows. Long static lockouts (tach-lie 30-120s rungs, cold-charge) DO exceed it
+// and may flush mid-lockout — field is hardware-dead there and re-enable is loop-synchronous,
+// so that is deliberate, not a hole.
+bool fieldCutSettled(uint32_t extraMs) {
+  static unsigned long fieldCutAt = 0;
+  if (!gpio4IsLow) {
+    fieldCutAt = 0;
+    return false;
+  }
+  if (fieldCutAt == 0) {
+    fieldCutAt = millis();
+    return false;
+  }
+  return (millis() - fieldCutAt >= 20000UL + extraMs);
+}
+
 // Periodic phased NVS save deleted — nvs_commit() blocks Core 1 for hundreds of ms
 // during sector erase and can collide with the voltage control loop on a transient.
 // All NVS persistence now goes through saveNVSDataFull() at the field-off edge
@@ -4374,7 +4400,7 @@ void seedSocFromVoltage() {
     // its first sample), so take one blocking forced conversion — ~50ms once, only on the
     // fresh-NVS path, and the board hasn't self-heated yet so it's the best proxy it ever is.
     boardTempF = ambientTemp;
-    if (isnan(boardTempF)) {
+    if (isnan(boardTempF) && !BMP388Disconnected) {
       bmp388.startForcedConversion();
       float t, p, a;
       uint32_t t0 = millis();

@@ -109,6 +109,7 @@ struct RipFit;          // measured ripple projection (full def below); forward-
                         // of ripFitEncode(const RipFit&)/ripFitDecode(...) don't precede its definition
 // Auto-prototype generator fails on default-argument functions defined in later .ino files.
 bool fieldOffSettled(uint32_t extraMs = 0);
+bool fieldCutSettled(uint32_t extraMs = 0);
 
 SET_LOOP_TASK_STACK_SIZE(20 * 1024);  // 20KB stack necessary for SSL/TLS operations
 int hardwarePresent = 1;              // usage varies
@@ -722,6 +723,7 @@ struct StreamingExtractor {
   // LittleFS state
   File currentWebFile;
   bool prodFSMounted;
+  bool webWriteFailed;  // any web-file open/write/size failure — fails the whole update before the boot switch
 
   mbedtls_md_context_t hashCtx;
   bool hashStarted;
@@ -771,7 +773,8 @@ int FreeInternalRam = 0;  // in KB
 int Heapfrag = 0;         // 0–100 %, integer only
 uint32_t FreePSRAM = 0;   // KB of free PSRAM
 size_t TotalInternalRam, LargestInternalBlock, TotalPSRAM;
-int LittleFsFreeKb = -1;  // free space on the userdata LittleFS partition, KB; -1 until first refresh (~60s cadence, skipped when fsMutex is busy)
+int LittleFsFreeKb = -1;   // free space on the userdata LittleFS partition, KB; -1 until the boot seed. Event-driven: it can only change when this firmware writes a file, so writers set fsFreeDirty and the refresh runs at the next fieldCutSettled heap walk (usedBytes() is a ~100ms full-flash traversal — never on a live control pass)
+bool fsFreeDirty = false;  // a LittleFS write happened since the last Free Data Storage refresh. Every writer runs on Core 1 (loop) — plain bool, no atomics
 
 
 // ===== TASK STACK MONITORING =====
@@ -933,6 +936,7 @@ DeviceMode currentMode = MODE_CLIENT;  // gets overwritten immediately, exact mo
 bool littleFSMounted = false;
 
 int INADisconnected = 0;
+int BMP388Disconnected = 0;
 int WifiHeartBeat = 0;
 static uint32_t stateRevision = 0;  // used for UX in client interface improvement
 int VeTime = 0;                     // rolling
@@ -2779,7 +2783,7 @@ FuncTiming ft_faWindowFinalize; // fast alt-current per-2s-window finalize (Goer
 // ft_dumpLongTermRing: a dirty-gated flash write is rare but, when it fires, shows up as an
 // otherwise-unattributed loop spike in the stall hunt. All three are field-off only (no OV risk).
 FuncTiming ft_zeroLogService;   // zero-drift diagnostic: dumpZeroLog() LittleFS flush (field-off, 30-min, dirty-gated)
-FuncTiming ft_bhFlushCapNVS;    // Battery Health: NVS write of capacity blob + results (field-off, dirty-gated)
+FuncTiming ft_bhFlushCapNVS;    // Battery Health: LittleFS blob write of capacity ring + results (field-off, dirty-gated)
 FuncTiming ft_kneeLearnService; // Auto Min% learning: NVS write of learned onset floors (field-off, 5-min, dirty-gated)
 
 // Fast alt-current per-session worst scalars (fleet upload, consumer 5). Declared HERE
@@ -3006,6 +3010,15 @@ int      bhCapHead = 0;
 bool     bhCapDirty = false;
 bool     bhResultsDirty = false;
 float    bhBaselineCapacityAh = 0.0f;       // first measured capacity (used when capRefMode==1); 0 = unset
+// Both rings persist as LittleFS blobs (writePsramBlob) — the legacy NVS-string path
+// (NK_bhCapBlob/NK_bhResults) hit nvs_set_str's 4000-byte cap near ~120 capacity points
+// and failed silently; bhInitSettings migrates a legacy string once, then removes the key.
+#define BHCAP_PATH  "/bhcap.bin"
+#define BHCAP_MAGIC 0x42484350u  // 'BHCP'
+#define BHCAP_VER   1u
+#define BHRES_PATH  "/bhres.bin"
+#define BHRES_MAGIC 0x42485253u  // 'BHRS'
+#define BHRES_VER   1u
 
 // ── Capacity tracker (OCV-anchored). Replaces the old circular coulomb-derived version. ──
 // Low SoC comes from a RESTED open-circuit-voltage reading mapped through capOcvVolt[] —
@@ -3120,8 +3133,6 @@ void   cvStress_tick(uint32_t nowMs);
 int    cvStressJsonBuild(char *buf, int cap);
 void   bhFlushCapNVS();
 void   bhInitSettings();
-String bhSerializeResults();
-String bhSerializeCap();
 void   bhDeserializeResults(const String &blob);
 void   bhDeserializeCap(const String &blob);
 String bhBuildStatusJson();
@@ -3700,12 +3711,16 @@ uint32_t cxLedgerUpBytes = 0;         // file bytes staged in the in-flight batc
 unsigned long cxLedgerLastAttemptMs = 0;
 uint32_t shutdownCloudDeadlineMs = 0;  // millis() deadline for cloud drain window
 
-// Field-off flush triggers — two staggered gates off the same field-off edge.
-// +5s:  saveNVSDataFull()      drains the storage namespace to NVS (heavy commit).
-// +13s: altHealthSave() writes the alt-health blobs (/altbase.bin + 3 more) to LittleFS (~67 KB).
-// Staggered so the LittleFS write doesn't pile onto the NVS commit's flash
-// relocation tail. Both re-arm on the next field-on edge. Independent of
-// fieldOffSettled() (which has a 60s baseline used by cloud/network callers).
+// Field-off flush triggers — two staggered gates off the same GPIO4-cut edge.
+// +20s: saveNVSDataFull()      drains the storage namespace to NVS (heavy commit).
+// +28s: altHealthSave() writes the alt-health blobs (/altbase.bin + 3 more) to LittleFS (~67 KB).
+// 20s, not 5s: 2x the fast-OV lockout cap (10s), so OV cut/retry churn can never reach the
+// commit — no flash work during dynamic protection events (user policy 2026-08-13). Long
+// static lockouts (tach-lie deep rungs, cold-charge) may exceed 20s and flush mid-lockout;
+// field is hardware-dead there, deliberate. Must grow if the fast-OV ladder cap grows.
+// Staggered so the LittleFS write doesn't pile onto the NVS commit's flash relocation tail,
+// and both land well before the buffered-upload TLS handshake at 70s. Both re-arm on the
+// next field-on edge.
 bool fieldOffFlushDone = false;         // NVS drain done this field-off window
 bool fieldOffMatrixFlushDone = false;   // matrix write done this field-off window
 int8_t lastFieldStateForFlush = -1;    // -1 = uninit; 0 = field off; 1 = field on
@@ -5307,6 +5322,10 @@ void setup() {
   initNVSCache();                  // Sync change-detection cache with loaded NVS values to prevent false writes
   restoreSoftClock();              // Re-establish a usable timebase (retained RTC, else NVS epoch) so AP-mode/no-internet Long Term records aren't stamped 0 and rendered as phantom gaps. Snaps to truth when a real source reports.
   loadUsageAccum();                // App-usage accumulator survives the maintenance restart (dumped at the shutdown flush points)
+  {  // Seed Free Data Storage once — boot is a guaranteed-safe moment for the ~100ms usedBytes() traversal
+    size_t fsTotal = 0, fsUsed = 0;
+    if (fsStatsTry(fsTotal, fsUsed) && fsTotal >= fsUsed) LittleFsFreeKb = (int)((fsTotal - fsUsed) / 1024);
+  }
   // Black box beats the NVS copy for last-session stats: NVS full-saves fire only at the
   // field-off edge / shutdown, so a session that ends in a crash or reset leaves SessionDur/
   // MaxLoop/MinHeap holding an older session's values. The snapshot is exact at death.
@@ -5555,8 +5574,9 @@ void loop() {
   static char pendingVersion[64] = { 0 };
 
   // Read the staged-update flag ONCE (NVS open per loop pass would be too costly), but only
-  // consume it once WiFi is up: an intermittent hotspot absent at this boot must not eat the
-  // update — the flag stays armed and the install fires when the network next appears.
+  // consume it once WiFi is up AND the field is de-energized: an intermittent hotspot absent at
+  // this boot must not eat the update — the flag stays armed and the install fires when the
+  // network next appears and charging is off.
   if (!manualUpdateCheckDone && millis() > 5000 && currentMode == MODE_CLIENT) {
     pendingUpdateWaiting = checkForPendingUpdateNonBlocking(pendingVersion);
     if (pendingUpdateWaiting) Serial.printf("UPDATE: Found pending update for %s (waiting for WiFi if not connected)\n", pendingVersion);
@@ -5564,15 +5584,28 @@ void loop() {
   }
 
   if (pendingUpdateWaiting && WiFi.status() == WL_CONNECTED) {
-    pendingUpdateWaiting = false;
+    if (fieldActiveStatus > 0) {
+      // performOTAUpdateToVersion blocks THIS task — the control loop — for the whole
+      // download+flash, freezing the LEDC field PWM at its last commanded duty with every
+      // software protection dead. Never start it with the field energized; nothing can raise
+      // the duty once the loop is seized, so a present-state check is sufficient.
+      static bool stagedOtaDeferLogged = false;
+      if (!stagedOtaDeferLogged) {
+        queueConsoleMessage("Staged update waiting: install starts when charging stops (field off)");
+        stagedOtaDeferLogged = true;
+      }
+    } else {
+      pendingUpdateWaiting = false;
 
-    // Clear the flag pre-attempt so a mid-install crash can't boot-loop
-    clearPendingUpdateNVS();
+      // Clear the flag pre-attempt so a mid-install crash can't boot-loop
+      clearPendingUpdateNVS();
 
-    // Claim the core0-busy gate so the control loop holds the field off through the install.
-    core0Busy = true;
+      // core0Busy: other tasks skip flash/heavy work during the install (contract: only set
+      // with the field off — satisfied by the gate above).
+      core0Busy = true;
 
-    performOTAUpdateToVersion(pendingVersion);  // This calls prepareForOTA() which kills tasks
+      performOTAUpdateToVersion(pendingVersion);  // This calls prepareForOTA() which kills tasks
+    }
   }
 
   // === OTA UPDATE: simple one-shot FORCED UPDATE check after 3s ===
@@ -5704,14 +5737,16 @@ void loop() {
       }
     }
 
-    // Long-term plot ring → flash while field-off (the doc's "field-off edge"; shutdown
-    // does the final dump). Field-off only — never write while the control loop is live.
-    // Dumps on the field-off-settled rising edge AND periodically thereafter (so a long
-    // engine-off stretch keeps persisting new records, not just the first one). The
-    // prev_longTermHead guard skips a dump when nothing changed since the last one.
+    // Long-term plot ring → flash while the field gate is physically cut (fieldCutSettled —
+    // never the duty-based fieldOffSettled, which reads "off" during a live duty-0 CV hold;
+    // 2026-08-13 loop-stall incident). Never write while the control loop is live. The ring
+    // is a 30-day rolling cache, so deferring the flush across a long engine run costs only
+    // power-cut durability — the 72 h hard maintenance reboot and the shutdown paths both
+    // dump it explicitly. Dumps on the cut-settled rising edge AND periodically thereafter.
+    // The prev_longTermHead guard skips a dump when nothing changed since the last one.
     static bool prevLongTermFieldOff = false;
     static unsigned long lastLongTermDumpMs = 0;
-    bool ltFieldOff = fieldOffSettled(0);
+    bool ltFieldOff = fieldCutSettled(0);
     bool ltRisingEdge = (ltFieldOff && !prevLongTermFieldOff);
     bool ltPeriodic   = (ltFieldOff && (millis() - lastLongTermDumpMs >= LONGTERM_DUMP_INTERVAL_MS));
     if ((ltRisingEdge || ltPeriodic) && prev_longTermHead != longTermHead) {
@@ -6051,13 +6086,16 @@ void loop() {
       TIMED_CALL(ft_updateSensorWindow, updateSensorWindow());            // Update sensor aggregation (after sensor reads)
       TIMED_CALL(ft_updateAccelMetrics, updateAccelMetrics());            // accel always on
 
-      // ===== FIELD-OFF NVS DRAIN (5s settled, once per field-off window) =====
-      // Independent of fieldOffSettled() — that helper has a 60s baseline intended for
-      // cloud/network callers. This drain wants to lock telemetry to flash quickly after
-      // the field cuts (engine pause, idle, ignition cut) without waiting for the 2-min
-      // schedule. Skips when pendingShutdownFlush owns the ignition-off sequence.
+      // ===== FIELD-OFF NVS DRAIN (60s settled, once per field-off window) =====
+      // Keyed on gpio4IsLow (the physical gate), NOT duty-derived fieldActiveStatus — the
+      // duty signal reads "off" during a live duty-0 CV hold, which let the heavy NVS
+      // commit and the ~67 KB alt-health/boat-perf writes fire while the control loop and
+      // every field-on clock were live (2026-08-13 loop-stall incident). Thresholds and the
+      // 60s-not-5s protection-lockout rationale live with the flag declarations
+      // (fieldOffFlushDone block above). Skips when pendingShutdownFlush owns the
+      // ignition-off sequence.
       {
-        bool fieldNowActive = (fieldActiveStatus > 0);
+        bool fieldNowActive = !gpio4IsLow;
         if (lastFieldStateForFlush == 1 && !fieldNowActive) {
           fieldOffEdgeMs = millis();  // capture the field-on -> field-off edge
         } else if (lastFieldStateForFlush == 0 && fieldNowActive) {
@@ -6068,16 +6106,16 @@ void loop() {
         }
         lastFieldStateForFlush = fieldNowActive ? 1 : 0;
 
-        // Gate 1 (+5 s): drain storage namespace to NVS
+        // Gate 1 (+20 s — 2x the fast-OV lockout cap): drain storage namespace to NVS
         if (!fieldOffFlushDone && !pendingShutdownFlush && !fieldNowActive
-            && fieldOffEdgeMs > 0 && (millis() - fieldOffEdgeMs) >= 5000UL) {
+            && fieldOffEdgeMs > 0 && (millis() - fieldOffEdgeMs) >= 20000UL) {
           saveNVSDataFull();
           fieldOffFlushDone = true;
         }
-        // Gate 2 (+13 s): write performance matrix to LittleFS — staggered so
+        // Gate 2 (+28 s): write performance matrix to LittleFS — staggered so
         // the ~150 ms file write doesn't land on the NVS commit's relocation tail
         if (!fieldOffMatrixFlushDone && !pendingShutdownFlush && !fieldNowActive
-            && fieldOffEdgeMs > 0 && (millis() - fieldOffEdgeMs) >= 13000UL) {
+            && fieldOffEdgeMs > 0 && (millis() - fieldOffEdgeMs) >= 28000UL) {
           altHealthSave();
           boatPerfSave();
           fieldOffMatrixFlushDone = true;
@@ -6204,11 +6242,13 @@ void loop() {
         }
 
         // App-usage analytics — one small POST per epoch day (the boundary is wall-clock, so
-        // maintenance restarts can't stretch or skip a period). Same gates as the config
-        // snapshot; retries at most once per minute while a gate fails. An empty period just
-        // rolls forward without uploading. Reset happens at queue time: a send that later
-        // fails loses that day (lossy by design, matches the accumulator's power-cut policy).
-        if (hardwarePresent == 1 && fieldOffSettled(10000)
+        // maintenance restarts can't stretch or skip a period). Retries at most once per minute
+        // while a gate fails. An empty period just rolls forward without uploading. Reset happens
+        // at queue time: a send that later fails loses that day (lossy by design, matches the
+        // accumulator's power-cut policy). fieldCutSettled (hardware gate), NOT fieldOffSettled:
+        // the period roll writes /usage.bin, and the duty-based gate reads "off" during a live
+        // duty-0 CV hold (2026-08-13 loop-stall incident).
+        if (hardwarePresent == 1 && fieldCutSettled(10000)
             && millis() - lastUsageUploadAttempt >= 60000) {
           time_t usageNowEp = time(NULL);
           if (usageNowEp > 1700000000LL && usagePeriodStartEpoch > 0
@@ -6241,8 +6281,10 @@ void loop() {
         // Commissioning-ledger drain (COMMISSIONING_LEDGER_SPEC.md): queued stage/sweep events →
         // log-commissioning-event. Deliberately NEVER fires during commissioning itself — rows wait
         // on flash until the boat is idle; the network gates live inside the service, the flash-safety
-        // gates (hardware + field-off settled) here, because the post-send file trim is a flash write.
-        if (hardwarePresent == 1 && fieldOffSettled(10000)) {
+        // gates here, because the post-send file trim is a flash write. fieldCutSettled (hardware
+        // gate), NOT fieldOffSettled: the duty-based gate reads "off" during a live duty-0 CV hold,
+        // which let these flash writes stall live control passes (2026-08-13 loop-stall incident).
+        if (hardwarePresent == 1 && fieldCutSettled(10000)) {
           cxLedgerDrainService();
           huntLedgerService();  // hunt-episode records queued in RAM by the control path → flash, here only
         }

@@ -122,18 +122,20 @@ void updateSystemHealthStats() {
     // dips largest-block under 34 KB and recovers, so it would re-fire constantly.
     // The heap figures above surface it live in the ESP32 Stats panel.
 
-    // LittleFS free space, every 15th heap walk (~60 s) — and ONLY once the field is off and
-    // settled: usedBytes() is a full filesystem traversal (thousands of flash reads, ms-scale),
-    // never allowed in the live control path. Stale while charging by design — the ESP32 card
-    // tooltip says so. While charging this costs one bool check per walk.
-    static uint8_t fsFreeCountdown = 0;
-    if (fsFreeCountdown > 0) {
-      fsFreeCountdown--;
-    } else if (fieldOffSettled(0)) {
-      fsFreeCountdown = 15;
+    // LittleFS free space — event-driven, not polled: the value can only change when this
+    // firmware writes a file, so writers set fsFreeDirty and the refresh runs here at the next
+    // heap walk with the field gate physically cut (fieldCutSettled — the duty-based
+    // fieldOffSettled reads "off" during a live duty-0 CV hold and let this ~96ms usedBytes()
+    // traversal stall live control passes, 2026-08-13). The countdown is only a ~10 min
+    // catch-all for any writer missing the fsFreeDirty hook; boot seeds the first value.
+    static uint8_t fsFreeCountdown = 150;
+    if (fsFreeCountdown > 0) fsFreeCountdown--;
+    if ((fsFreeDirty || fsFreeCountdown == 0) && fieldCutSettled(0)) {
       size_t fsTotal = 0, fsUsed = 0;
       if (fsStatsTry(fsTotal, fsUsed) && fsTotal >= fsUsed) {
         LittleFsFreeKb = (int)((fsTotal - fsUsed) / 1024);
+        fsFreeDirty = false;
+        fsFreeCountdown = 150;  // 150 heap walks × ~4s
       }
     }
   }
@@ -645,13 +647,19 @@ void initializeHardware() {
 
 //BMP390
 if (!bmp388.begin(BMP3_ADDR)) {
-  Serial.println("BMP388 not found");
-  while (1);
+  delay(50);
+  if (!bmp388.begin(BMP3_ADDR)) {  // one retry rides out a transient boot-time I2C NAK
+    Serial.println("BMP388 not found");
+    queueConsoleMessage("WARNING: BMP388 pressure sensor failed - barometer/board-temp disabled");
+    BMP388Disconnected = 1;
+  }
 }
-bmp388.setPresOversampling(OVERSAMPLING_X32);
-bmp388.setTempOversampling(OVERSAMPLING_X2);
-bmp388.setIIRFilter(IIR_FILTER_32);   // use highest exposed by this library
-Serial.println("BMP388 found");
+if (!BMP388Disconnected) {
+  bmp388.setPresOversampling(OVERSAMPLING_X32);
+  bmp388.setTempOversampling(OVERSAMPLING_X2);
+  bmp388.setIIRFilter(IIR_FILTER_32);   // use highest exposed by this library
+  Serial.println("BMP388 found");
+}
 
   // NMEA2K
   OutputStream = &Serial;
@@ -3408,6 +3416,10 @@ bool parseTarHeader(StreamingExtractor *extractor) {
     }
     String filePath = "/" + extractor->currentFileName;
     extractor->currentWebFile = webFS.open(filePath, "w");
+    if (!extractor->currentWebFile) {
+      Serial.printf("❌ Web file open failed: %s\n", filePath.c_str());
+      extractor->webWriteFailed = true;
+    }
   }
   return true;
 }
@@ -3476,6 +3488,7 @@ bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataS
           size_t written = extractor->currentWebFile.write(data + processed, toWrite);
           if (written != toWrite) {
             Serial.printf("❌ Web file write failed: %d/%d bytes\n", written, toWrite);
+            extractor->webWriteFailed = true;
           }
         }
       }
@@ -3489,7 +3502,14 @@ bool processDataChunk(StreamingExtractor *extractor, uint8_t *data, size_t dataS
         if (extractor->isCurrentFileFirmware && extractor->otaStarted) {
           Serial.println("✅ Firmware extraction completed");
         } else if (extractor->currentWebFile) {
+          extractor->currentWebFile.flush();
+          size_t onFlash = extractor->currentWebFile.size();
           extractor->currentWebFile.close();
+          if (onFlash != extractor->currentFileSize) {
+            Serial.printf("❌ Web file size mismatch: %s (%u on flash, %u expected)\n",
+                          extractor->currentFileName.c_str(), (unsigned)onFlash, (unsigned)extractor->currentFileSize);
+            extractor->webWriteFailed = true;
+          }
           Serial.printf("✅ Web file completed: %s (%d bytes)\n",
                         extractor->currentFileName.c_str(), extractor->currentFileSize);
         } else if (extractor->currentFileName.length() > 0) {
@@ -3874,6 +3894,16 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   }
 
   Serial.println("Streaming download and extraction completed");
+
+  // The signature hashes the downloaded stream, not what landed on flash — a web-file
+  // write failure must fail the update here or a corrupt bundle ships with a valid sig.
+  if (extractor.webWriteFailed) {
+    Serial.println("OTA FAILED: web file write/open failure during extraction");
+    queueConsoleMessage("OTA FAILED: web file write error - update not applied");
+    if (extractor.otaStarted) esp_ota_abort(extractor.otaHandle);
+    verifyFailed = true;
+    goto cleanup;
+  }
 
   // Verify signature
   mbedtls_md_finish(&extractor.hashCtx, hash);

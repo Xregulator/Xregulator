@@ -22048,7 +22048,14 @@ function cxVerifyStart() {
         }).catch(e => { cx.verifyRunning = false; xAlert('Verify start failed: ' + e); commissionRender(); });
 }
 function cxDetune() {
-    const kp = sysidFitKp * 0.8, ki = sysidFitKi * 0.8;
+    // Base the detune on the device's LIVE gains, not the session fit: sysidFitKp/Ki are page
+    // globals that are 0 unless the sweep ran in THIS session (a Verify-only redo after a
+    // reload would otherwise write PidKp=0/PidKi=0 and kill the current loop).
+    const echoKp = getEchoNumber('PidKp_echo'), echoKi = getEchoNumber('PidKi_echo');
+    const baseKp = (Number.isFinite(echoKp) && echoKp > 0) ? echoKp : sysidFitKp;
+    const baseKi = (Number.isFinite(echoKi) && echoKi > 0) ? echoKi : sysidFitKi;
+    const kp = baseKp * 0.8, ki = baseKi * 0.8;
+    if (!(kp > 0) || !(ki > 0)) { xAlert('Cannot soften: no valid current-loop gains available (run the plant sweep first).'); return; }
     sysidFitKp = kp; sysidFitKi = ki;
     cxGet('PidKp=' + kp.toFixed(4)).then(() => cxGet('PidKi=' + ki.toFixed(4))).then(() => cxVerifyStart());
 }

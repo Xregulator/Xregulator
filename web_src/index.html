@@ -10676,8 +10676,9 @@
                 <span class="tooltip">ℹ️
                   <span class="tooltip-box">Free space on the internal flash filesystem holding history rings, logs,
                     and buffered cloud uploads. Oldest data is pruned automatically, so this should stabilize rather
-                    than run to zero. Refreshes about once a minute while the alternator is idle; measuring it reads
-                    flash, which is never touched while charging, so the value holds still during a charge.</span>
+                    than run to zero. Measured at boot and re-measured shortly after each file write once the
+                    alternator has settled off — files are only ever written with the alternator off, so a
+                    value that holds still during a charge is exact, not stale.</span>
                 </span>
               </span>
               <span class="metric-value"><span id="LittleFsFreeKbID">?</span></span>

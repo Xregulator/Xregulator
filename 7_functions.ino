@@ -1167,6 +1167,7 @@ static void altTrendPersist() {
       altTrendFlushed = altTrendCount;
     }
   }
+  fsFreeDirty = true;
   fsReleaseLock();
 }
 static void altTrendLoad() {
@@ -1242,7 +1243,9 @@ bool altUploadFrontCsv(char *body, bool fixed) {
   settingWrite(NK_altRefSrc, "1");
   queueConsoleMessageF("AltFront: UPLOADED %d pts to Uploaded surface (%s); My History kept",
                        altFrontUp.count, fixed ? "Pause ON" : "still learning My History");
-  altHealthSave();   // persist both surfaces now (field-off-safe)
+  // Field on: flash writes stall both cores' cache — RAM surfaces are live now and the
+  // +28s field-off flush (Gate 2, Xregulator.ino) persists them at the next field-off.
+  if (fieldActiveStatus <= 0) altHealthSave();
   return true;
 }
 
@@ -2057,7 +2060,8 @@ bool perfUploadFrontCsv(char *body, bool fixed) {
     for (int i = 0; i < motorFront.count && motorPendingCount < PERF_PENDING_CAP; i++) motorPending[motorPendingCount++] = motorFrontBuf[i];
     perfPendingSeededFrom = "import";
   }
-  boatPerfSave();   // persist /sailfront.bin + /motorfront.bin now (field-off-safe)
+  // Field on: defer flash write to the +28s field-off flush (Gate 2) — see altUploadFrontCsv.
+  if (fieldActiveStatus <= 0) boatPerfSave();
   queueConsoleMessageF("PerfFront: UPLOADED sail %d + motor %d (%s)",
                        sailFront.count, motorFront.count, fixed ? "FIXED, paused" : "LEARNED, adopting to cloud");
   return true;
