@@ -73,6 +73,9 @@ void Heading(const tN2kMsg &N2kMsg) {
   if (ParseN2kHeading(N2kMsg, SID, Heading, Deviation, Variation, HeadingReference)) {
     if (N2kIsNA(Heading)) return;        // F-RES-04: skip NA field, otherwise -1e9 leaks into HeadingNMEA
     HeadingNMEA = Heading * 180.0 / PI;
+    HeadingRefNMEA = (HeadingReference == N2khr_true) ? 0
+                   : (HeadingReference == N2khr_magnetic) ? 1 : -1;
+    HeadingVariationDeg = N2kIsNA(Variation) ? NAN : (float)(Variation * 180.0 / PI);
     MARK_FRESH(IDX_HEADING_NMEA);
 
     // Uncomment below to get serial monitor output back
@@ -224,6 +227,7 @@ void BatteryConfigurationStatus(const tN2kMsg &N2kMsg) {
   double PeukertExponent;
   int8_t ChargeEfficiencyFactor;
 
+  if (NMEA2KVerbose != 1) return;  // display-only handler; unconditional prints firehosed the console at bus rate
   if (ParseN2kBatConf(N2kMsg, BatInstance, BatType, SupportsEqual, BatNominalVoltage, BatChemistry, BatCapacity, BatTemperatureCoefficient, PeukertExponent, ChargeEfficiencyFactor)) {
     PrintLabelValWithConversionCheckUnDef("Battery instance: ", BatInstance, 0, true);
     OutputStream->print("  - type: ");
@@ -254,6 +258,7 @@ void DCStatus(const tN2kMsg &N2kMsg) {
   double RippleVoltage;
   double Capacity;
 
+  if (NMEA2KVerbose != 1) return;  // display-only handler (~1 Hz on a bus with a BMV) — gate like SystemTime
   if (ParseN2kDCStatus(N2kMsg, SID, DCInstance, DCType, StateOfCharge, StateOfHealth, TimeRemaining, RippleVoltage, Capacity)) {
     OutputStream->print("DC instance: ");
     OutputStream->println(DCInstance);
@@ -288,11 +293,13 @@ void Speed(const tN2kMsg &N2kMsg) {
       STWNMEA = SOW * 1.94384;      // m/s → knots
       MARK_FRESH(IDX_STW_NMEA);
     }
-    OutputStream->print("Boat speed:");
-    PrintLabelValWithConversionCheckUnDef(" SOW:", N2kIsNA(SOW) ? SOW : msToKnots(SOW));
-    PrintLabelValWithConversionCheckUnDef(", SOG:", N2kIsNA(SOG) ? SOG : msToKnots(SOG));
-    OutputStream->print(", ");
-    PrintN2kEnumType(SWRT, OutputStream, true);
+    if (NMEA2KVerbose == 1) {      // prints only — the STW store above always runs
+      OutputStream->print("Boat speed:");
+      PrintLabelValWithConversionCheckUnDef(" SOW:", N2kIsNA(SOW) ? SOW : msToKnots(SOW));
+      PrintLabelValWithConversionCheckUnDef(", SOG:", N2kIsNA(SOG) ? SOG : msToKnots(SOG));
+      OutputStream->print(", ");
+      PrintN2kEnumType(SWRT, OutputStream, true);
+    }
   }
 }
 void WindSpeed(const tN2kMsg &N2kMsg) {
@@ -329,8 +336,19 @@ void WindSpeed(const tN2kMsg &N2kMsg) {
         while (angDeg >= 360.0)  angDeg -= 360.0;
         if ((WindReference == N2kWind_True_North || WindReference == N2kWind_Magnetic) &&
             !IS_STALE(IDX_HEADING_NMEA)) {
-          // Earth-frame TWD → convert to boat-relative TWA
-          float twa = angDeg - HeadingNMEA;
+          // Earth-frame TWD → boat-relative TWA. The subtraction is frame-valid only when wind and
+          // heading share a reference (both true-north or both magnetic); on a mismatch shift the
+          // heading into the wind's frame with the variation PGN 127250 carries (true = magnetic +
+          // east-positive variation). Unknown reference or missing variation falls back to the raw
+          // subtract — off by local variation, same as the pre-fix behavior.
+          float headingForFrame = HeadingNMEA;
+          if (!isnan(HeadingVariationDeg) && HeadingRefNMEA >= 0) {
+            bool windIsTrueNorth = (WindReference == N2kWind_True_North);
+            bool headingIsMagnetic = (HeadingRefNMEA == 1);
+            if (windIsTrueNorth && headingIsMagnetic)        headingForFrame = HeadingNMEA + HeadingVariationDeg;
+            else if (!windIsTrueNorth && !headingIsMagnetic) headingForFrame = HeadingNMEA - HeadingVariationDeg;
+          }
+          float twa = angDeg - headingForFrame;
           while (twa < 0)        twa += 360.0;
           while (twa >= 360.0)   twa -= 360.0;
           TrueWindAngleNMEA = twa;
@@ -406,6 +424,7 @@ void Attitude(const tN2kMsg &N2kMsg) {
   double Pitch;
   double Roll;
 
+  if (NMEA2KVerbose != 1) return;  // display-only handler; PGN 127257 arrives at 10 Hz from common compasses
   if (ParseN2kAttitude(N2kMsg, SID, Yaw, Pitch, Roll)) {
     OutputStream->println("Attitude:");
     PrintLabelValWithConversionCheckUnDef("  SID: ", SID, 0, true);
@@ -449,12 +468,19 @@ void ReadVEData() {
   bool dataReceived = false;
   float solarPower_W = 0.0f;
 
-  int veDrainBudget = 256;  // cap per-tick drain so a chatty Victron can't starve the loop
+  // Drain budget must exceed worst-case arrival between 2 s ticks (BMV ~900 B/s -> ~1800 B)
+  // or the stream starves and most frames fail checksum. Cheap now: the field-extraction
+  // loop below runs once per tick, not per byte.
+  int veDrainBudget = 2048;
+  uint32_t veFramesBefore = myve.frameCounter;
   while (veDrainBudget-- > 0 && Serial1.available()) {
-    myve.rxData(Serial1.read());
-    // Lib resets frameIndex only when an intact "Checksum" record parses; on corrupted frames
-    // it climbs past tempName[frameLen] and the next record strcpy's out of bounds. Clamp it.
-    if (myve.frameIndex >= frameLen) myve.frameIndex = 0;
+    myve.rxData(Serial1.read());  // corrupted-frame frameIndex clamp lives in the _xeng fork now (textRxEvent)
+    yield();
+  }
+  // Only read the public table when a NEW checksum-valid frame landed this tick: the table
+  // persists stale values forever, so unconditional MARK_FRESH here defeated IS_STALE (and
+  // integrated phantom solar power) whenever bytes arrived but no frame validated.
+  if (myve.frameCounter != veFramesBefore) {
     for (int i = 0; i < myve.veEnd; i++) {
       if (strcmp(myve.veName[i], "V") == 0) {
         float newVoltage = (atof(myve.veValue[i]) / 1000);
@@ -499,7 +525,6 @@ void ReadVEData() {
       if (strcmp(myve.veName[i], "H22") == 0)  { VictronYieldYesterday_kWh = atof(myve.veValue[i]) / 100.0f; dataReceived = true; }  // 0.01 kWh units
       if (strcmp(myve.veName[i], "H23") == 0)  { VictronMaxPowerYesterday_W = atof(myve.veValue[i]);         dataReceived = true; }
     }
-    yield();
   }
 
   // Panel current derived from power / voltage (VE.Direct MPPTs report PPV + VPV, not panel A)
@@ -698,8 +723,8 @@ void checkAndRestart() {
     dumpUsageAccum();  // app-usage period counters span the restart via /usage.bin
 
     if (WiFi.getMode() != WIFI_OFF) {
+      // Console event only — the client has no "status" listener, so that event was composed and dropped
       events.send("Performing maintenance restart", "console");
-      events.send("Device restarting. Will reconnect shortly.", "status");
       delay(500);             // Give events time to actually send
       events.close();         // Close all SSE connections
       delay(100);             // Let close complete
@@ -865,14 +890,16 @@ void UpdateEngineFuel(unsigned long elapsedMillis) {
   // Publish live fuel flow + economy for the dashboard (gal/hr, naut mi/gal).
   // Economy = SOG (knots = naut mi/hr) / flow (gal/hr); 0 when not moving or no GPS speed.
   currentFuelGPH = fuelRate_GPH;
-  currentNMPG = (fuelRate_GPH > 0.0f && SOGNMEA > 0.0f) ? (SOGNMEA / fuelRate_GPH) : 0.0f;
+  // Stale gate matches the trip logic: SOGNMEA is never zeroed on GPS loss, so without
+  // IS_STALE a frozen speed keeps NMPG live-looking and freezes fuel-curve bins with it.
+  currentNMPG = (fuelRate_GPH > 0.0f && SOGNMEA > 0.0f && !IS_STALE(IDX_SOG_NMEA)) ? (SOGNMEA / fuelRate_GPH) : 0.0f;
 
   // Session fuel-economy curve: settle-then-measure. RPM and boat speed must hold within band
   // (max-min ≤ tol on each) continuously; once they have held for fuelCurveSettleSec (the boat has
   // reached true steady speed for that throttle), mpg is averaged over the next fuelCurveSampleSec and
   // that average freezes the bin (overwriting). Then the settle->sample cycle restarts while still
   // steady, so a long cruise refreshes the bin. ANY band break / stop / no-GPS reseeds from scratch.
-  if (currentNMPG > 0.0f && SOGNMEA > 0.0f) {
+  if (currentNMPG > 0.0f && SOGNMEA > 0.0f && !IS_STALE(IDX_SOG_NMEA)) {
     uint32_t nowMs = millis();
     float r = RPM, s = SOGNMEA;
     bool inBand = false;
@@ -950,125 +977,138 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   BatteryPower_scaled = (Voltage_scaled * BatteryCurrent_scaled) / 100;  // W × 100
   float batteryPower_W = BatteryPower_scaled / 100.0f;
   float energyDelta_Wh = (batteryPower_W * elapsedSeconds) / 3600.0f;
-  static float chargedEnergyAccumulator = 0.0f;
-  static float dischargedEnergyAccumulator = 0.0f;
-  static float chargedEnergyAccumulator_AllTime = 0.0f;
-  static float dischargedEnergyAccumulator_AllTime = 0.0f;
-  if (BatteryCurrent_scaled > 0) {
-    chargedEnergyAccumulator += energyDelta_Wh;
-    chargedEnergyAccumulator_AllTime += energyDelta_Wh;
-    if (chargedEnergyAccumulator >= 1.0f) {
-      ChargedEnergy += (int)chargedEnergyAccumulator;
-      chargedEnergyAccumulator -= (int)chargedEnergyAccumulator;
+  // Battery-side tracking (charge/discharge energy, coulomb/SoC, capacity tracker,
+  // full-charge detection) all need a real Bcur — gate on the shunt. The alternator
+  // stats and voltage averaging below run on every config.
+  if (HAS_BATT_SHUNT) {
+    static float chargedEnergyAccumulator = 0.0f;
+    static float dischargedEnergyAccumulator = 0.0f;
+    static float chargedEnergyAccumulator_AllTime = 0.0f;
+    static float dischargedEnergyAccumulator_AllTime = 0.0f;
+    if (BatteryCurrent_scaled > 0) {
+      chargedEnergyAccumulator += energyDelta_Wh;
+      chargedEnergyAccumulator_AllTime += energyDelta_Wh;
+      if (chargedEnergyAccumulator >= 1.0f) {
+        ChargedEnergy += (int)chargedEnergyAccumulator;
+        chargedEnergyAccumulator -= (int)chargedEnergyAccumulator;
+      }
+      if (chargedEnergyAccumulator_AllTime >= 1.0f) {
+        ChargedEnergy_AllTime += (int)chargedEnergyAccumulator_AllTime;
+        chargedEnergyAccumulator_AllTime -= (int)chargedEnergyAccumulator_AllTime;
+      }
+    } else if (BatteryCurrent_scaled < 0) {
+      dischargedEnergyAccumulator += abs(energyDelta_Wh);
+      dischargedEnergyAccumulator_AllTime += abs(energyDelta_Wh);
+      if (dischargedEnergyAccumulator >= 1.0f) {
+        DischargedEnergy += (int)dischargedEnergyAccumulator;
+        dischargedEnergyAccumulator -= (int)dischargedEnergyAccumulator;
+      }
+      if (dischargedEnergyAccumulator_AllTime >= 1.0f) {
+        DischargedEnergy_AllTime += (int)dischargedEnergyAccumulator_AllTime;
+        dischargedEnergyAccumulator_AllTime -= (int)dischargedEnergyAccumulator_AllTime;
+      }
     }
-    if (chargedEnergyAccumulator_AllTime >= 1.0f) {
-      ChargedEnergy_AllTime += (int)chargedEnergyAccumulator_AllTime;
-      chargedEnergyAccumulator_AllTime -= (int)chargedEnergyAccumulator_AllTime;
-    }
-  } else if (BatteryCurrent_scaled < 0) {
-    dischargedEnergyAccumulator += abs(energyDelta_Wh);
-    dischargedEnergyAccumulator_AllTime += abs(energyDelta_Wh);
-    if (dischargedEnergyAccumulator >= 1.0f) {
-      DischargedEnergy += (int)dischargedEnergyAccumulator;
-      dischargedEnergyAccumulator -= (int)dischargedEnergyAccumulator;
-    }
-    if (dischargedEnergyAccumulator_AllTime >= 1.0f) {
-      DischargedEnergy_AllTime += (int)dischargedEnergyAccumulator_AllTime;
-      dischargedEnergyAccumulator_AllTime -= (int)dischargedEnergyAccumulator_AllTime;
-    }
-  }
 
-  // =================================================================
-  //     COULOMB COUNTING - BATTERY STATE OF CHARGE TRACKING
-  // =================================================================
-  // Track actual amp-hours into/out of battery with efficiency corrections
+    // =================================================================
+    //     COULOMB COUNTING - BATTERY STATE OF CHARGE TRACKING
+    // =================================================================
+    // Track actual amp-hours into/out of battery with efficiency corrections
 
-  static float coulombAccumulator_Ah = 0.0f;
-  float batteryCurrent_A = BatteryCurrent_scaled / 100.0f;
-  float deltaAh = (batteryCurrent_A * elapsedSeconds) / 3600.0f;
-  if (BatteryCurrent_scaled >= 0) {
-    // Charging - apply charge efficiency (not all energy makes it in)
-    // ChargeEfficiency_scaled is % × 10 (e.g. 990 = 99.0%), so divide by 1000 to get the multiplier.
-    float batteryDeltaAh = deltaAh * (ChargeEfficiency_scaled / 1000.0f);
-    coulombAccumulator_Ah += batteryDeltaAh;
-  } else {
-    // Discharging - apply Peukert compensation for high discharge rates
-    float dischargeCurrent_A = abs(batteryCurrent_A);
-    float peukertThreshold = BatteryCapacity_Ah / 100.0f;  // C/100 threshold
-
-    if (dischargeCurrent_A > peukertThreshold) {
-      float peukertExponent = PeukertExponent_scaled / 100.0f;
-      dischargeCurrent_A = constrain(dischargeCurrent_A, 0, BatteryCapacity_Ah);  // Max 1C
-      float currentRatio = PeukertRatedCurrent_A / dischargeCurrent_A;
-      float peukertFactor = pow(currentRatio, peukertExponent - 1.0f);
-      peukertFactor = constrain(peukertFactor, 0.5f, 2.0f);  // Sanity limits
-      float batteryDeltaAh = deltaAh * peukertFactor;
+    static float coulombAccumulator_Ah = 0.0f;
+    float batteryCurrent_A = BatteryCurrent_scaled / 100.0f;
+    float deltaAh = (batteryCurrent_A * elapsedSeconds) / 3600.0f;
+    if (BatteryCurrent_scaled >= 0) {
+      // Charging - apply charge efficiency (not all energy makes it in)
+      // ChargeEfficiency_scaled is % × 10 (e.g. 990 = 99.0%), so divide by 1000 to get the multiplier.
+      float batteryDeltaAh = deltaAh * (ChargeEfficiency_scaled / 1000.0f);
       coulombAccumulator_Ah += batteryDeltaAh;
     } else {
-      coulombAccumulator_Ah += deltaAh;
-    }
-  }
+      // Discharging - apply Peukert compensation for high discharge rates
+      float dischargeCurrent_A = abs(batteryCurrent_A);
+      float peukertThreshold = BatteryCapacity_Ah / 100.0f;  // C/100 threshold
 
-  if (abs(coulombAccumulator_Ah) >= 0.01f) {
-    int deltaAh_scaled = (int)(coulombAccumulator_Ah * 100.0f);
-    CoulombCount_Ah_scaled += deltaAh_scaled;
-    coulombAccumulator_Ah -= (deltaAh_scaled / 100.0f);  // Keep remainder
-  }
-
-  int capAhX100 = BatteryCapacity_Ah * 100;
-  if (capAhX100 < 1) capAhX100 = 1;  // guard: 0 Ah capacity (bad import / unset NVS) must not divide-by-zero into SOC
-  CoulombCount_Ah_scaled = constrain(CoulombCount_Ah_scaled, 0, capAhX100);
-  float SoC_float = (float)CoulombCount_Ah_scaled / (float)capAhX100 * 100.0f;
-  SOC_percent = (int)(SoC_float * 100);  // Store as percentage × 100 for 2 decimals
-  wmIgnUpdate(wmIgn_SOC, SoC_float);     // ignition-cycle watermark (float percent, 0..100)
-
-  // Capacity tracker (OCV-anchored): rest detection, low-OCV anchor capture, Ah bridge.
-  // Uses the FILTERED INA228 voltage (getFiltV) — rest/OCV is a slow read where filtering
-  // is correct (not a safety path). Board temp °F → °C for the temp coefficient.
-  capTrackTick(BatteryCurrent_scaled / 100.0f, getFiltV(),
-               isnan(ambientTemp) ? NAN : (ambientTemp - 32.0f) / 1.8f, elapsedSeconds);
-
-  // =================================================================
-  //     FULL CHARGE DETECTION - WORKS FROM ANY CHARGING SOURCE
-  // =================================================================
-  // When battery voltage is high AND current is low (tail current),
-  // we know it's fully charged regardless of what's charging it
-  // Units: BatteryCurrent_scaled is A×100. TailCurrent is % of capacity, so the
-  // threshold in A×100 is (TailCurrent/100 × Capacity) × 100 = TailCurrent × Capacity.
-  if (HAS_BATT_SHUNT && (abs(BatteryCurrent_scaled) <= (TailCurrent * BatteryCapacity_Ah)) && (Voltage_scaled >= ChargedVoltage_Scaled)) {
-    FullChargeTimer += elapsedSeconds;
-
-    if (FullChargeTimer >= ChargedDetectionTime) {
-      SOC_percent = 10000;  // 100.00%
-      CoulombCount_Ah_scaled = BatteryCapacity_Ah * 100;
-
-      static unsigned long lastFullChargeMessage = 0;
-      if (!FullChargeDetected || millis() - lastFullChargeMessage > 60000) {
-        char msg[128];
-        queueConsoleMessageF("BATTERY: Full charge detected - SoC reset to 100%% (V=%.2fV >= %.2fV, I=%.2fA, Timer=%.1fs)",
-                             Voltage_scaled / 100.0, ChargedVoltage_Scaled / 100.0,
-                             BatteryCurrent_scaled / 100.0, FullChargeTimer);
-        lastFullChargeMessage = millis();
-      }
-
-      // Capacity measurement at the full anchor (once per event, gated by !FullChargeDetected).
-      // OCV-anchored — capTrackOnFull validates the low anchor + span and emits a dated point.
-      if (!FullChargeDetected) {
-        uint32_t nowEpoch = timeIsSynced ? (timeBase + (millis() - timeBaseMillis) / 1000) : 0;
-        capTrackOnFull(nowEpoch, isnan(ambientTemp) ? NAN : (ambientTemp - 32.0f) / 1.8f);
-      }
-
-      FullChargeDetected = true;
-      coulombAccumulator_Ah = 0.0f;
-
-      // Apply shunt gain correction — battery current always comes from INA228
-      if (AutoShuntGainCorrection == 1) {
-        applySocGainCorrection();
+      if (dischargeCurrent_A > peukertThreshold) {
+        float peukertExponent = PeukertExponent_scaled / 100.0f;
+        dischargeCurrent_A = constrain(dischargeCurrent_A, 0, BatteryCapacity_Ah);  // Max 1C
+        // Peukert: effective drain = I*(I/I_rated)^(k-1) — heavier-than-rated discharge must
+        // count FASTER (factor > 1). The ratio was inverted here for years.
+        float currentRatio = dischargeCurrent_A / PeukertRatedCurrent_A;
+        float peukertFactor = pow(currentRatio, peukertExponent - 1.0f);
+        peukertFactor = constrain(peukertFactor, 0.5f, 2.0f);  // Sanity limits
+        float batteryDeltaAh = deltaAh * peukertFactor;
+        coulombAccumulator_Ah += batteryDeltaAh;
+      } else {
+        coulombAccumulator_Ah += deltaAh;
       }
     }
-  } else {
-    FullChargeTimer = 0;
-    FullChargeDetected = false;
+
+    if (abs(coulombAccumulator_Ah) >= 0.01f) {
+      int deltaAh_scaled = (int)(coulombAccumulator_Ah * 100.0f);
+      CoulombCount_Ah_scaled += deltaAh_scaled;
+      shadowCoulombX100 += deltaAh_scaled;  // unsaturated twin — no constrain below
+      coulombAccumulator_Ah -= (deltaAh_scaled / 100.0f);  // Keep remainder
+    }
+
+    int capAhX100 = BatteryCapacity_Ah * 100;
+    if (capAhX100 < 1) capAhX100 = 1;  // guard: 0 Ah capacity (bad import / unset NVS) must not divide-by-zero into SOC
+    CoulombCount_Ah_scaled = constrain(CoulombCount_Ah_scaled, 0, capAhX100);
+    float SoC_float = (float)CoulombCount_Ah_scaled / (float)capAhX100 * 100.0f;
+    SOC_percent = (int)(SoC_float * 100);  // Store as percentage × 100 for 2 decimals
+    wmIgnUpdate(wmIgn_SOC, SoC_float);     // ignition-cycle watermark (float percent, 0..100)
+
+    // Capacity tracker (OCV-anchored): rest detection, low-OCV anchor capture, Ah bridge.
+    // Uses the FILTERED INA228 voltage (getFiltV) — rest/OCV is a slow read where filtering
+    // is correct (not a safety path). Board temp °F → °C for the temp coefficient.
+    capTrackTick(BatteryCurrent_scaled / 100.0f, getFiltV(),
+                 isnan(ambientTemp) ? NAN : (ambientTemp - 32.0f) / 1.8f, elapsedSeconds);
+
+    // =================================================================
+    //     FULL CHARGE DETECTION - WORKS FROM ANY CHARGING SOURCE
+    // =================================================================
+    // When battery voltage is high AND current is low (tail current),
+    // we know it's fully charged regardless of what's charging it
+    // Units: BatteryCurrent_scaled is A×100. TailCurrent is % of capacity, so the
+    // threshold in A×100 is (TailCurrent/100 × Capacity) × 100 = TailCurrent × Capacity.
+    if ((abs(BatteryCurrent_scaled) <= (TailCurrent * BatteryCapacity_Ah)) && (Voltage_scaled >= ChargedVoltage_Scaled)) {
+      FullChargeTimer += elapsedSeconds;
+
+      if (FullChargeTimer >= ChargedDetectionTime) {
+        // Captured BEFORE the reset below — this is the drift evidence the gain correction reads.
+        // The SHADOW count is used, not the live one: unclamped, it retains overshoot above capacity,
+        // so drift is visible in both directions (the live counter's top clamp hides over-reading).
+        int preResetShadowX100 = shadowCoulombX100;
+        SOC_percent = 10000;  // 100.00%
+        CoulombCount_Ah_scaled = BatteryCapacity_Ah * 100;
+        shadowCoulombX100 = BatteryCapacity_Ah * 100;  // full charge = known anchor for both counters
+
+        static unsigned long lastFullChargeMessage = 0;
+        if (!FullChargeDetected || millis() - lastFullChargeMessage > 60000) {
+          char msg[128];
+          queueConsoleMessageF("BATTERY: Full charge detected - SoC reset to 100%% (V=%.2fV >= %.2fV, I=%.2fA, Timer=%.1fs)",
+                               Voltage_scaled / 100.0, ChargedVoltage_Scaled / 100.0,
+                               BatteryCurrent_scaled / 100.0, FullChargeTimer);
+          lastFullChargeMessage = millis();
+        }
+
+        // Capacity measurement at the full anchor (once per event, gated by !FullChargeDetected).
+        // OCV-anchored — capTrackOnFull validates the low anchor + span and emits a dated point.
+        if (!FullChargeDetected) {
+          uint32_t nowEpoch = timeIsSynced ? (timeBase + (millis() - timeBaseMillis) / 1000) : 0;
+          capTrackOnFull(nowEpoch, isnan(ambientTemp) ? NAN : (ambientTemp - 32.0f) / 1.8f);
+          // Shunt gain correction — once per full-charge event (this block, not the every-2s tick),
+          // fed the pre-reset SHADOW count. Battery current always comes from INA228.
+          if (AutoShuntGainCorrection == 1) {
+            applySocGainCorrection(preResetShadowX100);
+          }
+        }
+
+        FullChargeDetected = true;
+        coulombAccumulator_Ah = 0.0f;
+      }
+    } else {
+      FullChargeTimer = 0;
+      FullChargeDetected = false;
+    }
   }
 
   // =================================================================
@@ -1086,8 +1126,6 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
       AlternatorOnTime_AllTime += secondsRun;
       alternatorOnAccumulator %= 1000;  // Keep remainder milliseconds
     }
-
-    alternatorWasOn = alternatorIsOn;
 
     static float alternatorEnergyAccumulator = 0.0f;
     static float alternatorEnergyAccumulator_AllTime = 0.0f;
@@ -1155,30 +1193,33 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
     ChargeCycles_AllTime = (ChargedEnergy_AllTime) / batteryCapacity_Wh;
   }
 
-  // ===== AVERAGE SOC TRACKING (TIME-WEIGHTED) =====
-  static float socAccumulator = 0.0f;
-  // socAccumulator_AllTime and totalSocSampleTime_AllTime are globals, not statics here
-  static unsigned long totalSocSampleTime = 0;  // Session seconds tracked
+  // Average-SoC bookkeeping is meaningless without a real Bcur-driven SOC_percent.
+  if (HAS_BATT_SHUNT) {
+    // ===== AVERAGE SOC TRACKING (TIME-WEIGHTED) =====
+    static float socAccumulator = 0.0f;
+    // socAccumulator_AllTime and totalSocSampleTime_AllTime are globals, not statics here
+    static unsigned long totalSocSampleTime = 0;  // Session seconds tracked
 
-  float currentSOC = SOC_percent / 100.0f;  // Convert to actual percentage
+    float currentSOC = SOC_percent / 100.0f;  // Convert to actual percentage
 
-  socAccumulator += currentSOC * elapsedSeconds;
-  socAccumulator_AllTime += currentSOC * elapsedSeconds;
-  totalSocSampleTime += elapsedSeconds;
-  totalSocSampleTime_AllTime += elapsedSeconds;
+    socAccumulator += currentSOC * elapsedSeconds;
+    socAccumulator_AllTime += currentSOC * elapsedSeconds;
+    totalSocSampleTime += elapsedSeconds;
+    totalSocSampleTime_AllTime += elapsedSeconds;
 
-  if (totalSocSampleTime > 0) {
-    AvgSOC = socAccumulator / totalSocSampleTime;
-  }
-  if (totalSocSampleTime_AllTime > 0) {
-    AvgSOC_AllTime = socAccumulator_AllTime / totalSocSampleTime_AllTime;
-  }
+    if (totalSocSampleTime > 0) {
+      AvgSOC = socAccumulator / totalSocSampleTime;
+    }
+    if (totalSocSampleTime_AllTime > 0) {
+      AvgSOC_AllTime = socAccumulator_AllTime / totalSocSampleTime_AllTime;
+    }
 
 
-  if (totalSocSampleTime_AllTime > 0) {
-    float calculatedAvg = socAccumulator_AllTime / totalSocSampleTime_AllTime;
-  } else {
-    Serial.println("WARNING: totalSocSampleTime_AllTime is ZERO!");
+    if (totalSocSampleTime_AllTime > 0) {
+      float calculatedAvg = socAccumulator_AllTime / totalSocSampleTime_AllTime;
+    } else {
+      Serial.println("WARNING: totalSocSampleTime_AllTime is ZERO!");
+    }
   }
 
 
@@ -1407,7 +1448,9 @@ void UpdateAnchorageDetection(bool gpsValid) {
     spanCount++;
   }
   uint32_t spanMs = (uint32_t)(newestMs - anchorageRing[oldestValidIdx].sampleMs);
-  if (spanMs < WINDOW_SPAN_MS) return;  // not yet 5 contiguous hours
+  // Accept a window one sample short: a full 300-slot ring spans only 299 intervals
+  // (~17.94 M ms), so the strict < 18 M ms check could essentially never pass.
+  if (spanMs + SAMPLE_INTERVAL_MS < WINDOW_SPAN_MS) return;  // not yet 5 contiguous hours
   // Compute centroid + depth stats over the valid trailing span.
   double sumLat = 0, sumLon = 0;
   float depthMin = 1e9f, depthMax = -1e9f, depthSum = 0.0f;
@@ -1675,7 +1718,9 @@ void CheckAlarms() {
     }
 
     static unsigned long lastTempLowAlarmMsgMs = 0;
-    if (TempAlarmLow > 0 && TempToUse < TempAlarmLow) {
+    // -99 is the thermistor's disconnected sentinel (Channel3V < 0.05 V — the shipping ground
+    // jumper) — the stale-sensor alarm owns that case; without the guard it reads as "cold".
+    if (TempAlarmLow > 0 && TempToUse != -99 && TempToUse < TempAlarmLow) {
       currentAlarmCondition = true;
       alarmReason = "Low alternator temperature";
       if (millis() - lastTempLowAlarmMsgMs >= 30000) {
@@ -2025,7 +2070,7 @@ void logDashboardValues() {
   }
 }
 
-void applySocGainCorrection() {
+void applySocGainCorrection(int preResetShadowX100) {
   // battery current always comes from INA228
   if (AutoShuntGainCorrection == 0) {
     return;
@@ -2038,7 +2083,11 @@ void applySocGainCorrection() {
   }
 
   float expectedCapacity = BatteryCapacity_Ah;
-  float calculatedCapacity = CoulombCount_Ah_scaled / 100.0;
+  // Pre-reset SHADOW coulomb count from the caller (shadowCoulombX100) — unclamped, so it can sit
+  // above capacity at the full anchor. Evidence is two-sided: below capacity = counted too little
+  // (raise gain), above = counted too much (lower gain). A capacity-setting edit mid-cycle can
+  // contaminate one event's evidence; the 5%/event and 0.8-1.2 clamps bound the damage.
+  float calculatedCapacity = preResetShadowX100 / 100.0;
 
   if (calculatedCapacity < 10 || expectedCapacity < 10) {
     queueConsoleMessage("SOC Gain: Invalid capacity values, skipping correction");
@@ -3958,14 +4007,10 @@ void ensurePreferredBootPartition() {
   bool forceFactory = (digitalRead(41) == LOW);
 
   if (forceFactory) {
-    // Clear any pending update flags to prevent boot loops
-    nvs_handle_t nvs_handle;
-    if (nvs_open("storage", NVS_READWRITE, &nvs_handle) == ESP_OK) {
-      nvs_erase_key(nvs_handle, "update_flag");
-      nvs_erase_key(nvs_handle, "target_ver");
-      nvs_commit(nvs_handle);
-      nvs_close(nvs_handle);
-    }
+    // Clear any pending update flags to prevent boot loops. Staged-update flags live in the
+    // "update_req" namespace — erasing them from "storage" was a silent no-op that let an
+    // armed staged update survive the recovery jumper.
+    clearPendingUpdateNVS();
 
 
     if (current_boot != factory_partition) {
@@ -4200,6 +4245,7 @@ void saveNVSDataFull() {
   // still true (UpdateBatterySOC re-derives SOC from CoulombCount each tick).
   if (!socSeedPending && prev_SOC_percent != (int32_t)SOC_percent)          { nvs_set_i32(h, "SOC_percent",    (int32_t)SOC_percent);                          prev_SOC_percent = (int32_t)SOC_percent;                             chg = true; }
   if (!coulombSeedPending && prev_CoulombCount != (int32_t)CoulombCount_Ah_scaled) { nvs_set_i32(h, "CoulombCount",   (int32_t)CoulombCount_Ah_scaled);               prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;                 chg = true; }
+  if (!coulombSeedPending && prev_ShadowCoulomb != (int32_t)shadowCoulombX100)     { nvs_set_i32(h, "ShadowCoulomb",  (int32_t)shadowCoulombX100);                    prev_ShadowCoulomb = (int32_t)shadowCoulombX100;                     chg = true; }
   // Health + Thermal + Learning
   if (prev_SessionDur != (uint32_t)CurrentSessionDuration)                  { nvs_set_u32(h, "SessionDur",     (uint32_t)CurrentSessionDuration);              prev_SessionDur = (uint32_t)CurrentSessionDuration;                  chg = true; }
   if (prev_MaxLoop != (int32_t)MaxLoopTime)                                  { nvs_set_i32(h, "MaxLoop",        (int32_t)MaxLoopTime);                          prev_MaxLoop = (int32_t)MaxLoopTime;                                 chg = true; }
@@ -4457,6 +4503,7 @@ void seedSocFromVoltage() {
     // UpdateBatterySOC re-derives SOC_percent from the coulomb count every tick, so this
     // is the assignment that actually sticks.
     CoulombCount_Ah_scaled = (BatteryCapacity_Ah * SOC_percent) / 100;
+    shadowCoulombX100 = CoulombCount_Ah_scaled;  // external seed re-anchors the shadow twin
     coulombSeedPending = false;
   }
 
@@ -4637,6 +4684,13 @@ void loadNVSData() {
     Serial.printf("NVS LOAD: CoulombCount NOT FOUND - initialized to %d based on SoC\n",
                   CoulombCount_Ah_scaled);
   }
+  // Shadow (unclamped) coulomb twin: restore its own key; absent (pre-shadow firmware, or a
+  // pre-seed boot) → re-anchor to the live count, which just means no clamp evidence carried over.
+  if (nvs_get_i32(nvs_handle, "ShadowCoulomb", &temp_int32) == ESP_OK) {
+    shadowCoulombX100 = temp_int32;
+  } else {
+    shadowCoulombX100 = CoulombCount_Ah_scaled;
+  }
 
   // Session Health Stats (restore to prior-session variables)
   if (nvs_get_u32(nvs_handle, "SessionDur", &temp_uint32) == ESP_OK) LastSessionDuration = temp_uint32;
@@ -4779,6 +4833,7 @@ void initNVSCache() {
   // Battery state
   prev_SOC_percent = (int32_t)SOC_percent;
   prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;
+  prev_ShadowCoulomb = (int32_t)shadowCoulombX100;
 
   prev_SessionDur = (uint32_t)CurrentSessionDuration;
   prev_MaxLoop = (int32_t)MaxLoopTime;

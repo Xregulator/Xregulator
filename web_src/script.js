@@ -1132,7 +1132,7 @@ let altSettings = {};
 let altLive = { valid:false, rpm:0, exc:0, amps:0, pred:0, pct:0, worstPct:0, overallPct:0,
                 status:0, steady:false, engHours:0, coverage:0, haveCurve:0, ptCount:0,
                 source:0, paused:0, refOk:1, refDist:0, state:3,
-                sessionMean:0, sessionP10:0, sessionN:0, hiFieldAlert:0, sim:0 };
+                sessionMean:0, sessionP10:0, sessionN:0, hiFieldAlert:0, sim:0, gAmps:0 };
 let altTrend = [];     // committed trend points: [{eng, worst, overall}]
 let _altTrendPending = false, _altTrendLastFetch = 0;
 let altTrendPlot = null;
@@ -1141,7 +1141,7 @@ try { altTrendWindow = localStorage.getItem('altTrendWin') || '0'; } catch(e){}
 let altTrendYManual = null;
 try { altTrendYManual = JSON.parse(localStorage.getItem('altTrendY') || 'null'); } catch(e){}
 
-function fetchAltSchema(){ return fetch('/altschema').then(r=>r.json()).then(j=>{ altSchema=j; }).catch(()=>{}); }
+function fetchAltSchema(){ return fetch(buildURL('/altschema')).then(r=>r.json()).then(j=>{ altSchema=j; }).catch(()=>{}); }
 
 // ===== Automatic Min% Learning ("knee tracker") =====
 // Polls /kneeLearnState and fills the echo labels, knob input placeholders, and the per-RPM
@@ -1420,7 +1420,7 @@ function altExportHealthDataset(){
 function altSessSectionCsv(){
   const num = (v,dp) => (v==null || !isFinite(v)) ? '' : (dp==null ? v : (+v).toFixed(dp));
   const rows = ['# This Session graded points. state 0=MEASURED 1=ESTIMATED; ring 1=full steady run',
-                'SESSPT,idx,t_s,rpm,fieldPct,tempF,measAmps,liveAmps,expectedAmps,pct,state,source,ring'];
+                'SESSPT,idx,t_s,rpm,fieldPct,tempF,measAmps,gradedAmps,expectedAmps,pct,state,source,ring'];
   let t0 = null;
   for(let i=0;i<altSessInfo.length;i++){
     const d = altSessInfo[i]; if(!d) continue;
@@ -1750,7 +1750,7 @@ function fetchAltTrend() {
   // full resolution instead of being starved by a single global 200-point stride. All = no param.
   const win = +altTrendWindow;
   const url = '/alttrend.csv' + (win > 0 ? ('?hours=' + win) : '');
-  fetch(url).then(r=>r.text()).then(txt=>{
+  fetch(buildURL(url)).then(r=>r.text()).then(txt=>{
     const ln = txt.trim().split('\n'); altTrend = [];
     for (let i=1;i<ln.length;i++){ const c=ln[i].split(','); if(c.length<3) continue;
       altTrend.push({eng:+c[0], worst:+c[1], overall:+c[2]}); }
@@ -1867,7 +1867,7 @@ function buildAltTrendPlot() {
     series: [
       { label: 'engine-hours' },
       { label: 'average', stroke: 'rgba(58,123,213,0.45)', width: 1.5, points: { show: false } },
-      { label: 'worst',   stroke: '#3a7bd5', width: 2.2, points: { show: true, size: 5, fill: '#3a7bd5' } },
+      { label: 'low 10%', stroke: '#3a7bd5', width: 2.2, points: { show: true, size: 5, fill: '#3a7bd5' } },
     ],
     scales: {
       x: { time: false, range: () => altTrendXRange() },
@@ -2149,7 +2149,9 @@ function altSessionPush(){
   altSessGap.push(graded ? 0 : 1);
   altSessRing.push(graded && altLive.steady>=1 ? 1 : 0);   // full steady run → orange ring overlay
   altSessInfo.push(graded ? {
-    rpm: altLive.rpm, amps: altLive.amps, pred: altLive.pred, pct: altLive.pct,
+    // amps = the graded boxcar average when the firmware provides it (gAmps, the % numerator) so
+    // dot amps ÷ pred reproduces pct; older firmware falls back to the fast live amps.
+    rpm: altLive.rpm, amps: (altLive.gAmps > 0 ? altLive.gAmps : altLive.amps), pred: altLive.pred, pct: altLive.pct,
     tempF: window._lastAltTempF, fieldPct: window._lastFieldPct, measAmps: window._lastMeasAmps,
     state: st, source: altLive.source|0, ring: altLive.steady>=1 ? 1 : 0
   } : null);
@@ -2174,7 +2176,7 @@ function renderAltSessPoint(i){
     + ' · ' + (ago===0 ? 'just now' : ago + ' min ago') + '<br>'
     + '<span style="color:#444;">'
     + 'RPM ' + Math.round(d.rpm)
-    + ' · ' + n(d.measAmps != null ? d.measAmps : d.amps, 1, ' A') + ' output'
+    + ' · ' + n(d.amps != null ? d.amps : d.measAmps, 1, ' A') + ' output'   // graded average — matches pct ÷ expected
     + ' · ' + n(d.tempF == null ? null : toDisplayTemp(d.tempF), 0, ' ' + tempUnitLabel()) + ' alt temp'
     + ' · ' + n(d.fieldPct, 0, '%') + ' field'
     + ' · expected ' + n(d.pred, 1, ' A')
@@ -2192,7 +2194,7 @@ let perfSettings = {};
 let perfCells = [];
 let _perfPlotPending = false, _perfModelLastFetch = 0;
 
-function fetchPerfSchema(){ return fetch('/perfschema').then(r=>r.json()).then(j=>{ perfSchema=j; }).catch(()=>{}); }
+function fetchPerfSchema(){ return fetch(buildURL('/perfschema')).then(r=>r.json()).then(j=>{ perfSchema=j; }).catch(()=>{}); }
 
 // Names for the failure message; a key with no entry falls back to a generic phrase.
 const PERF_SET_LABEL = { perfFoldSymmetric:'polar symmetry', perfSimMode:'the simulator',
@@ -2433,8 +2435,8 @@ function parseFrontCsv(txt){
   });
   sailFrontPts=sail; motorFrontPts=motor;
 }
-function fetchPerfCurve(){ fetch('/perfcurve.csv').then(r=>r.text()).then(txt=>{ parseFrontCsv(txt); drawPerfPlot(); drawMotorPlot(); }).catch(()=>{}); }
-function fetchPerfRecords(){ fetch('/perfrecords.csv').then(r=>r.text()).then(txt=>{ const ln=txt.trim().split('\n'); perfRecs=[]; for(let i=1;i<ln.length;i++){ const c=ln[i].split(','); if(c.length<8)continue; perfRecs.push({mode:+c[0],tws:+c[1],twa:+c[2],chop:+c[3],rpm:+c[4],hw:+c[5],stw:+c[6],sog:+c[7]}); } }).catch(()=>{}); }
+function fetchPerfCurve(){ fetch(buildURL('/perfcurve.csv')).then(r=>r.text()).then(txt=>{ parseFrontCsv(txt); drawPerfPlot(); drawMotorPlot(); }).catch(()=>{}); }
+function fetchPerfRecords(){ fetch(buildURL('/perfrecords.csv')).then(r=>r.text()).then(txt=>{ const ln=txt.trim().split('\n'); perfRecs=[]; for(let i=1;i<ln.length;i++){ const c=ln[i].split(','); if(c.length<8)continue; perfRecs.push({mode:+c[0],tws:+c[1],twa:+c[2],chop:+c[3],rpm:+c[4],hw:+c[5],stw:+c[6],sog:+c[7]}); } }).catch(()=>{}); }
 function queuePerfPlotUpdate(){
   const now=Date.now();
   if(now-_perfCurveLastFetch>8000){ _perfCurveLastFetch=now; fetchPerfCurve(); }
@@ -3371,14 +3373,58 @@ setDiagnosticMode(false); // ← CHANGE THIS LINE: true=ON, false=OFF
 // ===== END DIAGNOSTIC LOGGING SYSTEM =====
 
 
-// 1. Fetch with timeout - prevents infinite hangs
+// 1. Fetch with timeout - prevents infinite hangs. On timeout the fetch is ABORTED so its socket
+// returns to the ESP32 (it has very few); callers still see the legacy Error('Request timeout'),
+// never an AbortError — Promise.race already settled with the timeout rejection by the time the
+// aborted fetch rejects, and race subscribes to both so nothing is unhandled. On settle the timer
+// is cleared (a won race used to leave a dead timer running to its full timeout).
 function fetchWithTimeout(url, options = {}, timeout = 8000) {
+    const ctrl = new AbortController();
+    let timerId = null;
     return Promise.race([
-        fetch(url, options),
-        new Promise((_, reject) =>
-            setTrackedTimeout(() => reject(new Error('Request timeout')), timeout)
-        )
-    ]);
+        fetch(url, { ...options, signal: ctrl.signal }),
+        new Promise((_, reject) => {
+            timerId = setTrackedTimeout(() => {
+                timerId = null;   // fired — self-pruned, nothing to clear
+                ctrl.abort();
+                reject(new Error('Request timeout'));
+            }, timeout);
+        })
+    ]).finally(() => { if (timerId !== null) clearTrackedTimeout(timerId); });
+}
+
+// The 4 registration/profile endpoints stage an async cloud op on the firmware (the old synchronous
+// handlers blocked every other endpoint for up to ~45 s on a dead uplink) and answer
+// 202 {"state":"pending","op":N}. Poll /cloudOpState until that op is done, then synthesize the
+// legacy response (its code + JSON body) so callers keep their old parse logic untouched. Non-202
+// replies (403 not armed, sync short-circuits like {"registered":false}) pass through as-is.
+async function cloudOpPost(url, options, timeout) {
+    const staged = await fetchWithTimeout(url, options, timeout || 8000);
+    if (staged.status !== 202) return staged;
+    let stagedData = null;
+    try { stagedData = await staged.clone().json(); } catch (e) { return staged; }
+    if (!stagedData || stagedData.state !== 'pending') return staged;
+    const op = stagedData.op;
+    const deadline = Date.now() + 90000;   // worst case on-device is ~45 s connect+read, plus retry slack
+    while (Date.now() < deadline) {
+        await new Promise(resolve => setTrackedTimeout(resolve, 1000));
+        let st = null;
+        try {
+            const poll = await fetchWithTimeout(buildURL('/cloudOpState'), { cache: 'no-store' }, 5000);
+            if (!poll.ok) continue;
+            st = await poll.json();
+        } catch (e) { continue; }   // transient poll failure — keep waiting
+        if (st.state === 'done' && st.op === op) {
+            return new Response(JSON.stringify(st.body === undefined ? null : st.body), {
+                status: st.code || 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        if (st.state === 'idle' || (st.op !== undefined && st.op !== op)) {
+            throw new Error('cloud operation was lost or superseded (device restarted?)');
+        }
+    }
+    throw new Error('cloud operation timed out');
 }
 
 
@@ -3392,9 +3438,23 @@ function setTrackedInterval(callback, delay) {
 }
 
 function setTrackedTimeout(callback, delay) {
-    const id = setTimeout(callback, delay);
+    // Self-pruning: fired entries were never removed, so the array grew for the life of the
+    // page (every fetchWithTimeout, debounce keystroke, and button pulse pushed one forever).
+    const id = setTimeout(() => {
+        const i = activeTimers.findIndex(t => t.type === 'timeout' && t.id === id);
+        if (i !== -1) activeTimers.splice(i, 1);
+        callback();
+    }, delay);
     activeTimers.push({ type: 'timeout', id });
     return id;
+}
+
+// Cancel a tracked timeout BEFORE it fires: a bare clearTimeout leaves the entry in activeTimers
+// forever (the self-prune above only runs when the callback fires).
+function clearTrackedTimeout(id) {
+    clearTimeout(id);
+    const i = activeTimers.findIndex(t => t.type === 'timeout' && t.id === id);
+    if (i !== -1) activeTimers.splice(i, 1);
 }
 
 function cleanupResources() {
@@ -3563,6 +3623,7 @@ function initializeEventSource() {
             updateInlineStatus(true);  // Flip indicator green on SSE connect
             closeRecovery();           // Dismiss Connection Lost dialog if it's open
             if (isOfflineMode) exitOfflineMode(); // Re-enable inputs if user had gone offline
+            checkInstallIdFreshness(); // drop stale console history if the device was reflashed/reset
         }, false);
 
 
@@ -4793,7 +4854,10 @@ function formatDeadline(unixTimestamp) {
 function handleForcedUpdate(data) {
     const hasForcedUpdate = data.hasForcedUpdate === 1;
     const forcedVersionInt = data.forcedFwVersionInt || 0;
-    if (!hasForcedUpdate || forcedVersionInt === 0) {
+    // Return early only when the forced-update UI was never created: an unconditional early
+    // return here made the clearing branch below unreachable, so a cancelled forced update
+    // left the blocking overlay + disabled inputs stuck until a hard reload.
+    if ((!hasForcedUpdate || forcedVersionInt === 0) && !document.getElementById('forced-update-banner')) {
         return;
     }
     const deadline = data.forcedUpdateDeadline || 0;
@@ -4842,9 +4906,13 @@ function handleForcedUpdate(data) {
     }
 
     if (!hasForcedUpdate || forcedVersionInt === 0) {
-        banner.style.display = 'none';
-        overlay.style.display = 'none';
-        enableAllInputs();
+        // Clear only on the shown→cleared transition — a steady-state enableAllInputs() every
+        // CSV2 frame would trample disables owned by other features (knee-learn cell locks etc.).
+        if (banner.style.display !== 'none' || overlay.style.display !== 'none') {
+            banner.style.display = 'none';
+            overlay.style.display = 'none';
+            enableAllInputs();
+        }
         return;
     }
 
@@ -4919,7 +4987,10 @@ function handleForcedUpdate(data) {
     }
 }
 
-// Disable all form inputs (when past deadline)
+// Disable all form inputs (when past deadline). Stamps each input it disables so enableAllInputs
+// releases ONLY those — disables owned by other features (knee-learn cell locks, ready-gated
+// commit buttons, demo-mode props) must not be trampled by this path running every CSV2 frame.
+let fuInputsDisabled = false;
 function disableAllInputs() {
     const inputs = document.querySelectorAll('input, button, select, textarea');
     inputs.forEach(input => {
@@ -4927,22 +4998,27 @@ function disableAllInputs() {
         // live too — disabling its OK/Cancel deadlocks the update-confirm prompt this same
         // blocking path opens (it runs every telemetry tick while the dialog is awaiting).
         if (input.type !== 'hidden' && !input.classList.contains('forced-update-btn') && !input.closest('#xdlg-overlay')) {
+            if (!input.disabled) input.dataset.fuDisabled = '1';   // stamp only inputs THIS feature disabled
             input.disabled = true;
             input.style.opacity = '0.5';
             input.style.cursor = 'not-allowed';
         }
     });
+    fuInputsDisabled = true;
 }
 
 function enableAllInputs() {
+    if (!fuInputsDisabled) return;   // nothing stamped — skip the scan (runs every CSV2 frame pre-deadline)
     const inputs = document.querySelectorAll('input, button, select, textarea');
     inputs.forEach(input => {
-        if (input.type !== 'hidden') {
+        if (input.dataset.fuDisabled === '1') {
+            delete input.dataset.fuDisabled;
             input.disabled = false;
             input.style.opacity = '1';
             input.style.cursor = '';
         }
     });
+    fuInputsDisabled = false;
 }
 
 async function triggerForcedUpdate(versionStr) {
@@ -5221,7 +5297,7 @@ function recomputeAutoScales(applyNow) {
 // client was disconnected or backgrounded, so the ESP32 has nothing to replay (AsyncEventSource
 // does not queue for absent clients) and the missing span can only be marked, never recovered.
 function insertStreamGap(gapSec) {
-    for (const b of [currentTempData, voltageData, rpmData, temperatureData, pidTuningData, cvTuningData]) {
+    for (const b of [currentTempData, voltageData, rpmData, temperatureData, pidTuningData, cvTuningData, cvPidData]) {
         if (!b || !b[1]) continue;
         const last = b[1].length - 1;
         for (let s = 1; s < b.length; s++) {
@@ -5288,6 +5364,7 @@ function processCSVDataOptimized(data) {
             plotInterp.temperature.lerpDuration = clamped;
             plotInterp.pid.lerpDuration         = clamped;
             plotInterp.cv.lerpDuration          = clamped;
+            plotInterp.cvpid.lerpDuration       = clamped;
         }
         processCSVDataOptimized._lastArrival = _arrivalNow;
         processCSVDataOptimized._lastHb = Number(data.WifiHeartBeat);
@@ -6592,7 +6669,7 @@ async function initializeProfileTab() {
     }, 400);
 
     try {
-        const response = await fetchWithTimeout(buildURL('/checkRegistration'), {
+        const response = await cloudOpPost(buildURL('/checkRegistration'), {
             method: 'POST',
             body: formData
         }, 8000);
@@ -7947,7 +8024,7 @@ function handleProfileUpdate(event) {
         })
         .then(data => {
             const endpoint = data.registered ? buildURL('/updateProfile') : buildURL('/registerProfile');
-            return fetchWithTimeout(endpoint, {
+            return cloudOpPost(endpoint, {
                 method: 'POST',
                 body: formData
             }, 8000);
@@ -8000,7 +8077,7 @@ async function handleDeleteAllData() {
 
     const formData = new FormData();
 
-    fetchWithTimeout(buildURL('/deleteAllData'), {
+    cloudOpPost(buildURL('/deleteAllData'), {
         method: 'POST',
         body: formData
     }, 8000)
@@ -9032,8 +9109,8 @@ let cvPidPlotResizeObserver = null;
 let cvPidAmpsMin = null, cvPidAmpsMax = null;
 let cvPidSeriesVisible = { p: true, i: true, d: true, icv: true };
 
-// Cache of last-seen CSV2 values for the CV tuning plot.
-// voltageTarget and Icv are CSV2 — not available in processCSVDataOptimized's data object.
+// Cache of last-seen CSV1 values for the CV tuning plot.
+// voltageTarget and Icv ride CSV1 (fast stream) — updated in processCSVDataOptimized.
 // BatteryV_raw is CSV1 and is read directly from data; it is NOT cached here.
 let cvPlotCache = { voltageTarget: null, Icv: null };
 let _lastBatteryV = null;  // last CSV1 BatteryV_raw in volts (÷100 applied)
@@ -9893,8 +9970,10 @@ async function factoryReset() {
         .catch(err => {
             diagError("Factory reset error:", err);
 
-            // Timeout or network error means the device is resetting (expected behavior)
-            if (err.message === 'Request timeout' || err.message.includes('Failed to fetch')) {
+            // Timeout or network error means the device is resetting (expected behavior).
+            // TypeError covers every engine's network-failure message: Chrome 'Failed to
+            // fetch', WebKit/iOS 'Load failed', Firefox 'NetworkError...'.
+            if (err.message === 'Request timeout' || err instanceof TypeError) {
                 xAlert("Factory reset complete!\n\nThe device is restarting.\n\nPage will reload in some seconds.");
                 setTrackedTimeout(() => {
                     window.location.reload();
@@ -10061,13 +10140,19 @@ function renderConsoleFromBuffer() {
 loadConsoleLog();
 // Device reports "<random NVS install ID>|<firmware version>". Either part changing
 // (NVS erase / factory reset, or a reflash) means old history is stale — drop it.
-fetch('/installid').then(r => r.text()).then(id => {
-    id = (id || '').trim();
-    if (!id) return;
-    const prev = localStorage.getItem('xreg_install_id');
-    if (prev && prev !== id) clearConsole();
-    localStorage.setItem('xreg_install_id', id);
-}).catch(() => { });
+// Called from the SSE open handler, NOT at script parse: in Capacitor the base URL isn't
+// resolved until discovery finishes, so a parse-time fetch silently never reached the device.
+// SSE open is also the moment new console lines start arriving, and re-running per reconnect
+// catches a mid-session reflash.
+function checkInstallIdFreshness() {
+    fetch(buildURL('/installid')).then(r => r.text()).then(id => {
+        id = (id || '').trim();
+        if (!id) return;
+        const prev = localStorage.getItem('xreg_install_id');
+        if (prev && prev !== id) clearConsole();
+        localStorage.setItem('xreg_install_id', id);
+    }).catch(() => { });
+}
 setInterval(() => { if (consoleLsDirty) saveConsoleLogNow(); }, 3000);
 document.addEventListener('visibilitychange', () => { if (document.hidden && consoleLsDirty) saveConsoleLogNow(); });
 window.addEventListener('pagehide', () => { if (consoleLsDirty) saveConsoleLogNow(); });
@@ -11636,15 +11721,19 @@ function updateGPSDisplay(lat, lon) {
 
 
 
-// Cap mode uses same pending/revision system as checkboxes
+// Cap mode uses same pending/revision system as checkboxes.
+// Throws on non-OK like submitChargeRateModeImmediately: the firmware answers 403 while
+// settings are locked and fetch() treats that as success (same class as the 2026-07-20 incident).
 async function submitCapLimitModeImmediately(desiredValue) {
     const params = new URLSearchParams();
     params.set('capLimitMode', String(desiredValue));
 
-    return fetchWithTimeout(buildURL(`/get?${params.toString()}`), {
+    const r = await fetchWithTimeout(buildURL(`/get?${params.toString()}`), {
         method: 'GET',
         cache: 'no-store'
     }, 4000);
+    if (!r.ok) throw new Error('rejected (HTTP ' + r.status + ')');
+    return r;
 }
 
 function handleCapModeToggle(mode) {
@@ -11661,8 +11750,9 @@ function handleCapModeToggle(mode) {
     setCapMode(mode); // optimistic UI immediately
 
     submitCapLimitModeImmediately(desiredValue).catch(err => {
-        diagLog('capLimitMode submit failed: ' + err);
-        // Do not manually revert — let SSE authoritative state resolve it
+        pendingToggles.delete('capLimitMode');
+        setCapMode(mode === 'kw' ? 'amps' : 'kw');   // undo the optimistic flip (HiLow pattern)
+        xAlert('Cap mode switch failed — the regulator did not change mode. ' + err);
     });
 }
 
@@ -13625,6 +13715,7 @@ window.addEventListener("load", function () {
                 ["UVDay2ID", "UVDay2"],
                 ["weatherDataValidID", "weatherDataValid"],
                 ["DynamicShuntGainFactor_display", "DynamicShuntGainFactor"],
+                ["DynamicShuntGainFactor_card", "DynamicShuntGainFactor"],  // Live Data card — was a duplicate id that lost by document order and froze at 1.000
                 ["DynamicAltCurrentZero_display", "DynamicAltCurrentZero"],
                 ["InsulationLifePercentID", "InsulationLifePercent"],
                 ["GreaseLifePercentID", "GreaseLifePercent"],
@@ -15782,7 +15873,7 @@ function updateCloudFeaturesTabVisibility(enabled) {
         if (!enabled) {
             const cloudTabContent = document.getElementById('cloudfeatures');
             if (cloudTabContent && cloudTabContent.classList.contains('active')) {
-                showMainTab('gauges');
+                showMainTab('livedata');  // no id="gauges" tab exists — that name threw mid-switch and left NO tab active (blank page)
             }
         }
     }
@@ -16004,9 +16095,11 @@ function updateLifeIndicators(data) {
         let colorIndex = 0; // Default green
 
         if (indicator.percent !== undefined) {
-            // For percentage indicators
-            if (indicator.percent < 20) colorIndex = 2;      // Red below 20%
-            else if (indicator.percent < 50) colorIndex = 1; // Yellow below 50%
+            // Life percents arrive x100 from CSV2 (SafeInt(x, 100)) — divide before thresholding,
+            // else Red/Yellow fire at 0.2%/0.5% actual life instead of 20%/50%.
+            const pct = indicator.percent / 100;
+            if (pct < 20) colorIndex = 2;      // Red below 20%
+            else if (pct < 50) colorIndex = 1; // Yellow below 50%
         } else if (indicator.hours !== undefined) {
             if (indicator.hours < 1000) colorIndex = 2;      // Red below 1000 hours
             else if (indicator.hours < 5000) colorIndex = 1; // Yellow below 5000 hours
@@ -17297,22 +17390,22 @@ async function pollLogRequest() {
         g_logRelayBusy = true;
 
         // Fetch every log from the device over LAN (tolerate individual failures).
-        const [thermal, pid, cvB64, systemid, tuning, cvtuning, famatrix, fascopeBuf, faflipBuf,
-               debugText, vesselInfo, longtermB64, alttrendCsv] = await Promise.all([
-            fetchLogText('/thermallog.csv'),
-            fetchLogText('/pidlog.csv'),
-            fetchLogBase64('/cvlog.bin'),
-            fetchLogJson('/systemidlog'),
-            fetchLogJson('/tuninglog'),
-            fetchLogJson('/cvtuninglog'),
-            fetchLogText('/famatrix.csv'),    // Resonance & Ripple Map (alt-current disturbance matrix) rides along
-            fetchLogArrayBuffer('/fastscope.bin'), // Live Oscilloscope capture (FSC1) — parsed to metadata-rich CSV below
-            fetchLogArrayBuffer('/faflip.bin'),    // Reference Flipbook (FFLP) — parsed to per-page metadata-rich CSV below
-            fetchLogText('/debug'),           // diagnostics dump (net-task cores, loop profiler sections)
-            fetchLogJson('/vessel_info.json'),// boat/alternator/battery config + identity
-            fetchLogBase64('/longTermPlots.bin'), // multi-day trend ring (whole-trip context)
-            fetchLogText('/alttrend.csv'),    // alternator health vs engine-hours (decimated ≤200 pts)
-        ]);
+        // SEQUENTIAL, matching downloadLogs(): 13 concurrent transfers overran the ESP32 async
+        // server (stalled/reset connections), silently dropping files from the support bundle.
+        // Small text first, large binaries last.
+        const debugText   = await fetchLogText('/debug');            // diagnostics dump (net-task cores, loop profiler sections)
+        const vesselInfo  = await fetchLogJson('/vessel_info.json'); // boat/alternator/battery config + identity
+        const systemid    = await fetchLogJson('/systemidlog');
+        const tuning      = await fetchLogJson('/tuninglog');
+        const cvtuning    = await fetchLogJson('/cvtuninglog');
+        const alttrendCsv = await fetchLogText('/alttrend.csv');     // alternator health vs engine-hours (decimated ≤200 pts)
+        const famatrix    = await fetchLogText('/famatrix.csv');     // Resonance & Ripple Map (alt-current disturbance matrix) rides along
+        const thermal     = await fetchLogText('/thermallog.csv');
+        const pid         = await fetchLogText('/pidlog.csv');
+        const fascopeBuf  = await fetchLogArrayBuffer('/fastscope.bin'); // Live Oscilloscope capture (FSC1) — parsed to metadata-rich CSV below
+        const faflipBuf   = await fetchLogArrayBuffer('/faflip.bin');    // Reference Flipbook (FFLP) — parsed to per-page metadata-rich CSV below
+        const cvB64       = await fetchLogBase64('/cvlog.bin');
+        const longtermB64 = await fetchLogBase64('/longTermPlots.bin');  // multi-day trend ring (whole-trip context)
 
         const logsIncluded = [];
         const logs = {};
@@ -19638,11 +19731,39 @@ function openSystemIDModal() {
     if (panel) { panel.style.left = ''; panel.style.top = '80px'; panel.style.right = '20px'; }
     const overlay = document.getElementById('sysid-modal-overlay');
     overlay.classList.remove('sysid-min', 'sysid-running');   // always open expanded
+    // A test is still driving the field (modal was closed mid-run): land on the live progress
+    // screen and re-attach the poll — never on preflight, whose Start would fire into the
+    // active run and whose completion/results path died with the cleared poll.
+    if (parseInt(getField('systemIDActive_ID') ?? 0) > 0) {
+        sysidShowScreen('progress');
+        overlay.style.display = 'block';
+        sysidInitDrag();
+        if (!sysidPollInterval) {
+            sysidLastPhase = -1;
+            sysidPhaseStartWall = Date.now();
+            sysidStartProgressPoll();
+        }
+        return;
+    }
     sysidShowScreen('preflight');
     overlay.style.display = 'block';
     sysidInitDrag();
     sysidUpdatePreflight();
     sysidPreflightInterval = setInterval(sysidUpdatePreflight, 1000);
+}
+
+// User-initiated close (the header X and footer buttons). While a test is mid-run, a bare close
+// left an open-loop field test running with zero on-screen indication (the floating Test Active
+// panel deliberately hides for sysid) — so ask: abort, or keep it running in the background?
+// Programmatic closes (abort, apply, poll timeout) call closeSystemIDModal directly.
+async function closeSystemIDModalUser() {
+    if (parseInt(getField('systemIDActive_ID') ?? 0) > 0) {
+        const abort = await xConfirm(
+            'A plant test is still running and driving the alternator field.\n\nOK aborts the test now. Cancel lets it keep running in the background — it ends on its own, and reopening this window shows live progress.',
+            { title: 'Plant test still running', okText: 'Abort test', cancelText: 'Keep running' });
+        if (abort) { abortSystemIDTest(); return; }   // sends cancelSystemID and closes the modal
+    }
+    closeSystemIDModal();
 }
 
 function closeSystemIDModal() {
@@ -19777,12 +19898,15 @@ function sysidUpdatePreflight() {
     // hidden <input> value (not the _echo span, which contains "On"/"Off" text).
     const tuningOn = parseInt(getField("TuningMode") ?? 0) === 1;
     const cvTuningOn = parseInt(getField("CVTuningMode") ?? 0) === 1;
-    const testsOK = !tuningOn && !cvTuningOn;
+    const sysidRunning = parseInt(getField("systemIDActive_ID") ?? 0) > 0;   // a run this modal was closed over
+    const testsOK = !tuningOn && !cvTuningOn && !sysidRunning;
     const activeTestName = tuningOn ? 'Current tuning'
                                     : (cvTuningOn ? 'Voltage tuning' : null);
     const testsMsg = testsOK
         ? '✅ No other tuning tests active'
-        : '❌ ' + activeTestName + ' is on — turn it off first';
+        : (activeTestName
+            ? '❌ ' + activeTestName + ' is on — turn it off first'
+            : '❌ A plant test is already running');
 
     const allOK   = rpmOK && ampsOK && voltOK && modeOK && testsOK;
 
@@ -20187,7 +20311,7 @@ function showSysidBodeResults() {
             // K = DC gain (low-freq), τ from the −3 dB corner, θ (dead time) from the
             // phase lag the pole alone can't explain. All cheap closed-form math on ~10
             // points — the heavy lock-in DFT already ran on the ESP32.
-            const fit = sysidFitFOPDT(pts, g0, j.fs);
+            const fit = sysidFitFOPDT(pts, g0, data.fs);  // `j` was copied from the commissioning-path call; here the response binds as `data`
 
             // −3 dB bandwidth: interpolated frequency where gain falls to 0.708× low-freq.
             const f3 = fit.f3Hz;
@@ -24946,7 +25070,7 @@ window.addEventListener('load', function () {
 
   // ---------- HISTORY FETCH ------------------------------------------------
   function fetchBaroHistory() {
-    fetch('/baroHistory.bin', { cache: 'no-cache' })
+    fetch(buildURL('/baroHistory.bin'), { cache: 'no-cache' })
       .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
       .then(buf => parseHistory(buf))
       .then(() => { if (baroPlot) refreshPlot(); else buildBaroPlot(); })
@@ -26305,7 +26429,7 @@ window.addEventListener('load', function () {
   // lazy: re-stitched on brush-past-horizon. Charts are built once; subsequent opens
   // refresh their data.
   window.initLongTermPlots = function () {
-    fetch('/longTermPlots.bin', { cache: 'no-cache' })
+    fetch(buildURL('/longTermPlots.bin'), { cache: 'no-cache' })
       .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
       .then(buf => {
         ltData = parseLT(buf);

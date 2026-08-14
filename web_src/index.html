@@ -358,14 +358,8 @@
         <div id="settings-vessel-info" class="sub-tab-content">
           <div class="settings-card">
 
-            <!-- Warning banner for incomplete setup -->
-            <div id="vessel-info-required-banner"
-              style="background:#fff3cd;border-left:4px solid #ffc107;padding:15px;margin-bottom:25px;border-radius:4px;display:none;">
-              <strong>Initial Setup Required</strong>
-              <p style="margin:5px 0 0 0;">Please complete all vessel information below before accessing other features.
-                This data improves system accuracy and enables cloud features.</p>
-            </div>
-
+            <!-- The incomplete-setup gate is the vesselInfoComplete xAlerts in showMainTab/showSubTab
+                 (script.js) — a dead "Initial Setup Required" banner that nothing ever showed was removed here. -->
             <form id="vessel-info-form" action="/get" method="GET" target="hidden-form">
 
               <!-- ========== VESSEL INFORMATION SECTION ========== -->
@@ -2061,7 +2055,7 @@
                   <div class="form-label"><span id="zerofit-status" class="learning-info-label">Fit: —</span></div>
                   <div class="form-input">
                     <button type="button" class="btn-secondary btn-sm"
-                      onclick="window.open(buildURL('/zerofit.csv'),'_blank')">Download Fit Trend</button>
+                      onclick="downloadCsv('/zerofit.csv','Zero Fit Trend')">Download Fit Trend</button>
                   </div>
                 </div>
 
@@ -2094,7 +2088,7 @@
                   <div class="form-label"><span id="zerolog-status" class="learning-info-label">Records: —</span></div>
                   <div class="form-input">
                     <button type="button" class="btn-secondary btn-sm"
-                      onclick="window.open(buildURL('/zerolog.csv'),'_blank')">Download CSV</button>
+                      onclick="downloadCsv('/zerolog.csv','Zero Drift Log')">Download CSV</button>
                     <button type="button" class="btn-danger-ghost btn-sm" onclick="resetZeroLog()">Reset Log</button>
                   </div>
                 </div>
@@ -3383,7 +3377,7 @@
             <div style="overflow-x:auto;">
               <table style="width:100%;min-width:1020px;border-collapse:collapse;font-size:12px;">
                 <thead>
-                  <tr style="background:var(--bg-card);color:var(--text-muted);">
+                  <tr style="background:var(--bg-card, var(--card-light));color:var(--text-muted);">
                     <th style="padding:4px 6px;text-align:left;">#</th>
                     <th style="padding:4px 6px;text-align:left;">Rise Avg (ms)</th>
                     <th style="padding:4px 6px;text-align:left;">Fall Avg (ms)</th>
@@ -3423,7 +3417,7 @@
             <div style="overflow-x:auto;">
               <table style="width:100%;min-width:980px;border-collapse:collapse;font-size:12px;">
                 <thead>
-                  <tr style="background:var(--bg-card);color:var(--text-muted);text-align:left;">
+                  <tr style="background:var(--bg-card, var(--card-light));color:var(--text-muted);text-align:left;">
                     <th style="padding:4px 6px;">#</th>
                     <th style="padding:4px 6px;">Roll-off (Hz) ↑</th>
                     <th style="padding:4px 6px;">DC gain (A/%)</th>
@@ -3934,7 +3928,7 @@
                 <div style="overflow-x:auto;">
                   <table id="tuningLogTable" style="width:100%; font-size:0.76em; border-collapse:collapse;">
                     <thead>
-                      <tr style="background:var(--card-dark); text-align:left;">
+                      <tr style="background:var(--card-dark, var(--card-light)); text-align:left;">
                         <th style="padding:3px 5px;">#</th>
                         <th style="padding:3px 5px;">Score ↑</th>
                         <th style="padding:3px 5px;">Kp</th>
@@ -3981,7 +3975,7 @@
                   <div style="overflow-x:auto;">
                     <table style="width:100%;min-width:1180px;border-collapse:collapse;font-size:12px;">
                       <thead>
-                        <tr style="background:var(--card-dark);color:var(--text-muted);text-align:left;">
+                        <tr style="background:var(--card-dark, var(--card-light));color:var(--text-muted);text-align:left;">
                           <th style="padding:4px 6px;">#</th>
                           <th style="padding:4px 6px;">Bandwidth (Hz) ↑</th>
                           <th style="padding:4px 6px;">Peak gain</th>
@@ -7407,12 +7401,12 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr style="border-bottom: 1px solid var(--border-light);">
+                  <tr style="border-bottom: 1px solid var(--border-light, var(--border));">
                     <td style="padding: 8px;">Today</td>
                     <td style="text-align: right; padding: 8px;"><span id="UVTodayID">0.0</span></td>
                     <td style="text-align: right; padding: 8px;"><span id="pKwHrToday_ID">0.00</span></td>
                   </tr>
-                  <tr style="border-bottom: 1px solid var(--border-light);">
+                  <tr style="border-bottom: 1px solid var(--border-light, var(--border));">
                     <td style="padding: 8px;">Tomorrow</td>
                     <td style="text-align: right; padding: 8px;"><span id="UVTomorrowID">0.0</span></td>
                     <td style="text-align: right; padding: 8px;"><span id="pKwHrTomorrow_ID">0.00</span></td>
@@ -9101,7 +9095,7 @@
 
           <div class="card req-batt-current">
             <p>SOC Gain Factor (Auto-Learned)</p>
-            <p class="reading"><span id="DynamicShuntGainFactor_display">1.000</span></p>
+            <p class="reading"><span id="DynamicShuntGainFactor_card">1.000</span></p>
           </div>
 
         </div>
@@ -12260,7 +12254,7 @@
         <!-- Charging-system health summary (v2) — sits directly above the plots -->
         <div style="display:flex;align-items:center;gap:18px;margin:4px 0 10px;flex-wrap:wrap;">
           <div style="min-width:96px;text-align:center;flex-shrink:0;">
-            <div style="font-size:11px;color:var(--text-muted);">Charging System Health <span class="tooltip">ℹ️<span class="tooltip-box">Output amps as a percentage of the best the charging system has done in the past under these same conditions. Both sides of that comparison are smoothed over several seconds (the Signal smoothing filter setting), so this reads steady-state performance only. MEASURED means a recorded best exists at this operating point (within a small matching window); ESTIMATED means it's interpolated.</span></span></div>
+            <div style="font-size:11px;color:var(--text-muted);">Charging System Health <span class="tooltip">ℹ️<span class="tooltip-box">Output amps as a percentage of the best the charging system has done in the past under these same conditions. Both sides of the comparison are the same statistic — a sustained multi-second average, the same window the record book stores — so a momentary dip can't read as lost health. MEASURED means a recorded best exists at this operating point (within a small matching window); ESTIMATED means it's interpolated.</span></span></div>
             <div id="alt-health-pct" style="font-size:30px;font-weight:800;line-height:1.1;">—</div>
             <div id="alt-health-status" style="font-size:12px;color:#888;">Learning</div>
             <div id="alt-hifield-alert" style="display:none;font-size:11px;font-weight:700;color:#d9534f;">Low output despite high field drive</div>
@@ -12273,7 +12267,7 @@
         <hr />
         <p class="card-group-title">
           <span>Charging System Health vs Engine Hours <span id="alt-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span></span>
-          <span class="tooltip">ℹ️<span class="tooltip-box">A healthy charging system holds a roughly flat line in the mid to high 90s — a steady downward trend is what to watch for.</span></span>
+          <span class="tooltip">ℹ️<span class="tooltip-box">A healthy charging system holds a roughly flat line near 100 — a steady downward trend is what to watch for. The lower line is each hour's low 10% mark (a tenth of that hour's readings fell below it), so one odd reading never defines an hour.</span></span>
         </p>
         <div style="display:flex;justify-content:center;margin:0 auto 8px;max-width:560px;">
           <span class="time-window-input" id="altTrendWinButtons" style="white-space:nowrap;display:inline-flex;gap:6px;align-items:center;font-size:12px;color:#555;">
@@ -12287,7 +12281,7 @@
         </div>
         <div id="alt-trend" style="width:100%;max-width:560px;margin:0 auto;"></div>
         <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i>worst</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i>low 10%</span>
           <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid rgba(58,123,213,.45);"></i>average</span>
         </div>
         <hr />
@@ -13550,152 +13544,33 @@
   <!-- span id's are for display values that JavaScript updates dynamically
  Read-only .  Basically sensor readings, calculated values, button and setting echos -->
   <div style="display:none;">
-    <span id="RPMMaxID" style="display:none;">0</span>
-    <span id="SOC_percentID" style="display:none;">0</span>
-    <span id="EngineRunTimeID" style="display:none;">0</span>
-    <span id="EngineCyclesID" style="display:none;">0</span>
-    <span id="AlternatorOnTimeID" style="display:none;">0</span>
-    <span id="AlternatorFuelUsedID" style="display:none;">0</span>
-    <span id="ChargedEnergyID" style="display:none;">0</span>
-    <span id="DischargedEnergyID" style="display:none;">0</span>
-    <span id="AlternatorChargedEnergyID" style="display:none;">0</span>
-    <span id="MaxAlternatorTemperatureF_ID" style="display:none;">0</span>
-    <span id="TemperatureLimitF_echo" style="display:none;">0</span>
-    <span id="BulkVoltage_echo" style="display:none;">0</span>
-    <span id="wavePeriod_echo" style="display:none;">0</span>
-    <span id="FloatVoltage_echo" style="display:none;">0</span>
-    <span id="SwitchingFrequency_echo" style="display:none;">0</span>
     <span id="yyMin_echo" style="display:none;">0</span>
     <span id="yyMax_echo" style="display:none;">0</span>
     <span id="FieldAdjustmentInterval_echo" style="display:none;">0</span>
-    <span id="ManualDutyTarget_echo" style="display:none;">0</span>
-    <span id="SwitchControlOverride_echo" style="display:none;">0</span>
     <span id="OnOff_echo" style="display:none;">0</span>
-    <span id="LimpHome_echo" style="display:none;">0</span>
-    <span id="VeData_echo" style="display:none;">0</span>
-    <span id="NMEA0183Data_echo" style="display:none;">0</span>
-    <span id="NMEA2KData_echo" style="display:none;">0</span>
-    <span id="waveAmplitude_echo" style="display:none;">0</span>
-    <span id="tuningWaveFloor_echo" style="display:none;">0</span>
-    <span id="CurrentThreshold_echo" style="display:none;">0</span>
-    <span id="PeukertExponent_echo" style="display:none;">0</span>
-    <span id="ChargeEfficiency_echo" style="display:none;">0</span>
-    <span id="ChargedVoltage_echo" style="display:none;">0</span>
-    <span id="TailCurrent_echo" style="display:none;">0</span>
-    <span id="ChargedDetectionTime_echo" style="display:none;">0</span>
-    <span id="IgnoreTemperature_echo" style="display:none;">0</span>
-    <span id="bmsLogic_echo" style="display:none;">0</span>
-    <span id="bmsLogicLevelOff_echo" style="display:none;">0</span>
-    <span id="AlarmActivate_echo" style="display:none;">0</span>
-    <span id="TempAlarm_echo" style="display:none;">0</span>
-    <span id="TempAlarmLow_echo" style="display:none;">0</span>
-    <span id="VoltageAlarmHigh_echo" style="display:none;">0</span>
-    <span id="VoltageAlarmLow_echo" style="display:none;">0</span>
-    <span id="CurrentAlarmHigh_echo" style="display:none;">0</span>
-    <span id="RPMScalingFactor_echo" style="display:none;">0</span>
     <span id="ResetAlternatorChargedEnergy_echo" style="display:none;">0</span>
     <span id="ResetDischargedEnergy_echo" style="display:none;">0</span>
     <span id="ResetFuelUsed_echo" style="display:none;">0</span>
     <span id="ResetEngineCycles_echo" style="display:none;">0</span>
     <span id="ResetRPMMax_echo" style="display:none;">0</span>
     <span id="FuelUsedID" style="display:none;">0</span>
-    <span id="MaximumAllowedBatteryAmps_echo" style="display:none;">0</span>
-    <span id="LoadDumpDtThresh1_echo" style="display:none;">0</span>
-    <span id="LoadDumpDtThresh_echo" style="display:none;">0</span>
-    <span id="LoadDumpDtThresh3_echo" style="display:none;">0</span>
-    <span id="CVTuningMode_echo" style="display:none;">0</span>
-    <span id="cvWaveAmplitudeV_echo" style="display:none;">0</span>
-    <span id="cvWavePeriodSec_echo" style="display:none;">0</span>
-    <span id="cvKOvershoot_echo" style="display:none;">0</span>
-    <span id="cvConsecutiveReads_echo" style="display:none;">0</span>
-    <span id="ManualSOCPoint_echo" style="display:none;">0</span>
-    <span id="ShuntResistanceMicroOhm_echo" style="display:none;">0</span>
-    <span id="InvertAltAmps_echo" style="display:none;">0</span>
-    <span id="InvertBattAmps_echo" style="display:none;">0</span>
-    <span id="MaxDuty_echo" style="display:none;">0</span>
-    <span id="MinDuty_echo" style="display:none;">0</span>
-    <span id="FieldResistance_echo" style="display:none;">0</span>
     <span id="maxPoints_echo" style="display:none;">0</span>
-    <span id="BatteryCOffset_echo" style="display:none;">0</span>
-    <span id="AlternatorCOffset_echo" style="display:none;">0</span>
-    <span id="BatteryCapacity_Ah_echo" style="display:none;">0</span>
-    <span id="AmpSensorRange_echo" style="display:none;">0</span>
-    <span id="R_fixed_echo" style="display:none;">0</span>
-    <span id="Beta_echo" style="display:none;">0</span>
-    <span id="T0_C_echo" style="display:none;">0</span>
-    <span id="TempSource_echo" style="display:none;">0</span>
-    <span id="IgnitionOverride_echo" style="display:none;">0</span>
-    <span id="AlarmLatchEnabled_echo" style="display:none;">0</span>
-    <span id="AlarmTest_echo" style="display:none;">0</span>
     <span id="AlarmLatchState_display" style="display:none;">Normal</span>
-    <span id="MaintainMode_echo" style="display:none;">0</span>
-    <span id="TargetVoltageMode_echo" style="display:none;">0</span>
-    <span id="absorptionCompleteTime_echo" style="display:none;">0</span>
-    <span id="FLOAT_DURATION_echo" style="display:none;">0</span>
-    <span id="AutoShuntGainCorrection_echo" style="display:none;">0</span>
-    <span id="AutoAltCurrentZero_echo" style="display:none;">0</span>
-    <span id="WindingTempOffset_echo" style="display:none;">0</span>
-    <span id="PulleyRatio_echo" style="display:none;">0</span>
-    <span id="ManualLifePercentage_echo" style="display:none;">0</span>
-    <span id="LastSessionDurationID" style="display:none;">0</span>
-    <span id="wifiReconnectsTotalID" style="display:none;">0</span>
-    <span id="LastSessionMaxLoopTimeID" style="display:none;">0</span>
     <span id="lastSessionMinHeapID" style="display:none;">0</span>
-    <span id="CurrentSessionDurationID" style="display:none;">0</span>
-    <span id="LastResetReasonID" style="display:none;">0</span>
-    <span id="ancientResetReasonID" style="display:none;">0</span>
-    <span id="totalPowerCyclesID" style="display:none;">0</span>
-    <span id="BatteryCurrentSource_echo" style="display:none;">0</span>
-    <span id="timeAxisModeChanging_echo" style="display:none;">0</span>
-    <span id="webgaugesinterval_echo" style="display:none;">0</span>
     <span id="weatherModeEnabled_echo" style="display:none;">0</span>
-    <span id="SolarWatts_echo" style="display:none;">0</span>
-    <span id="performanceRatio_echo" style="display:none;">0</span>
-    <span id="UVThresholdHigh_echo" style="display:none;">0</span>
-    <span id="pKwHrToday_ID" style="display:none;">0</span>
-    <span id="pKwHrTomorrow_ID" style="display:none;">0</span>
-    <span id="pKwHr2days_ID" style="display:none;">0</span>
-    <span id="WifiStrengthID" style="display:none;">0</span>
-    <span id="WifiHeartBeatID" style="display:none;">0</span>
     <span id="LoopTimeID" style="display:none;">0</span>
-    <span id="baroPressureID" style="display:none;">0</span>
-    <span id="ambientTempID" style="display:none;">0</span>
     <span id="firmwareVersionIntID" style="display:none;"></span>
     <span id="deviceIdUpperID" style="display:none;"></span>
     <span id="deviceIdLowerID" style="display:none;"></span>
     <span id="LearningRPMChangeThreshold_display" style="display:none;">0</span>
     <span id="LearningTempHysteresis_display" style="display:none;">0</span>
 
-    <span id="ChargedEnergy_AllTimeID" style="display:none;">0</span>
-    <span id="AlternatorChargedEnergy_AllTimeID" style="display:none;">0</span>
-    <span id="DischargedEnergy_AllTimeID" style="display:none;">0</span>
-    <span id="AvgSOC_AllTimeID" style="display:none;">0</span>
-    <span id="AvgSpeed_AllTimeID" style="display:none;">0</span>
-    <span id="AlternatorFuelUsed_AllTimeID" style="display:none;">0</span>
-    <span id="PeakVoltage_AllTimeID" style="display:none;">0</span>
-    <span id="EngineRunTime_AllTimeID" style="display:none;">0</span>
-    <span id="MinVoltageID" style="display:none;">0</span>
-    <span id="MinVoltage_AllTimeID" style="display:none;">0</span>
-    <span id="ChargeCyclesID" style="display:none;">0</span>
-    <span id="ChargeCycles_AllTimeID" style="display:none;">0</span>
-    <span id="EngineFuelUsedID" style="display:none;">0</span>
-    <span id="EngineFuelUsed_AllTimeID" style="display:none;">0</span>
-    <span id="TotalDistanceID" style="display:none;">0</span>
-    <span id="TotalDistance_AllTimeID" style="display:none;">0</span>
-    <span id="MaxSpeedID" style="display:none;">0</span>
-    <span id="MaxSpeed_AllTimeID" style="display:none;">0</span>
     <span id="SolarChargedEnergyID" style="display:none;">0</span>
     <span id="SolarChargedEnergy_AllTimeID" style="display:none;">0</span>
     <span id="IgnitionID" style="display:none;">0</span>
     <span id="BulkStageID" style="display:none;">0</span>
     <span id="WifiWakeSecondsRemainingID" style="display:none;">0</span>
-    <span id="BufferedRecordCountID" style="display:none;">0</span>
     <span id="BufferedRecordPercentID" style="display:none;">0</span>
-    <span id="BufferedRecordCapID" style="display:none;">0</span>
-    <span id="AbsorptionVoltage_echo" style="display:none;">0</span>
-    <span id="TargetVoltageSetpoint_echo" style="display:none;">0</span>
-    <span id="AbsorptionTimeoutMs_echo" style="display:none;">0</span>
-    <span id="bulkVoltageHoldMs_echo" style="display:none;">0</span>
     <span id="capLimitMode_echo" style="display:none;">0</span>
     <span id="BatteryV_rawID" style="display:none"></span>
 <span id="pidAltPV_ID" style="display:none"></span>
@@ -13710,12 +13585,7 @@
     <input id="yyMin" style="display:none;" value="0" />
     <input id="FieldAdjustmentInterval" style="display:none;" value="0" />
     <input id="ManualDutyTarget" style="display:none;" value="0" />
-    <input id="SwitchControlOverride" name="SwitchControlOverride" type="number" value style="display:none;" />
     <input id="HiLow" name="HiLow" type="number" value style="display:none;" />
-    <input id="LimpHome" name="LimpHome" type="number" value style="display:none;" />
-    <input id="VeData" name="VeData" type="number" value style="display:none;" />
-    <input id="NMEA0183Data" name="NMEA0183Data" type="number" value style="display:none;" />
-    <input id="NMEA2KData" name="NMEA2KData" type="number" value style="display:none;" />
     <input id="waveAmplitude" style="display:none;" value="0" />
     <input id="tuningWaveFloor" style="display:none;" value="0" />
     <input id="CurrentThreshold" style="display:none;" value="0" />
@@ -13724,35 +13594,17 @@
     <input id="ChargedVoltage" style="display:none;" value="0" />
     <input id="TailCurrent" style="display:none;" value="0" />
     <input id="ChargedDetectionTime" style="display:none;" value="0" />
-    <input id="IgnoreTemperature" name="IgnoreTemperature" type="number" value style="display:none;" />
-    <input id="bmsLogic" name="bmsLogic" type="number" value style="display:none;" />
-    <input id="bmsLogicLevelOff" name="bmsLogicLevelOff" type="number" value style="display:none;" />
-    <input id="AlarmActivate" name="AlarmActivate" type="number" value style="display:none;" />
     <input id="TempAlarm" style="display:none;" value="0" />
     <input id="TempAlarmLow" style="display:none;" value="0" />
     <input id="VoltageAlarmHigh" style="display:none;" value="0" />
     <input id="VoltageAlarmLow" style="display:none;" value="0" />
     <input id="CurrentAlarmHigh" style="display:none;" value="0" />
     <input id="RPMScalingFactor" style="display:none;" value="0" />
-    <input id="weatherModeEnabled" name="weatherModeEnabled" type="number" value style="display:none;" />
 
-    <input type="hidden" name="ResetTemp" id="ResetTemp" value="0" />
-    <input type="hidden" name="ResetVoltage" id="ResetVoltage" value="0" />
-    <input type="hidden" name="ResetCurrent" id="ResetCurrent" value="0" />
-    <input type="hidden" name="ResetEngineRunTime" id="ResetEngineRunTime" value="0" />
-    <input type="hidden" name="ResetAlternatorOnTime" id="ResetAlternatorOnTime" value="0" />
-    <input type="hidden" name="ResetEnergy" id="ResetEnergy" value="0" />
-    <input type="hidden" name="ResetAlternatorChargedEnergy" id="ResetAlternatorChargedEnergy" value="0" />
-    <input type="hidden" name="ResetDischargedEnergy" id="ResetDischargedEnergy" value="0" />
-    <input type="hidden" name="ResetFuelUsed" id="ResetFuelUsed" value="0" />
-    <input type="hidden" name="ResetEngineCycles" id="ResetEngineCycles" value="0" />
-    <input type="hidden" name="ResetRPMMax" id="ResetRPMMax" value="0" />
     <input id="MaximumAllowedBatteryAmps" style="display:none;" value="0" />
     <input id="ManualSOCPoint" style="display:none;" value="0" />
     <input id="AmpSensorRange" style="display:none;" value="0" />
     <input id="ShuntResistanceMicroOhm" style="display:none;" value="0" />
-    <input id="InvertAltAmps" name="InvertAltAmps" type="number" value style="display:none;" />
-    <input id="InvertBattAmps" name="InvertBattAmps" type="number" value style="display:none;" />
     <input id="MaxDuty" style="display:none;" value="0" />
     <input id="MinDuty" style="display:none;" value="0" />
     <input id="FieldResistance" style="display:none;" value="0" />
@@ -13765,12 +13617,8 @@
     <input id="T0_C" style="display:none;" value="0" />
     <input id="AlarmTest" style="display:none;" value="0" />
     <input id="ResetAlarmLatch" style="display:none;" value="0" />
-    <input id="MaintainMode" name="MaintainMode" type="number" value style="display:none;" />
-    <input id="TargetVoltageMode" name="TargetVoltageMode" type="number" value style="display:none;" />
     <input id="absorptionCompleteTime" style="display:none;" value="0" />
     <input id="FLOAT_DURATION" style="display:none;" value="0" />
-    <input id="AutoShuntGainCorrection" name="AutoShuntGainCorrection" type="number" value style="display:none;" />
-    <input id="AutoAltCurrentZero" name="AutoAltCurrentZero" type="number" value style="display:none;" />
     <input id="WindingTempOffset" style="display:none;" value="50.0" />
     <input id="PulleyRatio" style="display:none;" value="2.00" />
     <input id="ManualLifePercentage" style="display:none;" value="100" />
@@ -13785,7 +13633,6 @@
     <span id="systemIDQuietPP_2_ID" style="display:none;">0</span>
     <span id="systemIDAbortReason_ID" style="display:none;">0</span>
     <span id="systemIDAbortPhase_ID" style="display:none;">0</span>
-    <input id="timeAxisModeChanging" name="timeAxisModeChanging" type="number" value style="display:none;" />
     <input id="webgaugesinterval" style="display:none;" value="0" />
     <input id="plotTimeWindow" style="display:none;" value="0" />
     <input id="SolarWatts" style="display:none;" value="0" />
@@ -13799,7 +13646,6 @@
     <input id="PidKi" style="display:none;" value="0" />
     <input id="PidKd" style="display:none;" value="0" />
     <input id="PidSampleDivisor" style="display:none;" value="0" />
-    <input type="hidden" id="CloudFeatures" name="CloudFeatures" value="0">
     <input id="AbsorptionVoltage" style="display:none;" value="0" />
     <input id="TargetVoltageSetpoint" style="display:none;" value="0" />
     <input id="AbsorptionTimeoutMs" style="display:none;" value="0" />
@@ -13892,7 +13738,7 @@
         <span style="display:flex; align-items:center;">
           <!-- Minimize: mobile only (CSS-gated). Collapses to a progress pill so the current plot is visible behind it. -->
           <button id="sysid-min-btn" onclick="sysidMinimize()" title="Minimize" style="background:none; border:none; color:#888; cursor:pointer; font-size:20px; padding:0 8px; line-height:1; pointer-events:auto;">—</button>
-          <button onclick="closeSystemIDModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1; pointer-events:auto;">✕</button>
+          <button onclick="closeSystemIDModalUser()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1; pointer-events:auto;">✕</button>
         </span>
       </div>
 
@@ -13941,7 +13787,7 @@
         <div id="sysid-est-time" style="font-size:0.88em; color:#aaa; margin-bottom:20px;"></div>
 
         <div style="display:flex; gap:10px; justify-content:flex-end;">
-          <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Cancel</button>
+          <button onclick="closeSystemIDModalUser()" class="btn-secondary" style="flex:1;">Cancel</button>
           <button id="sysid-start-btn" onclick="confirmSystemIDStart()" class="btn-secondary" style="flex:1;" disabled>Start Test</button>
         </div>
       </div>
@@ -14057,7 +13903,7 @@
         <div id="sysid-results-summary" style="font-size:0.9em; margin-bottom:8px;"></div>
         <div id="sysid-results-warning" style="font-size:0.85em; color:#f0a500; margin-bottom:16px; display:none;"></div>
         <div style="display:flex; gap:10px; justify-content:flex-end;">
-          <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Close</button>
+          <button onclick="closeSystemIDModalUser()" class="btn-secondary" style="flex:1;">Close</button>
           <button onclick="sysidRunAgain()" class="btn-secondary" style="flex:1;">Run Again</button>
           <button id="sysid-apply-btn" onclick="applySystemIDResults()" class="btn-secondary" style="flex:1;">Set All Filters</button>
         </div>

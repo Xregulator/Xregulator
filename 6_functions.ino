@@ -57,7 +57,7 @@ float fdDrainMsAtRpm(float rpm) {
   return (float)fdDrainLoMs + f * ((float)fdDrainHiMs - (float)fdDrainLoMs);
 }
 // Auto Min% learning ("knee tracker") — observer + persistence (defined lower in this file)
-void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float amps,
+void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk);
 void kneeLearnInit();
 void kneeLearnService(bool fieldOff);
@@ -1255,18 +1255,21 @@ void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float 
   const float restRamp = COMMISSION_REST_RAMP_PCT * vNorm;     // 5 / 2.5 / 1.25 %/s
   const float restTarget = restFloor;
 
+  // Re-assert the field enable unconditionally: the mode arbiter guarantees no fault or lockout is
+  // active when COMMISSION_IDLE is selected (lockout is priority 7, rest 7.6), but a rest resumed
+  // after an immediate cut (e.g. engine stopped mid-rest) enters with gpio4IsLow still true — gating
+  // the write on it left the line LOW for the whole rest, killing the RPM-pickup keep-alive load.
+  digitalWrite(4, HIGH);
+  gpio4IsLow = false;
+
   // Dedicated slow slew toward the target (both directions), THEN governor in bypass-slew so it only
   // clamps (duty ceiling) and writes the PWM — we already did the slewing at the rest rate.
   float slowDuty = slew_limit_f(lastAppliedDuty, restTarget, restRamp, restRamp, actualDtSec);
-  bool writeToHardware = !gpio4IsLow;
   float dutyNewFloat = governor_apply(lastAppliedDuty, slowDuty, GOV_BYPASS_SLEW,
-                                      0.0f, writeToHardware, actualDtSec);
+                                      0.0f, true, actualDtSec);
   currentPID.ResetIntegratorTo((double)dutyNewFloat);
   pidOutput = (double)dutyNewFloat;
-  if (writeToHardware) {
-    lastAppliedDuty = dutyNewFloat;
-    digitalWrite(4, HIGH);   // keep the field enable asserted — never cut during rest
-  }
+  lastAppliedDuty = dutyNewFloat;
   dutyCycle = dutyNewFloat;
 
   updateFieldTelemetry(dutyCycle, tick.currentBatteryVoltage, FieldResistance);
@@ -5308,7 +5311,7 @@ void updateChargingStage() {
     if (timedOut && inAbsorptionStage) {
       inBulkStage = false;
       inAbsorptionStage = false;
-      inIdleStage = (UseFloat == 0);
+      inIdleStage = (UseFloat == 0) && !commissioningOwnsBattery;  // same guard as the tail exit: IDLE mid-wizard bounces sysMode OFF for a pass
       floatStartTime = now;
       absorptionTailTimer = 0;
       rebulkTimer = 0;

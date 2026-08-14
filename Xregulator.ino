@@ -31,7 +31,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //#include <U8g2lib.h>            // display
 #include <ADS1115_lite.h>  // measuring 4 analog inputs
 ADS1115_lite adc(ADS1115_DEFAULT_ADDRESS);
-#include "VeDirectFrameHandler.h"  // for victron communication
+#include <VeDirectFrameHandler_xeng.h>  // for victron communication — my fork: frameCounter new-frame gating + corrupted-stream bounds fixes (see its header)
 #include "INA228.h"
 INA228 INA(0x40);
 //DONT MOVE THE NEXT 6 LINES AROUND, MUST STAY IN THIS ORDER
@@ -160,7 +160,9 @@ enum HttpsRequestType {
   HTTPS_CLEAR_PENDING_CONFIG,  // clear the queued config after applying it
   HTTPS_RESET_RPM_AXIS,        // tach rescaled: delete the device's RPM-indexed cloud data
   HTTPS_UPLOAD_CX_LEDGER,      // commissioning-ledger event batch → log-commissioning-event
-  HTTPS_UPLOAD_USAGE           // daily app-usage analytics blob → track-behavior
+  HTTPS_UPLOAD_USAGE,          // daily app-usage analytics blob → track-behavior
+  HTTPS_CLOUD_OP               // staged registration/profile op (cloudOp slot in 3_functions.ino) — the
+                               // 4 web handlers no longer run doCloudPOST inside the async_tcp task
 };
 
 struct HttpsRequest {
@@ -207,7 +209,7 @@ String currentUID;
                                // rewrite per ~month of runtime instead of per engine-hour
 struct AltTrendPt {
   uint16_t engHour;            // engine-hours-since-baseline bucket index
-  int16_t  worstPct;          // worst (min) output-% in this bucket (×10)
+  int16_t  worstPct;          // low-decile (P10) output-% in this bucket (×10) — was raw min before 2026-08; a single unlucky sample no longer defines the hour
   int16_t  overallPct;        // average output-% in this bucket (×10)
 };
 static AltTrendPt *altTrend = nullptr;
@@ -220,7 +222,8 @@ static bool        altTrendRewrite = true;  // force a full log rewrite (load-mi
 volatile bool dbgRingsSynthetic = false;
 // Current-bucket accumulators (committed when the engine-hour bucket advances).
 static double altBucket_sum = 0, altBucket_n = 0;   // running average over the bucket
-static float  altBucket_worst = 0;                  // min output-% seen this bucket
+static float  altBucket_worst = 0;                  // raw min output-% this bucket (debug CSV only; the committed low line is P10)
+static uint16_t altBucketHist[60] = {};             // bucket %-histogram (2% bins, 0..120) → committed P10
 static int    altCurEngHour = -1;
 double altTrendBaselineSec = 0.0;   // EngineRunTime_AllTime at last "Start Over" (trend X-axis origin)
 
@@ -228,7 +231,8 @@ double altTrendBaselineSec = 0.0;   // EngineRunTime_AllTime at last "Start Over
 // EMA-filtered inputs; prediction + state + % are computed at 1 Hz in altHealth_tick.
 static float   altLive_rpm = 0, altLive_exc = 0, altLive_amps = 0, altLive_pred = 0;
 static float   altLive_vbus = 0, altLive_tF = 0, altLive_duty = 0;   // filtered fold outputs for the 1 Hz evaluator
-static float   altLive_pct = 0;            // live output-% = amps ÷ LWLR prediction (NO clamp; may exceed 100)
+static float   altLive_gAmps = 0;          // graded amps: episode boxcar average (same statistic the records store)
+static float   altLive_pct = 0;            // live output-% = graded amps ÷ LWLR prediction (NO clamp; may exceed 100)
 static bool    altRefOk = false;           // state is MEASURED/ESTIMATED → the % is trustworthy
 static float   altRefDist = 999.0f;        // normalized distance to nearest support point (diagnostics)
 static bool    altLiveValid = false;
@@ -237,7 +241,7 @@ static bool    altSessSteady = false;      // SESSION steady (temp held SESSION_
 static uint8_t altRefSource = 0;           // active reference surface for grading: 0 = My History (learned), 1 = Uploaded File
 static uint8_t altState = FRONT_NO_REFERENCE;   // confidence state (FrontStore::classify, 1 Hz)
 static uint32_t altLastFoldMs = 0;         // last fold time — stale fold (field off) → live point not graded
-static float   altWorstPctLive = 0;        // worst output-% of the in-progress trend bucket
+static float   altWorstPctLive = 0;        // P10 output-% of the in-progress trend bucket
 static float   altOverallPctLive = 0;      // current-bucket average output-%
 static uint8_t altStatusCode = 0;          // 0 normal, 3 disabled (Ignore Temperature); verdict codes 1/2 removed
 // Session statistics over the graded 1 Hz samples since boot/Start Over: mean + P10 histogram (60 × 2% bins).
@@ -685,6 +689,9 @@ bool usageAppSeen = false;          // a Capacitor client posted this period
 bool usageDirty = false;            // accumulator changed since last dumpUsageAccum()
 unsigned long lastUsageUploadAttempt = 0;
 SemaphoreHandle_t usageMutex = NULL;  // /track runs on async_tcp (Core 0 tree), build/reset on loop() — cross-core
+// Serializes the deferred commissioning-start persist machine: worker (loop(), Core 1) vs
+// Begin/Cancel (async_tcp, Core 0). See cxStartPersistService in 2_functions.ino.
+SemaphoreHandle_t cxStartMutex = NULL;
 // Lifetime totals (NVS "storage" namespace via saveNVSDataFull, same pattern as EngineRunTime_AllTime)
 double UsageOpenTime_AllTime = 0.0;  // seconds of visible app time
 uint32_t UsageOpens_AllTime = 0;
@@ -1471,6 +1478,8 @@ TaskHandle_t tempTaskHandle = NULL;    // separate CPU task for temp reading (re
 float VictronVoltage = 0;              // battery V reading from VeDirect
 float VictronCurrent = 0;              // battery Current (careful, can also be solar current if hooked up to solar charge controller not BMV712)
 float HeadingNMEA = 0;                 // Just here to test NMEA functionality
+int8_t HeadingRefNMEA = -1;            // PGN 127250 reference frame: 0 = true, 1 = magnetic, -1 = unknown
+float HeadingVariationDeg = NAN;       // PGN 127250 variation, degrees east-positive; NAN = not provided
 float COGNMEA = 0;                     // Course Over Ground from NMEA2K (degrees)
 float SOGNMEA = 0;                     // Speed Over Ground from NMEA2K (knots)
 float STWNMEA = NAN;                   // Speed Through Water (SOW) from NMEA2K PGN 128259 (knots); NAN = no log
@@ -1592,7 +1601,7 @@ struct AnchorageSample {
   float depth_ft;      // converted to feet for direct comparison with thresholds
 };
 AnchorageSample *anchorageRing = nullptr;        // PSRAM-allocated 300-slot ring
-const uint16_t ANCHORAGE_RING_SIZE = 300;        // 300 minutes × 60s = 5 hr
+const uint16_t ANCHORAGE_RING_SIZE = 300;        // 300 samples = 299 one-minute intervals ≈ 5 hr (qualifier accepts one short)
 uint16_t anchorageRingHead = 0;                  // next write slot
 uint16_t anchorageRingCount = 0;                 // valid samples (up to ANCHORAGE_RING_SIZE)
 uint32_t lastAnchorageSampleMs = 0;              // last sample push time
@@ -2197,6 +2206,11 @@ int BatteryCapacity_Ah = 200;         // Battery capacity in Amp-hours
 int SOC_percent = 5000;               // State of Charge percentage (0-100) but have to multiply by 100 for annoying reasons, but go with it
 float ManualSOCPoint = 25.0f;              // Used to set it manually (decimals allowed)
 int CoulombCount_Ah_scaled = 7500;    // Current energy in battery (Ah × 100 for precision)
+// Unsaturated twin of CoulombCount_Ah_scaled: same deltas, never constrained to [0, capacity],
+// re-anchored to capacity at each full-charge event and to the live count at every external seed.
+// Exists so the shunt-gain correction sees drift in BOTH directions — the live counter's top clamp
+// erases the over-reading (count-too-high) evidence before the full-charge anchor is reached.
+int shadowCoulombX100 = 7500;
 // Deferred first-boot SoC seed: loadNVSData() runs before the INA228 is ever read (IBV still 0)
 // and before InitSystemSettings parses battery type/voltage/capacity, so the voltage-based
 // estimate must wait until the forced ReadAnalogInputs() at the end of setup().
@@ -2268,6 +2282,7 @@ int32_t prev_EngineCycles = 0;
 int32_t prev_AltOnTime = 0;
 int32_t prev_SOC_percent = 0;
 int32_t prev_CoulombCount = 0;
+int32_t prev_ShadowCoulomb = 0;
 uint32_t prev_SessionDur = 0;
 int32_t prev_MaxLoop = 0;
 int32_t prev_MinHeap = 0;
@@ -2595,11 +2610,10 @@ unsigned long DischargedEnergy = 0;         // Total discharged energy from batt
 unsigned long AlternatorChargedEnergy = 0;  // Total energy from alternator (Wh)
 int FuelEfficiency_scaled = 250;            // Engine efficiency: Wh per mL of fuel (× 100)
 // Engine & Alternator Runtime Tracking
-int EngineRunTime = 0;          // Time engine has been spinning (minutes)
+int EngineRunTime = 0;          // Time engine has been spinning (SECONDS — incremented by secondsRun)
 int EngineCycles = 0;           // Average RPM * Minutes of run time
-int AlternatorOnTime = 0;       // Time alternator has been producing current (minutes)
+int AlternatorOnTime = 0;       // Time alternator has been producing current (SECONDS — incremented by secondsRun)
 bool engineWasRunning = false;  // Engine state in previous check
-bool alternatorWasOn = false;   // Alternator state in previous check
 
 
 // CH1 Interval Instrumentation — zero heap, all storage static. Three tiers: a 10 s ring of
@@ -4962,7 +4976,6 @@ uint32_t csv2SendLastUs  = 0, csv2SendWorstUs  = 0;   // CSV2 events.send time (
 // Forward declarations (for WiFi functions)
 String readFile(fs::FS &fs, const char *path);
 bool writeFile(fs::FS &fs, const char *path, const char *message);
-bool writeFileIfChanged(fs::FS &fs, const char *path, const char *message);
 // Versioned PSRAM-blob persistence (shared scaffold — see 2_functions.ino)
 uint32_t writePsramBlob(const char *path, uint32_t magic, uint32_t version,
                         uint32_t userWord, const void *base, size_t recordSize,
@@ -5032,6 +5045,11 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
   "<input type=\"text\" name=\"ssid\" placeholder=\"Required for client mode\">"
   "<label>Ship's WiFi Password:</label>"
   "<input type=\"password\" name=\"password\" placeholder=\"Required for client mode\">"
+  "<label style=\"display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer\">"
+  "<input type=\"checkbox\" name=\"forget_client\" style=\"width:auto;margin:0\">"
+  "Forget saved ship's WiFi"
+  "</label>"
+  "<span class=\"opt-desc\">Leave the two fields above blank and check this box to erase the saved ship's WiFi credentials. Until new credentials are saved, the regulator will boot back to this setup page with charging disabled - use the Hotspot Wire (below) for normal operation without ship's WiFi. Leaving the fields blank WITHOUT checking the box keeps the saved credentials unchanged.</span>"
   "</div>"
 
   // Non-preferred option: hotspot/AP credentials live inside the de-emphasized grey box
@@ -5117,6 +5135,7 @@ void setup() {
   if (!usageSlots) Serial.println("FATAL: usageSlots ps_malloc failed");
   else memset(usageSlots, 0, USAGE_SLOTS * sizeof(UsageSlot));
   usageMutex = xSemaphoreCreateMutex();
+  cxStartMutex = xSemaphoreCreateMutex();
   consoleHist = (ConsoleHistEntry *)ps_malloc(CONSOLE_HIST_SIZE * sizeof(ConsoleHistEntry));
   if (!consoleHist) Serial.println("FATAL: consoleHist ps_malloc failed");
   else memset(consoleHist, 0, CONSOLE_HIST_SIZE * sizeof(ConsoleHistEntry));
@@ -5715,7 +5734,7 @@ void loop() {
     lastSOCUpdateTime = currentTime;
     UpdateEngineRuntime(elapsedMillis);  // untimed: negligible 2s-cadence arithmetic
     UpdateEngineFuel(elapsedMillis);
-    if (HAS_BATT_SHUNT) TIMED_CALL(ft_UpdateBatterySOC, UpdateBatterySOC(elapsedMillis));  // no battery shunt → SoC/coulomb/capacity all need Bcur; skip entirely
+    TIMED_CALL(ft_UpdateBatterySOC, UpdateBatterySOC(elapsedMillis));  // always runs: alternator stats + AvgVoltage are shunt-independent; Bcur-dependent sections gate on HAS_BATT_SHUNT internally
     UpdateTravelStatistics(elapsedMillis);
     UpdateBoardTempPressureMaximums();
     handleSocGainReset();   // do the dynamic updates

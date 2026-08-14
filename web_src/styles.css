@@ -1116,7 +1116,7 @@ input[type="submit"]:hover {
 #sysid-pill {
   display: none;
   position: fixed;
-  left: 12px; right: 12px; bottom: 16px;
+  left: 12px; right: 12px; bottom: calc(16px + env(safe-area-inset-bottom));  /* viewport-fit=cover: keep the tappable pill out of the iPhone home-indicator zone */
   z-index: 9001;
   background: #1e1e1e; color: #eee;
   border: 1px solid #3a3a3a; border-radius: 16px;

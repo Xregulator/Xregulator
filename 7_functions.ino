@@ -45,13 +45,14 @@ struct FrontPoint { float x[NAXIS]; float ex[2]; float y; uint32_t nSamp; uint32
 // inside the window, then ages out — it never zeroes accumulated dwell, so a disqualifying sample
 // does NOT discard the prior in-band history. A point emits, at most once per EP_EMIT_PERIOD_MS,
 // while EVERY axis (and the optional output band) is steady AND data has spanned its dwell since the
-// last hard barrier (eligible=false). The emitted value is a short trailing boxcar (EP_AVG_WIN_MS) —
-// minimal smear, since the caller pre-filters the inputs. Steadiness + averaging are fed at a
-// decimated EP_FEED_DT_MS cadence (the fold may run far faster — 200 Hz on alt). Shared by alt-health
-// (4 axes + amps band) and vessel-performance (sail/motor, 3 axes, output band disabled).
+// last hard barrier (eligible=false) AND steadiness has held for a full avgWinMs, so the trailing
+// boxcar (width avgWinMs, per instance) contains only continuously-steady data. Steadiness +
+// averaging are fed at a decimated EP_FEED_DT_MS cadence (the fold may run far faster — 200 Hz on
+// alt). Shared by alt-health (4 axes + amps band, avgWinMs = ALT_EMIT_AVG_MS) and
+// vessel-performance (sail/motor, 3 axes, output band disabled, default window).
 
 #define EP_FEED_DT_MS      100    // steadiness/average update cadence (10 Hz), decimated from the fold
-#define EP_AVG_WIN_MS     2000    // trailing boxcar width for the emitted average (minimal smear)
+#define EP_AVG_WIN_MS     2000    // default trailing boxcar width for the emitted average (per-instance avgWinMs overrides)
 #define EP_EMIT_PERIOD_MS 1000    // max emit rate while steady (≤ the ~2/s consumer drain; the front's
                                   // max-per-cell dedup collapses repeats in a long hold, so over-emitting is harmless)
 
@@ -92,6 +93,8 @@ struct Episode {
   double    avgSumX[NAXIS], avgSumEx[2], avgSumOut;
   uint32_t  count;                  // boxcar sample count while steady, else 0 (caller reads count>0 as "steady")
   uint32_t  lastFeedMs, lastEmitMs;
+  uint32_t  avgWinMs = EP_AVG_WIN_MS;   // boxcar width; also the continuous-steady dwell an emit requires
+  uint32_t  lastUnqualMs;           // last non-qualified feed — emits wait until the boxcar is past it
 
   // ringBuf/ringCap = the caller's PSRAM boxcar ring; maxDwellSec[NAXIS+1] sizes each axis's (and the
   // output band's) deque to its longest expected steady time. Deque storage is ps_malloc'd here.
@@ -122,7 +125,7 @@ struct Episode {
     for (int a = 0; a < NAXIS; a++) avgSumX[a] = 0;
     for (int a = 0; a < NAXIS + 1; a++) axisSteady[a] = false;
     avgSumEx[0] = avgSumEx[1] = 0; avgSumOut = 0;
-    dataStartMs = 0; haveData = false; lastFeedMs = 0; lastEmitMs = 0;
+    dataStartMs = 0; haveData = false; lastFeedMs = 0; lastEmitMs = 0; lastUnqualMs = 0;
   }
 
   // Feed one sample. eligible=false → hard barrier (drop all in-band history; a run can't span the
@@ -133,8 +136,13 @@ struct Episode {
 
     // Decimate the steadiness/averaging update to EP_FEED_DT_MS (the fold may run much faster).
     if (haveData && (uint32_t)(s.tMs - lastFeedMs) < EP_FEED_DT_MS) return false;
+    // A feed gap is a hard barrier too: several caller paths stop feeding WITHOUT clearRun
+    // (stale NMEA, pause, IgnoreTemperature toggle). After a gap the window deques evict to a
+    // single sample (trivially in-band) while dwell still measures from the pre-gap dataStartMs,
+    // so one instantaneous post-gap reading would emit as a full steady run.
+    if (haveData && (uint32_t)(s.tMs - lastFeedMs) > 5u * EP_FEED_DT_MS) clearRun();
     lastFeedMs = s.tMs;
-    if (!haveData) { dataStartMs = s.tMs; haveData = true; }
+    if (!haveData) { dataStartMs = s.tMs; haveData = true; lastUnqualMs = s.tMs; }
 
     // Per-axis sliding-window min/max over each axis's own trailing dwell window (clamped to storage).
     bool qualified = true;
@@ -163,7 +171,7 @@ struct Episode {
       axisSteady[NAXIS] = true;   // output band disabled (vessel-perf) → never blocks
     }
 
-    // Trailing boxcar average (the emitted value): push, then evict samples older than EP_AVG_WIN_MS.
+    // Trailing boxcar average (the emitted value): push, then evict samples older than avgWinMs.
     avgRing[ringHead] = s;
     ringHead = (ringHead + 1) % avgCap;
     if (ringCount < avgCap) ringCount++;
@@ -171,15 +179,19 @@ struct Episode {
     avgSumEx[0] += s.ex[0]; avgSumEx[1] += s.ex[1]; avgSumOut += s.out;
     while (ringCount > 1) {
       int tail = (ringHead - ringCount + avgCap) % avgCap;
-      if ((uint32_t)(s.tMs - avgRing[tail].tMs) <= EP_AVG_WIN_MS) break;
+      if ((uint32_t)(s.tMs - avgRing[tail].tMs) <= avgWinMs) break;
       for (int a = 0; a < NAXIS; a++) avgSumX[a] -= avgRing[tail].x[a];
       avgSumEx[0] -= avgRing[tail].ex[0]; avgSumEx[1] -= avgRing[tail].ex[1]; avgSumOut -= avgRing[tail].out;
       ringCount--;
     }
     count = qualified ? (uint32_t)ringCount : 0;            // caller reads count>0 as "steady now"
+    if (!qualified) lastUnqualMs = s.tMs;
 
-    // Emit a steady point, rate-limited. lastEmitMs=0 after a barrier → the first qualified tick emits.
-    if (qualified && (uint32_t)(s.tMs - lastEmitMs) >= EP_EMIT_PERIOD_MS && ringCount > 0) {
+    // Emit a steady point, rate-limited. Requires steadiness to have HELD for a full avgWinMs so the
+    // boxcar holds only continuously-steady data — an out-of-band blip pushes emits out until it ages
+    // past the window, and a fresh run's first emit lands avgWinMs after qualification, not instantly.
+    if (qualified && (uint32_t)(s.tMs - lastEmitMs) >= EP_EMIT_PERIOD_MS && ringCount > 0
+        && (uint32_t)(s.tMs - lastUnqualMs) >= avgWinMs) {
       lastEmitMs = s.tMs;
       if (out) {
         for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(avgSumX[a] / (double)ringCount);
@@ -491,9 +503,12 @@ static inline float altExcitation(float duty, float vbus, float tF) {
 // Steadiness/averaging axes: {RPM, field-duty %, Vbus, tempF}. Defined here (before every function
 // that references them) so the rest of the module can use the front. Generic engine: Xregulator.ino.
 #define ALT_NAXIS        4
+#define ALT_EMIT_AVG_MS  8000     // record/grade averaging window. 2 s let max-per-cell harvest lucky
+                                  // 2 s windows (~2-3% record inflation → healthy graded ~95%); 8 s is
+                                  // the current best guess pending /altwinstats.csv data from a real run
 #define ALT_FRONT_CAP    4096     // sparse support points (PSRAM); sized to be unreachable even AP-mode/no-prune — cost scales with count, not cap (see ALT_HEALTH_LWLR_ENGINE_SPEC.md)
-#define ALT_EP_RING_CAP  1024     // Episode trailing-boxcar buffer (PSRAM). Only ~EP_AVG_WIN_MS of
-                                  // decimated samples are ever live in it (~20 at 10 Hz); generously
+#define ALT_EP_RING_CAP  1024     // Episode trailing-boxcar buffer (PSRAM). Only ~ALT_EMIT_AVG_MS of
+                                  // decimated samples are ever live in it (~80 at 10 Hz); generously
                                   // sized. The steadiness windows live in the per-axis monotonic
                                   // deques (allocated in Episode::init), NOT here.
 #define ALT_PENDING_CAP  4096     // = front cap: holds every unsynced point through weeks offline (PSRAM)
@@ -533,6 +548,7 @@ struct AltTempGate {
   void feed(bool eligible, float tF, uint32_t nowMs, float tol, float secs) {
     if (!eligible) { clear(); return; }
     if (have && (uint32_t)(nowMs - lastFeedMs) < EP_FEED_DT_MS) return;   // decimate to match the fold's Episode feed
+    if (have && (uint32_t)(nowMs - lastFeedMs) > 5u * EP_FEED_DT_MS) clear();  // feed gap = hard barrier, same as Episode::feed
     lastFeedMs = nowMs;
     if (!have) { startMs = nowMs; have = true; }
     uint32_t win = (uint32_t)(secs * 1000.0f);
@@ -599,13 +615,15 @@ static AltSetting ALT_SETTINGS[] = {
 };
 static const size_t ALT_SETTING_COUNT = sizeof(ALT_SETTINGS) / sizeof(ALT_SETTINGS[0]);
 
-// ---- performance-vs-engine-hours trend (engine-hour buckets: average + worst output-%) ----
+// ---- performance-vs-engine-hours trend (engine-hour buckets: average + P10 output-%) ----
 // Source = FULL-steady runs only, graded against the active surface, throttled to one per
 // altTrendFeedSec (fed from altProcessEmits). A bucket spans altTrendBucketSec of engine-time
-// (production 3600 = 1 h; testing 600) and stores its samples' average + worst (min) output-%. It
+// (production 3600 = 1 h; testing 600) and stores its samples' average + low-decile (P10) output-%
+// (from a 2%-bin histogram — the raw min made one unlucky sample define the hour's lower line; real
+// degradation drags a tenth of the hour down and the P10 with it). It
 // commits when the engine-time bucket index advances AND it holds ≥ altTrendMinSamp samples; a bucket
 // short of that many qualifying steady samples shows a gap, by design (spec §2/§5). The in-progress
-// bucket (sum/count/worst/index) PERSISTS across reboot, so a 50-min partial hour commits after only
+// bucket (sum/count/hist/index) PERSISTS across reboot, so a 50-min partial hour commits after only
 // 10 more minutes of the next session — the commit fires on the real engine-time rollover regardless
 // of how many reboots happen inside the bucket. NO clamp — % may exceed 100 vs a stale reference.
 static float altEngineHoursSinceBaseline() {        // engine-HOURS since Start Over (live display)
@@ -619,11 +637,25 @@ static int altTrendBucketIndex() {                  // which bucket the current 
   double bsec = (altTrendBucketSec > 1.0f) ? (double)altTrendBucketSec : 1.0;
   return (int)(s / bsec);
 }
+// Bucket P10 from the 2%-bin histogram, linearly interpolated inside the crossing bin. With n < 10
+// the target lands in the lowest occupied bin, so tiny buckets degrade gracefully toward the min.
+static float altBucketP10() {
+  uint32_t n = (uint32_t)altBucket_n;
+  if (n < 1) return 0.0f;
+  uint32_t target = (n + 9) / 10, cum = 0;
+  for (int i = 0; i < 60; i++) {
+    if (altBucketHist[i] == 0) continue;
+    if (cum + altBucketHist[i] >= target)
+      return (float)(i * 2) + 2.0f * ((float)(target - cum) / (float)altBucketHist[i]);
+    cum += altBucketHist[i];
+  }
+  return altBucket_worst * 100.0f;   // histogram/count mismatch (shouldn't happen) → raw min
+}
 static void altCommitTrendBucket() {
   // sample gate ≥ altTrendMinSamp: a too-thin bucket must not commit (gap, not a single-sample artifact)
   if (altCurEngHour < 0 || altBucket_n < (double)altTrendMinSamp || !altTrend) return;
   float overall = (float)(altBucket_sum / altBucket_n) * 100.0f;
-  float worst   = altBucket_worst * 100.0f;
+  float worst   = altBucketP10();
   if (altTrendCount >= ALT_TREND_CAP) {  // window full → evict the oldest ALT_TREND_DROP block in one
     // shift; indices moved → next save rewrites the whole log (once per ~DROP hours, not per hour)
     memmove(altTrend, altTrend + ALT_TREND_DROP, (ALT_TREND_CAP - ALT_TREND_DROP) * sizeof(AltTrendPt));
@@ -641,31 +673,55 @@ static void altTrendAdd(float perfFrac) {
   if (eh != altCurEngHour) {             // engine-time bucket advanced → commit the prior bucket + reset
     altCommitTrendBucket();
     altBucket_sum = 0; altBucket_n = 0; altBucket_worst = perfFrac;
+    memset(altBucketHist, 0, sizeof(altBucketHist));
     altCurEngHour = eh;
   }
   if (altBucket_n < 1 || perfFrac < altBucket_worst) altBucket_worst = perfFrac;
   altBucket_sum += perfFrac; altBucket_n += 1;
+  int bin = (int)(perfFrac * 100.0f * 0.5f);   // same 2%-wide binning as the session histogram
+  if (bin < 0) bin = 0;
+  if (bin > 59) bin = 59;
+  if (altBucketHist[bin] < 65535) altBucketHist[bin]++;
   altOverallPctLive = (float)(altBucket_sum / altBucket_n) * 100.0f;
-  altWorstPctLive   = altBucket_worst * 100.0f;
+  altWorstPctLive   = altBucketP10();
   // NOTE: the partial bucket is NOT written here. It is persisted only at the ignition-off shutdown
   // flush (altHealthSave → altPersistTrendBucket, Phase 2 after the field cuts) and on Reset. Every
   // shutdown goes through field-off while the device is still powered, so that one write always lands —
   // no per-tick NVS churn needed.
   // (deliberately no healthy/drifting verdict here — trends are read from the plots)
 }
-// Persist the in-progress bucket to NVS (4 scalars). The committed buckets live in /alttrend.bin; this
-// covers ONLY the partial current bucket so a reboot mid-bucket keeps its accumulated samples.
+// Persist the in-progress bucket to NVS (4 scalars + the P10 histogram as sparse "bin:count" pairs).
+// The committed buckets live in /alttrend.bin; this covers ONLY the partial current bucket so a
+// reboot mid-bucket keeps its accumulated samples.
 static void altPersistTrendBucket() {
   settingWrite("altBkSum", String(altBucket_sum, 4).c_str());
   settingWrite("altBkN",   String(altBucket_n, 0).c_str());
   settingWrite("altBkWst", String(altBucket_worst, 5).c_str());
   settingWrite("altBkHr",  String(altCurEngHour).c_str());
+  String h;
+  for (int i = 0; i < 60; i++)
+    if (altBucketHist[i] > 0) { if (h.length()) h += ','; h += String(i); h += ':'; h += String(altBucketHist[i]); }
+  settingWrite("altBkHist", h.c_str());
 }
 static void altRestoreTrendBucket() {    // boot restore — resume the partial bucket exactly where it stopped
   if (settingExists("altBkHr")) altCurEngHour   = settingRead("altBkHr").toInt();
   if (settingExists("altBkSum")) altBucket_sum  = settingRead("altBkSum").toDouble();
   if (settingExists("altBkN"))   altBucket_n    = settingRead("altBkN").toDouble();
   if (settingExists("altBkWst")) altBucket_worst = settingRead("altBkWst").toFloat();
+  if (settingExists("altBkHist")) {
+    String h = settingRead("altBkHist");
+    int pos = 0;
+    while (pos < (int)h.length()) {
+      int colon = h.indexOf(':', pos);
+      if (colon < 0) break;
+      int comma = h.indexOf(',', colon);
+      if (comma < 0) comma = h.length();
+      int bin = h.substring(pos, colon).toInt();
+      long cnt = h.substring(colon + 1, comma).toInt();
+      if (bin >= 0 && bin < 60 && cnt > 0) altBucketHist[bin] = (uint16_t)((cnt > 65535) ? 65535 : cnt);
+      pos = comma + 1;
+    }
+  }
 }
 
 // ---- NMEA-style bench simulator (no engine) ----
@@ -728,6 +784,131 @@ static int altEmitQCount = 0;
 static bool altCapWarned = false;   // once per boot OR per Start Over (cleared in resetAlternatorHealth)
 
 // ---- per-control-tick fold (THE canonical cadence) ----
+// ---- emit-window sizing probe (temporary diagnostic; RAM only, cleared at boot) ----
+// Measures, during FULL-steady runs, how far a trailing W-second average of the graded amps signal
+// rides above the run's overall mean — exactly the inflation a max-per-cell record book harvests at
+// that window width. One steady run = one committed sample per window it spans ≥2×. Serves
+// /altwinstats.csv; once a real charging session has filled it, pick the knee where avgInflPct goes
+// small and hard-set ALT_EMIT_AVG_MS to it, then this probe can be deleted.
+#define AWP_NWIN 7
+static const float AWP_WIN_S[AWP_NWIN] = { 1, 2, 4, 8, 15, 30, 60 };
+#define AWP_RING_N 620                     // 62 s @ the 10 Hz probe cadence — covers the 60 s window
+static float    *awpAmps = nullptr;        // PSRAM rings (allocated in altFrontInit)
+static uint32_t *awpT = nullptr;
+static int      awpHead = 0, awpN = 0;
+static uint32_t awpLastFeedMs = 0, awpLastCalcMs = 0;
+static bool     awpInRun = false;
+static uint32_t awpRunStartMs = 0, awpRunLastMs = 0;
+static double   awpRunSum = 0;
+static uint32_t awpRunN = 0;
+static float    awpRunMax[AWP_NWIN], awpRunMin[AWP_NWIN];
+static bool     awpRunHave[AWP_NWIN];
+static uint32_t awpCnt[AWP_NWIN];
+static double   awpSumInfl[AWP_NWIN], awpSumInflPct[AWP_NWIN], awpSumRange[AWP_NWIN];
+static float    awpMaxInfl[AWP_NWIN];
+static uint32_t awpRunsTotal = 0;
+static double   awpSteadySec = 0, awpAmpSum = 0;
+static uint32_t awpAmpN = 0;
+static void awpCloseRun() {
+  if (!awpInRun) return;
+  awpInRun = false;
+  if (awpRunN < 5) return;
+  float runMean = (float)(awpRunSum / awpRunN);
+  float durS = (float)((uint32_t)(awpRunLastMs - awpRunStartMs)) / 1000.0f;
+  awpRunsTotal++; awpSteadySec += durS;
+  if (runMean < 1.0f) return;              // ratio meaningless at near-zero output
+  for (int w = 0; w < AWP_NWIN; w++) {
+    if (!awpRunHave[w] || durS < 2.0f * AWP_WIN_S[w]) continue;   // ≥2 window-lengths of run for a fair max
+    float infl = awpRunMax[w] - runMean;
+    awpCnt[w]++;
+    awpSumInfl[w] += infl;
+    awpSumInflPct[w] += 100.0f * infl / runMean;
+    awpSumRange[w] += (awpRunMax[w] - awpRunMin[w]);
+    if (infl > awpMaxInfl[w]) awpMaxInfl[w] = infl;
+  }
+}
+static void awpReset() {
+  awpHead = awpN = 0; awpInRun = false;
+  memset(awpCnt, 0, sizeof(awpCnt));
+  memset(awpMaxInfl, 0, sizeof(awpMaxInfl));
+  for (int w = 0; w < AWP_NWIN; w++) awpSumInfl[w] = awpSumInflPct[w] = awpSumRange[w] = 0;
+  awpRunsTotal = 0; awpSteadySec = 0; awpAmpSum = 0; awpAmpN = 0;
+}
+static void altWinProbeFeed(uint32_t nowMs, float amps, bool steady) {
+  if (!awpAmps || !awpT) return;
+  if (awpLastFeedMs != 0 && (uint32_t)(nowMs - awpLastFeedMs) < 100u) return;
+  bool gap = (awpLastFeedMs != 0) && ((uint32_t)(nowMs - awpLastFeedMs) > 1000u);
+  awpLastFeedMs = nowMs;
+  if (gap || !steady) {
+    awpCloseRun(); awpN = 0; awpHead = 0;  // ring holds in-run data only; a gap can't bridge runs
+    if (!steady) return;
+  }
+  if (!awpInRun) {
+    awpInRun = true; awpRunStartMs = nowMs; awpRunSum = 0; awpRunN = 0;
+    for (int w = 0; w < AWP_NWIN; w++) { awpRunHave[w] = false; awpRunMax[w] = -1e30f; awpRunMin[w] = 1e30f; }
+  }
+  awpRunLastMs = nowMs;
+  awpAmps[awpHead] = amps; awpT[awpHead] = nowMs;
+  awpHead = (awpHead + 1) % AWP_RING_N;
+  if (awpN < AWP_RING_N) awpN++;
+  awpRunSum += amps; awpRunN++;
+  awpAmpSum += amps; awpAmpN++;
+  if ((uint32_t)(nowMs - awpLastCalcMs) < 1000u) return;   // trailing averages sampled 1/s, like emits
+  awpLastCalcMs = nowMs;
+  double sum = 0; int cnt = 0, wi = 0;
+  for (int back = 0; back < awpN && wi < AWP_NWIN; back++) {
+    int idx = (awpHead - 1 - back + AWP_RING_N) % AWP_RING_N;
+    uint32_t age = (uint32_t)(nowMs - awpT[idx]);
+    while (wi < AWP_NWIN && age > (uint32_t)(AWP_WIN_S[wi] * 1000.0f)) {
+      // window wi is complete (this sample is already older than it) → record its trailing average,
+      // but only once the run itself has spanned the window (no partial-window impostors)
+      if (cnt > 0 && (uint32_t)(nowMs - awpRunStartMs) >= (uint32_t)(AWP_WIN_S[wi] * 1000.0f)) {
+        float avg = (float)(sum / cnt);
+        if (avg > awpRunMax[wi]) awpRunMax[wi] = avg;
+        if (avg < awpRunMin[wi]) awpRunMin[wi] = avg;
+        awpRunHave[wi] = true;
+      }
+      wi++;
+    }
+    if (wi >= AWP_NWIN) break;
+    sum += awpAmps[idx]; cnt++;
+  }
+  for (; wi < AWP_NWIN; wi++) {            // ring exhausted before these windows aged out
+    if (cnt > 0 && (uint32_t)(nowMs - awpRunStartMs) >= (uint32_t)(AWP_WIN_S[wi] * 1000.0f)) {
+      float avg = (float)(sum / cnt);
+      if (avg > awpRunMax[wi]) awpRunMax[wi] = avg;
+      if (avg < awpRunMin[wi]) awpRunMin[wi] = avg;
+      awpRunHave[wi] = true;
+    }
+  }
+}
+// /altwinstats.csv — one row per candidate window width. avgInflA/avgInflPct = how far that window's
+// best trailing average sat above its run's mean (averaged over runs); maxInflA = worst single run;
+// avgRangeA = mean max-min spread of the window averages within a run. ?reset=1 clears.
+void altWinStatsCsvSend(AsyncWebServerRequest *request) {
+  if (request->hasParam("reset")) { awpReset(); request->send(200, "text/plain", "reset\n"); return; }
+  String out;
+  out.reserve(900);
+  if (!awpAmps || !awpT) { request->send(200, "text/plain", "probe unavailable (alloc failed)\n"); return; }
+  out += "# steadyRuns=" + String(awpRunsTotal) + " steadySec=" + String(awpSteadySec, 0);
+  out += " meanAmps=" + String((awpAmpN > 0) ? (float)(awpAmpSum / awpAmpN) : 0.0f, 1);
+  out += " prodWinMs=" + String((unsigned)ALT_EMIT_AVG_MS) + "\n";
+  out += "win_s,runs,avgInflA,avgInflPct,maxInflA,avgRangeA\n";
+  for (int w = 0; w < AWP_NWIN; w++) {
+    out += String(AWP_WIN_S[w], 0); out += ',';
+    out += String(awpCnt[w]);
+    if (awpCnt[w] > 0) {
+      out += ',';
+      out += String((float)(awpSumInfl[w] / awpCnt[w]), 2); out += ',';
+      out += String((float)(awpSumInflPct[w] / awpCnt[w]), 2); out += ',';
+      out += String(awpMaxInfl[w], 2); out += ',';
+      out += String((float)(awpSumRange[w] / awpCnt[w]), 2);
+    } else out += ",0,0,0,0";
+    out += '\n';
+  }
+  request->send(200, "text/csv", out);
+}
+
 // Live: called from the pidLog hook (~200 Hz). Bench-sim: called at 1 Hz from altHealth_tick.
 // Reads the final control state, EMA-filters the detector inputs, feeds the Episode detector, and on a
 // steady-run emit builds the surface point and STASHES it into altEmitQ — the O(count) work (front
@@ -798,6 +979,7 @@ void altFold_tick(uint32_t nowMs) {
   FrontPoint<ALT_NAXIS> ep;
   bool emitted = altEpisode.feed(eligible, s, &ep);
   altSteady = (altEpisode.count > 0);                              // FULL steady (temp held altThermSec) → ring + surface + trend
+  altWinProbeFeed(nowMs, fAmps, altSteady);                        // emit-window sizing probe (10 Hz internal decimation)
   // SESSION steady = all axes EXCEPT temperature steady on their ~3 s windows (Episode per-axis flags for
   // {RPM,duty,Vbus} + the amps band) AND temperature steady for the HALF dwell (altSessTempGate). Lets a
   // Session-plot dot appear before the full record-book dwell is reached.
@@ -867,7 +1049,8 @@ static void altProcessEmits() {
     // No console message on accept — the dashboard front-point counters show growth; logging every
     // accept spammed the console with same-cell improvements at steady state.
     if (altFront2.add(sp)) {                                              // optimistic local front (cloud re-prunes)
-      if (altPending && altPendingCount < ALT_PENDING_CAP) altPending[altPendingCount++] = sp;  // queue for upload
+      // Sim-folded points stay local (My History) — never queued, so synthetic data can't reach the cloud front
+      if (altSimMode < 0.5f && altPending && altPendingCount < ALT_PENDING_CAP) altPending[altPendingCount++] = sp;
     }
   }
   if (altEmitQCount > n) memmove(altEmitQ, altEmitQ + n, (size_t)(altEmitQCount - n) * sizeof(AltEmitPending));
@@ -909,6 +1092,7 @@ static float alf_sessP10()   {                                            // P10
 static float alf_sessN()     { return (float)altSessN; }
 static float alf_hiField()   { return altHiFieldAlert ? 1.0f : 0.0f; }    // high-field-low-output alert active
 static float alf_sim()       { return (altSimMode >= 0.5f) ? 1.0f : 0.0f; }
+static float alf_gAmps()     { return altLive_gAmps; }                    // graded boxcar-average amps (the % numerator)
 static float alf_syncAgo()   { if (lastAltHealthSyncEpoch <= 0 || !timeIsSynced) return -1.0f;
                                time_t n = time(NULL); return (n > (time_t)lastAltHealthSyncEpoch) ? (float)(n - (time_t)lastAltHealthSyncEpoch) : 0.0f; }
 // fold timing lives in the Function Timing table (ft_altHealth / ft_altFold rows) — not in this live stream
@@ -923,13 +1107,17 @@ static AltLiveField ALT_LIVE[] = {
   {"sessionMean", alf_sessMean}, {"sessionP10", alf_sessP10}, {"sessionN", alf_sessN},
   {"hiFieldAlert", alf_hiField},
   {"sim", alf_sim}, {"syncAgoS", alf_syncAgo},
+  {"gAmps", alf_gAmps},
 };
 static const size_t ALT_LIVE_COUNT = sizeof(ALT_LIVE) / sizeof(ALT_LIVE[0]);
 static void altSendLive() {
   char buf[384];
   int off = 0;
-  for (size_t i = 0; i < ALT_LIVE_COUNT; i++)
-    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), ALT_LIVE[i].get());
+  for (size_t i = 0; i < ALT_LIVE_COUNT; i++) {
+    int n = snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), ALT_LIVE[i].get());
+    if (n < 0 || off + n >= (int)sizeof(buf)) break;   // truncated echo beats stack overrun (snprintf returns would-be length)
+    off += n;
+  }
   events.send(buf, "AltLive");
 }
 
@@ -1045,7 +1233,7 @@ void altDebugCsvSend(AsyncWebServerRequest *request) {
               case 2: st.len = snprintf(st.line, sizeof(st.line), "LIVE,state_refOk_refDist,%d,%d,%.3f\n", (int)altState, (int)altRefOk, altRefDist); break;
               case 3: st.len = snprintf(st.line, sizeof(st.line), "GATE,sessSteady_fullSteady_valid,%d,%d,%d\n", (int)altSessSteady, (int)altSteady, (int)altLiveValid); break;
               case 4: st.len = snprintf(st.line, sizeof(st.line), "GATE,ignoreTemp_paused_refSrc_haveUp_sim,%d,%.0f,%d,%d,%.0f\n", (int)IgnoreTemperature, altPaused, (int)altRefSource, (int)altHaveUpload, altSimMode); break;
-              case 5: st.len = snprintf(st.line, sizeof(st.line), "BUCKET,sum_n_worst_idx,%.4f,%.0f,%.4f,%d\n", altBucket_sum, altBucket_n, altBucket_worst, altCurEngHour); break;
+              case 5: st.len = snprintf(st.line, sizeof(st.line), "BUCKET,sum_n_min_p10_idx,%.4f,%.0f,%.4f,%.1f,%d\n", altBucket_sum, altBucket_n, altBucket_worst, altBucketP10(), altCurEngHour); break;
               case 6: st.len = snprintf(st.line, sizeof(st.line), "BUCKET,baseline_engNow_bucketSec,%.1f,%.1f,%.0f\n", altTrendBaselineSec, EngineRunTime_AllTime, altTrendBucketSec); break;
               case 7: st.len = snprintf(st.line, sizeof(st.line), "SESSION,mean_p10_n,%.1f,%.1f,%lu\n", alf_sessMean(), alf_sessP10(), (unsigned long)altSessN); break;
               case 8: st.len = snprintf(st.line, sizeof(st.line), "COUNT,myHist_upload_trend_myHistSrc_upSrc,%d,%d,%d,%d,%d\n", st.myN, st.upN, st.trN, (int)altFront2.source, (int)altFrontUp.source); break;
@@ -1112,8 +1300,18 @@ static bool altIngestFrontCsvInto(char *body, bool toUploaded) {
   uint8_t newSource = 0;
   { char saved = *nl; *nl = '\0';                       // header: BEFRONT1,sys,naxis,source,units…
     char *t = strtok(p, ",");                           // BEFRONT1
-    t = strtok(NULL, ",");                              // sys
+    t = strtok(NULL, ",");                              // sys — must be ALT: a boat-polar BEFRONT1 (SAIL/MOTOR)
+    if (!t || strcmp(t, "ALT") != 0) {                  // parses column-shifted into garbage alt points otherwise
+      *nl = saved;
+      queueConsoleMessageF("AltFront: rejected import — header sys '%s' is not ALT", t ? t : "?");
+      return false;
+    }
     t = strtok(NULL, ",");                              // naxis
+    if (!t || atoi(t) != ALT_NAXIS) {
+      *nl = saved;
+      queueConsoleMessageF("AltFront: rejected import — %d axes, expected %d", t ? atoi(t) : 0, ALT_NAXIS);
+      return false;
+    }
     t = strtok(NULL, ",");                              // source
     if (t) newSource = (uint8_t)atoi(t);
     *nl = saved; }
@@ -1243,9 +1441,9 @@ bool altUploadFrontCsv(char *body, bool fixed) {
   settingWrite(NK_altRefSrc, "1");
   queueConsoleMessageF("AltFront: UPLOADED %d pts to Uploaded surface (%s); My History kept",
                        altFrontUp.count, fixed ? "Pause ON" : "still learning My History");
-  // Field on: flash writes stall both cores' cache — RAM surfaces are live now and the
-  // +28s field-off flush (Gate 2, Xregulator.ino) persists them at the next field-off.
-  if (fieldActiveStatus <= 0) altHealthSave();
+  // Immediate persist even field-on: user-initiated import, the brief flash-write control
+  // stall is accepted for user actions (owner decision 2026-08-14).
+  altHealthSave();
   return true;
 }
 
@@ -1295,6 +1493,7 @@ void resetAlternatorHealth() {
   altEpisode.clearRun(); altEpisode.ringHead = 0; altEpisode.ringCount = 0;
   altTrendCount = 0; altTrendFlushed = 0; altTrendRewrite = true;   // /alttrend.bin removed below → fresh log
   altBucket_sum = 0; altBucket_n = 0; altBucket_worst = 0; altCurEngHour = -1;
+  memset(altBucketHist, 0, sizeof(altBucketHist));
   altPersistTrendBucket();                       // overwrite the persisted partial bucket with the cleared one
   altWorstPctLive = 0; altOverallPctLive = 0; altStatusCode = 0; altLive_pct = 0;
   altState = FRONT_NO_REFERENCE; altHiFieldAlert = false;
@@ -1317,6 +1516,8 @@ void altFrontInit() {
   altFrontBuf   = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
   altFrontUpBuf = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
   altPending  = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_PENDING_CAP * sizeof(FrontPoint<ALT_NAXIS>));
+  awpAmps = (float *)ps_malloc((size_t)AWP_RING_N * sizeof(float));         // window-sizing probe rings (~5 KB)
+  awpT    = (uint32_t *)ps_malloc((size_t)AWP_RING_N * sizeof(uint32_t));
   if (!altEpRing || !altFrontBuf || !altFrontUpBuf || !altPending) { queueConsoleMessage("ERROR: AltFront ps_malloc failed"); return; }
   memset(altEpRing,     0, (size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>));
   memset(altFrontBuf,   0, (size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
@@ -1327,6 +1528,7 @@ void altFrontInit() {
   // headroom, temperature 240 s (covers the full temp dwell + room). Index 4 = the output (amps) band.
   static const float ALT_MAXDWELL[ALT_NAXIS + 1] = { 30.0f, 30.0f, 30.0f, 240.0f, 30.0f };
   altEpisode.init(altEpRing, ALT_EP_RING_CAP, ALT_MAXDWELL);
+  altEpisode.avgWinMs = ALT_EMIT_AVG_MS;   // sail/motor keep the 2 s default; alt records are sustained averages
   altEpisodeSyncCfg(0.0f);   // amps band starts at the floor; resized from filtered amps every fold
   altSessTempGate.init(2600);   // session-temp (half-dwell) gate, ~240 s of 10 Hz headroom (matches temp axis maxdwell)
   altFront2.init(altFrontBuf, ALT_FRONT_CAP);
@@ -1374,7 +1576,20 @@ void altHealth_tick(uint32_t nowMs) {
   bool foldFresh = (altLastFoldMs != 0) && ((uint32_t)(nowMs - altLastFoldMs) < 3000u);
   if (!foldFresh) altLiveValid = false;
   if (foldFresh && altLiveValid) {
+    // Grade the SAME statistic the records store: the episode's trailing-boxcar averages (coords AND
+    // amps). A half-second snapshot divided by a best-ever boxcar reads ~95% on a healthy machine
+    // (middle-of-wiggle ÷ top-of-wiggle); boxcar-vs-boxcar reads ~100. Ring empty (just became
+    // eligible / output below the admission floor) → fall back to the fast EMA point.
     float surf[ALT_NAXIS] = { altLive_rpm, altLive_exc, altLive_vbus, altLive_tF };
+    altLive_gAmps = altLive_amps;
+    if (altEpisode.ringCount > 0) {
+      double rc = (double)altEpisode.ringCount;
+      surf[0] = (float)(altEpisode.avgSumX[0] / rc);                      // RPM
+      surf[2] = (float)(altEpisode.avgSumX[2] / rc);                      // Vbus
+      surf[3] = (float)(altEpisode.avgSumX[3] / rc);                      // tempF
+      surf[1] = altExcitation((float)(altEpisode.avgSumX[1] / rc), surf[2], surf[3]);   // exc, same derivation as emits
+      altLive_gAmps = (float)(altEpisode.avgSumOut / rc);
+    }
     // Grade against the ACTIVE reference surface (My History or Uploaded). The trend uses the same
     // surface (in altProcessEmits) — session % and trend are graded identically (spec §1/§4.2).
     FrontStore<ALT_NAXIS> &gf = altGradeFront();
@@ -1384,7 +1599,7 @@ void altHealth_tick(uint32_t nowMs) {
     altState = (uint8_t)gf.classify(surf, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &pred);
     altLive_pred = pred;
     altRefOk = (altState == FRONT_MEASURED || altState == FRONT_ESTIMATED);
-    altLive_pct = (altRefOk && pred > 0.1f) ? (altLive_amps / pred * 100.0f) : 0.0f;
+    altLive_pct = (altRefOk && pred > 0.1f) ? (altLive_gAmps / pred * 100.0f) : 0.0f;
     // Session stats = the SESSION-PLOTTED points: session-steady (lighter gate) AND graded. The trend is
     // NOT fed here — it is built purely from FULL-steady runs in altProcessEmits (spec §2).
     if (altSessSteady && altRefOk && altLive_pct > 0.0f) {
@@ -1485,8 +1700,11 @@ bool altSettingsHandle(AsyncWebServerRequest *request) {
 void sendAltSettings() {
   char buf[320];
   int off = 0;
-  for (size_t i = 0; i < ALT_SETTING_COUNT; i++)
-    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.4f" : "%.4f"), *ALT_SETTINGS[i].ptr);
+  for (size_t i = 0; i < ALT_SETTING_COUNT; i++) {
+    int n = snprintf(buf + off, sizeof(buf) - off, (i ? ",%.4f" : "%.4f"), *ALT_SETTINGS[i].ptr);
+    if (n < 0 || off + n >= (int)sizeof(buf)) break;   // truncated echo beats stack overrun (snprintf returns would-be length)
+    off += n;
+  }
   events.send(buf, "AltSettings");
 }
 
@@ -1513,7 +1731,9 @@ String altSchemaJson() {
 #define PERF_NAXIS       3
 #define PERF_FRONT_CAP   4096     // sparse support points (PSRAM); sized to be unreachable even for fast hulls AP-mode/no-prune (see ALT_HEALTH_LWLR_ENGINE_SPEC.md)
 #define PERF_EP_RING_CAP 2048    // Episode trailing-boxcar buffer (PSRAM); only ~EP_AVG_WIN_MS of decimated samples are live (steadiness windows are in the per-axis deques)
-#define PERF_PENDING_CAP 4096     // = front cap: holds every unsynced point through weeks offline (PSRAM)
+#define PERF_PENDING_CAP 4096     // = front cap (PSRAM). Covers weeks offline because non-admitted raw
+                                  // points are per-cell throttled at queue time (PerfPendingQ::push);
+                                  // admitted best-ever points always get a slot.
 
 static Episode<PERF_NAXIS>    sailEpisode,  motorEpisode;
 static FrontStore<PERF_NAXIS> sailFront,    motorFront;
@@ -1521,6 +1741,8 @@ static RawSample<PERF_NAXIS>  *sailRing = nullptr,     *motorRing = nullptr;
 static FrontPoint<PERF_NAXIS> *sailFrontBuf = nullptr, *motorFrontBuf = nullptr;
 static FrontPoint<PERF_NAXIS> *sailPending = nullptr,  *motorPending = nullptr;
 static int sailPendingCount = 0, motorPendingCount = 0;
+static uint8_t *sailPendingAdm = nullptr, *motorPendingAdm = nullptr;   // 1 = admitted into the local front (never evicted/dropped)
+static bool perfPendingOverflowWarned = false;   // one-shot until the next successful cloud sync
 static String perfPendingSeededFrom = "";   // non-empty → this pending batch is an adopted import (provenance tag)
 static bool sailCapWarned = false, motorCapWarned = false;   // once per boot OR per Clear All (cleared in resetBoatPerformance)
 
@@ -1547,7 +1769,54 @@ float perfCoveragePct()      { return sailFrontBuf  ? (100.0f * (float)sailFront
 float perfMotorCoveragePct() { return motorFrontBuf ? (100.0f * (float)motorFront.count / (float)PERF_FRONT_CAP) : 0.0f; }
 int   perfSailCount()  { return sailFront.count; }
 int   perfMotorCount() { return motorFront.count; }
-void  perfClearPending() { sailPendingCount = 0; motorPendingCount = 0; perfPendingSeededFrom = ""; }   // cloud accepted the batch + tag
+void  perfClearPending() { sailPendingCount = 0; motorPendingCount = 0; perfPendingSeededFrom = ""; perfPendingOverflowWarned = false; }   // cloud accepted the batch + tag
+
+// Pending-queue admission (policy 2026-08-14). ADMITTED points (FrontStore::add returned true — they
+// opened or beat a local best-ever cell) always queue: on overflow they evict the oldest non-admitted
+// raw point, so the "front is built locally, cloud only prunes" invariant survives any offline
+// stretch. Non-admitted raw points are per-cell rate limited (same half-axisScale cell as
+// FrontStore::add dedupes in) so PERF_PENDING_CAP genuinely covers weeks, and drop with a one-shot
+// warning when the queue is full. Template so Arduino's auto-prototype generator (which can't parse
+// template types in signatures) leaves it alone.
+#define PERF_RAW_CELL_THROTTLE_MS 600000u   // one non-admitted raw push per conditions-cell per 10 min
+// Struct wrapper (not a free function): Arduino's auto-prototype generator emits a broken prototype
+// for any free function with a template type in its signature; struct members are left alone.
+struct PerfPendingQ {
+  template <int N>
+  static void push(FrontPoint<N> *q, uint8_t *adm, int &n, const FrontPoint<N> &p,
+                   bool admitted, const float axisScale[N], uint32_t nowMs) {
+    if (!q || !adm) return;
+  if (!admitted) {
+    // Newest → oldest, bounded by the throttle window (tEmit is nondecreasing for live emits).
+    for (int i = n - 1; i >= 0; i--) {
+      if ((uint32_t)(nowMs - q[i].tEmit) >= PERF_RAW_CELL_THROTTLE_MS) break;
+      bool sameCell = true;
+      for (int a = 0; a < N; a++) {
+        float sc = (axisScale[a] > 1e-9f) ? axisScale[a] : 1.0f;
+        if (fabsf(p.x[a] - q[i].x[a]) > 0.5f * sc) { sameCell = false; break; }
+      }
+      if (sameCell) return;   // this cell already queued inside the window
+    }
+  }
+  if (n < PERF_PENDING_CAP) { adm[n] = admitted ? 1 : 0; q[n] = p; n++; return; }
+  if (!admitted) {
+    if (!perfPendingOverflowWarned) {
+      perfPendingOverflowWarned = true;
+      queueConsoleMessage("WARN: perf pending queue full — raw episode points dropped until next cloud sync");
+    }
+    return;
+  }
+  for (int i = 0; i < PERF_PENDING_CAP; i++) {
+    if (!adm[i]) {   // evict the oldest non-admitted raw point
+      memmove(&q[i], &q[i + 1], (size_t)(PERF_PENDING_CAP - 1 - i) * sizeof(FrontPoint<N>));
+      memmove(&adm[i], &adm[i + 1], (size_t)(PERF_PENDING_CAP - 1 - i));
+      q[PERF_PENDING_CAP - 1] = p; adm[PERF_PENDING_CAP - 1] = 1;
+      return;
+    }
+  }
+  // Queue holds 4096 unsynced ADMITTED records (needs that many distinct best-ever cells) — drop.
+  }
+};
 
 // Fold |AWA| to [0,180] when symmetric (eval/display only — raw AWA is stored to pending/cloud).
 static inline float perfFoldAwa(float a) {
@@ -1673,11 +1942,11 @@ void perfFold_tick(uint32_t nowMs) {
   ss.ex[0] = 0; ss.ex[1] = 0;   // sail keeps raw AWS/AWA as surface axes x0/x1 already — no extras needed
   if (sailEpisode.feed(sailElig, ss, &ep)) {
     FrontPoint<PERF_NAXIS> raw = ep;                                  // raw both-sided AWA → cloud
-    if (sailPending && sailPendingCount < PERF_PENDING_CAP) sailPending[sailPendingCount++] = raw;
     FrontPoint<PERF_NAXIS> sp = ep; sp.x[1] = perfFoldAwa(ep.x[1]);   // device front: folded AWA (gate operates on folded coords)
     // Cell-local admit gate (alt pattern): unvisited cell → unconditional; local support → beat
     // the min(IDW, LWLR) hybrid bar − margin.
     bool sailLocal = sailFront.hasLocalSupport(sp.x);
+    bool sailAdmitted = false;
     if (!sailLocal || sailFront.pushesHybrid(sp.x, sp.y, perfSafetyMargin, perfIdwPower, perfRidgeFrac)) {
       if (!sailLocal && sailFront.count >= PERF_FRONT_CAP) {
         // a genuinely NEW conditions cell dropped at capacity (in-cell improvements still land)
@@ -1685,8 +1954,10 @@ void perfFold_tick(uint32_t nowMs) {
           sailCapWarned = true;
           queueConsoleMessage("WARN: sail front at capacity — new conditions are no longer recorded");
         }
-      } else sailFront.add(sp);   // no console message on accept (counter on the dashboard)
+      } else sailAdmitted = sailFront.add(sp);   // no console message on accept (counter on the dashboard)
     }
+    // Queue AFTER the admit gate so admitted points carry their never-drop flag (sim never uploads).
+    if (perfSimMode < 0.5f) PerfPendingQ::push(sailPending, sailPendingAdm, sailPendingCount, raw, sailAdmitted, sailFront.axisScale, nowMs);
   }
 
   bool motorLearn = (motorFront.source != 1);
@@ -1694,9 +1965,9 @@ void perfFold_tick(uint32_t nowMs) {
   RawSample<PERF_NAXIS> ms; ms.x[0] = rpm; ms.x[1] = headwind; ms.x[2] = sea; ms.out = spd; ms.tMs = nowMs;
   ms.ex[0] = aws; ms.ex[1] = awa;   // retain raw AWS/AWA (headwind is derived from them) for cloud diagnosis
   if (motorEpisode.feed(motorElig, ms, &ep)) {
-    if (motorPending && motorPendingCount < PERF_PENDING_CAP) motorPending[motorPendingCount++] = ep;
     // Cell-local admit gate — same pattern as the sail site above.
     bool motorLocal = motorFront.hasLocalSupport(ep.x);
+    bool motorAdmitted = false;
     if (!motorLocal || motorFront.pushesHybrid(ep.x, ep.y, perfSafetyMargin, perfIdwPower, perfRidgeFrac)) {
       if (!motorLocal && motorFront.count >= PERF_FRONT_CAP) {
         // a genuinely NEW conditions cell dropped at capacity (in-cell improvements still land)
@@ -1704,8 +1975,10 @@ void perfFold_tick(uint32_t nowMs) {
           motorCapWarned = true;
           queueConsoleMessage("WARN: motor front at capacity — new conditions are no longer recorded");
         }
-      } else motorFront.add(ep);   // no console message on accept (counter on the dashboard)
+      } else motorAdmitted = motorFront.add(ep);   // no console message on accept (counter on the dashboard)
     }
+    // Queue AFTER the admit gate so admitted points carry their never-drop flag (sim never uploads).
+    if (perfSimMode < 0.5f) PerfPendingQ::push(motorPending, motorPendingAdm, motorPendingCount, ep, motorAdmitted, motorFront.axisScale, nowMs);
   }
 
   // steady-run indicator: the active mode's Episode is currently accumulating eligible samples
@@ -1827,8 +2100,11 @@ static const size_t PERF_LIVE_COUNT = sizeof(PERF_LIVE) / sizeof(PERF_LIVE[0]);
 static void perfSendLive() {
   char buf[256];
   int off = 0;
-  for (size_t i = 0; i < PERF_LIVE_COUNT; i++)
-    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), PERF_LIVE[i].get());
+  for (size_t i = 0; i < PERF_LIVE_COUNT; i++) {
+    int n = snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), PERF_LIVE[i].get());
+    if (n < 0 || off + n >= (int)sizeof(buf)) break;   // truncated echo beats stack overrun (snprintf returns would-be length)
+    off += n;
+  }
   events.send(buf, "PerfLive");
 }
 
@@ -1861,8 +2137,11 @@ static const size_t PERF_MOTOR_LIVE_COUNT = sizeof(PERF_MOTOR_LIVE) / sizeof(PER
 static void perfSendMotorLive() {
   char buf[256];
   int off = 0;
-  for (size_t i = 0; i < PERF_MOTOR_LIVE_COUNT; i++)
-    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), PERF_MOTOR_LIVE[i].get());
+  for (size_t i = 0; i < PERF_MOTOR_LIVE_COUNT; i++) {
+    int n = snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), PERF_MOTOR_LIVE[i].get());
+    if (n < 0 || off + n >= (int)sizeof(buf)) break;   // truncated echo beats stack overrun (snprintf returns would-be length)
+    off += n;
+  }
   events.send(buf, "MotorLive");
 }
 
@@ -2056,12 +2335,12 @@ bool perfUploadFrontCsv(char *body, bool fixed) {
     sailPendingCount = motorPendingCount = 0; perfPendingSeededFrom = "";
   } else {                                      // LEARN — adopt to cloud: stage both fronts (tagged), keep refining
     sailPendingCount = motorPendingCount = 0;   // replace pending with the imported set (pure seeded batch)
-    for (int i = 0; i < sailFront.count  && sailPendingCount  < PERF_PENDING_CAP; i++) sailPending[sailPendingCount++]   = sailFrontBuf[i];
-    for (int i = 0; i < motorFront.count && motorPendingCount < PERF_PENDING_CAP; i++) motorPending[motorPendingCount++] = motorFrontBuf[i];
+    for (int i = 0; i < sailFront.count  && sailPendingCount  < PERF_PENDING_CAP; i++) { if (sailPendingAdm)  sailPendingAdm[sailPendingCount]   = 1; sailPending[sailPendingCount++]   = sailFrontBuf[i]; }
+    for (int i = 0; i < motorFront.count && motorPendingCount < PERF_PENDING_CAP; i++) { if (motorPendingAdm) motorPendingAdm[motorPendingCount] = 1; motorPending[motorPendingCount++] = motorFrontBuf[i]; }
     perfPendingSeededFrom = "import";
   }
-  // Field on: defer flash write to the +28s field-off flush (Gate 2) — see altUploadFrontCsv.
-  if (fieldActiveStatus <= 0) boatPerfSave();
+  // Immediate persist even field-on: user-initiated import — see altUploadFrontCsv.
+  boatPerfSave();
   queueConsoleMessageF("PerfFront: UPLOADED sail %d + motor %d (%s)",
                        sailFront.count, motorFront.count, fixed ? "FIXED, paused" : "LEARNED, adopting to cloud");
   return true;
@@ -2075,7 +2354,10 @@ void initBoatPerformance() {
   motorFrontBuf = (FrontPoint<PERF_NAXIS> *)ps_malloc((size_t)PERF_FRONT_CAP   * sizeof(FrontPoint<PERF_NAXIS>));
   sailPending   = (FrontPoint<PERF_NAXIS> *)ps_malloc((size_t)PERF_PENDING_CAP * sizeof(FrontPoint<PERF_NAXIS>));
   motorPending  = (FrontPoint<PERF_NAXIS> *)ps_malloc((size_t)PERF_PENDING_CAP * sizeof(FrontPoint<PERF_NAXIS>));
-  if (!sailRing || !motorRing || !sailFrontBuf || !motorFrontBuf || !sailPending || !motorPending) {
+  sailPendingAdm  = (uint8_t *)ps_malloc(PERF_PENDING_CAP);
+  motorPendingAdm = (uint8_t *)ps_malloc(PERF_PENDING_CAP);
+  if (!sailRing || !motorRing || !sailFrontBuf || !motorFrontBuf || !sailPending || !motorPending
+      || !sailPendingAdm || !motorPendingAdm) {
     queueConsoleMessage("ERROR: BoatPerf ps_malloc failed"); return;
   }
   memset(sailFrontBuf,  0, (size_t)PERF_FRONT_CAP * sizeof(FrontPoint<PERF_NAXIS>));
@@ -2239,8 +2521,11 @@ bool perfSettingsHandle(AsyncWebServerRequest *request) {
 void sendPerfSettings() {
   char buf[320];   // 23 registry floats at %.4f — headroom over the worst case
   int off = 0;
-  for (size_t i = 0; i < PERF_SETTING_COUNT; i++)
-    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.4f" : "%.4f"), *PERF_SETTINGS[i].ptr);
+  for (size_t i = 0; i < PERF_SETTING_COUNT; i++) {
+    int n = snprintf(buf + off, sizeof(buf) - off, (i ? ",%.4f" : "%.4f"), *PERF_SETTINGS[i].ptr);
+    if (n < 0 || off + n >= (int)sizeof(buf)) break;   // truncated echo beats stack overrun (snprintf returns would-be length)
+    off += n;
+  }
   events.send(buf, "PerfSettings");
 }
 

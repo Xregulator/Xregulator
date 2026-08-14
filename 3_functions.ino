@@ -1555,6 +1555,8 @@ void setupWiFiConfigServer() {
 
     // Blank client SSID = user only came for AP settings — leave stored client creds untouched
     // (mirrors the blank-hotspot_ssid handling; an unconditional write here wiped working WiFi).
+    // Deliberate erase goes through the explicit forget_client checkbox instead.
+    bool forgetClient = (ssid[0] == '\0' && request->hasParam("forget_client", true));
     if (ssid[0] != '\0') {
       settingWrite(NK_ssid, ssid);
       settingWrite(NK_pass, password);
@@ -1566,6 +1568,12 @@ void setupWiFiConfigServer() {
       cached_wifi_pass[sizeof(cached_wifi_pass) - 1] = '\0';
 
       cached_wifi_creds_valid = true;
+    } else if (forgetClient) {
+      settingRemove(NK_ssid);
+      settingRemove(NK_pass);
+      cached_wifi_ssid[0] = '\0';
+      cached_wifi_pass[0] = '\0';
+      cached_wifi_creds_valid = false;
     }
 
     Serial.printf("Verification - SSID: '%s'\n", cached_wifi_ssid);
@@ -1574,6 +1582,8 @@ void setupWiFiConfigServer() {
 
     request->send(200, "text/plain", ssid[0] != '\0'
                                        ? "Configuration saved! Device will restart in 3 seconds."
+                                     : forgetClient
+                                       ? "Ship's WiFi credentials erased. Device will restart in 3 seconds into this setup page (charging disabled until WiFi is configured or the Hotspot Wire is used)."
                                        : "Configuration saved (client WiFi credentials unchanged). Device will restart in 3 seconds.");
 
     Serial.println("=== CONFIGURATION SAVED - RESTARTING ===");
@@ -1595,8 +1605,9 @@ void setupWiFiConfigServer() {
   Serial.println("=== WIFI CONFIG SERVER SETUP COMPLETE ===");
 }
 
-// Raw WiFiClientSecure POST for the 4 cloud-POST handlers (/checkRegistration /registerProfile
-// /updateProfile /deleteAllData). Deliberately NOT HTTPClient: HTTPClient::getString() hangs on
+// Raw WiFiClientSecure POST for the 4 registration/profile cloud ops (/checkRegistration
+// /registerProfile /updateProfile /deleteAllData — executed via executeCloudOp on the httpsTask
+// worker, never inside a web handler). Deliberately NOT HTTPClient: HTTPClient::getString() hangs on
 // TLS, and http.begin(url) with no WiFiClientSecure has undefined behavior on https URLs. Pattern
 // mirrors executeUploadPayload() in 2_functions.ino. Returns HTTP status code (e.g. 200,
 // 401) on success, or a negative sentinel on transport failure:
@@ -1794,12 +1805,202 @@ const char *cloudFailReason(int code) {
   }
 }
 
+// ── Async cloud-op slot: /checkRegistration /registerProfile /updateProfile /deleteAllData stage
+// here and answer 202 immediately; the httpsTask worker runs doCloudPOST + the old handler's
+// post-processing (executeCloudOp below); /cloudOpState serves the finished (code, body) to the
+// polling client. One op in flight at a time — these are single-user dashboard actions. Plain
+// globals (no slot struct) because Arduino's auto-prototype generator can't parse sketch-defined
+// types in free-function signatures.
+#define CLOUDOP_CHECK_REG      1
+#define CLOUDOP_REGISTER       2
+#define CLOUDOP_UPDATE_PROFILE 3
+#define CLOUDOP_DELETE_DATA    4
+#define CLOUDOP_PAYLOAD_CAP 1024
+#define CLOUDOP_RESP_CAP    2048
+#define CLOUDOP_BODY_CAP    2304   // resp + envelope headroom, so pass-through can never truncate
+static volatile uint8_t cloudOpState = 0;   // 0 idle, 1 pending, 2 done
+static volatile uint8_t cloudOpKind = 0;
+static volatile int cloudOpCode = 0;        // HTTP status the old synchronous handler would have sent
+static uint32_t cloudOpSeq = 0;
+static char *cloudOpPayload = nullptr;      // PSRAM, lazy — staged request JSON
+static char *cloudOpResp = nullptr;         // PSRAM, lazy — raw cloud response scratch (worker only)
+static char *cloudOpBody = nullptr;         // PSRAM, lazy — final JSON body for the poll
+
+static bool cloudOpBuffersReady() {
+  if (!cloudOpPayload) cloudOpPayload = (char *)ps_malloc(CLOUDOP_PAYLOAD_CAP);
+  if (!cloudOpResp)    cloudOpResp    = (char *)ps_malloc(CLOUDOP_RESP_CAP);
+  if (!cloudOpBody)    cloudOpBody    = (char *)ps_malloc(CLOUDOP_BODY_CAP);
+  return cloudOpPayload && cloudOpResp && cloudOpBody;
+}
+
+// Pass a cloud response through to the poll body — the poll envelope embeds it verbatim, so it
+// must be JSON; anything else (proxy error page) is replaced instead of corrupting the envelope.
+static void cloudOpSetBodyJson(const char *resp) {
+  if (resp[0] == '{' || resp[0] == '[') strlcpy(cloudOpBody, resp, CLOUDOP_BODY_CAP);
+  else snprintf(cloudOpBody, CLOUDOP_BODY_CAP, "{\"error\":\"malformed cloud response\"}");
+}
+
+static void cloudOpStageAndReply(AsyncWebServerRequest *request, uint8_t kind, const char *payload) {
+  if (!cloudOpBuffersReady()) {
+    request->send(500, "application/json", "{\"error\":\"alloc failed\"}");
+    return;
+  }
+  if (cloudOpState == 1) {
+    request->send(503, "application/json", "{\"error\":\"cloud operation already in progress\"}");
+    return;
+  }
+  if (strlen(payload) >= CLOUDOP_PAYLOAD_CAP) {
+    request->send(500, "application/json", "{\"error\":\"payload too large\"}");
+    return;
+  }
+  strcpy(cloudOpPayload, payload);
+  cloudOpKind = kind;
+  cloudOpCode = 0;
+  cloudOpBody[0] = '\0';
+  cloudOpSeq++;
+  cloudOpState = 1;
+  HttpsRequest req = { .type = HTTPS_CLOUD_OP };
+  if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+    cloudOpState = 0;
+    request->send(503, "application/json", "{\"error\":\"cloud queue full, retry shortly\"}");
+    return;
+  }
+  char buf[64];
+  snprintf(buf, sizeof(buf), "{\"state\":\"pending\",\"op\":%u}", (unsigned)cloudOpSeq);
+  request->send(202, "application/json", buf);
+}
+
+// Runs on the httpsTask worker (HTTPS_CLOUD_OP). Mirrors the old synchronous handlers' response
+// handling exactly — token save/clear, post-registration version/forced checks, snapshot request.
+void executeCloudOp() {
+  if (cloudOpState != 1 || !cloudOpBuffersReady()) { cloudOpState = 0; return; }
+  char *resp = cloudOpResp;
+  resp[0] = '\0';
+  int outCode = 200;
+  snprintf(cloudOpBody, CLOUDOP_BODY_CAP, "{\"error\":\"internal\"}");
+  switch (cloudOpKind) {
+    case CLOUDOP_CHECK_REG: {
+      int httpCode = doCloudPOST("/functions/v1/validate-token", cloudOpPayload, resp, CLOUDOP_RESP_CAP);
+      Serial.printf("Validate-token HTTP code: %d\n", httpCode);
+      if (httpCode == 200) {
+        queueConsoleMessage("Cloud: profile verified");
+        DynamicJsonDocument doc(2048);
+        DeserializationError error = deserializeJson(doc, resp);
+        if (error) {
+          snprintf(cloudOpBody, CLOUDOP_BODY_CAP, "{\"registered\":false,\"error\":\"parse_failed\"}");
+        } else if (doc["device_uid"].as<String>() != String(device_id_hex)) {
+          Serial.println("ERROR: Token device mismatch!");
+          snprintf(cloudOpBody, CLOUDOP_BODY_CAP, "{\"registered\":false,\"error\":\"device_mismatch\"}");
+        } else {
+          cloudOpSetBodyJson(resp);   // token valid and matches — full profile data through
+        }
+      } else if (httpCode == 401) {
+        queueConsoleMessage("Cloud: ready to register");
+        DynamicJsonDocument doc(1024);
+        DeserializationError error = deserializeJson(doc, resp);
+        String errorMsg = (!error && doc.containsKey("error")) ? doc["error"].as<String>() : String("");
+        // Only clear credentials if the token genuinely doesn't exist in the database
+        if (errorMsg == "Invalid token" || errorMsg == "Token not found") {
+          Serial.println("Clearing invalid credentials - device ready for re-registration");
+          clearAuthToken();
+        }
+        snprintf(cloudOpBody, CLOUDOP_BODY_CAP, "{\"registered\":false,\"error\":\"validation_failed\"}");
+      } else {
+        snprintf(cloudOpBody, CLOUDOP_BODY_CAP, "{\"registered\":false,\"error\":\"network_error\"}");
+      }
+      outCode = 200;   // the old handler answered 200 on every one of these paths
+      break;
+    }
+    case CLOUDOP_REGISTER: {
+      int httpCode = doCloudPOST("/functions/v1/register-device", cloudOpPayload, resp, CLOUDOP_RESP_CAP);
+      Serial.printf("Register response code: %d\n", httpCode);
+      if (httpCode <= 0) {
+        queueConsoleMessageF("Registration failed: %s (code %d)", cloudFailReason(httpCode), httpCode);
+        snprintf(cloudOpBody, CLOUDOP_BODY_CAP, "{\"error\":\"Connection to cloud failed\",\"code\":%d}", httpCode);
+        outCode = 503;
+      } else if (resp[0] == '\0') {
+        queueConsoleMessageF("Registration failed: empty response from cloud (HTTP %d)", httpCode);
+        snprintf(cloudOpBody, CLOUDOP_BODY_CAP, "{\"error\":\"Empty response from cloud\",\"code\":%d}", httpCode);
+        outCode = 502;
+      } else {
+        if (httpCode == 200) {
+          DynamicJsonDocument responseDoc(1024);
+          DeserializationError error = deserializeJson(responseDoc, resp);
+          if (!error && responseDoc.containsKey("token")) {
+            String newToken = responseDoc["token"].as<String>();
+            if (newToken.length() > 0) {
+              saveAuthToken(newToken);
+              Serial.println("Token saved to NVS");
+              // The boot checks latched otaCheckDone while this device was still unregistered, so
+              // nothing would report our version or see a forced update until the next reboot.
+              // Version first: the cloud clears a forced flag once the reported version reaches it.
+              // Factory partition excluded for the same reasons as the boot check in Xregulator.ino.
+              if (currentPartitionType != 0) {
+                HttpsRequest verReq = { .type = HTTPS_UPDATE_FW_VERSION };
+                HttpsRequest forcedReq = { .type = HTTPS_CHECK_FORCED_UPDATE };
+                bool verSent = (xQueueSend(httpsQueue, &verReq, 0) == pdTRUE);
+                bool forcedSent = (xQueueSend(httpsQueue, &forcedReq, 0) == pdTRUE);
+                if (!verSent || !forcedSent) {
+                  Serial.println("REGISTER: HTTPS queue full - version/forced check deferred to next boot");
+                }
+              }
+              // Fill the new profile's vessel columns now — registration is identity-only, the
+              // snapshot's settings jsonb is what carries the vessel record to the cloud.
+              configSnapshotRequested = true;
+            }
+          }
+        }
+        cloudOpSetBodyJson(resp);
+        outCode = httpCode;
+      }
+      break;
+    }
+    case CLOUDOP_UPDATE_PROFILE: {
+      int httpCode = doCloudPOST("/functions/v1/update-profile", cloudOpPayload, resp, CLOUDOP_RESP_CAP);
+      Serial.printf("Update-profile response code: %d\n", httpCode);
+      if (httpCode <= 0) {
+        queueConsoleMessageF("Profile update failed: %s (code %d)", cloudFailReason(httpCode), httpCode);
+        snprintf(cloudOpBody, CLOUDOP_BODY_CAP,
+                 "{\"success\":false,\"error\":\"Connection to cloud failed\",\"code\":%d}", httpCode);
+        outCode = 503;
+      } else {
+        cloudOpSetBodyJson(resp);
+        outCode = httpCode;
+      }
+      break;
+    }
+    case CLOUDOP_DELETE_DATA: {
+      int httpCode = doCloudPOST("/functions/v1/delete-user-data", cloudOpPayload, resp, CLOUDOP_RESP_CAP);
+      Serial.printf("Delete-user-data response code: %d\n", httpCode);
+      if (httpCode <= 0) {
+        queueConsoleMessageF("Account delete failed: %s (code %d)", cloudFailReason(httpCode), httpCode);
+        snprintf(cloudOpBody, CLOUDOP_BODY_CAP,
+                 "{\"success\":false,\"error\":\"Connection to cloud failed\",\"code\":%d}", httpCode);
+        outCode = 503;
+      } else {
+        if (httpCode == 200) {
+          clearAuthToken();
+          Serial.println("Auth token cleared from NVS");
+        }
+        cloudOpSetBodyJson(resp);
+        outCode = httpCode;
+      }
+      break;
+    }
+    default:
+      snprintf(cloudOpBody, CLOUDOP_BODY_CAP, "{\"error\":\"unknown op\"}");
+      outCode = 500;
+      break;
+  }
+  cloudOpCode = outCode;
+  cloudOpState = 2;   // last: the poll reads code/body only after seeing state done
+}
+
 // Accumulator for the /perfUploadFront POST body (Load CSV) — filled across body chunks, then
 // ingested once the request completes. LAN-only single-client dashboard, so one global is fine.
 static String perfUploadBuf;
 static String altUploadBuf;   // same, for /altUploadFront (alternator-health Load CSV)
 static String importConfigBuf;   // body accumulator for POST /importConfig (config sharing)
-static String trackBodyBuf;   // body accumulator for POST /track (app-usage analytics deltas)
 
 void setupServer() {
 
@@ -1858,7 +2059,9 @@ void setupServer() {
         size_t written = 0;
         while (written < maxLen) {
           if (state.linePos >= state.lineLen) {
-            if (state.row > state.count) {
+            // Rows: 0=header, 1=constants, data at idx=oldest+row-2 → last data row is count+1.
+            // `> count` stopped one early and always dropped the newest entry (.bin emits it).
+            if (state.row > state.count + 1) {
               thermalLogPaused = false;
               state.done = true;
               return written;
@@ -1963,6 +2166,12 @@ void setupServer() {
     state.entryPos = 0;
     thermalLogPaused = true;
     thermalLogPausedAtMs = millis();
+    // Token-guarded unpause on client abort (same pattern as /thermallog.csv) — without it a
+    // torn-down transfer stays paused until the 30 s watchdog, losing samples.
+    uint32_t dlTok = ++thermalLogDlToken;
+    request->onDisconnect([dlTok]() {
+      if (dlTok == thermalLogDlToken) thermalLogPaused = false;
+    });
     AsyncWebServerResponse *response = request->beginChunkedResponse(
       "application/octet-stream",
       [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
@@ -2671,10 +2880,15 @@ void setupServer() {
   server.on("/altdebug.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     altDebugCsvSend(request);
   });
+  // Emit-window sizing probe (temporary diagnostic, RAM only — see the probe block in 7_functions).
+  server.on("/altwinstats.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    altWinStatsCsvSend(request);
+  });
   // Performance-vs-engine-hours trend (header + points, chunked). This is the headline. Decimated to
   // <= TR_MAXOUT output points for readability + payload (full hourly history stays on the device):
-  // each output point is one bucket of source hours — worst = min (preserve the early-warning
-  // envelope), overall = mean. stride==1 (<= TR_MAXOUT total) streams every hour, as before.
+  // each output point is one bucket of source hours — the low line = min of the source hours' P10s
+  // (preserve the early-warning envelope), overall = mean. stride==1 (<= TR_MAXOUT total) streams
+  // every hour, as before.
   extern float altTrendBucketSec;   // defined in 7_functions.ino (concatenated later) — needed to convert bucket index → engine-hours
   server.on("/alttrend.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!altTrend) { request->send(200, "text/plain", "engHours,worstPct,overallPct\n"); return; }
@@ -2778,6 +2992,7 @@ void setupServer() {
     },
     NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (total > 131072) return;  // a real BEFRONT1 is a few KB — a mispicked 30 MB log would OOM the accumulator
       if (index == 0) { perfUploadBuf = ""; perfUploadBuf.reserve(total + 1); }
       perfUploadBuf.concat((const char *)data, len);
     });
@@ -2804,6 +3019,7 @@ void setupServer() {
     },
     NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (total > 131072) return;  // same cap rationale as /perfUploadFront above
       if (index == 0) { altUploadBuf = ""; altUploadBuf.reserve(total + 1); }
       altUploadBuf.concat((const char *)data, len);
     });
@@ -2820,20 +3036,26 @@ void setupServer() {
   // App-usage analytics delta from the web UI / Capacitor app (page dwell, button counts).
   // Deliberately NOT arm-gated: pure counter increments, no settings touched, works in AP
   // and Client mode. sendBeacon posts land here too (text/plain — content type is ignored).
+  // Body rides request->_tempObject (freed by the request destructor, aborted requests included) so
+  // two clients posting at once can't interleave into one shared accumulator.
   server.on("/track", HTTP_POST,
     [](AsyncWebServerRequest *request) {
-      if (trackBodyBuf.length() < 2) {
-        trackBodyBuf = ""; request->send(400, "text/plain", "empty"); return;
-      }
-      bool ok = usageMergeDelta(trackBodyBuf.c_str());
-      trackBodyBuf = "";
+      char *body = (char *)request->_tempObject;
+      if (!body || strlen(body) < 2) { request->send(400, "text/plain", "empty"); return; }
+      bool ok = usageMergeDelta(body);
       request->send(ok ? 200 : 400, "text/plain", ok ? "ok" : "bad");
     },
     NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
       if (total > 4096) return;   // a real delta is a few hundred bytes; reject anything absurd
-      if (index == 0) { trackBodyBuf = ""; trackBodyBuf.reserve(total + 1); }
-      trackBodyBuf.concat((const char *)data, len);
+      if (index == 0 && !request->_tempObject) {
+        request->_tempObject = ps_malloc(total + 1);
+        if (request->_tempObject) ((char *)request->_tempObject)[0] = '\0';  // guard-rejected chunks must not leave strlen() garbage
+      }
+      char *body = (char *)request->_tempObject;
+      if (!body || index + len > total) return;
+      memcpy(body + index, data, len);
+      body[index + len] = '\0';
     });
 
   // App Usage card (Live Data → ESP32): period + lifetime stats. Read-only, so not arm-gated.
@@ -4734,6 +4956,12 @@ void setupServer() {
       RebulkCurrent_A = inputMessage.toFloat();
       settingWrite(NK_RebulkCurrent_A, String(RebulkCurrent_A).c_str());
     }
+    if (request->hasParam("VMGTargetBearing")) {
+      foundParameter = true;
+      inputMessage = request->getParam("VMGTargetBearing")->value();
+      VMGTargetBearing = constrain(inputMessage.toFloat(), -1.0f, 359.0f);  // -1 = not set
+      settingWrite(NK_VMGTargetBearing, String(VMGTargetBearing).c_str());
+    }
     // No VMGUseTrueWind param — both VMGs (manual + upwind) are always computed.
     if (request->hasParam("gpsTimeSourceMode")) {
       foundParameter = true;
@@ -4948,6 +5176,7 @@ void setupServer() {
       ManualSOCPoint = inputMessage.toFloat();
       SOC_percent = (int)roundf(ManualSOCPoint * 100.0f);   // SOC_percent is percent x100; round so decimals seed exactly
       CoulombCount_Ah_scaled = (ManualSOCPoint * BatteryCapacity_Ah);
+      shadowCoulombX100 = CoulombCount_Ah_scaled;  // external seed re-anchors the shadow twin
       nvsPersistNow = true;  // persist SoC + coulomb count NOW (single save at end of handler). NVS otherwise only saves at the field-off edge, so a reboot before then (e.g. a forced OTA) would revert the manual seed and the loop would re-derive SoC from the stale/zero coulomb count.
       queueConsoleMessageF("SoC manually set to: %.2f%%", ManualSOCPoint);
     }
@@ -7088,90 +7317,46 @@ void setupServer() {
       return;
     }
 
-    String deviceUID = String(device_id_hex);
     Serial.println("=== checkRegistration called ===");
-    Serial.println("isRegistered: " + String(isRegistered));
-    Serial.println("Current deviceUID: " + deviceUID);
-
     if (!isRegistered) {
       request->send(200, "application/json", "{\"registered\":false}");
       return;
     }
 
-    // Validate token with Supabase (send only token, not device_uid)
+    // Validate token with Supabase (send only token, not device_uid) — staged onto the httpsTask
+    // worker; a synchronous doCloudPOST here starved every other endpoint for up to ~45 s on a
+    // dead uplink. Response handling lives in executeCloudOp; the client polls /cloudOpState.
     DynamicJsonDocument payloadDoc(256);
     payloadDoc["token"] = authToken;
     String payload;
     serializeJson(payloadDoc, payload);
+    cloudOpStageAndReply(request, CLOUDOP_CHECK_REG, payload.c_str());
+  });
 
-    char responseBuf[2048];
-    int httpCode = doCloudPOST("/functions/v1/validate-token", payload.c_str(),
-                               responseBuf, sizeof(responseBuf));
-    String response = String(responseBuf);
-
-    Serial.println("Validate-token HTTP code: " + String(httpCode));
-    Serial.println("Validate-token response: " + response);
-    if (httpCode == 200) {
-      queueConsoleMessage("Cloud: profile verified");
-    } else if (httpCode == 401) {
-      queueConsoleMessage("Cloud: ready to register");
+  // Result poll for the staged cloud ops (/checkRegistration /registerProfile /updateProfile
+  // /deleteAllData). "code" is the HTTP status the old synchronous handler would have sent;
+  // "body" is its exact JSON reply.
+  server.on("/cloudOpState", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!settingsArmActive()) {
+      request->send(403, "text/plain", "Settings not armed");
+      return;
     }
-    if (httpCode == 200) {
-      // Parse response to check device_uid match
-      DynamicJsonDocument doc(2048);
-      DeserializationError error = deserializeJson(doc, response.c_str(), response.length());
-      if (error) {
-        Serial.println("JSON parse error");
-        request->send(200, "application/json", "{\"registered\":false,\"error\":\"parse_failed\"}");
-        return;
-      }
-
-      String tokenDeviceUID = doc["device_uid"].as<String>();
-      Serial.println("Token belongs to device: " + tokenDeviceUID);
-
-      if (tokenDeviceUID != deviceUID) {
-        Serial.println("ERROR: Token device mismatch!");
-        Serial.println("  Token device: " + tokenDeviceUID);
-        Serial.println("  Current device: " + deviceUID);
-        request->send(200, "application/json", "{\"registered\":false,\"error\":\"device_mismatch\"}");
-        return;
-      }
-
-      // Token valid and matches this device - return profile data
-      request->send(200, "application/json", response);
-
-    } else if (httpCode == 401) {
-      // Parse error response to check WHY validation failed
-      DynamicJsonDocument doc(1024);
-      DeserializationError error = deserializeJson(doc, response.c_str(), response.length());
-
-      String errorMsg = "";
-      if (!error && doc.containsKey("error")) {
-        errorMsg = doc["error"].as<String>();
-      }
-
-      Serial.println("Validation failed: " + errorMsg);
-
-      // Only clear credentials if token genuinely doesn't exist in database
-      if (errorMsg == "Invalid token" || errorMsg == "Token not found") {
-        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        Serial.println("⚠️ CLEARING INVALID CREDENTIALS");
-        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        Serial.println("Token no longer exists in database");
-        Serial.println("Device ready for re-registration");
-        Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-        clearAuthToken();
-      } else {
-        Serial.println("⚠️ Auth error but keeping credentials (may be temporary)");
-      }
-
-      request->send(200, "application/json", "{\"registered\":false,\"error\":\"validation_failed\"}");
-
-    } else {
-      Serial.println("⚠️ Network/server issue (HTTP " + String(httpCode) + ") - keeping credentials");
-      request->send(200, "application/json", "{\"registered\":false,\"error\":\"network_error\"}");
+    if (cloudOpState == 0) {
+      request->send(200, "application/json", "{\"state\":\"idle\"}");
+      return;
     }
+    if (cloudOpState == 1) {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "{\"state\":\"pending\",\"op\":%u}", (unsigned)cloudOpSeq);
+      request->send(200, "application/json", buf);
+      return;
+    }
+    String out;
+    out.reserve(CLOUDOP_BODY_CAP + 64);
+    out = "{\"state\":\"done\",\"op\":" + String(cloudOpSeq) + ",\"code\":" + String(cloudOpCode) + ",\"body\":";
+    out += (cloudOpBody && cloudOpBody[0]) ? cloudOpBody : "null";
+    out += "}";
+    request->send(200, "application/json", out);
   });
 
   // Tiny always-answers identity endpoint for app-side subnet discovery: when mDNS fails
@@ -7207,6 +7392,10 @@ void setupServer() {
       return;
     }
     String deviceUID = String(device_id_hex);
+    if (!request->hasParam("username", true) || !request->hasParam("email", true)) {
+      request->send(400, "application/json", "{\"error\":\"missing username/email\"}");
+      return;
+    }
     // Identity only — the vessel record reaches user_profiles via the config snapshot
     // (update-config-snapshot projects the settings jsonb), never via registration.
     DynamicJsonDocument doc(512);
@@ -7216,67 +7405,9 @@ void setupServer() {
     String payload;
     serializeJson(doc, payload);
     Serial.println("=== REGISTRATION REQUEST ===");
-    Serial.printf("=== PRE-REGISTRATION HEAP ===\n");
-    Serial.printf("Free internal: %u\n", ESP.getFreeHeap());
-    Serial.printf("Max alloc internal: %u\n", ESP.getMaxAllocHeap());
-    Serial.printf("Free PSRAM: %u\n", ESP.getFreePsram());
-
-    char responseBuf[2048];
-    int httpCode = doCloudPOST("/functions/v1/register-device", payload.c_str(),
-                               responseBuf, sizeof(responseBuf));
-    String response = String(responseBuf);
-
-    Serial.println("Response code: " + String(httpCode));
-    Serial.println("Response: " + response);
-
-    // Connection-level failure (negative sentinels from doCloudPOST)
-    if (httpCode <= 0) {
-      Serial.println("HTTP connection failed: " + String(httpCode));
-      queueConsoleMessageF("Registration failed: %s (code %d)", cloudFailReason(httpCode), httpCode);
-      request->send(503, "application/json",
-                    "{\"error\":\"Connection to cloud failed\",\"code\":" + String(httpCode) + "}");
-      return;
-    }
-
-    // Empty body guard
-    if (response.length() == 0) {
-      Serial.println("Empty response from server (HTTP " + String(httpCode) + ")");
-      queueConsoleMessageF("Registration failed: empty response from cloud (HTTP %d)", httpCode);
-      request->send(502, "application/json",
-                    "{\"error\":\"Empty response from cloud\",\"code\":" + String(httpCode) + "}");
-      return;
-    }
-
-    // Token extraction for 200
-    if (httpCode == 200) {
-      DynamicJsonDocument responseDoc(1024);
-      DeserializationError error = deserializeJson(responseDoc, response.c_str(), response.length());
-      if (!error && responseDoc.containsKey("token")) {
-        String newToken = responseDoc["token"].as<String>();
-        if (newToken.length() > 0) {
-          saveAuthToken(newToken);
-          Serial.println("Token saved to NVS");
-          // The boot checks latched otaCheckDone while this device was still unregistered, so
-          // nothing would report our version or see a forced update until the next reboot.
-          // Version first: the cloud clears a forced flag once the reported version reaches it.
-          // Factory partition excluded for the same reasons as the boot check in Xregulator.ino.
-          if (currentPartitionType != 0) {
-            HttpsRequest verReq = { .type = HTTPS_UPDATE_FW_VERSION };
-            HttpsRequest forcedReq = { .type = HTTPS_CHECK_FORCED_UPDATE };
-            bool verSent = (xQueueSend(httpsQueue, &verReq, 0) == pdTRUE);
-            bool forcedSent = (xQueueSend(httpsQueue, &forcedReq, 0) == pdTRUE);
-            if (!verSent || !forcedSent) {
-              Serial.println("REGISTER: HTTPS queue full - version/forced check deferred to next boot");
-            }
-          }
-          // Fill the new profile's vessel columns now — registration is identity-only, the
-          // snapshot's settings jsonb is what carries the vessel record to the cloud.
-          configSnapshotRequested = true;
-        }
-      }
-    }
-
-    request->send(httpCode, "application/json", response);
+    // Staged onto the httpsTask worker (see /checkRegistration). Token save, post-registration
+    // version/forced checks and the snapshot request all live in executeCloudOp.
+    cloudOpStageAndReply(request, CLOUDOP_REGISTER, payload.c_str());
   });
 
   server.on("/updateProfile", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -7293,6 +7424,10 @@ void setupServer() {
 
     String deviceUID = String(device_id_hex);
 
+    if (!request->hasParam("username", true) || !request->hasParam("email", true)) {
+      request->send(400, "application/json", "{\"error\":\"missing username/email\"}");
+      return;
+    }
     // Identity only — vessel data rides the config snapshot, same as /registerProfile.
     DynamicJsonDocument doc(512);
     doc["device_uid"] = deviceUID;
@@ -7305,22 +7440,8 @@ void setupServer() {
 
     Serial.println("=== UPDATE PROFILE REQUEST ===");
     Serial.println("Device UID: " + deviceUID);
-
-    char responseBuf[2048];
-    int httpCode = doCloudPOST("/functions/v1/update-profile", payload.c_str(),
-                               responseBuf, sizeof(responseBuf));
-    String response = String(responseBuf);
-
-    Serial.println("Response code: " + String(httpCode));
-    Serial.println("Response: " + response);
-
-    if (httpCode <= 0) {
-      queueConsoleMessageF("Profile update failed: %s (code %d)", cloudFailReason(httpCode), httpCode);
-      request->send(503, "application/json",
-                    "{\"success\":false,\"error\":\"Connection to cloud failed\",\"code\":" + String(httpCode) + "}");
-      return;
-    }
-    request->send(httpCode, "application/json", response);
+    // Staged onto the httpsTask worker (see /checkRegistration).
+    cloudOpStageAndReply(request, CLOUDOP_UPDATE_PROFILE, payload.c_str());
   });
 
   server.on("/deleteAllData", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -7343,27 +7464,9 @@ void setupServer() {
     serializeJson(doc, payload);
 
     Serial.println("=== DELETE ALL DATA REQUEST ===");
-
-    char responseBuf[1024];
-    int httpCode = doCloudPOST("/functions/v1/delete-user-data", payload.c_str(),
-                               responseBuf, sizeof(responseBuf));
-    String response = String(responseBuf);
-
-    Serial.println("Response code: " + String(httpCode));
-    Serial.println("Response: " + response);
-
-    if (httpCode <= 0) {
-      queueConsoleMessageF("Account delete failed: %s (code %d)", cloudFailReason(httpCode), httpCode);
-      request->send(503, "application/json",
-                    "{\"success\":false,\"error\":\"Connection to cloud failed\",\"code\":" + String(httpCode) + "}");
-      return;
-    }
-    if (httpCode == 200) {
-      clearAuthToken();
-      Serial.println("Auth token cleared from NVS");
-    }
-
-    request->send(httpCode, "application/json", response);
+    // Staged onto the httpsTask worker (see /checkRegistration); the token clear on HTTP 200
+    // lives in executeCloudOp.
+    cloudOpStageAndReply(request, CLOUDOP_DELETE_DATA, payload.c_str());
   });
 
   server.on("/resetThermalPID", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -8561,8 +8664,8 @@ void SendWifiData() {
                                SafeInt(MeasuredAmpsMax, 100),
                                SafeInt(RPMMax),
                                SafeInt(SOC_percent),
-                               SafeInt(EngineRunTime * 100 / 3600, 1),
-                               SafeInt(AlternatorOnTime * 100 / 3600, 1),
+                               SafeInt((double)EngineRunTime * 100.0 / 3600.0, 1),    // double: int math overflows (UB) at 5,965 engine-hours
+                               SafeInt((double)AlternatorOnTime * 100.0 / 3600.0, 1),
                                SafeInt(AlternatorFuelUsed, 100),
                                SafeInt(ChargedEnergy),
                                SafeInt(DischargedEnergy),

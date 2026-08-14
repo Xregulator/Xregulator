@@ -998,6 +998,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "totalPowerCycles", NK_totalPowerCycles, 3 },
   { "weatherDataValid", NK_weatherDataValid, 3 },
   { "gpsManualActive", NK_gpsManualActive, 3 },   // flag only — LatitudeManual/LongitudeManual never export
+  { "VMGTargetBearing", NK_VMGTargetBearing, 3 }, // manual VMG bearing — voyage-transient nav intent, never imported
   { "LastResetReason", NK_LastResetReason, 3 },
   { "cfgSchema", NK_cfgSchema, 3 },
   { "lastAppldCfgId", NK_lastAppldCfgId, 3 },
@@ -1525,6 +1526,20 @@ bool bhStartTest() {
   if (bhNumEdges < 3) bhNumEdges = 3;
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
   if (bhDwellMs < bhMinDwellMs()) bhDwellMs = bhMinDwellMs();   // belt-and-braces; set paths already clamp
+  // Total run must fit the sample buffer (~123 s at 8192×15 ms): bhSample stops appending when
+  // full, edges past that point score nb<2/na<2, and the abort blames protections misleadingly.
+  {
+    uint32_t maxRunMs = (uint32_t)bhSampleCap * BH_SAMPLE_INTERVAL_MS;
+    uint32_t needMs   = (uint32_t)(bhNumEdges + 3) * bhDwellMs;
+    if (needMs > maxRunMs) {
+      uint8_t fitEdges = (uint8_t)(maxRunMs / bhDwellMs);
+      fitEdges = (fitEdges > 3) ? (uint8_t)(fitEdges - 3) : 0;
+      if (fitEdges < 3) { bhAbortReason = "dwell too long for sample buffer"; return false; }
+      queueConsoleMessageF("BATT HEALTH: %u edges x %lus exceeds the ~%lus sample buffer - running %u edges",
+                           bhNumEdges, (unsigned long)(bhDwellMs / 1000), (unsigned long)(maxRunMs / 1000), fitEdges);
+      bhNumEdges = fitEdges;
+    }
+  }
   bhSampleCount  = 0;
   bhSampleLastMs = 0;
   bhWaveHigh     = false;
@@ -1533,8 +1548,10 @@ bool bhStartTest() {
   bhTestStartMs  = millis();
   bhLastToggleMs = bhTestStartMs;
   bhAbortReason  = "";
-  bhTestState    = 1;
+  // Active flag FIRST: Core-1's bhServiceCompletion reads (bhTestState==1 && !active) as
+  // run-complete, so the reverse order let a loop pass abort the test at the starting gun.
   batteryHealthTestActive = true;
+  bhTestState    = 1;
   queueConsoleMessageF("BATT HEALTH: DCIR test started (%.1f<->%.1fA, %lus dwell, %u edges)",
                        bhStepLowA, bhStepLowA + bhStepDeltaA, (unsigned long)(bhDwellMs / 1000), bhNumEdges);
   return true;
@@ -1603,8 +1620,8 @@ void bhComputeDcir() {
   bhLastResultDcir = r.dcir_mOhm;
   bhTestState = 2;
   bhResultsDirty = true;   // NVS persist deferred to field-off — a test always ends field-on
-  queueConsoleMessageF("BATT HEALTH: DCIR = %.2f mOhm (%d/%u edges, SoC %.0f%%, %.1fF, fit %luus)",
-                       r.dcir_mOhm, Rn, bhNumEdges, r.soc_pct, r.boardTempF, (unsigned long)(micros() - bhT0));
+  queueConsoleMessageF("BATT HEALTH: DCIR = %.2f mOhm (%d/%u edges, SoC %.0f%%, %.1f%s, fit %luus)",
+                       r.dcir_mOhm, Rn, bhNumEdges, r.soc_pct, dispTempF(r.boardTempF), dispTempUnit(), (unsigned long)(micros() - bhT0));
   char ev[288];
   snprintf(ev, sizeof(ev),
            "{\"test\":\"batt_health\",\"ok\":1,\"dcir_mohm\":%.2f,\"spread_mohm\":%.2f,\"edges_used\":%d,"
@@ -1998,7 +2015,7 @@ bool cvpfStartTest(float diMaxReq) {
     cvpfAbortMsg = "another test active"; return false;
   }
   cvpfBufCount = 0; cvpfSampleLastMs = 0;
-  cvpfPhase = 0; cvpfState = 1;
+  cvpfPhase = 0;
   cvpfPhaseStartMs = millis(); cvpfTestStartMs = cvpfPhaseStartMs;
   cvpfBaseA = 10.0f; cvpfPilotA = 6.0f; cvpfStepA = 6.0f;
   cvpfTargetDV = 0.30f; cvpfFellBack = false;  // fixed absolute ΔV probe (sensor-resolution-limited, not per-cell)
@@ -2017,7 +2034,10 @@ bool cvpfStartTest(float diMaxReq) {
   cvpfRpmSum = cvpfBattVSum = cvpfSocSum = 0.0; cvpfCondN = 0;
   cvpfRpmMinAtFit = cvpfRpmMaxAtFit = 0.0f;
   cvpfCcActive = true;
+  // Active flag before state=1: cvpfServiceCompletion on Core 1 reads (cvpfState==1 && !active)
+  // as run-complete, so state must never be 1 while the active flag is still false.
   cvPlantFitActive = true;
+  cvpfState = 1;
   queueConsoleMessage("CV plant-fit: started (settle -> size -> practice run -> 4 abrupt duty pulses, ~0.6s stiffness read)");
   return true;
 }
@@ -2570,23 +2590,38 @@ void capTrackOnFull(uint32_t epoch, float tempC) {
 }
 
 // Persist DCIR results + capacity ring to LittleFS blobs. Caller gates on field-off.
-// Dirty flags stay set on a failed write so the next flush retries instead of losing history.
+// Dirty flags stay set on a failed write so a later flush retries instead of losing history;
+// the caller runs on the 2 s SOC tick, so failures back off 10 min (one warning per retry).
 void bhFlushCapNVS() {
   if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM ring is synthetic/empty — keep the real flash blob
+  static uint32_t bhFlushRetryAtMs = 0;
+  if (bhFlushRetryAtMs != 0 && (int32_t)(millis() - bhFlushRetryAtMs) < 0) return;
+  bool failed = false;
   if (bhCapDirty) {
     uint32_t start = (bhCapCount < bhCapCap) ? 0 : (uint32_t)bhCapHead;
     uint32_t n = writePsramBlob(BHCAP_PATH, BHCAP_MAGIC, BHCAP_VER, 0,
                                 bhCapRing, sizeof(BattCapPoint), bhCapCap, start, bhCapCount);
     settingWrite(NK_bhBaseline, String(bhBaselineCapacityAh, 3).c_str());
-    if (n == (uint32_t)bhCapCount) bhCapDirty = false;
-    else queueConsoleMessage("Battery health: capacity history save failed - will retry");
+    if (n == (uint32_t)bhCapCount) {
+      bhCapDirty = false;
+      // Legacy NVS string is only dropped once its content is safely in the blob (migration in bhInitSettings)
+      if (settingExists(NK_bhCapBlob)) settingRemove(NK_bhCapBlob);
+    } else failed = true;
   }
   if (bhResultsDirty) {
     uint32_t start = (bhResultCount < bhResultCap) ? 0 : (uint32_t)bhResultHead;
     uint32_t n = writePsramBlob(BHRES_PATH, BHRES_MAGIC, BHRES_VER, 0,
                                 bhResults, sizeof(BattHealthResult), bhResultCap, start, bhResultCount);
-    if (n == (uint32_t)bhResultCount) bhResultsDirty = false;
-    else queueConsoleMessage("Battery health: DCIR history save failed - will retry");
+    if (n == (uint32_t)bhResultCount) {
+      bhResultsDirty = false;
+      if (settingExists(NK_bhResults)) settingRemove(NK_bhResults);
+    } else failed = true;
+  }
+  if (failed) {
+    bhFlushRetryAtMs = millis() + 600000UL;
+    queueConsoleMessage("Battery health: history save failed (filesystem?) - retrying every 10 min");
+  } else {
+    bhFlushRetryAtMs = 0;
   }
 }
 
@@ -2599,6 +2634,15 @@ static float bhTok(const String &s, int &pos) {   // next comma/semicolon-delimi
   if (t == "nan") return NAN;
   return t.toFloat();
 }
+// Integer fields must not round-trip through bhTok's float (24-bit mantissa): current epochs
+// (~1.75e9) land on a 128 s float grid, shifting every timestamp up to ~64 s per reboot.
+static uint32_t bhTokU32(const String &s, int &pos) {
+  int e = pos;
+  while (e < (int)s.length() && s[e] != ',' && s[e] != ';') e++;
+  String t = s.substring(pos, e);
+  pos = e + 1;
+  return (uint32_t)strtoul(t.c_str(), nullptr, 10);
+}
 
 void bhDeserializeResults(const String &blob) {
   bhResultCount = 0; bhResultHead = 0;
@@ -2606,7 +2650,7 @@ void bhDeserializeResults(const String &blob) {
   int pos = 0;
   while (pos < (int)blob.length()) {
     BattHealthResult r = {};
-    r.epoch      = (uint32_t)bhTok(blob, pos);
+    r.epoch      = bhTokU32(blob, pos);
     r.dcir_mOhm  = bhTok(blob, pos);
     r.soh_pct    = bhTok(blob, pos);
     r.boardTempF = bhTok(blob, pos);
@@ -2615,7 +2659,7 @@ void bhDeserializeResults(const String &blob) {
     r.stepLowA   = bhTok(blob, pos);
     r.stepDeltaA = bhTok(blob, pos);
     r.edgesUsed  = (uint8_t)bhTok(blob, pos);
-    r.dwellMsUsed    = (uint16_t)bhTok(blob, pos);   // 0 for pre-upgrade rows (clear history once after flashing)
+    r.dwellMsUsed    = (uint16_t)bhTokU32(blob, pos);   // 0 for pre-upgrade rows (clear history once after flashing)
     r.fitSpread_mOhm = bhTok(blob, pos);
     BH_APPEND_RESULT(r);
   }
@@ -2627,7 +2671,7 @@ void bhDeserializeCap(const String &blob) {
   int pos = 0;
   while (pos < (int)blob.length()) {
     BattCapPoint p = {};
-    p.epoch      = (uint32_t)bhTok(blob, pos);
+    p.epoch      = bhTokU32(blob, pos);
     p.capacityAh = bhTok(blob, pos);
     p.capPct     = bhTok(blob, pos);
     p.socLow     = bhTok(blob, pos);
@@ -2687,7 +2731,9 @@ void bhInitSettings() {
   if (bhStepDeltaA < 5.0f) bhStepDeltaA = 5.0f;   // ΔV must clear ripple/noise; also guards the ΔI validity gate
   if (bhDwellMs < bhMinDwellMs()) bhDwellMs = bhMinDwellMs();
   // Rings restore from LittleFS blobs; a legacy NVS string (pre-blob firmware) migrates once —
-  // deserialized, key removed, dirty flag set so the next field-off flush writes the blob.
+  // deserialized + dirty flag set so the next field-off flush writes the blob. The legacy key is
+  // removed only AFTER that blob write succeeds (in bhFlushCapNVS), so a reboot before the first
+  // flush can't lose the migrated history.
   {
     uint32_t nRes = readPsramBlob(BHRES_PATH, BHRES_MAGIC, BHRES_VER,
                                   bhResults, sizeof(BattHealthResult), bhResultCap, nullptr, false);
@@ -2695,7 +2741,6 @@ void bhInitSettings() {
     bhResultHead  = (nRes >= (uint32_t)bhResultCap) ? 0 : (int)nRes;
     if (nRes == 0 && settingExists(NK_bhResults)) {
       bhDeserializeResults(settingRead(NK_bhResults));
-      settingRemove(NK_bhResults);
       bhResultsDirty = true;
     }
     uint32_t nCap = readPsramBlob(BHCAP_PATH, BHCAP_MAGIC, BHCAP_VER,
@@ -2704,7 +2749,6 @@ void bhInitSettings() {
     bhCapHead  = (nCap >= (uint32_t)bhCapCap) ? 0 : (int)nCap;
     if (nCap == 0 && settingExists(NK_bhCapBlob)) {
       bhDeserializeCap(settingRead(NK_bhCapBlob));
-      settingRemove(NK_bhCapBlob);
       bhCapDirty = true;
     }
   }
@@ -2916,10 +2960,14 @@ void debugFillMax(AsyncWebServerRequest *request) {
   for (int r = 0; r < 20; r++) sink += altFront2.classify(surf, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &pred);
   uint32_t classifyUs = (micros() - t0) / 20;
   // 2) trend drop-oldest memmove at cap = the "once per decade" event on real PSRAM
-  uint32_t t1 = micros();
-  memmove(altTrend, altTrend + 1, (size_t)(ALT_TREND_CAP - 1) * sizeof(AltTrendPt));
-  uint32_t memmoveUs = micros() - t1;
-  altTrendCount = ALT_TREND_CAP;                    // memmove left a dup in the last slot; keep count at cap
+  // altTrend can be NULL (initAlternatorHealth returns early on ps_malloc failure) — same guard as the fill above
+  uint32_t memmoveUs = 0;
+  if (altTrend) {
+    uint32_t t1 = micros();
+    memmove(altTrend, altTrend + 1, (size_t)(ALT_TREND_CAP - 1) * sizeof(AltTrendPt));
+    memmoveUs = micros() - t1;
+    altTrendCount = ALT_TREND_CAP;                  // memmove left a dup in the last slot; keep count at cap
+  }
 
   out  = "FILLMAX done — every ring at cap (bench worst-case)\n";
   out += "altFront2="   + String(altFront2.count) + "/" + String(ALT_FRONT_CAP);

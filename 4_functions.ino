@@ -55,6 +55,16 @@ void updateCpuLoad() {
     return;
   }
 
+  // ulRunTimeCounter is 32-bit µs and wraps ~every 71 min; the uint64 cast happens before
+  // differencing, so a wrapped sample makes deltaTotal enormous and both cores read 100%.
+  // Discard the sample and re-baseline instead of latching a phantom max into telemetry.
+  if (total < lastTotal || idle0 < lastIdle0 || idle1 < lastIdle1) {
+    lastIdle0 = idle0;
+    lastIdle1 = idle1;
+    lastTotal = total;
+    return;
+  }
+
   uint64_t deltaIdle0 = idle0 - lastIdle0;
   uint64_t deltaIdle1 = idle1 - lastIdle1;
   uint64_t deltaTotal = total - lastTotal;
@@ -212,7 +222,8 @@ bool executeFetchWeatherData() {
     UVDay2 = mjDay2 * MJ_TO_KWH_CONVERSION;
     weatherDataValid = 1;
     weatherLastError[0] = '\0';
-    nextWeatherUpdate = millis() + 3600000;
+    weatherLastUpdate = millis();   // was never written — the freshness gate measured uptime, not fetch age
+    nextWeatherUpdate = millis() + WeatherUpdateInterval;   // honor the user's interval (hardcoded 1 h ignored it)
     Serial.printf("Solar forecast: Today=%.1f, Tomorrow=%.1f, Day2=%.1f kWh\n",
                   pKwHrToday, pKwHrTomorrow, pKwHr2days);
     queueConsoleMessageF("Weather updated: %.1f kWh today", pKwHrToday);
@@ -676,6 +687,7 @@ if (!BMP388Disconnected) {
 
 
   //Victron VeDirect and NMEA0183
+  Serial1.setRxBufferSize(2048);               // must precede begin(); default 256 B overflows in the 2 s ReadVEData gap (BMV emits ~900 B/s)
   Serial1.begin(19200, SERIAL_8N1, 7, -1, 1);  // Victron VEDirect
   Serial2.begin(19200, SERIAL_8N1, 6, -1, 0);  // ... note the "0" at end for normal logic.  This is combined NMEA0183 data from YachtDevices
   Serial2.flush();              
@@ -752,8 +764,8 @@ if (!BMP388Disconnected) {
   sensors.setWaitForConversion(false);                   // don't block inside requestTemperaturesByAddress()
   sensors.setCheckForConversion(true);                   // enable polling via isConversionComplete()
   sensors.setAutoSaveScratchPad(false);                  // RAM-only config changes (no EEPROM writes)
-  sensors.setResolution(tempDeviceAddress, resolution);  // set once at boot
-  sensors.getAddress(tempDeviceAddress, 0);
+  sensors.getAddress(tempDeviceAddress, 0);              // fill the address FIRST — setResolution on the zeroed address is a no-op
+  sensors.setResolution(tempDeviceAddress, resolution);  // TempTask re-asserts this on its own enumeration; kept here for boot coverage
   if (sensors.getDeviceCount() == 0) {
     Serial.println("WARNING: No DS18B20 sensors found on the bus.");
     queueConsoleMessage("WARNING: No DS18B20 sensors found on the bus");
@@ -1445,6 +1457,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     queueConsoleMessage("Enter the shunt resistance to enable them. Your float setting is kept.");
   }
 
+  if (!settingExists(NK_VMGTargetBearing)) {
+    settingWrite(NK_VMGTargetBearing, String(VMGTargetBearing).c_str());
+  } else {
+    VMGTargetBearing = settingRead(NK_VMGTargetBearing).toFloat();
+  }
   if (!settingExists(NK_AutoShuntGainCorrection)) {  // BOOLEAN
     settingWrite(NK_AutoShuntGainCorrection, String(AutoShuntGainCorrection).c_str());
   } else {
@@ -3239,70 +3256,6 @@ bool base64Decode(const String &input, uint8_t *output, size_t outputSize, size_
 
   return true;
 }
-// Verify firmware signature using RSA public key
-bool verifyPackageSignature(uint8_t *packageData, size_t packageSize, const String &signatureBase64) {
-  Serial.println("🛡️ Starting package signature verification...");
-
-  mbedtls_pk_context pk;
-  uint8_t signature[520];  // Buffer for RSA-4096 signatures
-  size_t sigLength;
-
-  if (!base64Decode(signatureBase64, signature, sizeof(signature), &sigLength)) {
-    Serial.println("SECURITY: Failed to decode signature");
-    return false;
-  }
-
-  if (sigLength != 512) {
-    Serial.printf("SECURITY: Invalid signature length: %d (expected 512)\n", sigLength);
-    return false;
-  }
-
-  // Hash the complete package using SHA-256
-  uint8_t hash[32];
-  mbedtls_md_context_t ctx;
-  mbedtls_md_init(&ctx);
-
-  const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-  if (info == NULL) {
-    Serial.println("SECURITY: Failed to get SHA-256 info");
-    mbedtls_md_free(&ctx);
-    return false;
-  }
-
-  int ret = mbedtls_md_setup(&ctx, info, 0);
-  if (ret != 0) {
-    Serial.printf("SECURITY: Failed to setup MD context: %d\n", ret);
-    mbedtls_md_free(&ctx);
-    return false;
-  }
-
-  mbedtls_md_starts(&ctx);
-  mbedtls_md_update(&ctx, packageData, packageSize);
-  mbedtls_md_finish(&ctx, hash);
-  mbedtls_md_free(&ctx);
-
-  Serial.println("Package hash computed successfully");
-
-  mbedtls_pk_init(&pk);
-
-  ret = mbedtls_pk_parse_public_key(&pk, (const unsigned char *)OTA_PUBLIC_KEY, strlen(OTA_PUBLIC_KEY) + 1);
-  if (ret != 0) {
-    Serial.printf("SECURITY: Failed to parse public key: -0x%04x\n", -ret);
-    mbedtls_pk_free(&pk);
-    return false;
-  }
-
-  ret = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, 32, signature, sigLength);
-  mbedtls_pk_free(&pk);
-
-  if (ret == 0) {
-    Serial.println("SECURITY: Package signature verification PASSED ✅");
-    return true;
-  } else {
-    Serial.printf("SECURITY: Package signature verification FAILED ❌ (error -0x%04x)\n", -ret);
-    return false;
-  }
-}
 bool initStreamingExtractor(StreamingExtractor *extractor) {
   memset(extractor, 0, sizeof(StreamingExtractor));
 
@@ -3399,7 +3352,13 @@ bool parseTarHeader(StreamingExtractor *extractor) {
   // Route file to appropriate destination
   if (extractor->currentFileName.equals("firmware.bin")) {
     extractor->otaPartition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
-    esp_ota_begin(extractor->otaPartition, extractor->currentFileSize, &extractor->otaHandle);
+    esp_err_t beginErr = esp_ota_begin(extractor->otaPartition, extractor->currentFileSize, &extractor->otaHandle);
+    if (beginErr != ESP_OK) {
+      // e.g. ESP_ERR_INVALID_SIZE: image exceeds the 0x280000 slot — abort now instead of
+      // failing on the first esp_ota_write mid-stream.
+      Serial.printf("❌ esp_ota_begin failed: %s\n", esp_err_to_name(beginErr));
+      return false;
+    }
     extractor->otaStarted = true;
     extractor->isCurrentFileFirmware = true;
   } else if (extractor->currentFileName.indexOf('.') > 0) {
@@ -3983,6 +3942,10 @@ cleanup:
     delay(3000);
     ESP.restart();
   } else {
+    // No reboot on this path. If the extractor swapped webFS to prod_fs mid-download, the
+    // running factory app just lost its filesystem — remount factory_fs or every PSRAM-cache
+    // miss and flash-fallback asset 404s until the next power cycle.
+    if (extractor.prodFSMounted) switchToFactoryWebFiles();
     otaRestoreNormalOperation(false);
   }
 }
@@ -4191,33 +4154,6 @@ void performOTAUpdateToVersion(const char *targetVersion) {
                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   otaSetWdtWindow(WDT_TIMEOUT_MS);  // failed attempt returns here; success rebooted inside
   core0Busy = false;
-}
-bool isValidTarHeader(uint8_t *header) {
-  // Check for all zeros (end of archive)
-  bool allZeros = true;
-  for (int i = 0; i < 512; i++) {
-    if (header[i] != 0) {
-      allZeros = false;
-      break;
-    }
-  }
-  if (allZeros) {
-    Serial.println("📦 End of tar archive detected");
-    return false;  // End of archive
-  }
-
-  if (memcmp(header + 257, "ustar", 5) != 0) {
-    Serial.println("❌ Invalid tar header: missing ustar magic");
-    Serial.print("Header start: ");
-    for (int i = 0; i < 20; i++) {
-      Serial.printf("%02x ", header[i]);
-    }
-    Serial.println();
-    return false;
-  }
-
-  Serial.println("✅ Valid tar header with ustar magic");
-  return true;
 }
 // FORCED OTA STUFF
 void executeUpdateFirmwareVersion() {
@@ -4656,7 +4592,8 @@ void printPartitionInfo() {
   checkExpectedPartition("ota_0", ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, 0x280000);
   checkExpectedPartition("factory_fs", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x100000);
   checkExpectedPartition("prod_fs", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x100000);
-  checkExpectedPartition("userdata", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x8E0000);
+  checkExpectedPartition("nvs", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, 0x20000);
+  checkExpectedPartition("userdata", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x8C0000);  // matches partitions.csv (0x8E0000 predated the nvs relocation and false-alarmed every boot)
 
   Serial.println("\n🔄 OTA PARTITION STATUS:");
   const esp_partition_t *ota_partition = esp_ota_get_next_update_partition(NULL);
@@ -4679,12 +4616,8 @@ void printPartitionInfo() {
   Serial.println("=== END PARTITION SUMMARY ===\n");
 }
 bool testInternetSpeed() {
-  // Don't interfere with HTTPS operations
-  if (core0Busy) {
-    Serial.println("Speed test skipped - upload in progress");
-    return true;  // Assume connection is OK
-  }
-
+  // No core0Busy skip here: the only caller is the OTA pre-flight, which sets core0Busy
+  // BEFORE calling — the old skip made this entire reachability gate dead code.
   Serial.println("========================================");
   Serial.println(">>> testInternetSpeed() ENTERED");
   Serial.println("========================================");

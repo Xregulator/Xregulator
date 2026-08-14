@@ -64,15 +64,6 @@ String readFile(fs::FS &fs, const char *path) {
   return result;
 }
 
-// Settings-write wrapper: skip the LittleFS erase/rewrite when the file already holds this exact
-// content (saves a flash cycle on no-op form re-submits). Fail-safe — any read mismatch just writes,
-// so it can never skip a needed write. writeFile uses file.print(message) and readFile reads it back
-// byte-for-byte, so an unchanged value round-trips exactly.
-bool writeFileIfChanged(fs::FS &fs, const char *path, const char *message) {
-  if (fsExists(path) && readFile(fs, path) == message) return true;   // unchanged → no write
-  return writeFile(fs, path, message);
-}
-
 bool writeFile(fs::FS &fs, const char *path, const char *message) {
   if (!littleFSMounted && !ensureLittleFS()) {
     return false;
@@ -395,6 +386,7 @@ bool fsRemove(const char *path) {
 #define NK_UVThresholdHigh "UVThresholdHigh"
 #define NK_UseFloat "UseFloat"
 #define NK_VeData "VeData"
+#define NK_VMGTargetBearing "VMGTargetBrg"
 #define NK_VoltageAlarmHigh "VoltageAlarmHgh"
 #define NK_VoltageAlarmLow "VoltageAlarmLow"
 #define NK_VoltageDisagreeThreshold "VltgDsgrThrshld"
@@ -696,7 +688,10 @@ bool commissionRestoreScalars(const char* key) {
 // the origin key. Returns false if none exists.
 bool commissionRestore() {
   bool ok = commissionRestoreScalars(NK_commissionSnap);
-  if (ok) commissionRestoreMinPct();      // revert the Min% floor table + knee tracker (also clears the backup)
+  // Min% revert runs unconditionally: the bk_* blobs are an independent store, so an unreadable
+  // scalar snapshot (field-count drift from an OTA mid-run) must not strand a valid floor backup.
+  // Safe when no complete backup exists — it returns false and changes nothing.
+  ok = commissionRestoreMinPct() || ok;
   settingRemove(NK_commissionSnap);
   return ok;
 }
@@ -853,6 +848,10 @@ volatile uint8_t cxStartPersistStep = 0;  // 0 = idle; 1..6 = next write to reti
 volatile bool cxStartPersistFail = false; // restore-point write refused → start cancelled
 
 void cxStartPersistBegin(bool resuming) {
+  // cxStartMutex serializes this against the worker: the give below is the release barrier that
+  // publishes the staged buffers to Core 1, and step=1 stays invisible until then.
+  if (!cxStartMutex) return;
+  xSemaphoreTake(cxStartMutex, portMAX_DELAY);  // worker holds it at most one staged NVS write
   commissionSnapshotScalarsToBuf(cxStartTuneCsv, sizeof(cxStartTuneCsv));
   memcpy(cxStartMinDuty, rpmMinDutyTable, sizeof(cxStartMinDuty));
   memcpy(cxStartKneeFloor, kneeFloor, sizeof(cxStartKneeFloor));
@@ -864,7 +863,8 @@ void cxStartPersistBegin(bool resuming) {
   cxStartPrevManualMask = commissionManualMask;
   cxStartResume = resuming;
   cxStartPersistFail = false;
-  cxStartPersistStep = 1;   // flag flips only after staging is complete — the worker reads nothing sooner
+  cxStartPersistStep = 1;
+  xSemaphoreGive(cxStartMutex);
 }
 
 bool cxStartPersistFreshPending() {
@@ -875,30 +875,40 @@ bool cxStartPersistFreshPending() {
 // is an exact teardown to the pre-click state — NOT a revert, and the caller must not fall into the
 // live-run teardown (which would demote a previously-commissioned device whose re-run never began).
 // Resume: just stop the worker — the original committed snapshot is intact for the normal teardown.
+// Whole body under cxStartMutex: once the take succeeds the worker is provably between cases, so the
+// machine cannot advance again (it re-reads step under the lock) and the compensating writes below
+// can never interleave with an in-flight staged write. Returns with the cancel COMPLETE.
 void cxStartPersistCancel() {
-  if (cxStartPersistStep == 0) return;
+  if (!cxStartMutex) return;
+  xSemaphoreTake(cxStartMutex, portMAX_DELAY);  // worker holds it at most one staged NVS write
+  if (cxStartPersistStep == 0) { xSemaphoreGive(cxStartMutex); return; }
   bool fresh = !cxStartResume;
   cxStartPersistStep = 0;
-  if (!fresh) return;
-  testProtectionsEnabled = commissionProtBackup;
-  settingRemove(NK_commissionSnap);       // drop whatever subset the worker already wrote
-  settingRemove(NK_commissionStepSnap);
-  commissionClearMinPctBackup();
-  commissionSetPhase(cxStartPrevPhase);
-  commissionDoneMask = cxStartPrevDoneMask;
-  commissionWriteDoneMask();
-  commissionManualMask = cxStartPrevManualMask;
-  commissionWriteManualMask();
+  if (fresh) {
+    testProtectionsEnabled = commissionProtBackup;
+    settingRemove(NK_commissionSnap);       // drop whatever subset the worker already wrote
+    settingRemove(NK_commissionStepSnap);
+    commissionClearMinPctBackup();
+    commissionSetPhase(cxStartPrevPhase);
+    commissionDoneMask = cxStartPrevDoneMask;
+    commissionWriteDoneMask();
+    commissionManualMask = cxStartPrevManualMask;
+    commissionWriteManualMask();
+  }
+  xSemaphoreGive(cxStartMutex);
 }
 
-// Retire one staged write per call — called every loop() pass, no-op when idle. The step is
-// double-checked around every advance: cxStartPersistCancel runs on the network task, and an
-// unguarded ++ after a mid-case cancel would read the fresh 0 and resurrect the cancelled
-// sequence from step 1 — marching a torn-down Start all the way to commissionSetState(1).
+// Retire one staged write per call — called every loop() pass, no-op when idle. Each case runs
+// under cxStartMutex, so a Cancel from the network task can only land BETWEEN cases, never inside
+// one — the old lock-free double-checks left an instruction-wide window where a mid-case cancel
+// was overwritten by the advance, resurrecting a torn-down Start all the way to commissionSetState(1).
+// The take is zero-timeout: a Cancel/Begin holding the lock just costs this pass, never a loop stall.
 void cxStartPersistService() {
+  if (cxStartPersistStep == 0) return;  // lock-free fast path — Begin publishes step=1 via the mutex
+  if (!cxStartMutex || xSemaphoreTake(cxStartMutex, 0) != pdTRUE) return;
   uint8_t s = cxStartPersistStep;
-  if (s == 0) return;
   switch (s) {
+    case 0: break;  // cancel landed between the fast path and the take
     case 1:  // origin snapshot FIRST — it is the abort path's entire restore point
       if (!cxStartResume && !settingWrite(NK_commissionSnap, cxStartTuneCsv)) {
         // No restore point ⇒ refuse the run: starting anyway would leave Abort with nothing to revert to.
@@ -907,24 +917,25 @@ void cxStartPersistService() {
         cxStartPersistFail = true;
         settingsDirty = true;
         queueConsoleMessage("Commissioning: could not save the settings restore point (flash write failed) — start cancelled");
-        return;
+        break;
       }
+      cxStartPersistStep = 2;
       break;
     case 2:
       if (!cxStartResume) commissionBackupMinPct(cxStartMinDuty, cxStartKneeFloor, cxStartKneeKnee, cxStartKneeFrozen, cxStartKneeFitA);
+      cxStartPersistStep = 3;
       break;
-    case 3: settingWrite(NK_commissionStepSnap, cxStartTuneCsv); break;
-    case 4: commissionSetPhase(0); break;
-    case 5: commissionMarkStage(0); break;  // Prep complete: snapshot staged, preconditions checked
+    case 3: settingWrite(NK_commissionStepSnap, cxStartTuneCsv); cxStartPersistStep = 4; break;
+    case 4: commissionSetPhase(0); cxStartPersistStep = 5; break;
+    case 5: commissionMarkStage(0); cxStartPersistStep = 6; break;  // Prep complete: snapshot staged, preconditions checked
     case 6:
-      if (cxStartPersistStep != 6) return;  // last-instant cancel re-check — state=1 is the irreversible commit
       commissionSetState(1);  // LAST — a persisted state=1 proves the restore point is on flash
       cxStartPersistStep = 0;
       settingsDirty = true;   // push the CSV3 state echo promptly
       queueConsoleMessage("Commissioning: started — settings snapshotted");
-      return;
+      break;
   }
-  if (cxStartPersistStep == s) cxStartPersistStep = (uint8_t)(s + 1);  // advance only if no cancel landed mid-case
+  xSemaphoreGive(cxStartMutex);
 }
 
 bool fsMkdir(const char *path) {
@@ -1171,13 +1182,18 @@ void performDeepFactoryReset() {
   // Erase All Memory does NOT lock the user out of their cloud account. Token is
   // held in a stack buffer for the ~2-3 second wipe; power-loss in that window
   // loses the token and requires support contact for re-registration.
-  char savedToken[128] = { 0 };
+  char savedToken[256] = { 0 };   // 256 matches /debugToken; cloud sets no length cap on issued tokens
   {
     nvs_handle_t h;
     if (nvs_open("cloud", NVS_READONLY, &h) == ESP_OK) {
       size_t len = sizeof(savedToken);
       esp_err_t e = nvs_get_str(h, "authToken", savedToken, &len);
-      if (e != ESP_OK) savedToken[0] = '\0';
+      if (e != ESP_OK) {
+        savedToken[0] = '\0';
+        // A too-long token would silently de-register the device here — say so distinctly.
+        if (e == ESP_ERR_NVS_INVALID_LENGTH)
+          Serial.println("RESET: authToken exceeds preserve buffer — it will NOT survive the wipe!");
+      }
       nvs_close(h);
     }
     if (savedToken[0] != '\0') {
@@ -1529,7 +1545,11 @@ uint32_t httpsUploadWorstMs = 0;
 
 void httpsTask(void *param) {
   if (otaInProgress) {
-    return;  // Skip during OTA
+    // Returning from a FreeRTOS task function aborts in vPortTaskWrapper (panic-reboot) —
+    // self-delete cleanly instead, matching TempTask. Unreachable today, latent trap otherwise.
+    httpsTaskHandle = NULL;
+    vTaskDelete(NULL);
+    return;  // never reached — silences no-return analysis
   }
   esp_task_wdt_add(NULL);
   // Serial.println("HTTPS Task started on Core 0");
@@ -1613,6 +1633,10 @@ void httpsTask(void *param) {
           break;
         case HTTPS_RESET_RPM_AXIS:
           executeResetRpmAxis();
+          opSuccess = true;
+          break;
+        case HTTPS_CLOUD_OP:
+          executeCloudOp();
           opSuccess = true;
           break;
       }
@@ -3621,6 +3645,92 @@ static char *syncBodyGet() {
   return syncBody;
 }
 
+// Drains HTTP response headers (already past the status line) up to the blank line, capturing
+// Content-Length (-1 when absent / headers never completed) and Transfer-Encoding: chunked. Lets
+// the sync-back callers tell a mid-body connection drop from a complete short body — BEFRONT1 has
+// no terminator, so a truncated body parses cleanly and would wholesale-replace the local front.
+// (Probed 2026-08-14: the Supabase/Cloudflare edge over HTTP/1.1 sends chunked, no Content-Length,
+// so the chunked path is the live one; Content-Length is kept for framing changes upstream.)
+static long drainHeadersCaptureLen(WiFiClientSecure &client, uint32_t startMs, bool *chunked) {
+  uint32_t drainStart = millis();
+  char line[48];
+  size_t ll = 0;
+  long contentLen = -1;
+  *chunked = false;
+  while (client.connected() && (millis() - drainStart < READ_TIMEOUT)) {
+    esp_task_wdt_reset();
+    while (client.available()) {
+      char c = (char)client.read();
+      drainStart = millis();
+      if (c == '\n') {
+        if (ll && line[ll - 1] == '\r') ll--;
+        line[ll] = '\0';
+        if (ll == 0) return contentLen;   // blank line = end of headers
+        if (strncasecmp(line, "Content-Length:", 15) == 0) contentLen = atol(line + 15);
+        else if (strncasecmp(line, "Transfer-Encoding:", 18) == 0 && strcasestr(line + 18, "chunked")) *chunked = true;
+        ll = 0;
+      } else if (ll < sizeof(line) - 1) {
+        line[ll++] = c;   // overlong header lines just lose their tail — the two we match never are
+      }
+    }
+    if (millis() - startMs > GLOBAL_TIMEOUT) break;
+    delay(1);
+  }
+  return contentLen;
+}
+
+// Reads a response body into buf (cap-1 usable), DE-CHUNKING when the response is chunked — the raw
+// reader used to store the chunk framing (hex size lines) into the CSV, and a chunk boundary landing
+// mid-row could admit a column-shifted garbage front point. Sets *complete=false when a chunked
+// body's terminating 0-chunk never arrived, or a Content-Length body came up short: the caller must
+// not hand an incomplete body to the wholesale-replacing front ingest.
+static size_t readSyncBody(WiFiClientSecure &client, char *buf, size_t cap, bool chunked,
+                           long contentLen, uint32_t startMs, bool *complete) {
+  size_t bl = 0;
+  bool done = false;
+  uint32_t bodyStart = millis();
+  uint8_t cs = 0;       // chunked state: 0 = size line, 1 = payload, 2/3 = CR/LF after payload
+  long remain = 0;
+  bool sawSize = false, inExt = false;
+  while (!done && client.connected() && bl < cap - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
+    esp_task_wdt_reset();
+    if (client.available()) bodyStart = millis();
+    while (!done && client.available() && bl < cap - 1) {
+      char c = (char)client.read();
+      if (!chunked) { buf[bl++] = c; continue; }
+      switch (cs) {
+        case 0: {   // hex size line; ';' starts an extension we ignore
+          if (c == '\n') {
+            if (sawSize) { if (remain == 0) done = true; else cs = 1; }
+            sawSize = inExt = false;
+          } else if (c == ';') inExt = true;
+          else if (!inExt && c != '\r') {
+            int v = (c >= '0' && c <= '9') ? c - '0'
+                  : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                  : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+            if (v >= 0) { remain = remain * 16 + v; sawSize = true; }
+          }
+          break;
+        }
+        case 1:
+          buf[bl++] = c;
+          if (--remain == 0) cs = 2;
+          break;
+        case 2:
+          cs = (c == '\n') ? 0 : 3;   // tolerate bare LF
+          break;
+        case 3:
+          if (c == '\n') cs = 0;
+          break;
+      }
+    }
+    if (millis() - startMs > GLOBAL_TIMEOUT) break;
+    delay(1);
+  }
+  *complete = chunked ? done : (contentLen < 0 || (long)bl == contentLen);
+  return bl;
+}
+
 // Mirrors executeUploadConfig() exactly (proven HTTPS pattern) — only the endpoint + log labels
 // differ. Uploads the boat-performance aggregates to the update-boat-performance edge function.
 bool executeUploadBoatPerf(const char *payload) {
@@ -3693,38 +3803,14 @@ bool executeUploadBoatPerf(const char *payload) {
     delay(1);
   }
 drain_headers_bp:
-  {
-    uint32_t drainStart = millis();
-    uint8_t state = 0;
-    while (client.connected() && (millis() - drainStart < READ_TIMEOUT)) {
-      esp_task_wdt_reset();
-      while (client.available()) {
-        char c = (char)client.read();
-        drainStart = millis();
-        if (state == 0 && c == '\r') state = 1;
-        else if (state == 1 && c == '\n') state = 2;
-        else if (state == 2 && c == '\r') state = 3;
-        else if (state == 3 && c == '\n') goto done_headers_bp;
-        else state = 0;
-      }
-      if (millis() - start > GLOBAL_TIMEOUT) break;
-      delay(1);
-    }
-  }
-done_headers_bp:
+  long bpContentLen;
+  bool bpChunked, bpComplete;
+  bpContentLen = drainHeadersCaptureLen(client, start, &bpChunked);
   // Read the response BODY (both pruned BEFRONT1 blocks) into the shared PSRAM sync buffer.
   {
     char *bpBody = syncBodyGet();
     if (!bpBody) { client.stop(); return false; }   // PSRAM alloc failed — skip, retry next cycle
-    size_t bl = 0;
-    uint32_t bodyStart = millis();
-    while (client.connected() && bl < SYNC_BODY_CAP - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
-      esp_task_wdt_reset();
-      if (client.available()) bodyStart = millis();
-      while (client.available() && bl < SYNC_BODY_CAP - 1) bpBody[bl++] = (char)client.read();
-      if (millis() - start > GLOBAL_TIMEOUT) break;
-      delay(1);
-    }
+    size_t bl = readSyncBody(client, bpBody, SYNC_BODY_CAP, bpChunked, bpContentLen, start, &bpComplete);
     bpBody[bl] = '\0';
     client.stop();
     esp_task_wdt_reset();
@@ -3734,6 +3820,16 @@ done_headers_bp:
       // Buffer filled completely → the front CSV may be cut mid-stream. Never parse a possibly-
       // truncated front (the ingest replaces the local front wholesale).
       queueConsoleMessage("WARN: boat-perf sync response overran the sync buffer — front NOT updated");
+      if (timeIsSynced) lastBoatPerfSyncEpoch = (int64_t)time(NULL);
+      perfClearPending();   // upload itself succeeded; only the sync-back is unusable
+      return success;
+    }
+    if (success && !bpComplete) {
+      // Chunked terminator (or Content-Length worth of body) never arrived → connection dropped
+      // mid-body. Same rule as the overrun guard: a truncated front must never reach the
+      // wholesale-replacing ingest.
+      queueConsoleMessageF("WARN: boat-perf sync body truncated (%u bytes, incomplete) — front NOT updated",
+                           (unsigned)bl);
       if (timeIsSynced) lastBoatPerfSyncEpoch = (int64_t)time(NULL);
       perfClearPending();   // upload itself succeeded; only the sync-back is unusable
       return success;
@@ -3831,38 +3927,14 @@ bool executeUploadAltHealth(const char *payload) {
     delay(1);
   }
 drain_headers_ah:
-  {
-    uint32_t drainStart = millis();
-    uint8_t state = 0;
-    while (client.connected() && (millis() - drainStart < READ_TIMEOUT)) {
-      esp_task_wdt_reset();
-      while (client.available()) {
-        char c = (char)client.read();
-        drainStart = millis();
-        if (state == 0 && c == '\r') state = 1;
-        else if (state == 1 && c == '\n') state = 2;
-        else if (state == 2 && c == '\r') state = 3;
-        else if (state == 3 && c == '\n') goto done_headers_ah;
-        else state = 0;
-      }
-      if (millis() - start > GLOBAL_TIMEOUT) break;
-      delay(1);
-    }
-  }
-done_headers_ah:
+  long ahContentLen;
+  bool ahChunked, ahComplete;
+  ahContentLen = drainHeadersCaptureLen(client, start, &ahChunked);
   // Read the response BODY (the pruned BEFRONT1 front CSV) into the shared PSRAM sync buffer.
   {
     char *ahBody = syncBodyGet();
     if (!ahBody) { client.stop(); return false; }   // PSRAM alloc failed — skip, retry next cycle
-    size_t bl = 0;
-    uint32_t bodyStart = millis();
-    while (client.connected() && bl < SYNC_BODY_CAP - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
-      esp_task_wdt_reset();
-      if (client.available()) bodyStart = millis();
-      while (client.available() && bl < SYNC_BODY_CAP - 1) ahBody[bl++] = (char)client.read();
-      if (millis() - start > GLOBAL_TIMEOUT) break;
-      delay(1);
-    }
+    size_t bl = readSyncBody(client, ahBody, SYNC_BODY_CAP, ahChunked, ahContentLen, start, &ahComplete);
     ahBody[bl] = '\0';
     client.stop();
     esp_task_wdt_reset();
@@ -3872,6 +3944,16 @@ done_headers_ah:
       // Buffer filled completely → the front CSV may be cut mid-stream. Never parse a possibly-
       // truncated front (the ingest replaces the local front wholesale).
       queueConsoleMessage("WARN: alt-health sync response overran the sync buffer — front NOT updated");
+      if (timeIsSynced) lastAltHealthSyncEpoch = (int64_t)time(NULL);
+      altClearPending();   // upload itself succeeded; only the sync-back is unusable
+      return success;
+    }
+    if (success && !ahComplete) {
+      // Chunked terminator (or Content-Length worth of body) never arrived → connection dropped
+      // mid-body. Same rule as the overrun guard: a truncated front must never reach the
+      // wholesale-replacing ingest.
+      queueConsoleMessageF("WARN: alt-health sync body truncated (%u bytes, incomplete) — front NOT updated",
+                           (unsigned)bl);
       if (timeIsSynced) lastAltHealthSyncEpoch = (int64_t)time(NULL);
       altClearPending();   // upload itself succeeded; only the sync-back is unusable
       return success;
