@@ -11116,6 +11116,18 @@
                   <span id="ft_loopFieldOn_ses_ID">0</span>
                 </div>
               </div>
+              <!-- Worst Field-On Pass — blame attribution -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">↳ Worst Field-On Pass — Top Consumers
+                  <span class="tooltip">ℹ
+                    <span class="tooltip-box">Captured the instant the field-on worst (right column above) was set: the timed functions that consumed the most time in that exact pass, in ms. Attribution is automatic — no counter reset needed to learn what caused a spike. Untimed glue between calls doesn't appear, so the parts may not sum to the total. Resets with Reset Peak Values.</span>
+                  </span>
+                </div>
+                <div style="grid-column: span 2; padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;">
+                  <span id="loopBlame_ID">n/a</span>
+                </div>
+              </div>
 
               <!-- WiFi Send -->
               <div
@@ -11762,6 +11774,13 @@
               <span class="interval-val"><span id="pf_worst_at_ID">0</span></span>
             </div>
             <div class="interval-row">
+              <span class="interval-label">Worst Field-On (ms)
+                <span class="tooltip">ℹ️<span class="tooltip-box">Same clock as Worst All-Time, but only counting reads that completed while the field gate was open — the control-relevant number. The field-blind worst above is inflated by deliberate field-off background passes (flash flushes), which are harmless. The PID firing column is field-on by nature, so it needs no split. Resets with Reset Peak Values.</span></span>
+              </span>
+              <span class="interval-val"><span id="ch1_worst_fieldon_ID">0</span></span>
+              <span class="interval-val">—</span>
+            </div>
+            <div class="interval-row">
               <span class="interval-label">Last Interval (ms)
                 <span class="tooltip">ℹ️<span class="tooltip-box">Most recent gap between firings, ms. Wall-clock across several loop iterations, so it can exceed the worst single Loop Time without any one loop being blocked.</span></span>
               </span>
@@ -11924,6 +11943,14 @@
               <span class="metric-value"><span id="ch2GapWorst_ID">0</span></span>
             </div>
             <div class="metric-row">
+              <span class="metric-label">RPM Read Gap — Worst Field-On (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Same gap meter, counting only gaps that ended while the field gate was open — the control-relevant figure. The field-blind worst above includes field-off background passes (flash flushes) that stretch the loop harmlessly. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch2GapFieldOnWorst_ID">0</span></span>
+            </div>
+            <div class="metric-row">
               <span class="metric-label">Voltage Read Gap — Last (ms)
                 <span class="tooltip">ℹ
                   <span class="tooltip-box">Milliseconds since the previous valid ADS battery-voltage (channel 0) reading. This is the secondary voltage used only as a sanity cross-check against the INA228; like RPM it is read on a brief mux excursion. Target is under 30 ms. Out-of-range reads do not count.</span>
@@ -11938,6 +11965,14 @@
                 </span>
               </span>
               <span class="metric-value"><span id="ch0GapWorst_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Voltage Read Gap — Worst Field-On (ms)
+                <span class="tooltip">ℹ
+                  <span class="tooltip-box">Same gap meter, counting only gaps that ended while the field gate was open — the control-relevant figure. The field-blind worst above includes field-off background passes (flash flushes) that stretch the loop harmlessly. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch0GapFieldOnWorst_ID">0</span></span>
             </div>
             <div class="metric-row">
               <span class="metric-label">CSV2 Build — Last (ms)
@@ -14045,8 +14080,8 @@
       </div>
       <div style="padding:18px 20px 16px; font-size:0.92em; line-height:1.5; overflow-y:auto; flex:1; min-height:0;">
         <p style="margin:0 0 15px; font-size:14px;">
-          The regulator periodically reboots itself. There is no fixed schedule: it waits for
-          non-interrupting moments and forces an immediate reboot only if a better moment wasn't found.
+          The regulator periodically reboots itself. There is no fixed schedule: it generally takes
+          advantage of non-interrupting moments and forces an immediate reboot only if one wasn't found.
         </p>
 
         <!-- Steps mirror the three uptime tiers in checkAndRestart() (5_functions.ino): 24 h fully quiet
@@ -14057,7 +14092,7 @@
         <div style="display:grid; grid-template-columns:24px 1fr; column-gap:11px; align-items:start;">
           <div style="width:24px; height:24px; border-radius:50%; background:#22403c; border:1px solid #3d6b64; color:#6fd3c6; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; line-height:1;">1</div>
           <div>
-            <div style="font-size:13px; font-weight:600; color:#e6e6e6; margin-bottom:4px;">From 1 day on &mdash; only when nothing at all is happening</div>
+            <div style="font-size:13px; font-weight:600; color:#e6e6e6; margin-bottom:4px;">Starting after day 1 &mdash; only when nothing at all is happening</div>
             <div style="font-size:12.5px; color:#b6b6b6; line-height:1.45;">
               All must be true at once for a full 5 minutes: engine off, not charging, nobody connected
               to the app or dashboard, cloud uploads finished, SOC above 30% if it is known, and battery

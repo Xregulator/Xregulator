@@ -1044,7 +1044,7 @@ uint32_t writePsramBlob(const char *path, uint32_t magic, uint32_t version,
     ok = (f.write(bytes + (size_t)idx * recordSize, spanBytes) == spanBytes);
     remaining -= span;
     idx = 0;                                 // wrapped span starts at buffer top
-    esp_task_wdt_reset();
+    if (wdtMainTaskSubscribed) esp_task_wdt_reset();
   }
 
   f.close();
@@ -1092,7 +1092,7 @@ uint32_t readPsramBlob(const char *path, uint32_t magic, uint32_t version,
   uint32_t toRead = (hdr.count > destCapacity) ? destCapacity : hdr.count;
   size_t bodyBytes = (size_t)toRead * recordSize;
   size_t bodyRead = f.readBytes((char *)destBase, bodyBytes);
-  esp_task_wdt_reset();
+  if (wdtMainTaskSubscribed) esp_task_wdt_reset();
   f.close();
   if (deleteAfter) LittleFS.remove(path);
   fsReleaseLock();
@@ -1130,7 +1130,7 @@ uint32_t appendRingBlob(const char *path, const void *base, size_t recordSize,
   for (uint32_t i = delta; i >= 1 && ok; i--) {          // i=delta → oldest new record, i=1 → newest
     uint32_t slot = (head + capacity - i) % capacity;
     ok = (f.write(bytes + (size_t)slot * recordSize, recordSize) == recordSize);
-    esp_task_wdt_reset();
+    if (wdtMainTaskSubscribed) esp_task_wdt_reset();
   }
   f.close();
   fsReleaseLock();
@@ -1170,7 +1170,7 @@ uint32_t restoreRingBlob(const char *path, uint32_t magic, uint32_t version,
   }
   f.close();
   fsReleaseLock();
-  esp_task_wdt_reset();
+  if (wdtMainTaskSubscribed) esp_task_wdt_reset();
   if (fileRecordsOut) *fileRecordsOut = fileRecords;
   return keep;
 }
@@ -1343,24 +1343,33 @@ void TempTask(void *parameter) {
     float pendingMaxTempAllTime = 0.0f;
 
     // A single isConnected() false-negative is usually OneWire noise (field-PWM coupling), not a real
-    // disconnect. Tearing down enumeration on the first miss forces the slow re-enumerate path and its
-    // retry delays, which can stack past the 20s control-staleness gate and needlessly cut the field.
-    // Only re-enumerate after 3 consecutive misses; otherwise fast-retry (1s, post-failure) and keep
-    // the enumerated address so a good read on the very next poll clears staleness.
+    // disconnect — at 19kHz field PWM every 1-Wire bit slot spans switching edges, so corruption is
+    // probabilistic and an immediate re-roll usually lands clean (the CRC retry recovers ~2/3 the same
+    // way). Retry in place before counting a miss. Tearing down enumeration on a counted miss forces the
+    // slow re-enumerate path and its retry delays, which can stack past the 20s control-staleness gate
+    // and needlessly cut the field. Only re-enumerate after 3 consecutive counted misses; otherwise
+    // fast-retry (1s, post-failure) and keep the enumerated address so a good read clears staleness.
     if (!sensors.isConnected(tempDeviceAddress)) {
-      tempConnectedFailCount++;
-      if (++connFailStreak >= 3) {
-        lastValidTemp = -99;
-        sensorEnumerated = false;
-        connFailStreak = 0;
+      vTaskDelay(pdMS_TO_TICKS(5));
+      if (!sensors.isConnected(tempDeviceAddress)) {
+        tempConnectedFailCount++;
+        if (++connFailStreak >= 3) {
+          lastValidTemp = -99;
+          sensorEnumerated = false;
+          connFailStreak = 0;
+        }
+        goto cleanup;
       }
-      goto cleanup;
     }
     connFailStreak = 0;
 
+    // Same in-place re-roll: a repeated CONVERT command is harmless to the sensor.
     if (!sensors.requestTemperaturesByAddress(tempDeviceAddress)) {
-      tempRequestFailCount++;
-      goto cleanup;
+      vTaskDelay(pdMS_TO_TICKS(5));
+      if (!sensors.requestTemperaturesByAddress(tempDeviceAddress)) {
+        tempRequestFailCount++;
+        goto cleanup;
+      }
     }
 
     {

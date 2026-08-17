@@ -2626,6 +2626,10 @@ static inline void adsGapUpdate(uint8_t ch, uint32_t now) {
   if (g > 65535u) g = 65535u;                  // clamp (a >65s gap means the channel is dead)
   *last = (uint16_t)g;
   if ((uint16_t)g > *worst) *worst = (uint16_t)g;
+  if (!gpio4IsLow) {  // field-on split — excludes field-off background passes that stretch gaps harmlessly
+    uint16_t *fw = (ch == 0) ? &ch0GapFieldOnWorstMs : &ch2GapFieldOnWorstMs;
+    if ((uint16_t)g > *fw) *fw = (uint16_t)g;
+  }
   *prev = now;
 }
 
@@ -3693,7 +3697,7 @@ bool ensureWebFS() {
         Serial.flush();
         webMounted = true;
         cacheWebAssets();
-        esp_task_wdt_reset();
+        if (wdtMainTaskSubscribed) esp_task_wdt_reset();
         return true;
       } else {
         Serial.println("\n✗✗✗ CRITICAL ERROR: Factory web files FAILED validation ✗✗✗");
@@ -3725,7 +3729,7 @@ bool ensureWebFS() {
         Serial.flush();
         webMounted = true;
         cacheWebAssets();
-        esp_task_wdt_reset();
+        if (wdtMainTaskSubscribed) esp_task_wdt_reset();
         return true;
 
       } else {
@@ -3763,7 +3767,7 @@ bool ensureWebFS() {
         Serial.flush();
         webMounted = true;
         cacheWebAssets();
-        esp_task_wdt_reset();
+        if (wdtMainTaskSubscribed) esp_task_wdt_reset();
         return true;
 
       } else {

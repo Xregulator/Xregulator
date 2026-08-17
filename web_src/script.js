@@ -903,7 +903,38 @@ const CSV2_FIELDS = [
     "deviceEpoch",     // regulator wall clock, UTC epoch seconds; 0 = clock never set this boot
     "cfgPushPending",  // admin config push staged in the cloud: settings it will change; 0 = none queued
     "cfgPushApplied",  // admin config push applied on the previous boot: settings it changed; 0 = nothing to report
+    "ch1FieldOnWorst",     // worst CH1 read interval with field gate open, ms — control-relevant split
+    "ch0GapFieldOnWorst",  // ADS battV read-gap worst with field gate open, ms
+    "ch2GapFieldOnWorst",  // ADS RPM read-gap worst with field gate open, ms
+    "blameIdx1", "blameUs1",  // worst field-on pass blame: top 3 timed consumers (idx into FT_BLAME_NAMES, 255 = empty; µs)
+    "blameIdx2", "blameUs2",
+    "blameIdx3", "blameUs3",
 ];
+
+// Order MUST match ftBlameReg[] in Xregulator.ino — the blame indices in CSV2 point here.
+const FT_BLAME_NAMES = [
+    "Analog Inputs", "VE Direct", "Alt Control", "Derived Metrics",
+    "Alarms", "Battery SOC", "Log Dashboard", "System Health",
+    "Sensor Window", "Accel Metrics", "Alt Health", "Boat Perf", "Osc Damper",
+    "CH1 Stats", "WiFi Send", "WiFi Check", "Time Sync",
+    "Sensor History", "Upload Buffered", "Config Payload",
+    "LT Ring Flush", "Ripple Flush", "Fast Alt Drain", "Fault Detector",
+    "Zero-Drift Log", "Batt Health Save", "Knee Save",
+];
+
+// Worst field-on pass blame line under "Loop Time when Field is On" — names + ms of the top
+// timed consumers captured the instant that session worst was set.
+function renderLoopBlame(data) {
+    const el = document.getElementById('loopBlame_ID');
+    if (!el) return;
+    const parts = [];
+    for (const [ix, us] of [[data.blameIdx1, data.blameUs1], [data.blameIdx2, data.blameUs2], [data.blameIdx3, data.blameUs3]]) {
+        const i = Number(ix);
+        if (!Number.isFinite(i) || i < 0 || i >= FT_BLAME_NAMES.length) continue;
+        parts.push(FT_BLAME_NAMES[i] + ' ' + (Number(us) / 1000).toFixed(1));
+    }
+    el.textContent = parts.length ? parts.join(', ') + ' ms' : 'n/a';
+}
 
 // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). Sits between CSV1 (10 Hz)
 // and CSV2 (5 s). Order MUST match the firmware Csv4Index enum in 3_functions.ino.
@@ -13394,6 +13425,7 @@ window.addEventListener("load", function () {
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
             g_lastCsv2 = data;  // cache for the diagnostics snapshot in log exports
             renderBattTempDerate();   // live board temp + applied derate scale arrive on CSV2
+            renderLoopBlame(data);    // worst field-on pass attribution line
             renderImuInstallWarning(data.imuInstallCode);
 
             // Active RPM row highlight in the cap/learning table — currentRPMTableIndex
@@ -14037,6 +14069,9 @@ window.addEventListener("load", function () {
                 ["ch0GapWorst_ID", "ch0GapWorst"],
                 ["ch2GapLast_ID", "ch2GapLast"],
                 ["ch2GapWorst_ID", "ch2GapWorst"],
+                ["ch0GapFieldOnWorst_ID", "ch0GapFieldOnWorst"],
+                ["ch2GapFieldOnWorst_ID", "ch2GapFieldOnWorst"],
+                ["ch1_worst_fieldon_ID", "ch1FieldOnWorst"],
                 ["csv2BuildLast_ID", "csv2BuildLast"],
                 ["csv2BuildWorst_ID", "csv2BuildWorst"],
                 ["csv2SendLast_ID", "csv2SendLast"],

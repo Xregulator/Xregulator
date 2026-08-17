@@ -2656,6 +2656,7 @@ float ch1_avg_at = 0;
 uint16_t ch1_worst_at = 0;
 uint32_t ch1_over2x_at = 0;
 uint32_t ch1_n_at = 0;
+uint16_t ch1_worst_fieldon = 0;  // worst CH1 read interval with the field gate open (hardware gate), ms — the field-blind worst above is inflated by harmless field-off flush passes
 
 #define CH1_RING 5000
 #define CH1_BUCKETS 12  // 12 closed buckets × 10 s = 2-minute window
@@ -2782,7 +2783,13 @@ struct FuncTiming {
   uint32_t worstWindow;
   uint32_t worstSession;
   uint32_t lastCall;  // Most recent individual call duration (µs)
+  uint32_t passSeq;   // ftLoopPassSeq at the time of lastCall — lets blame capture tell "ran this pass" from stale data
 };
+uint32_t ftLoopPassSeq = 0;  // increments at the top of every loop() pass (Core-0 TIMED_CALLs stamp whatever value is current — harmless, they're excluded from the blame registry)
+// Worst field-on pass blame — top 3 timed consumers of the pass that set loopFieldOnSes.
+// Captured only when a new session worst lands (rare), so attribution costs nothing on normal passes.
+uint8_t loopBlameIdx[3] = { 255, 255, 255 };  // index into ftBlameReg[] (255 = empty slot)
+uint32_t loopBlameUs[3] = { 0, 0, 0 };
 
 // One instance per timed function
 FuncTiming ft_ReadAnalogInputs;
@@ -2871,9 +2878,44 @@ int32_t prev_faDomEp = 0;
     call; \
     uint32_t _dt = (uint32_t)esp_timer_get_time() - _t0; \
     (ft).lastCall = _dt; \
+    (ft).passSeq = ftLoopPassSeq; \
     if (_dt > (ft).worstWindow) (ft).worstWindow = _dt; \
     if (_dt > (ft).worstSession) (ft).worstSession = _dt; \
   } while (0)
+
+// Blame registry: loop-resident TOP-LEVEL timers only. Nested sub-blocks (ft_rai_*,
+// ft_faWindowFinalize) are excluded so a parent and its child never double-bill the same
+// microseconds; Core-0 task timers are excluded because their passSeq stamps don't
+// correspond to loop passes. Order = the blame index sent in CSV2 — any change here MUST
+// be mirrored in FT_BLAME_NAMES in script.js.
+FuncTiming *const ftBlameReg[] = {
+  &ft_ReadAnalogInputs, &ft_ReadVEData, &ft_AdjustFieldLearnMode, &ft_calculateDerivedMetrics,
+  &ft_CheckAlarms, &ft_UpdateBatterySOC, &ft_logDashboardValues, &ft_updateSystemHealthStats,
+  &ft_updateSensorWindow, &ft_updateAccelMetrics, &ft_altHealth, &ft_boatPerf, &ft_huntGov,
+  &ft_ch1_compute_stats, &ft_SendWifiData, &ft_checkWiFiConnection, &ft_checkTimeSync,
+  &ft_uploadSensorHistory, &ft_uploadBufferedRecords, &ft_buildConfigPayload,
+  &ft_dumpLongTermRing, &ft_faMatrixFlush, &ft_fastAltDrain, &ft_faDetector,
+  &ft_zeroLogService, &ft_bhFlushCapNVS, &ft_kneeLearnService
+};
+constexpr uint8_t FT_BLAME_N = sizeof(ftBlameReg) / sizeof(ftBlameReg[0]);
+
+// Runs ONLY when a field-on pass sets a new session worst: rank this pass's timed calls,
+// keep the top 3. ~27 compares, microseconds — never on the normal-pass path.
+void captureLoopBlame() {
+  for (int s = 0; s < 3; s++) { loopBlameIdx[s] = 255; loopBlameUs[s] = 0; }
+  for (uint8_t i = 0; i < FT_BLAME_N; i++) {
+    if (ftBlameReg[i]->passSeq != ftLoopPassSeq) continue;  // stale — didn't run this pass
+    uint32_t us = ftBlameReg[i]->lastCall;
+    for (int s = 0; s < 3; s++) {
+      if (us > loopBlameUs[s]) {
+        for (int m = 2; m > s; m--) { loopBlameUs[m] = loopBlameUs[m - 1]; loopBlameIdx[m] = loopBlameIdx[m - 1]; }
+        loopBlameUs[s] = us;
+        loopBlameIdx[s] = i;
+        break;
+      }
+    }
+  }
+}
 
 uint32_t loopTime5sWindow = 0;                     // worst loop time in last AinputTrackerTime window (µs)
 constexpr unsigned long AinputTrackerTime = 5000;  // rolling window reset interval (ms)
@@ -4882,6 +4924,9 @@ int plotTimeWindow = 30;                    // Plot time window in seconds
 // Cached WiFi client credentials (loaded once, reused for reconnects)
 char cached_wifi_ssid[33] = "";  // 32 + null
 char cached_wifi_pass[65] = "";  // 64 + null
+// Main task subscribes to the TWDT late in setup(); before that, esp_task_wdt_reset() feeds
+// nothing and just logs "task not found". Boot-path reset sites gate on this to stay silent.
+bool wdtMainTaskSubscribed = false;
 bool cached_wifi_creds_valid = false;
 
 
@@ -4979,6 +5024,7 @@ const uint16_t adsMuxCodes[4] = {
 // by adsGapUpdate() in the ADS read path. Dashboard: Live Data → ESP32. CSV2 (Pattern A2).
 uint16_t ch0GapLastMs = 0, ch0GapWorstMs = 0;   // CH0 battery-voltage read gap (ms)
 uint16_t ch2GapLastMs = 0, ch2GapWorstMs = 0;   // CH2 RPM read gap (ms)
+uint16_t ch0GapFieldOnWorstMs = 0, ch2GapFieldOnWorstMs = 0;  // same meters, field gate open only — excludes field-off background passes
 uint32_t ch0GapPrevMs = 0, ch2GapPrevMs = 0;    // timestamp of last valid read (internal)
 
 // One-heavy-per-pass scheduler gate. Reset false at the top of loop(); the staggerable
@@ -5526,6 +5572,7 @@ void setup() {
   if (result == ESP_OK) {
     esp_err_t add_result = esp_task_wdt_add(NULL);
     if (add_result == ESP_OK) {
+      wdtMainTaskSubscribed = true;
       Serial.println("✅ Main task added to watchdog");
       queueConsoleMessage("Watchdog: 16s timeout active");
     } else {
@@ -5749,6 +5796,7 @@ void loop() {
   starttime = esp_timer_get_time();
   // Latched at the top of the pass so a pass that drops the field mid-way still counts as
   // field-on (it ran control code). Consumed by the field-ON loop worst at the bottom of loop().
+  ftLoopPassSeq++;  // pass tag for blame capture — must precede every TIMED_CALL in this pass
   bool passFieldOn = !gpio4IsLow;
   currentTime = millis();
 
@@ -5767,9 +5815,12 @@ void loop() {
     UpdateBoardTempPressureMaximums();
     handleSocGainReset();   // do the dynamic updates
     handleAltZeroReset();   // do the dynamic udpates
-    TIMED_CALL(ft_kneeLearnService, kneeLearnService(fieldOffSettled(2000)));  // Auto Min% learning: NVS flush of learned floors, field-off-gated (never stalls control)
-    if (fieldOffSettled(2000)) TIMED_CALL(ft_bhFlushCapNVS, bhFlushCapNVS());  // Battery Health NVS persist — field-off only
-    if (fieldOffSettled(2000)) overheatHistFlush();  // overheat-history NVS persist — dirty-flagged at overheat entry, written field-off only
+    // These three flash writers use fieldCutSettled (hardware gate) — the duty-based
+    // fieldOffSettled reads "off" during a live duty-0 CV hold (2026-08-13 loop-stall
+    // incident class), which let small NVS/LittleFS commits land on live control passes.
+    TIMED_CALL(ft_kneeLearnService, kneeLearnService(fieldCutSettled(2000)));  // Auto Min% learning: NVS flush of learned floors
+    if (fieldCutSettled(2000)) TIMED_CALL(ft_bhFlushCapNVS, bhFlushCapNVS());  // Battery Health persist
+    if (fieldCutSettled(2000)) overheatHistFlush();  // overheat-history NVS persist — dirty-flagged at overheat entry
 
     // Barometric pressure history sampler — 5-min cadence into baroPressureHistory ring.
     // Skipped if BMP388 hasn't reported (NAN). Wall-clock epoch stamped only if timeIsSynced
@@ -6495,7 +6546,10 @@ void loop() {
   // field-off background work (flash flushes, uploads) that dominates the ungated worst.
   if (passFieldOn) {
     if ((uint32_t)LoopTime > loopFieldOnWin) loopFieldOnWin = (uint32_t)LoopTime;
-    if ((uint32_t)LoopTime > loopFieldOnSes) loopFieldOnSes = (uint32_t)LoopTime;
+    if ((uint32_t)LoopTime > loopFieldOnSes) {
+      loopFieldOnSes = (uint32_t)LoopTime;
+      captureLoopBlame();  // new session worst — snapshot which timed calls consumed this pass
+    }
   }
   if (LoopTime > 5000000) {  // 5 seconds in microseconds
     Serial.printf("WARNING: Loop took %lld - potential watchdog risk\n", LoopTime / 1000);

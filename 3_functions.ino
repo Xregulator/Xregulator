@@ -650,6 +650,12 @@ enum Csv2Index {
   CSV2_deviceEpoch,     // regulator wall clock, UTC epoch seconds; 0 = clock never set this boot
   CSV2_cfgPushPending,  // admin config push staged in the cloud: settings it will change; 0 = none queued
   CSV2_cfgPushApplied,  // admin config push applied on the previous boot: settings it changed; 0 = nothing to report
+  CSV2_ch1FieldOnWorst,     // worst CH1 read interval with field gate open, ms — control-relevant split of ch1_worst_at
+  CSV2_ch0GapFieldOnWorst,  // ADS battV read-gap worst with field gate open, ms
+  CSV2_ch2GapFieldOnWorst,  // ADS RPM read-gap worst with field gate open, ms
+  CSV2_blameIdx1, CSV2_blameUs1,  // worst field-on pass blame: top 3 timed consumers of the pass that set loopFieldOnSes
+  CSV2_blameIdx2, CSV2_blameUs2,  // idx = ftBlameReg[] position (255 = empty), us = that call's duration in µs
+  CSV2_blameIdx3, CSV2_blameUs3,
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1280,9 +1286,26 @@ static const char *wifiDisconnectReasonStr(uint8_t reason) {
   }
 }
 
+// 0 = no disconnect event received; written from the WiFi task, read by the boot-connect verdict
+static volatile uint8_t lastStaDiscReason = 0;
+
 static void onWiFiStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
   uint8_t reason = info.wifi_sta_disconnected.reason;
+  lastStaDiscReason = reason;
   Serial.printf("WiFi STA disconnect reason: %u (%s)\n", reason, wifiDisconnectReasonStr(reason));
+}
+
+static const char *wifiStatusStr(int s) {
+  switch (s) {
+    case WL_IDLE_STATUS: return "IDLE";
+    case WL_NO_SSID_AVAIL: return "NO_SSID_AVAIL (network not found)";
+    case WL_SCAN_COMPLETED: return "SCAN_COMPLETED";
+    case WL_CONNECTED: return "CONNECTED";
+    case WL_CONNECT_FAILED: return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+    case WL_DISCONNECTED: return "DISCONNECTED";
+    default: return "UNKNOWN";
+  }
 }
 
 // Boot-time (setup) connect only — a blocking wait is fine before the control loop starts.
@@ -1309,6 +1332,8 @@ bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout
     wifiReasonLoggerRegistered = true;
   }
 
+  lastStaDiscReason = 0;
+
   if (strlen(password) > 0) {
     WiFi.begin(ssid, password);
   } else {
@@ -1321,7 +1346,7 @@ bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout
 
   while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
     delay(100);
-    esp_task_wdt_reset();
+    if (wdtMainTaskSubscribed) esp_task_wdt_reset();
     attempts++;
 
     // Print progress every 5 seconds — a normal ~2s connect stays silent; only slow/stuck connects log
@@ -1343,7 +1368,32 @@ bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout
   } else {
 
     Serial.printf("WiFi connection failed after %lu ms\n", timeout);
-    Serial.printf("Final status: %d\n", WiFi.status());
+    int st = WiFi.status();
+    Serial.printf("Final status: %d (%s)\n", st, wifiStatusStr(st));
+
+    uint8_t r = lastStaDiscReason;
+    if (r == 0 || r == 201) {
+      Serial.printf("DIAGNOSIS: network '%s' was never seen. The name is case-sensitive - check spelling, and check the network is broadcasting (iPhone hotspot: keep the Personal Hotspot screen open while connecting).\n", ssid);
+    } else {
+      Serial.printf("DIAGNOSIS: network '%s' was found, but the connection failed (%s). A wrong password is the most common cause.\n", ssid, wifiDisconnectReasonStr(r));
+    }
+
+    // List what IS visible so a typo'd SSID is obvious at the bench. Blocking ~2-3 s scan:
+    // acceptable only because this function runs in setup(), before the control loop starts.
+    WiFi.disconnect();
+    if (wdtMainTaskSubscribed) esp_task_wdt_reset();
+    int16_t n = WiFi.scanNetworks();
+    if (wdtMainTaskSubscribed) esp_task_wdt_reset();
+    if (n > 0) {
+      Serial.printf("Networks visible now (%d):\n", n);
+      for (int16_t i = 0; i < n && i < 10; i++) {
+        Serial.printf("  '%s' (ch %d, %d dBm)\n", WiFi.SSID(i).c_str(), (int)WiFi.channel(i), (int)WiFi.RSSI(i));
+      }
+      if (n > 10) Serial.printf("  ... and %d more\n", (int)(n - 10));
+    } else {
+      Serial.println("No networks visible in scan");
+    }
+    WiFi.scanDelete();
     return false;
   }
 }
@@ -6956,6 +7006,7 @@ void setupServer() {
       ch1_over2x_at = 0;
       ch1_avg_at = 0.0f;
       ch1_n_at = 0;
+      ch1_worst_fieldon = 0;
       // CH1 10s ring buffer
       ch1Head = 0;
       ch1Count = 0;
@@ -7032,8 +7083,10 @@ void setupServer() {
       loopWorst80Ses = 0;
       loopOver80ImuLimitCount = 0;
       loop80IterCount = 0;
-      // field-ON loop instrumentation — clear session worst
+      // field-ON loop instrumentation — clear session worst + its blame snapshot (stale blame
+      // would describe a worst that no longer exists)
       loopFieldOnSes = 0;
+      for (int bs = 0; bs < 3; bs++) { loopBlameIdx[bs] = 255; loopBlameUs[bs] = 0; }
       // I2C bus-health — clear bus-only worst-timers and stall/error counts for a fresh window
       inaBusReadWorstUs = 0;
       inaBusSlowCount = 0;
@@ -7044,6 +7097,8 @@ void setupServer() {
       // ADS slow-channel gap meters — clear worst (keep last; prev re-seeds on next read)
       ch0GapWorstMs = 0;
       ch2GapWorstMs = 0;
+      ch0GapFieldOnWorstMs = 0;
+      ch2GapFieldOnWorstMs = 0;
       // CSV2 build/send cost — clear worsts
       csv2BuildWorstUs = 0;
       csv2SendWorstUs = 0;
@@ -8363,6 +8418,8 @@ void checkWiFiConnection() {
   }
 
   // Seeking: reap a finished presence scan, else kick one off at cadence
+  static bool lastScanWasFullSweep = false;
+  static uint8_t fullSweepMisses = 0;  // consecutive all-channel sweeps with no sighting
   int16_t sc = WiFi.scanComplete();
   if (sc == WIFI_SCAN_RUNNING) return;
 
@@ -8375,7 +8432,13 @@ void checkWiFiConnection() {
       }
     }
     WiFi.scanDelete();
+    if (seenChannel == 0 && lastScanWasFullSweep && fullSweepMisses < 250) {
+      if (++fullSweepMisses == 3) {  // ~30 s of all-channel misses; print once, reset on sighting
+        Serial.printf("WiFi: '%s' not seen in any scan - name is case-sensitive; check spelling and that it is broadcasting\n", cached_wifi_ssid);
+      }
+    }
     if (seenChannel > 0) {
+      fullSweepMisses = 0;
       wifiRecon.channel = seenChannel;
       Serial.printf("WiFi: '%s' sighted on ch %d - joining\n", cached_wifi_ssid, (int)seenChannel);
       // Fire-and-poll: begin() returns immediately; association + DHCP run on the Core-0 WiFi task
@@ -8392,6 +8455,7 @@ void checkWiFiConnection() {
     // (and whenever no channel is cached); otherwise it's 120 ms of passive RX on one channel.
     bool fullSweep = (wifiRecon.channel == 0) || (++wifiRecon.scansSinceSweep >= WIFI_FULL_SWEEP_EVERY);
     if (fullSweep) wifiRecon.scansSinceSweep = 0;
+    lastScanWasFullSweep = fullSweep;
     WiFi.scanNetworks(true, false, true, 120, fullSweep ? 0 : (uint8_t)wifiRecon.channel, cached_wifi_ssid);
     wifiRecon.state = WIFI_RECON_SEEKING;
   }
@@ -8695,7 +8759,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
@@ -9251,7 +9316,13 @@ void SendWifiData() {
                                (lastCloudUploadOkMs == 0) ? -1 : (int)((millis() - lastCloudUploadOkMs) / 1000UL),
                                (int)getCurrentTimestamp(),
                                (int)cfgPushPendingCount,
-                               (int)cfgPushAppliedCount);
+                               (int)cfgPushAppliedCount,
+                               SafeInt(ch1_worst_fieldon),
+                               SafeInt(ch0GapFieldOnWorstMs),
+                               SafeInt(ch2GapFieldOnWorstMs),
+                               (int)loopBlameIdx[0], (int)loopBlameUs[0],
+                               (int)loopBlameIdx[1], (int)loopBlameUs[1],
+                               (int)loopBlameIdx[2], (int)loopBlameUs[2]);
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)

@@ -2678,6 +2678,7 @@ void ch1_record(uint32_t now) {
   ch1AtCount++;
   ch1AtSum += iv;
   if (iv > ch1AtWorst) ch1AtWorst = iv;
+  if (!gpio4IsLow && iv > ch1_worst_fieldon) ch1_worst_fieldon = iv;  // field-on split — the control-relevant worst
   // over2x is per-sample vs the running mean — the SAME test feeds the 1s mini-bucket
   // below, so the 10s / 2m / all-time over-counts are all on the same footing.
   bool isOver2x = false;
