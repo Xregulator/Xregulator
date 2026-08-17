@@ -149,7 +149,7 @@ float computeCvTempScale() {
 // space (same numbers on 12/24/48 V), then ×vNorm bakes back to pack space; the battery-temp derate is
 // the final multiplier in BOTH modes (the plant shifts with temperature however the gains were chosen).
 void recomputeCvGains() {
-  float vNorm = 12.0f / (float)BATTERY_VOLTAGE;     // 1, 0.5, 0.25 for 12/24/48 V
+  float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;     // 1, 0.5, 0.25 for 12/24/48 V
   cvPlantK = cvPlantKa;                             // the ~0.6 s stiffness anchor; the √t-tail (cvPlantKb) is retired
   bool plantValid = (cvPlantK > 1e-6f);
   float kpNorm, kiNorm, kdNorm;                     // 12V-equivalent gains (what the user sees)
@@ -182,14 +182,14 @@ void recomputeCvGains() {
 }
 
 // recomputeCcGains — CC (output-current) analog of recomputeCvGains. PidKp/Ki/Kd are 12V-equivalent;
-// ×(12/BATTERY_VOLTAGE) bakes them into the duty-space gains the inner current PID actually applies,
+// ×(12/SYSTEM_VOLTAGE_CLASS) bakes them into the duty-space gains the inner current PID actually applies,
 // so one set of tunings behaves identically on 12/24/48 V (field current per duty-% scales with bus
-// voltage). Call after any PidK* change and after a BATTERY_VOLTAGE change. currentPID is a global
+// voltage). Call after any PidK* change and after a SYSTEM_VOLTAGE_CLASS change. currentPID is a global
 // object (constructed before setup), so SetTunings is safe to call unconditionally. The hunt
 // governor's Ki derate applies here — the single SetTunings choke point — so every recompute path
 // (setting change, class change, governor step) preserves it.
 void recomputeCcGains() {
-  float vNorm = 12.0f / (float)BATTERY_VOLTAGE;     // 1, 0.5, 0.25 for 12/24/48 V
+  float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;     // 1, 0.5, 0.25 for 12/24/48 V
   PidKp_active = PidKp * vNorm;
   PidKi_active = PidKi * vNorm;
   PidKd_active = PidKd * vNorm;
@@ -558,8 +558,8 @@ void applyCcOutputLimits() {
 }
 
 // applyNominalVoltageChange — single entry point for a system-voltage class change (12/24/48 V),
-// triggered from the Vessel Info save (BATTERY_VOLTAGE is the sole source of truth). Call AFTER
-// setting BATTERY_VOLTAGE = newV. When the class actually changes it persists the new class to NVS
+// triggered from the Vessel Info save (SYSTEM_VOLTAGE_CLASS is the sole source of truth). Call AFTER
+// setting SYSTEM_VOLTAGE_CLASS = newV. When the class actually changes it persists the new class to NVS
 // (NK_BatteryVoltage), then rescales the PERSISTED
 // charge-voltage profile by newV/oldV (Bulk/Float/Absorption/Rebulk/Target/Charged/alarms), the
 // volt-domain protection/helper margins and V/s rates (OV margins, disagreement threshold, iExcess
@@ -573,7 +573,7 @@ void applyCcOutputLimits() {
 // band/floor) and the amp-per-volt gain KHard
 // (bank resistance rises with class, so the same per-cell excess needs the same amp response) in place
 // by oldV/newV and persists them, so they stay WYSIWYG in real per-bus units
-// (the live paths do not multiply by 12/Vbatt at use; nothing reads BATTERY_VOLTAGE at duty-clamp
+// (the live paths do not multiply by 12/Vbatt at use; nothing reads SYSTEM_VOLTAGE_CLASS at duty-clamp
 // time). Currents/times/normalized gains are voltage-independent. VoltageKd is NOT here — it is
 // runtime-normalized like VoltageKp/Ki (recomputeCvGains below re-derives VoltageKd_active for the new
 // class). CvKdMaxTrimA is NOT here either — a flat amp cap, voltage-independent by design.
@@ -1250,7 +1250,7 @@ void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float 
   ctrlLimiter = 0;
   shutdownPhase = SHUTDOWN_PHASE_NONE;   // so a later real shutdown starts its ramp fresh from here
 
-  const float vNorm = 12.0f / fmaxf(1.0f, (float)BATTERY_VOLTAGE);
+  const float vNorm = 12.0f / fmaxf(1.0f, (float)SYSTEM_VOLTAGE_CLASS);
   const float restFloor = COMMISSION_REST_FLOOR_PCT * vNorm;   // 4 / 2 / 1 % @ 12 / 24 / 48 V
   const float restRamp = COMMISSION_REST_RAMP_PCT * vNorm;     // 5 / 2.5 / 1.25 %/s
   const float restTarget = restFloor;
@@ -1455,7 +1455,7 @@ void commitCVTuningRecord() {
   // HIGH overshoot above the class-scaled dead-band weighted ×cvKOvershoot; LOW undershoot ×0.15
   // with time ramp. ÷ class ratio² (the integrators are V²-domain) so the score and its
   // good<10/<20 dashboard bands read 12V-equivalent on 24/48V banks.
-  float scoreNorm = (12.0f / (float)BATTERY_VOLTAGE) * (12.0f / (float)BATTERY_VOLTAGE);
+  float scoreNorm = (12.0f / (float)SYSTEM_VOLTAGE_CLASS) * (12.0f / (float)SYSTEM_VOLTAGE_CLASS);
   rec.score = (rec.activeTimeSec > 0.0f)
                 ? (1000.0f * scoreNorm * (cvTuningScore.totalIntegratedOvershootVs + cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
                    / rec.activeTimeSec)
@@ -1947,7 +1947,7 @@ static inline bool ovEpisodeActive() {
 // Scales only the P term; cv_I and the D trim are untouched.
 static inline float cvRecovBoostMult(float shortfallV) {
   if (!cvRecovBoostEnable || shortfallV <= 0.0f) return 1.0f;
-  float cls = (float)BATTERY_VOLTAGE / 12.0f;
+  float cls = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
   float floorV = cvRecovBoostFloorV * cls;
   float fullV = cvRecovBoostErrV * cls;
   if (ovEpisodeActive()) {
@@ -1967,7 +1967,7 @@ static inline float cvRecovBoostMult(float shortfallV) {
 // lands with ~zero surplus; the PI re-adds the held-back amps at its own pace if truly needed.
 // Continuous at the band edge; returns the plain goal when disabled (band 0 / frac 1).
 static inline float cvRecovFlaredCeil(float goalA, float shortfallV) {
-  float band = cvRecovFlareBandV * ((float)BATTERY_VOLTAGE / 12.0f);
+  float band = cvRecovFlareBandV * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
   if (band <= 0.001f || shortfallV >= band) return goalA;
   float frac = fmaxf(shortfallV, 0.0f) / band;
   return goalA * (cvRecovFlareFrac + (1.0f - cvRecovFlareFrac) * frac);
@@ -2159,7 +2159,7 @@ void AdjustFieldLearnMode() {
     float zeroFullScaleA = (AmpSensorRange == 0) ? 200.0f : (AmpSensorRange == 2) ? 500.0f : 300.0f;
     float zeroBandA = fmaxf(2.0f, 0.01f * zeroFullScaleA);
     static uint32_t altZeroSinceMs = 0;
-    float zeroHystV = 0.05f * ((float)BATTERY_VOLTAGE / 12.0f);
+    float zeroHystV = 0.05f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
     bool zeroLegs = voltageControlActive && !tick.currentDataStale
                     && MeasuredAmps < zeroBandA;
     bool inBandNow = zeroLegs && ((altZeroOutput || altZeroSinceMs != 0)
@@ -2322,7 +2322,7 @@ void AdjustFieldLearnMode() {
       const float V_HARD = ChargingVoltageTarget + OvPredMarginV;
       // Arm-proximity window scales with class: at 48V dV/dt is ~4× so a fixed 0.06V window
       // could be crossed inside one tick, defeating the predictive layer entirely.
-      const float PRED_GUARD = 0.06f * ((float)BATTERY_VOLTAGE / 12.0f);
+      const float PRED_GUARD = 0.06f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
 
       float Vpred = IBV + TD_PRED * fmaxf(0.0f, dvdt);
       g_fastOvVpred = Vpred;
@@ -2575,7 +2575,7 @@ void AdjustFieldLearnMode() {
   // Triggers when battery is 0.5V (per-cell-scaled by class) above the hard-shutdown threshold —
   // by this point the fault path is already ramping; this just removes the slew limit so the
   // ramp is instant.
-  if (tick.currentBatteryVoltage > (tick.alternatorHardShutdownV + 0.5f * ((float)BATTERY_VOLTAGE / 12.0f))) {
+  if (tick.currentBatteryVoltage > (tick.alternatorHardShutdownV + 0.5f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f))) {
     govMode = GOV_BYPASS_SLEW;
   }
   // Voltage sensor failure: bypass slew
@@ -2593,7 +2593,7 @@ void AdjustFieldLearnMode() {
     if (voltageControlActive) {
       if (fastOvClampActive) {
         cvGovBypassLatch = true;
-      } else if (IBV < ChargingVoltageTarget + 0.02f * ((float)BATTERY_VOLTAGE / 12.0f)) {
+      } else if (IBV < ChargingVoltageTarget + 0.02f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f)) {
         cvGovBypassLatch = false;
       }
       if (cvGovBypassLatch) {
@@ -3857,7 +3857,7 @@ void AdjustFieldLearnMode() {
         bool cvManualTest = (CVTuningMode != 0 && !g_autoTestActive);
         bool tgtSlewOff   = cvManualTest ? (cvTestSlewMode == 0)
                                          : (vTgtRampEnable == 0 && !g_autoTestActive);
-        float vtDflt   = VTGT_RAMP_DEFAULT * ((float)BATTERY_VOLTAGE / 12.0f);
+        float vtDflt   = VTGT_RAMP_DEFAULT * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
         float cvRampUp = (cvManualTest && cvTestSlewMode == 1) ? vtDflt : vTgtRampUp;
         float cvRampDn = (cvManualTest && cvTestSlewMode == 1) ? vtDflt : vTgtRampDn;
         bool forceSnap = (!voltageControlActive || enteringCV) ||
@@ -3873,7 +3873,7 @@ void AdjustFieldLearnMode() {
           // relative OV protections can't trip. vTgtRampDn then owns the final approach. Self-arming:
           // fires only while target >> measured (saturated); stays disengaged once measured is near
           // target, which is exactly the delicate absorption→float-on-a-full-battery case.
-          float fastFloor = IBV + 0.2f * ((float)BATTERY_VOLTAGE / 12.0f);
+          float fastFloor = IBV + 0.2f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
           if (ChargingVoltageTarget > fastFloor) {
             ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, fastFloor);
           }
@@ -3888,7 +3888,7 @@ void AdjustFieldLearnMode() {
           // the floor, because CvStressDropV (0.10) equals the shipped OvMeasMarginV (0.100) and an
           // unpaced landing puts the still-settled bus exactly on the G2 line.
           if (!cvManualTest && (!g_autoTestActive || cvStressForceCV)) {
-            float paceFloor = getFiltV() - CV_TGT_PACE_LEAD_V * ((float)BATTERY_VOLTAGE / 12.0f);
+            float paceFloor = getFiltV() - CV_TGT_PACE_LEAD_V * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
             tgtDn = fminf(fmaxf(tgtDn, paceFloor), ChargingVoltageTarget);
           }
           ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, tgtDn);
@@ -3914,7 +3914,7 @@ void AdjustFieldLearnMode() {
           if ((cvRiseGovEnable || g_autoTestActive) && ChargingVoltageTarget > voltageTargetSlewed + 0.01f) {
             float icvHi_gov = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // alternator command ceiling in CV
             float e_needed = (icvHi_gov - cv_I) / VoltageKp_active;
-            e_needed = fmaxf(e_needed, 0.02f * ((float)BATTERY_VOLTAGE / 12.0f));  // min target lead, per-cell-scaled
+            e_needed = fmaxf(e_needed, 0.02f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));  // min target lead, per-cell-scaled
             voltageTargetSlewed = fminf(ChargingVoltageTarget,
                                         IBV + e_needed);  // raw INA228 — no filter lag on governor
           } else {
@@ -4267,7 +4267,7 @@ void AdjustFieldLearnMode() {
             // target: overshoot droop (|e| large, V over target) and flutter-gap re-samples (recovActive)
             // are both excluded, so it tracks the true hold (~39A) not the bled-down snapshot (~21A).
             if (voltageControlActive && !fastOvClampActive && !recovActive
-                && fabsf(e) < 0.20f * ((float)BATTERY_VOLTAGE / 12.0f)) {
+                && fabsf(e) < 0.20f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f)) {
               float aH = (float)g_voltLoopActualIntervalMs / (1500.0f + (float)g_voltLoopActualIntervalMs);
               cvSteadyHoldEma = (cvSteadyHoldEma < 0.5f) ? cv_I
                                                          : cvSteadyHoldEma + aH * (cv_I - cvSteadyHoldEma);
@@ -4295,7 +4295,7 @@ void AdjustFieldLearnMode() {
             if (recovActive) {
               float aRef = (float)g_voltLoopActualIntervalMs / (3000.0f + (float)g_voltLoopActualIntervalMs);
               recovVRefEma += aRef * (getFiltV() - recovVRefEma);
-              float clsRec = (float)BATTERY_VOLTAGE / 12.0f;
+              float clsRec = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
               float shortfallF = voltageTargetSlewed - getFiltV();
               // "Not rising" = bus still within the answer band of the ~3s reference — a DELTA, not a
               // per-tick slope sign: idle ripple (±0.09 V/s on a flat bus) flips a slope EMA and
@@ -4330,7 +4330,7 @@ void AdjustFieldLearnMode() {
               // the climb is over, whatever the amp deficit says. Without it the window latches as a
               // stale ceiling whenever the plant heals needing less current than the goal (battery
               // filled during the event, load gone, target dropped) and ambushes the next disturbance.
-              bool heldAtTarget = (e <= 0.025f * ((float)BATTERY_VOLTAGE / 12.0f))
+              bool heldAtTarget = (e <= 0.025f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f))
                                   && ((uint32_t)(currentMillis - recovStartMs) > 2000UL);
               recovHeldTicks = heldAtTarget ? (uint8_t)(recovHeldTicks + 1) : 0;
               // A collapsed goal (goal = seed) starts already "healed" — the deficit exit would
@@ -4393,7 +4393,7 @@ void AdjustFieldLearnMode() {
                 && MaintainMode == 0 && !zeroFloatActive) {
               float servNeedA = (MeasuredAmps - Bcur) + fmaxf(battIntakeEma, 0.0f);
               bool servDeficit = (servNeedA - cv_I > 10.0f)
-                                 && (e > 0.05f * ((float)BATTERY_VOLTAGE / 12.0f));
+                                 && (e > 0.05f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
               loadServeTicks = servDeficit ? (uint8_t)((loadServeTicks < 200) ? loadServeTicks + 1 : 200) : 0;
               if (!loadServeActive && loadServeTicks >= 2) {
                 loadServeActive = true;
@@ -4458,7 +4458,7 @@ void AdjustFieldLearnMode() {
               // either way (too short only arms on a genuinely crawling bus, still arrival-gated).
               float stallOffset = voltageTargetSlewed - getFiltV();
               bool stallOk = !recovActive && !loadServeActive && !fastOvClampActive && !cvWindDownActive
-                             && (stallOffset >= 0.10f * ((float)BATTERY_VOLTAGE / 12.0f))
+                             && (stallOffset >= 0.10f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f))
                              && (lastAppliedDuty < 0.95f * ccDutyCeiling());
               if (!stallOk) {
                 cvStallStartMs = 0;
@@ -4467,7 +4467,7 @@ void AdjustFieldLearnMode() {
                 cvStallStartMs = currentMillis;
                 cvStallV0 = getFiltV();
               } else if (!cvStallBoost && (uint32_t)(currentMillis - cvStallStartMs) >= 3000UL) {
-                if (getFiltV() - cvStallV0 < 0.05f * ((float)BATTERY_VOLTAGE / 12.0f)) {
+                if (getFiltV() - cvStallV0 < 0.05f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f)) {
                   cvStallBoost = true;
                   queueConsoleMessage("CV: bus stalled below target with field in reserve — accelerating");
                 } else {
@@ -4490,7 +4490,7 @@ void AdjustFieldLearnMode() {
                 if (!arriving) {
                   float floorRate = CvRecovClimbRate * (float)MaxTableValue;
                   if (!recovActive) {
-                    float clsSt = (float)BATTERY_VOLTAGE / 12.0f;
+                    float clsSt = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
                     floorRate *= clamp_f((stallOffset / clsSt - 0.10f)
                                          / fmaxf(cvRecovDeepBandV - 0.10f, 0.05f), 0.0f, 1.0f);
                   }
@@ -4564,7 +4564,7 @@ void AdjustFieldLearnMode() {
         // their reference and G2 backstops a stalled wind-down exactly as before. Sits after the
         // per-tick Icv recompute so the cap is the last writer before setpointCommand reads Icv.
         {
-          float kWd = (float)BATTERY_VOLTAGE / 12.0f;
+          float kWd = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
           bool fitProbeActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
                                 resTestActive || batteryHealthTestActive || cvPlantFitActive;
           if (!voltageControlActive || !cvWindDownEnable || fitProbeActive ||
@@ -4619,7 +4619,7 @@ void AdjustFieldLearnMode() {
           float e_scored, w_high;
           if (e_high > 0.0f) {
             // dead-band (per-cell-scaled by class): the first 25mV(×class) of overshoot is free
-            e_scored = fmaxf(0.0f, e_high - CV_HIGH_DEADBAND_V * ((float)BATTERY_VOLTAGE / 12.0f));
+            e_scored = fmaxf(0.0f, e_high - CV_HIGH_DEADBAND_V * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
             w_high = cvKOvershoot;
           } else {
             e_scored = e_high;  // approach (undershoot during rise) scored normally, no dead-band
@@ -4631,7 +4631,7 @@ void AdjustFieldLearnMode() {
 
           if (!cvTuningScore.phaseSettled) {
             float vErr = fabsf(IBV - highTarget);  // raw INA228 — settle detection on true voltage
-            if (vErr <= CV_SETTLE_V_THRESH * ((float)BATTERY_VOLTAGE / 12.0f)) {
+            if (vErr <= CV_SETTLE_V_THRESH * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f)) {
               if (++cvTuningScore.consecutiveInBand >= cvConsecutiveReads) {
                 cvTuningScore.phaseSettled = true;
                 cvTuningScore.totalSettlingTimeSec +=
@@ -4645,7 +4645,7 @@ void AdjustFieldLearnMode() {
           // Steady-state peak-to-peak: stamp when V first enters the settle band, wait
           // CV_P2P_SKIP_MS (skip the ring), then track min/max of true V for CV_P2P_EVAL_MS.
           {
-            float bandV = CV_SETTLE_V_THRESH * ((float)BATTERY_VOLTAGE / 12.0f);
+            float bandV = CV_SETTLE_V_THRESH * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
             if (cvTuningScore.reachedTargetMs == 0 && fabsf(IBV - highTarget) <= bandV) {
               cvTuningScore.reachedTargetMs = currentMillis;
               cvTuningScore.p2pMin = 1.0e9f;
@@ -4698,7 +4698,7 @@ void AdjustFieldLearnMode() {
 
           if (!cvTuningScore.lowPhaseSettled) {
             float vErr = fabsf(IBV - lowTarget);  // raw INA228 — settle detection on true voltage
-            if (vErr <= CV_SETTLE_V_THRESH * ((float)BATTERY_VOLTAGE / 12.0f)) {
+            if (vErr <= CV_SETTLE_V_THRESH * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f)) {
               if (++cvTuningScore.lowConsecInBand >= cvConsecutiveReads) {
                 cvTuningScore.lowPhaseSettled = true;
                 cvTuningScore.totalLowSettlingTimeSec +=
@@ -4976,7 +4976,7 @@ void AdjustFieldLearnMode() {
     // regimes needed. Measured in 12V-EQUIVALENT volts so every published mV figure (CSV2,
     // /cvtuninglog live, cloud acc_volt_* columns) compares across 12/24/48V systems.
     {
-      float vNorm = 12.0f / (float)BATTERY_VOLTAGE;
+      float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;
       // Per-tick delta so temp-comp drift (mV-scale per tick) never reads as a step; track the
       // target every tick (valid or not) so CV re-entry can't fire a phantom step.
       bool targetStep = fabsf(ChargingVoltageTarget - accVPrevTargetV) * vNorm > ACC_V_STEP_V;
@@ -5107,15 +5107,24 @@ void setDutyPercent(float percent) {
 
   // constrain(NaN,…) returns NaN (both compares false) and (uint32_t)NaN is undefined. This is the single
   // final write to the field PWM for every duty path, so it is the place to hard-stop a NaN.
+  // Hard cap 99%: at 100% the LEDC output is solid DC with zero off-edges, so the high-side bootstrap
+  // never refreshes on P-type wiring (C4 drains through R108 in ~0.6ms → UVLO chop). 99% guarantees a
+  // refresh slice every period (526ns at 19kHz ≈ 2.4 recharge time constants — verified sufficient).
   if (isnan(percent)) percent = 0.0f;
-  percent = constrain(percent, 0.0f, 100.0f);
+  percent = constrain(percent, 0.0f, 99.0f);
+
+  // LEDC 12-bit ceiling: the clock divider must exceed 1.0, so 19455Hz is the max the driver accepts
+  // (19500 is rejected — bench 2026-08-16). NVS can carry an out-of-range value from older firmware;
+  // clamp here so boot attach and frequency changes can never fail.
+  SwitchingFrequency = constrain(SwitchingFrequency, 100.0f, 19455.0f);
 
   // Field-duty safety net for higher-voltage banks. Every duty path (Auto/manual/limp/fault) lands
   // here, so this is the one place that hard-bounds field duty even on the open-loop paths that bypass
   // the PID's MaxDuty limit (manual/limp/fault). MaxDuty is the real per-bus cap (its default is scaled
   // down on 24/48V so worst-case field current never exceeds the 12V case); clamp to it. Gated to >12V
-  // so 12V manual mode keeps its full-duty bypass. This is a duty-ratio proxy, not a measured amp limit.
-  if (BATTERY_VOLTAGE > 12 && percent > MaxDuty) {
+  // so 12V manual mode bypasses MaxDuty (up to the 99% bootstrap cap above). Duty-ratio proxy, not a
+  // measured amp limit.
+  if (SYSTEM_VOLTAGE_CLASS > 12 && percent > MaxDuty) {
     percent = MaxDuty;
   }
 
@@ -5201,8 +5210,8 @@ void updateChargingStage() {
   }
 
   // Two-sided hysteresis: timer arms when V reaches BulkVoltage − ENTER, resets only when V falls below BulkVoltage − EXIT. Prevents 30–50 mV idle noise (12V-bank figure) from resetting the hold timer — scaled ×V/12 so the band tracks the ~proportionally larger idle noise on 24/48V banks (BulkVoltage is class-scaled).
-  const float BULK_V_BAND_ENTER = 0.05f * ((float)BATTERY_VOLTAGE / 12.0f);
-  const float BULK_V_BAND_EXIT  = 0.10f * ((float)BATTERY_VOLTAGE / 12.0f);
+  const float BULK_V_BAND_ENTER = 0.05f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
+  const float BULK_V_BAND_EXIT  = 0.10f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
 
   if (inBulkStage && !inAbsorptionStage) {
     // ===== BULK (CC) =====
@@ -5233,7 +5242,7 @@ void updateChargingStage() {
     // short of target — drives Bcur to ~0 or negative while the pack is nowhere near absorbed, ending
     // absorption on a half-charged bank. Require the bus to actually BE at the absorption target first.
     // One-sided: another charge source holding the bus ABOVE target is a legitimate tail condition.
-    const float ABS_V_TAIL_BAND = 0.15f * ((float)BATTERY_VOLTAGE / 12.0f);
+    const float ABS_V_TAIL_BAND = 0.15f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
     const bool atAbsorbV = (v >= (AbsorptionVoltage - ABS_V_TAIL_BAND));
     // No battery shunt → Bcur is meaningless (reads ~0), which would false-trip tail on tick 1 and drop
     // the bank out of absorption instantly. Disable the tail path; absorption then ends on AbsorptionTimeoutMs.
@@ -6870,7 +6879,7 @@ void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
   // The duty-domain knobs — kneeStepPct (staircase), kneeMarginPct (park margin / step-down),
   // kneeMaxFloorPct (ceiling) — are stored in REAL duty-% for THIS bus, so they're used as-is here
   // (no runtime normalization — WYSIWYG with the dashboard box). Their defaults are scaled by
-  // ×(12/BATTERY_VOLTAGE) at first boot (kneeLearnInit) and rescaled in place on a system-voltage
+  // ×(12/SYSTEM_VOLTAGE_CLASS) at first boot (kneeLearnInit) and rescaled in place on a system-voltage
   // change (applyNominalVoltageChange) so a 5% 12V margin shows/uses as 1.25% on a 48V bank — keeping
   // the field-CURRENT margin constant without hiding the math. Amps-domain knobs (kneeOnsetA,
   // kneeReArmA) and the learned floors are voltage-independent (the probe observes real onset).
@@ -7186,9 +7195,9 @@ void kneeLearnInit() {
   else kneeTempComp = (settingRead(NK_kneeTempComp).toInt() != 0);
 #define KNEE_LD_F(key, var) do { if (!settingExists(key)) settingWrite(key, String(var).c_str()); else var = settingRead(key).toFloat(); } while (0)
   // Duty-domain knobs are stored in REAL duty-% for this bus. Their hardcoded globals are 12V values,
-  // so on FIRST creation scale the default by ×(12/BATTERY_VOLTAGE) (5%→1.25% at 48V) before persisting.
+  // so on FIRST creation scale the default by ×(12/SYSTEM_VOLTAGE_CLASS) (5%→1.25% at 48V) before persisting.
   // Once a key exists the stored value wins verbatim (no scaling) — that's the WYSIWYG dashboard value.
-#define KNEE_LD_DUTY(key, var) do { if (!settingExists(key)) { var = var * 12.0f / (float)BATTERY_VOLTAGE; settingWrite(key, String(var).c_str()); } else var = settingRead(key).toFloat(); } while (0)
+#define KNEE_LD_DUTY(key, var) do { if (!settingExists(key)) { var = var * 12.0f / (float)SYSTEM_VOLTAGE_CLASS; settingWrite(key, String(var).c_str()); } else var = settingRead(key).toFloat(); } while (0)
   KNEE_LD_DUTY(NK_kneeMarginPct,   kneeMarginPct);
   KNEE_LD_F(NK_kneeOnsetA,      kneeOnsetA);
   KNEE_LD_F(NK_kneeReArmA,      kneeReArmA);
@@ -7278,13 +7287,13 @@ String kneeLearnStateJson() {
 bool isVoltageSensorPlausible() {
   float minPlausible, maxPlausible;
 
-  // Use the user-entered nominal bank class (BATTERY_VOLTAGE) directly — not an autodetect from
+  // Use the user-entered nominal bank class (SYSTEM_VOLTAGE_CLASS) directly — not an autodetect from
   // BulkVoltage, which can mis-bucket and "F up" near class boundaries.
-  if (BATTERY_VOLTAGE >= 48) {
+  if (SYSTEM_VOLTAGE_CLASS >= 48) {
     // 48V system (normal bulk = 55.2-57.6V)
     minPlausible = 18.0f;  // Dead battery - 0.5V buffer
     maxPlausible = 60.5f;  // Max charging + 0.5V buffer
-  } else if (BATTERY_VOLTAGE >= 24) {
+  } else if (SYSTEM_VOLTAGE_CLASS >= 24) {
     // 24V system (normal bulk = 27.6-28.8V)
     minPlausible = 9.0f;   // Dead battery - 0.5V buffer
     maxPlausible = 32.5f;  // Max charging/equalization + buffer
@@ -7693,7 +7702,7 @@ void pidLog_tick(uint32_t nowMs) {
   // Inner output-current PID — the gains ACTUALLY handed to currentPID (setting × voltage-class norm,
   // Ki × the oscillation damper's live derate), same convention as voltageKp/Ki below. The configured
   // PidKp/Ki/Kd ride the CSV3 settings echo in the snapshot JSON saved beside every log, so the derate
-  // is recoverable as innerKi ÷ (PidKi × 12/BATTERY_VOLTAGE).
+  // is recoverable as innerKi ÷ (PidKi × 12/SYSTEM_VOLTAGE_CLASS).
   e.innerKp = PidKp_active;
   e.innerKi = PidKi_active * g_huntDerate;
   e.innerKd = PidKd_active;

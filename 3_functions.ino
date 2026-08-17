@@ -648,6 +648,8 @@ enum Csv2Index {
   CSV2_littleFsFreeKb,  // free space on the userdata LittleFS partition, kB; -1 until the boot seed; refreshed after each file write once the field gate is cut
   CSV2_cloudUpAgeS,     // seconds since last ack-confirmed cloud payload upload; -1 = never this boot
   CSV2_deviceEpoch,     // regulator wall clock, UTC epoch seconds; 0 = clock never set this boot
+  CSV2_cfgPushPending,  // admin config push staged in the cloud: settings it will change; 0 = none queued
+  CSV2_cfgPushApplied,  // admin config push applied on the previous boot: settings it changed; 0 = nothing to report
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -3373,6 +3375,22 @@ void setupServer() {
     }
     request->send(200, "application/json", "{\"ok\":true}");
   });
+  // Admin config push detail + ack. The CSV2 counts tell the dashboard THAT something is queued
+  // or landed; this hands over the text the popup needs. ?ack=1 clears the applied receipt (the
+  // pending notice is not ackable — it clears itself when the cloud flag goes away or the push
+  // lands). Not arm-gated: it neither changes a setting nor reveals anything a CSV2 frame doesn't.
+  server.on("/configPush", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("ack")) {
+      cfgPushAppliedCount = 0;
+      cfgPushAppliedKeys = "";
+      settingRemove(NK_cfgPushNotify);
+    }
+    String out = "{\"pendingCount\":" + String((int)cfgPushPendingCount)
+               + ",\"pendingNote\":\"" + cfgPushPendingNote
+               + "\",\"appliedCount\":" + String((int)cfgPushAppliedCount)
+               + ",\"appliedKeys\":\"" + cfgPushAppliedKeys + "\"}";
+    request->send(200, "application/json", out);
+  });
   server.on("/saveVesselInfo", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (!settingsArmActive()) {
       request->send(401, "application/json", "{\"success\":false,\"error\":\"Settings not armed\"}");
@@ -3408,12 +3426,12 @@ void setupServer() {
     // System voltage is the sole source of truth for the 12/24/48V class. On a change, rescale the
     // whole charge-voltage profile + re-derive the hard-shutdown trip + the INA228 OV limit + both
     // control loops' normalized gains (CV and CC). The dashboard warns the user before submitting.
-    int oldBatteryVoltage = BATTERY_VOLTAGE;
-    int newBatteryVoltage = doc["battery_voltage"] | (int)BATTERY_VOLTAGE;
+    int oldBatteryVoltage = SYSTEM_VOLTAGE_CLASS;
+    int newBatteryVoltage = doc["battery_voltage"] | (int)SYSTEM_VOLTAGE_CLASS;
     if (newBatteryVoltage != 12 && newBatteryVoltage != 24 && newBatteryVoltage != 48) newBatteryVoltage = oldBatteryVoltage;
     int    oldCapacityAh = BatteryCapacity_Ah;
     String oldBatteryType = BATTERY_TYPE;
-    BATTERY_VOLTAGE = (uint8_t)newBatteryVoltage;
+    SYSTEM_VOLTAGE_CLASS = (uint8_t)newBatteryVoltage;
     applyNominalVoltageChange(oldBatteryVoltage, newBatteryVoltage);
     // An absent/invalid key yields 0, which zeroes the full-charge tail-current threshold
     // (TailCurrent * BatteryCapacity_Ah) and the displayed capacity. Keep the current value instead.
@@ -3465,7 +3483,24 @@ void setupServer() {
         OnOff = 0;
         settingWrite(NK_OnOff, "0");
         stateRevision++;
-        queueConsoleMessage("FIELD OFF: Safety override (no arming required)");
+        // Sender fingerprint: unexplained OnOff=0 arrivals were seen on the bench (2026-08).
+        // The header form carries exactly one param, so extra params = a different sender,
+        // and IP+UA tell laptop from phone from a stale client replaying the request.
+        {
+          String qs;
+          for (size_t i = 0; i < request->params() && qs.length() < 120; i++) {
+            const AsyncWebParameter *p = request->getParam(i);
+            if (i) qs += '&';
+            qs += p->name();
+            qs += '=';
+            qs += p->value();
+          }
+          const AsyncWebHeader *uaH = request->getHeader("User-Agent");
+          String ua = uaH ? uaH->value() : String("-");
+          if (ua.length() > 80) ua = ua.substring(0, 80);
+          queueConsoleMessageF("FIELD OFF: Safety override (no arming required) [from %s | %s | UA %s]",
+                               request->client()->remoteIP().toString().c_str(), qs.c_str(), ua.c_str());
+        }
         request->send(200, "text/plain", "0");
         return;
       }
@@ -4437,7 +4472,7 @@ void setupServer() {
     }
     // NOTE: system voltage (12/24/48V) is NOT a /get setting — it lives in Vessel Info and the whole
     // class-change rescale (charge profile, hard-shutdown, INA228 OV, normalized CV/CC gains) runs in
-    // the /saveVesselInfo handler via applyNominalVoltageChange(). BATTERY_VOLTAGE is the sole source.
+    // the /saveVesselInfo handler via applyNominalVoltageChange(). SYSTEM_VOLTAGE_CLASS is the sole source.
     if (request->hasParam("wavePeriod")) {
       foundParameter = true;
       inputMessage = request->getParam("wavePeriod")->value();
@@ -4487,10 +4522,12 @@ void setupServer() {
     if (request->hasParam("SwitchingFrequency")) {
       foundParameter = true;
       inputMessage = request->getParam("SwitchingFrequency")->value();
-      int requestedFreq = inputMessage.toInt();
+      // LEDC 12-bit ceiling is 19455Hz (clock divider must exceed 1.0) — higher values are rejected
+      // by the driver and, once in NVS, kill the boot-time PWM attach (bench-confirmed 2026-08-16).
+      int requestedFreq = constrain(inputMessage.toInt(), 100, 19455);
       settingWrite(NK_SwitchingFrequency, String(requestedFreq).c_str());
       SwitchingFrequency = requestedFreq;
-      queueConsoleMessageF("Frequency target set to %dHz", SwitchingFrequency);
+      queueConsoleMessageF("Frequency target set to %dHz", requestedFreq);
     }
     if (request->hasParam("FloatVoltage")) {
       foundParameter = true;
@@ -6110,13 +6147,13 @@ void setupServer() {
     }
     if (request->hasParam("vTgtRampUp")) {  // CV voltage-target ramp UP rate (V/s); 0 = instant
       foundParameter = true;
-      vTgtRampUp = clamp_f(request->getParam("vTgtRampUp")->value().toFloat(), 0.0f, 5.0f * ((float)BATTERY_VOLTAGE / 12.0f));
+      vTgtRampUp = clamp_f(request->getParam("vTgtRampUp")->value().toFloat(), 0.0f, 5.0f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       settingWrite(NK_vTgtRampUp, String(vTgtRampUp, 3).c_str());
       queueConsoleMessageF("CV target ramp up: %.3f V/s", vTgtRampUp);
     }
     if (request->hasParam("vTgtRampDn")) {  // CV voltage-target ramp DOWN rate (V/s); 0 = instant
       foundParameter = true;
-      vTgtRampDn = clamp_f(request->getParam("vTgtRampDn")->value().toFloat(), 0.0f, 5.0f * ((float)BATTERY_VOLTAGE / 12.0f));
+      vTgtRampDn = clamp_f(request->getParam("vTgtRampDn")->value().toFloat(), 0.0f, 5.0f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
       queueConsoleMessageF("CV target ramp down: %.3f V/s", vTgtRampDn);
     }
@@ -6134,7 +6171,7 @@ void setupServer() {
     }
     if (request->hasParam("cvWindDownStopV")) {  // V real per-bus — stop margin above the commanded target
       foundParameter = true;
-      cvWindDownStopV = clamp_f(request->getParam("cvWindDownStopV")->value().toFloat(), 0.0f, 0.3f * ((float)BATTERY_VOLTAGE / 12.0f));
+      cvWindDownStopV = clamp_f(request->getParam("cvWindDownStopV")->value().toFloat(), 0.0f, 0.3f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       settingWrite(NK_cvWindDownStopV, String(cvWindDownStopV, 3).c_str());
       queueConsoleMessageF("CV wind-down stop margin: %.3f V", cvWindDownStopV);
     }
@@ -6285,7 +6322,7 @@ void setupServer() {
     if (request->hasParam("CvKdSlopeCeil")) {
       foundParameter = true;
       inputMessage = request->getParam("CvKdSlopeCeil")->value();
-      CvKdSlopeCeil = clamp_f(inputMessage.toFloat(), 1.0f*((float)BATTERY_VOLTAGE/12.0f), 20.0f*((float)BATTERY_VOLTAGE/12.0f));  // real per-bus — bounds scale with class like the input widget
+      CvKdSlopeCeil = clamp_f(inputMessage.toFloat(), 1.0f*((float)SYSTEM_VOLTAGE_CLASS/12.0f), 20.0f*((float)SYSTEM_VOLTAGE_CLASS/12.0f));  // real per-bus — bounds scale with class like the input widget
       settingWrite(NK_CvKdSlopeCeil, String(CvKdSlopeCeil, 1).c_str());
       queueConsoleMessageF("CV D-term slope ceiling: %.1f V/s", CvKdSlopeCeil);
     }
@@ -6595,7 +6632,7 @@ void setupServer() {
     if (request->hasParam("IExcessArmMarginV")) {
       foundParameter = true;
       inputMessage = request->getParam("IExcessArmMarginV")->value();
-      IExcessArmMarginV = constrain(inputMessage.toFloat(), 0.020f * ((float)BATTERY_VOLTAGE / 12.0f), 5.000f * ((float)BATTERY_VOLTAGE / 12.0f));
+      IExcessArmMarginV = constrain(inputMessage.toFloat(), 0.020f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f), 5.000f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
       queueConsoleMessageF("iExcess arming margin set to: %.0f mV below target", IExcessArmMarginV * 1000.0f);
     }
@@ -6625,7 +6662,7 @@ void setupServer() {
     if (request->hasParam("FastSetpointRiseHeadroomV")) {
       foundParameter = true;
       inputMessage = request->getParam("FastSetpointRiseHeadroomV")->value();
-      FastSetpointRiseHeadroomV = constrain(inputMessage.toFloat(), 0.05f * ((float)BATTERY_VOLTAGE / 12.0f), 2.0f * ((float)BATTERY_VOLTAGE / 12.0f));
+      FastSetpointRiseHeadroomV = constrain(inputMessage.toFloat(), 0.05f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f), 2.0f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       settingWrite(NK_FastSetpointRiseHeadroomV, String(FastSetpointRiseHeadroomV, 2).c_str());
       queueConsoleMessageF("Fast rise headroom set to: %.2fV", FastSetpointRiseHeadroomV);
     }
@@ -6733,14 +6770,14 @@ void setupServer() {
     if (request->hasParam("OvMeasMarginV")) {
       foundParameter = true;
       inputMessage = request->getParam("OvMeasMarginV")->value();
-      OvMeasMarginV = constrain(inputMessage.toFloat(), 0.020f * ((float)BATTERY_VOLTAGE / 12.0f), 0.500f * ((float)BATTERY_VOLTAGE / 12.0f));
+      OvMeasMarginV = constrain(inputMessage.toFloat(), 0.020f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f), 0.500f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       settingWrite(NK_OvMeasMarginV, String(OvMeasMarginV, 3).c_str());
       queueConsoleMessageF("Group 2 measured-voltage trigger margin set to: %.0f mV", OvMeasMarginV * 1000.0f);
     }
     if (request->hasParam("OvPredMarginV")) {
       foundParameter = true;
       inputMessage = request->getParam("OvPredMarginV")->value();
-      OvPredMarginV = constrain(inputMessage.toFloat(), 0.050f * ((float)BATTERY_VOLTAGE / 12.0f), 1.000f * ((float)BATTERY_VOLTAGE / 12.0f));
+      OvPredMarginV = constrain(inputMessage.toFloat(), 0.050f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f), 1.000f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
       queueConsoleMessageF("Group 1 prediction trigger margin set to: %.0f mV", OvPredMarginV * 1000.0f);
     }
@@ -6812,7 +6849,7 @@ void setupServer() {
     if (request->hasParam("cvWaveAmplitudeV")) {
       foundParameter = true;
       inputMessage = request->getParam("cvWaveAmplitudeV")->value();
-      cvWaveAmplitudeV = constrain(inputMessage.toFloat(), 0.05f * ((float)BATTERY_VOLTAGE / 12.0f), 2.0f * ((float)BATTERY_VOLTAGE / 12.0f));
+      cvWaveAmplitudeV = constrain(inputMessage.toFloat(), 0.05f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f), 2.0f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       settingWrite(NK_cvWaveAmplitudeV, String(cvWaveAmplitudeV, 2).c_str());
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -7975,7 +8012,7 @@ void setupServer() {
     float cvts = 0.0f;
     if (cvTestActive && cvTuningScore.activeTimeSec > 0.0f) {
       // ÷ class ratio² to match commitCVTuningRecord's 12V-equivalent score normalization
-      float liveNorm = (12.0f / (float)BATTERY_VOLTAGE) * (12.0f / (float)BATTERY_VOLTAGE);
+      float liveNorm = (12.0f / (float)SYSTEM_VOLTAGE_CLASS) * (12.0f / (float)SYSTEM_VOLTAGE_CLASS);
       cvts = 1000.0f * liveNorm * (cvTuningScore.totalIntegratedOvershootVs
                         + cvTuningScore.totalLowIntOvVs
                         + cvTuningScore.totalLowUndershootVs)
@@ -8133,7 +8170,7 @@ void setupServer() {
                        "{\"bulk\":%.2f,\"k\":%.2f,\"bins_fine\":%d,\"bins_coarse\":%d,"
                        "\"fine_width_12v\":0.2,\"coarse_width_12v\":1.0,"
                        "\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"kd\":%lu,\"events\":[",
-                       BulkVoltage, (float)BATTERY_VOLTAGE / 12.0f, OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS,
+                       BulkVoltage, (float)SYSTEM_VOLTAGE_CLASS / 12.0f, OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS,
                        (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
                        (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.kdEventCount);
     for (int i = 0; i < OV_HIST_BINS && off > 0 && off < (int)cap; i++)
@@ -8658,7 +8695,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
@@ -9212,7 +9249,9 @@ void SendWifiData() {
                                SafeInt(g_cvKdCount),
                                LittleFsFreeKb,
                                (lastCloudUploadOkMs == 0) ? -1 : (int)((millis() - lastCloudUploadOkMs) / 1000UL),
-                               (int)getCurrentTimestamp());
+                               (int)getCurrentTimestamp(),
+                               (int)cfgPushPendingCount,
+                               (int)cfgPushAppliedCount);
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
@@ -9879,7 +9918,7 @@ void saveVesselInfoToNvs() {
   vesselNvsSet(h, NK_homePort,           HOME_PORT);
   vesselNvsSet(h, NK_engineMake,         ENGINE_MAKE.c_str());
   vesselNvsSet(h, NK_engineHp,           String((int)ENGINE_HP).c_str());
-  vesselNvsSet(h, NK_BatteryVoltage,     String((int)BATTERY_VOLTAGE).c_str());
+  vesselNvsSet(h, NK_BatteryVoltage,     String((int)SYSTEM_VOLTAGE_CLASS).c_str());
   vesselNvsSet(h, NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());
   vesselNvsSet(h, NK_batteryType,        BATTERY_TYPE.c_str());
   vesselNvsSet(h, NK_battMakeModel,      BATTERY_MAKE_MODEL.c_str());

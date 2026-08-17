@@ -12019,43 +12019,43 @@
 
         <details class="esp32-sec" id="esp32SecAppUsage" ontoggle="if (this.open && typeof usageFetchStats === 'function') usageFetchStats();">
           <summary>App Usage</summary>
-          <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">How this interface gets used. "Today" counts
-            reset at the daily cloud upload; lifetime totals persist on the device.</p>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Counted on the regulator across everything
+            that connects to it. "Today" resets at midnight; lifetime totals never reset.</p>
           <div class="grid">
             <div class="card-group">
-              <p class="card-group-title">Time &amp; Opens</p>
-              <div class="metric-row">
-                <span class="metric-label">Open Time (Today)</span>
-                <span class="metric-value"><span id="usageTodayTime">--</span></span>
-              </div>
-              <div class="metric-row">
-                <span class="metric-label">Opens (Today)</span>
-                <span class="metric-value"><span id="usageTodayOpens">--</span></span>
-              </div>
-              <div class="metric-row">
-                <span class="metric-label">Open Time (Lifetime)</span>
-                <span class="metric-value"><span id="usageLifeTime">--</span></span>
-              </div>
-              <div class="metric-row">
-                <span class="metric-label">Opens (Lifetime)</span>
-                <span class="metric-value"><span id="usageLifeOpens">--</span></span>
-              </div>
-              <div class="metric-row">
-                <span class="metric-label">Days Uploaded</span>
-                <span class="metric-value"><span id="usageLifeDays">--</span></span>
-              </div>
+              <p class="card-group-title">Totals</p>
+              <table class="usage-table">
+                <thead>
+                  <tr><th></th><th>Today</th><th>Lifetime</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>Screen Time</td><td id="usageTodayTime">--</td><td id="usageLifeTime">--</td></tr>
+                  <tr><td>Opens</td><td id="usageTodayOpens">--</td><td id="usageLifeOpens">--</td></tr>
+                  <tr><td>Days Uploaded</td><td class="usage-none">&mdash;</td><td id="usageLifeDays">--</td></tr>
+                </tbody>
+              </table>
             </div>
             <div class="card-group">
               <p class="card-group-title">Top Pages (Today)</p>
-              <div id="usageTopPages">
-                <div class="metric-row"><span class="metric-label">No data yet</span></div>
-              </div>
+              <table class="usage-table">
+                <thead>
+                  <tr><th>Page</th><th>Opens</th><th>Screen Time</th></tr>
+                </thead>
+                <tbody id="usageTopPages">
+                  <tr><td colspan="3" class="usage-none">No data yet</td></tr>
+                </tbody>
+              </table>
             </div>
             <div class="card-group">
               <p class="card-group-title">Top Buttons (Today)</p>
-              <div id="usageTopBtns">
-                <div class="metric-row"><span class="metric-label">No data yet</span></div>
-              </div>
+              <table class="usage-table">
+                <thead>
+                  <tr><th>Button</th><th>Clicks</th></tr>
+                </thead>
+                <tbody id="usageTopBtns">
+                  <tr><td colspan="2" class="usage-none">No data yet</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </details>
@@ -14046,8 +14046,7 @@
       <div style="padding:18px 20px 16px; font-size:0.92em; line-height:1.5; overflow-y:auto; flex:1; min-height:0;">
         <p style="margin:0 0 15px; font-size:14px;">
           The regulator periodically reboots itself. There is no fixed schedule: it waits for
-          non-interrupting moments, and forces an immediate reboot only if a better moment wasn't found.
-          This is normal maintenance, not a fault.
+          non-interrupting moments and forces an immediate reboot only if a better moment wasn't found.
         </p>
 
         <!-- Steps mirror the three uptime tiers in checkAndRestart() (5_functions.ino): 24 h fully quiet
@@ -14060,10 +14059,9 @@
           <div>
             <div style="font-size:13px; font-weight:600; color:#e6e6e6; margin-bottom:4px;">From 1 day on &mdash; only when nothing at all is happening</div>
             <div style="font-size:12.5px; color:#b6b6b6; line-height:1.45;">
-              All of these have to be true at once for a full 5 minutes: engine off, not charging, nobody
-              connected to the app or dashboard, cloud uploads finished (offline, there is nothing to wait
-              for), SOC above 30% if it is known, and battery voltage above 11.8 V on a 12 V system
-              (scaled for 24 V and 48 V).
+              All must be true at once for a full 5 minutes: engine off, not charging, nobody connected
+              to the app or dashboard, cloud uploads finished, SOC above 30% if it is known, and battery
+              voltage &gt;11.8 V on a 12 V system (scaled for 24 V and 48 V).
             </div>
           </div>
         </div>
@@ -14078,12 +14076,11 @@
           <div>
             <div style="font-size:13px; font-weight:600; color:#e6e6e6; margin-bottom:4px;">From 2 days on &mdash; it stops waiting for you to disconnect</div>
             <div style="font-size:12.5px; color:#b6b6b6; line-height:1.45;">
-              Having the app open no longer holds it off, and the state of charge no longer matters.
-              Everything else from step 1 still applies.
+              SOC no longer matters either. Everything else from step 1 still applies.
             </div>
             <div style="font-size:12px; color:#8b8b8b; margin-top:5px;">
               <span style="font-size:10.5px; letter-spacing:0.05em; text-transform:uppercase; color:#777; font-weight:600;">You'll see</span>
-              &nbsp;A 10-minute countdown if you are connected; nothing if you are not.
+              &nbsp;A 10-minute countdown if you are connected.
             </div>
           </div>
         </div>
@@ -14111,7 +14108,7 @@
           <strong style="color:#ccc; font-weight:600;">One case forces restart quicker than the above
           schedule:</strong> if the regulator finds its own working memory has stayed fragmented for 30
           minutes straight, it takes the very next quiet window rather than waiting for the 1-day mark.
-          The step 1 conditions still have to be met, so you would not notice that one either.
+          The step 1 conditions still have to be met.
         </p>
         <p style="margin:0; font-size:12.5px; color:#999;">
           <strong style="color:#ccc; font-weight:600;">Nothing is lost in reboot.</strong> Settings, history,

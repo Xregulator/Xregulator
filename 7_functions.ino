@@ -955,7 +955,7 @@ void altFold_tick(uint32_t nowMs) {
   // only the EMA filters + the episode detector feed.
   altLive_rpm = fRpm; altLive_exc = exc; altLive_amps = fAmps;
   altLive_vbus = fVbus; altLive_tF = tF; altLive_duty = fDuty;
-  altLiveValid = (!isnan(fRpm) && !isnan(exc) && !isnan(fVbus) && fVbus >= ALT_MIN_BATT_V * ((float)BATTERY_VOLTAGE / 12.0f));
+  altLiveValid = (!isnan(fRpm) && !isnan(exc) && !isnan(fVbus) && fVbus >= ALT_MIN_BATT_V * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
   altLastFoldMs = nowMs;
 
   // Detection runs regardless of Pause / Reference Source: the trend (full-steady runs graded against
@@ -971,7 +971,7 @@ void altFold_tick(uint32_t nowMs) {
   // output-amps band) — all filtered, including the admission floors, so a single noise dip
   // can't act as a barrier that wipes the look-back ring mid-run.
   altEpisodeSyncCfg(fAmps);
-  bool eligible = (!isnan(fVbus) && fVbus >= ALT_MIN_BATT_V * ((float)BATTERY_VOLTAGE / 12.0f) && fAmps >= altMinAmps && fDuty >= altMinDuty && fRpm >= 0);
+  bool eligible = (!isnan(fVbus) && fVbus >= ALT_MIN_BATT_V * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f) && fAmps >= altMinAmps && fDuty >= altMinDuty && fRpm >= 0);
   altSessTempGate.feed(eligible, tF, nowMs, altThermDegF, altSessTempDwell());   // lighter (half-dwell) temp gate for the session plot
   RawSample<ALT_NAXIS> s;
   s.x[0] = fRpm; s.x[1] = fDuty; s.x[2] = fVbus; s.x[3] = tF; s.out = fAmps; s.tMs = nowMs;
@@ -1455,7 +1455,7 @@ bool buildAltHealthPayload(char *buf, size_t size) {
   time_t now_ts = time(NULL);
   int off = snprintf(buf, size,
     "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\",\"sys\":\"ALT\",\"pruneK\":%d,\"idwPower\":%.2f,\"sysV\":%u,",
-    device_id_hex, authToken.c_str(), formatTimestamp(now_ts), (int)altPruneK, altIdwPower, (unsigned)BATTERY_VOLTAGE);
+    device_id_hex, authToken.c_str(), formatTimestamp(now_ts), (int)altPruneK, altIdwPower, (unsigned)SYSTEM_VOLTAGE_CLASS);
   if (off < 0 || (size_t)off >= size) return false;
   if (altPendingSeededFrom.length()) {   // adopted import: tag the whole batch as borrowed provenance
     off += snprintf(buf + off, size - off, "\"seededFrom\":\"%s\",", altPendingSeededFrom.c_str());
@@ -1539,7 +1539,7 @@ void altFrontInit() {
   // it is physical field volts, and the MaxDuty class scaling keeps its range identical on any bank).
   altFront2.axisScale[0] = 25.0f;   // RPM
   altFront2.axisScale[1] = 0.2f;    // excitation (temp-normalized field volts)
-  altFront2.axisScale[2] = 0.1f;    // Vbus at 12V — class-corrected by altApplyClassScales() once BATTERY_VOLTAGE is loaded
+  altFront2.axisScale[2] = 0.1f;    // Vbus at 12V — class-corrected by altApplyClassScales() once SYSTEM_VOLTAGE_CLASS is loaded
   altFront2.axisScale[3] = 5.0f;    // tempF
   for (int a = 0; a < ALT_NAXIS; a++) altFrontUp.axisScale[a] = altFront2.axisScale[a];   // same metric for the borrowed surface
   queueConsoleMessageF("AltFront init: cap %d pts, ring %d, %.1fKB PSRAM",
@@ -1549,11 +1549,11 @@ void altFrontInit() {
 }
 
 // Vbus cell size per-cell-equivalent across bank classes (0.4V @48V ≡ 0.1V @12V). Separate from
-// altFrontInit because that runs BEFORE InitSystemSettings loads BATTERY_VOLTAGE; also re-run on a
+// altFrontInit because that runs BEFORE InitSystemSettings loads SYSTEM_VOLTAGE_CLASS; also re-run on a
 // live class change (applyNominalVoltageChange). Scales are interpretation-only — stored points keep
 // raw coordinates. The update-alt-health edge fn mirrors this via the upload payload's sysV field.
 void altApplyClassScales() {
-  altFront2.axisScale[2] = 0.1f * ((float)BATTERY_VOLTAGE / 12.0f);
+  altFront2.axisScale[2] = 0.1f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
   altFrontUp.axisScale[2] = altFront2.axisScale[2];
 }
 
@@ -1643,7 +1643,7 @@ void altHealth_tick(uint32_t nowMs) {
 // declarations so altDebugCsvSend can iterate it.) Avoids fragile CSV3 plumbing.
 void altSettingsLoad() {
   // Three knobs are class-dependent 12V-value defaults, and this loader runs BEFORE InitSystemSettings
-  // resolves BATTERY_VOLTAGE (NVS else vessel-JSON mirror). Their first creation is DEFERRED to
+  // resolves SYSTEM_VOLTAGE_CLASS (NVS else vessel-JSON mirror). Their first creation is DEFERRED to
   // altSeedClassKnobs() right after it; existing keys still load verbatim here. The knobs have no
   // consumer until the runtime fold (altEpisodeSyncCfg), so the gap is safe.
   for (size_t i = 0; i < ALT_SETTING_COUNT; i++) {
@@ -1658,12 +1658,12 @@ void altSettingsLoad() {
 }
 
 // Deferred first-creation seeding for the class-dependent registry knobs — call AFTER InitSystemSettings
-// so BATTERY_VOLTAGE is authoritative. Volt-domain ×(V/12), duty-domain ×(12/V), identity at 12V; a live
+// so SYSTEM_VOLTAGE_CLASS is authoritative. Volt-domain ×(V/12), duty-domain ×(12/V), identity at 12V; a live
 // class change rescales them in applyNominalVoltageChange like every other class-scaled setting.
 void altSeedClassKnobs() {
-  if (!settingExists("altVbusTol"))    { altVbusTol    *= (float)BATTERY_VOLTAGE / 12.0f; settingWrite("altVbusTol",    String(altVbusTol, 4).c_str()); }
-  if (!settingExists("altDutyTolPct")) { altDutyTolPct *= 12.0f / (float)BATTERY_VOLTAGE; settingWrite("altDutyTolPct", String(altDutyTolPct, 4).c_str()); }
-  if (!settingExists("altMinDuty"))    { altMinDuty    *= 12.0f / (float)BATTERY_VOLTAGE; settingWrite("altMinDuty",    String(altMinDuty, 4).c_str()); }
+  if (!settingExists("altVbusTol"))    { altVbusTol    *= (float)SYSTEM_VOLTAGE_CLASS / 12.0f; settingWrite("altVbusTol",    String(altVbusTol, 4).c_str()); }
+  if (!settingExists("altDutyTolPct")) { altDutyTolPct *= 12.0f / (float)SYSTEM_VOLTAGE_CLASS; settingWrite("altDutyTolPct", String(altDutyTolPct, 4).c_str()); }
+  if (!settingExists("altMinDuty"))    { altMinDuty    *= 12.0f / (float)SYSTEM_VOLTAGE_CLASS; settingWrite("altMinDuty",    String(altMinDuty, 4).c_str()); }
 }
 bool altSettingsHandle(AsyncWebServerRequest *request) {
   bool handled = false;

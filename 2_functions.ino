@@ -503,6 +503,7 @@ bool fsRemove(const char *path) {
 #define NK_kneeDutyTolPct  "kneeDutyTolPct"
 #define NK_ZeroLogEnable   "ZeroLogEnable"   // Zero-drift characterization log master toggle
 #define NK_lastAppldCfgId  "lastAppldCfgId"  // id of the last admin-pushed config applied (reboot-loop guard)
+#define NK_cfgPushNotify   "cfgPushNotify"   // "<n>|<key,key,...>" receipt written by an applied config push, read back one boot later for the dashboard popup, cleared by its ack
 #define NK_cfgSchema       "cfgSchema"       // persisted settings-schema version (runSettingsMigrations)
 
 // Vessel Info. Was /vessel_info.json on LittleFS; moved into NVS so the boat's identity,
@@ -680,7 +681,7 @@ bool commissionRestoreScalars(const char* key) {
   // Affine trip-line intercept + CC offset (13th/14th fields, always written as a pair).
   IExcessBaseA = v[12];     settingWrite(NK_IExcessBaseA, String(IExcessBaseA, 1).c_str());
   IExcessCcOffsetA = v[13]; settingWrite(NK_IExcessCcOffsetA, String(IExcessCcOffsetA, 1).c_str());
-  recomputeCcGains();  // re-apply CC gains live (normalized to BATTERY_VOLTAGE)
+  recomputeCcGains();  // re-apply CC gains live (normalized to SYSTEM_VOLTAGE_CLASS)
   return true;
 }
 
@@ -3320,7 +3321,7 @@ bool buildConfigPayload() {
     "\"bins_fine\":%d,\"bins_coarse\":%d,\"events\":[",
     (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
     (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.kdEventCount,
-    BulkVoltage, (float)BATTERY_VOLTAGE / 12.0f,
+    BulkVoltage, (float)SYSTEM_VOLTAGE_CLASS / 12.0f,
     OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS);
   for (int i = 0; i < OV_HIST_BINS; i++)
     offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset), "%s%lu", i ? "," : "", (unsigned long)g_ovTel.events[i]);
@@ -4026,6 +4027,10 @@ bool usageMergeDelta(const char *body) {
   if (xSemaphoreTake(usageMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
   uint32_t o = doc["o"] | 0U;
   bool isApp = (doc["a"] | 0) != 0;
+  if (doc.containsKey("z")) {
+    int32_t z = doc["z"] | 0;
+    if (z >= -50400 && z <= 50400) usageTzOffsetS = z;  // ±14 h — the real-world UTC-offset range
+  }
   usageOpens += o;
   UsageOpens_AllTime += o;
   if (isApp) {
@@ -4080,11 +4085,11 @@ bool buildUsagePayload(char *buf, uint32_t cap) {
   int off = snprintf(buf, cap,
                      "{\"device_uid\":\"%s\",\"token\":\"%s\",\"payload_v\":1,"
                      "\"fw_version_int\":%d,\"web_version\":\"%s\",\"app_seen\":%d,"
-                     "\"period_start\":%lld,\"period_end\":%lld,"
+                     "\"period_start\":%lld,\"period_end\":%lld,\"tz\":%ld,"
                      "\"opens\":%u,\"opens_app\":%u,\"total_ms\":%llu,\"overflow\":%u,\"pages\":{",
                      device_id_hex, authToken.c_str(), firmwareVersionInt, FIRMWARE_VERSION,
                      usageAppSeen ? 1 : 0, (long long)usagePeriodStartEpoch, (long long)time(NULL),
-                     usageOpens, usageOpensApp, (unsigned long long)totalMs, usageOverflowN);
+                     (long)usageTzOffsetS, usageOpens, usageOpensApp, (unsigned long long)totalMs, usageOverflowN);
   bool first = true;
   for (uint16_t i = 0; i < usageSlotCount && off > 0 && off < (int)cap; i++) {
     if (strncmp(usageSlots[i].key, "p:", 2) != 0) continue;
@@ -4181,6 +4186,7 @@ done_status_us:
 
   bool success = (httpCode == 200);
   if (success) {
+    UsageDays_AllTime++;  // counts DELIVERED days — queue admission alone must not count
     queueConsoleMessage("App-usage analytics uploaded");
   } else if (httpCode > 0) {
     snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Usage upload failed HTTP %d", httpCode);
@@ -4193,7 +4199,7 @@ done_status_us:
 // top-5 pages by dwell, top-5 buttons by count, lifetime totals.
 String usageStatsJson() {
   String out;
-  out.reserve(1200);
+  out.reserve(1400);  // headroom for the 40-char key cap
   if (!usageSlots || !usageMutex || xSemaphoreTake(usageMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
     return String("{\"err\":1}");
   }
@@ -4258,6 +4264,7 @@ struct UsageFileHdr {
   uint32_t magic;
   uint32_t opens, opensApp, overflowN;
   int64_t periodStart;
+  int32_t tzOffsetS;
   uint8_t appSeen;
   uint8_t _pad[3];
   uint16_t slotCount;
@@ -4279,6 +4286,7 @@ void dumpUsageAccum() {
     h.opensApp = usageOpensApp;
     h.overflowN = usageOverflowN;
     h.periodStart = usagePeriodStartEpoch;
+    h.tzOffsetS = usageTzOffsetS;
     h.appSeen = usageAppSeen ? 1 : 0;
     h.slotCount = usageSlotCount;
     bool ok = f.write((const uint8_t *)&h, sizeof(h)) == sizeof(h);
@@ -4312,6 +4320,7 @@ void loadUsageAccum() {
       usageOpensApp = h.opensApp;
       usageOverflowN = h.overflowN;
       usagePeriodStartEpoch = h.periodStart;
+      usageTzOffsetS = h.tzOffsetS;
       usageAppSeen = h.appSeen != 0;
       usageSlotCount = h.slotCount;
       for (uint16_t i = 0; i < usageSlotCount; i++)

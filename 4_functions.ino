@@ -876,22 +876,22 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     capLimitMode = constrain(settingRead(NK_capLimitMode).toInt(), 0, 1);
   }
   // System voltage class (12/24/48). The CV/CC gain normalization (recomputeCv/CcGains, called
-  // at the end of this function) divides by BATTERY_VOLTAGE, so a zero here is fatal.
+  // at the end of this function) divides by SYSTEM_VOLTAGE_CLASS, so a zero here is fatal.
   if (!settingExists(NK_BatteryVoltage)) {
-    if (BATTERY_VOLTAGE != 12 && BATTERY_VOLTAGE != 24 && BATTERY_VOLTAGE != 48) BATTERY_VOLTAGE = 12;
-    settingWrite(NK_BatteryVoltage, String((int)BATTERY_VOLTAGE).c_str());
+    if (SYSTEM_VOLTAGE_CLASS != 12 && SYSTEM_VOLTAGE_CLASS != 24 && SYSTEM_VOLTAGE_CLASS != 48) SYSTEM_VOLTAGE_CLASS = 12;
+    settingWrite(NK_BatteryVoltage, String((int)SYSTEM_VOLTAGE_CLASS).c_str());
   } else {
     int v = settingRead(NK_BatteryVoltage).toInt();
-    if (v != 12 && v != 24 && v != 48) v = 12;  // reject corrupt NVS value (guards vNorm = 12/BATTERY_VOLTAGE div-by-zero/NaN)
-    BATTERY_VOLTAGE = (uint8_t)v;
+    if (v != 12 && v != 24 && v != 48) v = 12;  // reject corrupt NVS value (guards vNorm = 12/SYSTEM_VOLTAGE_CLASS div-by-zero/NaN)
+    SYSTEM_VOLTAGE_CLASS = (uint8_t)v;
   }
   // First-creation class scaling. Every hardcoded default below is a 12V value; volt-domain seeds
   // scale ×(V/12), duty-domain seeds ×(12/V) — the same two domains applyNominalVoltageChange
   // rescales on a live class change. Existing keys always load verbatim, so this only fires when a
   // key is first created on a device already provisioned 24/48V (fresh NVS with the class known, or
   // a firmware update introducing a new setting).
-  const float seedVScale = (float)BATTERY_VOLTAGE / 12.0f;
-  const float seedDScale = 12.0f / (float)BATTERY_VOLTAGE;
+  const float seedVScale = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
+  const float seedDScale = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;
   if (!settingExists(NK_BulkVoltage)) {
     BulkVoltage *= seedVScale;
     settingWrite(NK_BulkVoltage, String(BulkVoltage).c_str());
@@ -1373,17 +1373,17 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   }
   if (!settingExists(NK_MaxDuty)) {
     // Max Field % is the REAL per-bus field-duty cap. The hardcoded default (99) is a 12V value, so on
-    // first creation scale it by ×(12/BATTERY_VOLTAGE) (→ ~50%@24V, ~25%@48V) so worst-case field
+    // first creation scale it by ×(12/SYSTEM_VOLTAGE_CLASS) (→ ~50%@24V, ~25%@48V) so worst-case field
     // current never exceeds the 12V case. WYSIWYG: the dashboard box shows the actual cap; user-adjustable.
-    MaxDuty = (int)lroundf(MaxDuty * 12.0f / (float)BATTERY_VOLTAGE);
+    MaxDuty = (int)lroundf(MaxDuty * 12.0f / (float)SYSTEM_VOLTAGE_CLASS);
     settingWrite(NK_MaxDuty, String(MaxDuty).c_str());
   } else {
     MaxDuty = settingRead(NK_MaxDuty).toInt();
   }
   if (!settingExists(NK_MinDuty)) {
-    // Float field floor, first-creation scaled ×(12/BATTERY_VOLTAGE) like MaxDuty so the same
+    // Float field floor, first-creation scaled ×(12/SYSTEM_VOLTAGE_CLASS) like MaxDuty so the same
     // field current floor applies on any bank (0.25% @48V ≡ 1% @12V).
-    MinDuty = MinDuty * 12.0f / (float)BATTERY_VOLTAGE;
+    MinDuty = MinDuty * 12.0f / (float)SYSTEM_VOLTAGE_CLASS;
     settingWrite(NK_MinDuty, String(MinDuty, 2).c_str());
   } else {
     MinDuty = settingRead(NK_MinDuty).toFloat();
@@ -1890,6 +1890,17 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   }
   if (settingExists(NK_cmAgeAck))     commissionAgeAck     = settingRead(NK_cmAgeAck).toInt() != 0;
   if (settingExists(NK_cmChangeFlag)) commissionChangeFlag = settingRead(NK_cmChangeFlag).toInt() != 0;
+  // Receipt from an admin config push that applied on the PREVIOUS boot ("<n>|<key,key,...>").
+  // Survives here until the dashboard acks it, so an owner who was not watching at the moment
+  // of the push still learns their settings were changed remotely.
+  if (settingExists(NK_cfgPushNotify)) {
+    String rec = settingRead(NK_cfgPushNotify);
+    int bar = rec.indexOf('|');
+    if (bar > 0) {
+      cfgPushAppliedCount = (uint8_t)rec.substring(0, bar).toInt();
+      cfgPushAppliedKeys  = rec.substring(bar + 1);
+    }
+  }
   if (!settingExists(NK_battTempDerateEn)) {
     settingWrite(NK_battTempDerateEn, String((int)battTempDerateEnable).c_str());
   } else {
@@ -2040,9 +2051,9 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   }
   if (!settingExists(NK_DutyRampRate)) {
     // Duty-domain knob stored in REAL %/s for THIS bus. The hardcoded default is a 12V value, so on
-    // first creation scale it by ×(12/BATTERY_VOLTAGE) (40%/s → 10%/s @48V) before persisting — the
+    // first creation scale it by ×(12/SYSTEM_VOLTAGE_CLASS) (40%/s → 10%/s @48V) before persisting — the
     // field-current slew stays constant across banks, and the dashboard box shows what's actually used.
-    DutyRampRate = DutyRampRate * 12.0f / (float)BATTERY_VOLTAGE;
+    DutyRampRate = DutyRampRate * 12.0f / (float)SYSTEM_VOLTAGE_CLASS;
     settingWrite(NK_DutyRampRate, String(DutyRampRate, 1).c_str());
   } else {
     DutyRampRate = settingRead(NK_DutyRampRate).toFloat();
@@ -2079,7 +2090,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   // Once written, the value is treated as user-set; a later system-class change re-derives it
   // in applyNominalVoltageChange.
   if (!settingExists(NK_AlternatorHardShutdownV)) {
-    AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)BATTERY_VOLTAGE / 12.0f);
+    AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
     settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
   } else {
     AlternatorHardShutdownV = settingRead(NK_AlternatorHardShutdownV).toFloat();
@@ -2330,7 +2341,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   }
   // Derive the active CV gains now that gain mode, λ, plant, and manual Kp/Ki are all loaded.
   recomputeCvGains();
-  recomputeCcGains();  // and the active CC (output-current) gains, normalized to BATTERY_VOLTAGE
+  recomputeCcGains();  // and the active CC (output-current) gains, normalized to SYSTEM_VOLTAGE_CLASS
   if (!settingExists(NK_VoltageLoopInterval)) {
     settingWrite(NK_VoltageLoopInterval, String(VoltageLoopInterval).c_str());
   } else {
@@ -4281,9 +4292,30 @@ void executeCheckForcedUpdate() {
     String response = http.getString();
     Serial.println("FORCED_UPDATE: Response: " + response);
 
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(1536);
     DeserializationError error = deserializeJson(doc, response.c_str(), response.length());
     if (!error) {
+      // Admin config push notice. Parsed BEFORE the forced-update branch on purpose — that
+      // branch has an early return (already-on-forced-version) that would otherwise leave the
+      // pending-config notice frozen at whatever the last poll saw. Notice only: the config is
+      // neither fetched nor applied here, so a cancelled push clears on the next 6 h poll.
+      int pendCount = doc["pending_config_count"] | 0;
+      cfgPushPendingCount = (pendCount > 255) ? 255 : (uint8_t)pendCount;
+      // Admin-authored free text. Sanitized on arrival (not at emit) so /configPush can hand it
+      // out raw: drop anything that would break the JSON string, cap the length. Built locally,
+      // then one memcpy to the global — the webserver task reads it lock-free.
+      const char *pendNote = doc["pending_config_note"];
+      char noteBuf[sizeof(cfgPushPendingNote)];
+      size_t noteLen = 0;
+      if (pendNote != nullptr) {
+        for (const char *p = pendNote; *p && noteLen < 80; p++) {
+          if (*p == '"' || *p == '\\' || *p == '<' || *p == '>' || (uint8_t)*p < 0x20) continue;
+          noteBuf[noteLen++] = *p;
+        }
+      }
+      noteBuf[noteLen] = '\0';
+      memcpy(cfgPushPendingNote, noteBuf, noteLen + 1);
+
       const char *forced_version = doc["forced_fw_version"];
       const char *deadline_str = doc["forced_update_deadline"];
 
@@ -4529,12 +4561,21 @@ void executeGetPendingConfig() {
   // A remote push writes every importable key, hardware/calibration included — sensor range,
   // shunt resistance, current zero offsets. applyImportConfig scans the response for the
   // embedded "config" object, so no big JSON parse is needed.
+  // Collect the names it actually changes so the dashboard can show the owner what a remote
+  // push touched. Written to NVS below and read back next boot — this boot reboots immediately,
+  // so there is no live client to tell.
+  String changed = "";
+  cfgImportChangedNames = &changed;
   int n = applyImportConfig(response.c_str());
+  cfgImportChangedNames = nullptr;
   if (n < 0) {
     Serial.println("PENDING_CONFIG: malformed blob, not applied");
     return;
   }
   settingWrite(NK_lastAppldCfgId, pid.c_str());
+  if (n > 0) {
+    settingWrite(NK_cfgPushNotify, (String(n) + "|" + changed).c_str());
+  }
   Serial.printf("PENDING_CONFIG: applied %d settings from config %s; rebooting\n", n, pid.c_str());
   queueConsoleMessage("Config push: applied " + String(n) + " settings, rebooting to load");
 

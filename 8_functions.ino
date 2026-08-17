@@ -1263,7 +1263,7 @@ String vesselInfoJson() {
   j += ",\"home_port\":";               cfgAppendJsonStr(j, String(HOME_PORT));
   j += ",\"engine_make\":";             cfgAppendJsonStr(j, ENGINE_MAKE);
   j += ",\"engine_hp\":";               j += String((unsigned)ENGINE_HP);
-  j += ",\"battery_voltage\":";         j += String((unsigned)BATTERY_VOLTAGE);
+  j += ",\"battery_voltage\":";         j += String((unsigned)SYSTEM_VOLTAGE_CLASS);
   j += ",\"battery_capacity_ah\":";     j += String(BatteryCapacity_Ah);
   j += ",\"battery_type\":";            cfgAppendJsonStr(j, BATTERY_TYPE);
   j += ",\"battery_make_model\":";      cfgAppendJsonStr(j, BATTERY_MAKE_MODEL);
@@ -1422,6 +1422,15 @@ void raiseRecommissionNag() {
   settingWrite(NK_cmChangeFlag, "1");
 }
 
+static const size_t CFGPUSH_KEYS_CAP = 240;   // bounds the NVS receipt + the /configPush body
+
+static void cfgImportNoteChanged(const char *name) {
+  if (!cfgImportChangedNames) return;
+  if (cfgImportChangedNames->length() + strlen(name) + 1 > CFGPUSH_KEYS_CAP) return;   // silently stop at the cap; the count is still exact
+  if (cfgImportChangedNames->length()) *cfgImportChangedNames += ',';
+  *cfgImportChangedNames += name;
+}
+
 int applyImportConfig(const char *body) {
   if (!body) return -1;
   const char *cfg = strstr(body, "\"config\"");
@@ -1438,7 +1447,10 @@ int applyImportConfig(const char *body) {
     if (CONFIG_MANIFEST[i].tier == 3) continue;   // export-only: this device's own history, never adopted
     String val;
     if (cfgJsonExtract(cfg, CONFIG_MANIFEST[i].param, val)) {
-      if (settingWrite(CONFIG_MANIFEST[i].nvsKey, val.c_str())) applied++;
+      if (settingWrite(CONFIG_MANIFEST[i].nvsKey, val.c_str())) {
+        applied++;
+        cfgImportNoteChanged(CONFIG_MANIFEST[i].param);
+      }
     }
   }
   // Only nag once a pass has actually been finished (epoch stamped) — a fresh device has
@@ -1469,7 +1481,7 @@ int applyImportConfig(const char *body) {
       if (cfgJsonExtract(cfg, REG[i].name, val)) { \
         char key[16]; \
         snprintf(key, sizeof(key), "%s", REG[i].name); \
-        if (settingWrite(key, val.c_str())) applied++; \
+        if (settingWrite(key, val.c_str())) { applied++; cfgImportNoteChanged(REG[i].name); } \
       } \
     }
   CFG_IMPORT_REGISTRY(ALT_SETTINGS, ALT_SETTING_COUNT)
@@ -1810,7 +1822,7 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
         // on baseline + the projected peak of the step actually sized (stepA·pilotK — tracks boosted
         // re-runs that exceed the fixed ΔV target, and cap-clamped steps smaller than it).
         if (cvpfChemGasses() && isfinite(cvpfPilotVbase)
-            && cvpfPilotVbase + cvpfStepA * cvpfPilotK > CVPF_GASSING_V_12V * (float)BATTERY_VOLTAGE / 12.0f) {
+            && cvpfPilotVbase + cvpfStepA * cvpfPilotK > CVPF_GASSING_V_12V * (float)SYSTEM_VOLTAGE_CLASS / 12.0f) {
           cvpfAbort("bank too full to measure — the step would drive it into gassing, which reads the resistance low and over-tunes the loop. Draw the bank down with some loads, then re-run.");
           break;
         }
@@ -1989,7 +2001,7 @@ void cvpfProcess() {
   if (!noShunt && dIaltMed > 0.5f
       && fabsf(dIaltMed - cvpfDI) / dIaltMed > 0.15f) cvpfWarn |= 0x08;  // alt vs battery step disagree ⇒ a load moved
   // display Kp/Ki (mirrors recomputeCvGains; recomputeCvGains is authoritative when the user Applies Ka)
-  float vNorm = 12.0f / (float)BATTERY_VOLTAGE;
+  float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;
   float kp = cvAlpha / fmaxf(1e-6f, cvpfKa * vNorm);
   float ki = cvPiZero * kp;                   // from the UN-clamped Kp, then clamp both — matches recomputeCvGains
   cvpfKp = clamp_f(kp, 2.0f, 120.0f);
@@ -2220,7 +2232,7 @@ void cvStressAbort(const char *reason) {
 // Also queues the "test" ledger row — every graded ending reaches the cloud, not just the
 // last attempt the wizard's stage-8 row happens to carry.
 static void cvStressPersistResult() {
-  const float k = (float)BATTERY_VOLTAGE / 12.0f;
+  const float k = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
   snprintf(cvsLastBlob, sizeof(cvsLastBlob),
            "2,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
            (int)cvsOutcome, (int)cvsGOverall, (int)cvsGPreStab, (int)cvsGEvents, (int)cvsGHardCut,
@@ -2286,7 +2298,7 @@ static void cvStressStabilityFail(const char *where) {
 // Phases 1-2 wait for stationarity; phase 2-3 drive CV at cvStressTargetV via the cvStressForceCV hook.
 void cvStress_tick(uint32_t nowMs) {
   if (!cvStressActive) return;
-  float    k       = (float)BATTERY_VOLTAGE / 12.0f;
+  float    k       = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
   uint32_t elapsed = nowMs - cvsPhaseStartMs;
 
   if (cvStressAbortRequested) { cvStressAbortRequested = false; cvStressAbort("cancelled by user"); return; }
@@ -2466,7 +2478,7 @@ void cvStress_tick(uint32_t nowMs) {
 // /cvstress.json builder — also stamps the poll deadman.
 int cvStressJsonBuild(char *buf, int cap) {
   cvsLastPollMs = millis();
-  const float k = (float)BATTERY_VOLTAGE / 12.0f;   // graded bands are 12V-equiv constants × V/12
+  const float k = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;   // graded bands are 12V-equiv constants × V/12
   return snprintf(buf, cap,
                   "{\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"aborted\":%d,\"abort\":\"%s\","
                   "\"targetV\":%.2f,\"idleAvgV\":%.2f,"
@@ -2497,7 +2509,7 @@ int cvStressJsonBuild(char *buf, int cap) {
 // to the bank). Table descends in both SoC and voltage. Returns 100 above the top row, 0 below
 // the bottom. This is the INDEPENDENT low anchor that makes fade measurable (no coulomb count).
 float ocvToSoC(float restedV) {
-  float vScale = (float)BATTERY_VOLTAGE / 12.0f;
+  float vScale = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
   if (restedV >= capOcvVolt[0] * vScale) return 100.0f;
   for (int i = 0; i < CAP_OCV_ROWS - 1; i++) {
     float vHi = capOcvVolt[i]     * vScale;   // higher SoC, higher V
@@ -2757,7 +2769,7 @@ void bhInitSettings() {
   if (!settingExists(NK_capRestFrac))   settingWrite(NK_capRestFrac, String(capRestCurrentFrac, 4).c_str());   else capRestCurrentFrac = settingRead(NK_capRestFrac).toFloat();
   if (!settingExists(NK_capRestFloor))  settingWrite(NK_capRestFloor, String(capRestFloorMin).c_str());        else capRestFloorMin   = (uint16_t)settingRead(NK_capRestFloor).toInt();
   // capSettleRate is volt-domain (mV/10min): first creation scales the 12V default ×(V/12), same rule as InitSystemSettings seeds
-  if (!settingExists(NK_capSettleRate)) { capSettleRateMv10 *= (float)BATTERY_VOLTAGE / 12.0f; settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str()); }  else capSettleRateMv10 = settingRead(NK_capSettleRate).toFloat();
+  if (!settingExists(NK_capSettleRate)) { capSettleRateMv10 *= (float)SYSTEM_VOLTAGE_CLASS / 12.0f; settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str()); }  else capSettleRateMv10 = settingRead(NK_capSettleRate).toFloat();
   if (!settingExists(NK_capSocLowMax))  settingWrite(NK_capSocLowMax, String(capSocLowMax, 1).c_str());        else capSocLowMax      = settingRead(NK_capSocLowMax).toFloat();
   if (!settingExists(NK_capMinSpan))    settingWrite(NK_capMinSpan, String(capMinSpan, 1).c_str());            else capMinSpan        = settingRead(NK_capMinSpan).toFloat();
   if (!settingExists(NK_capFullSoc))    settingWrite(NK_capFullSoc, String(capFullSoc, 1).c_str());            else capFullSoc        = settingRead(NK_capFullSoc).toFloat();

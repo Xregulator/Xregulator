@@ -16,7 +16,7 @@
 
 // Must be strict semver ^\d+\.\d+\.\d+$ — no suffixes, no leading v. Compared as an integer
 // major*10000 + minor*100 + patch, so the ceiling is 999.99.99 (minor/patch cannot exceed 99).
-const char *FIRMWARE_VERSION = "0.0.2";
+const char *FIRMWARE_VERSION = "0.0.3";
 
 // OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
 // proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
@@ -330,7 +330,7 @@ String BOAT_MAKE_MODEL = "";
 uint16_t BOAT_YEAR = 2025;
 String ENGINE_MAKE = "";
 uint16_t ENGINE_HP = 0;
-uint8_t BATTERY_VOLTAGE = 12;
+uint8_t SYSTEM_VOLTAGE_CLASS = 12;
 // BatteryCapacity_Ah already exists
 String BATTERY_TYPE = "lifepo4";
 String BATTERY_MAKE_MODEL = "";
@@ -619,6 +619,28 @@ unsigned long forcedUpdateDeadline = 0;
 bool hasForcedUpdate = false;
 int forcedFwVersionInt = 0;
 
+// Admin config push, user-facing half. The apply itself stays boot-only (executeGetPendingConfig);
+// these two carry the "a push is waiting" notice and the "a push just landed" receipt to the
+// dashboard so a settings change never happens invisibly.
+// cfgPushPendingCount is learned mid-run from the 6 h check-forced-update poll (the staged config
+// is NOT fetched or applied there) — it exists so a watching user can restart early instead of
+// waiting out the 24/72 h maintenance ladder. cfgPushAppliedCount is restored from NVS at boot,
+// written by the push itself just before it rebooted, and cleared by the dashboard's ack.
+uint8_t cfgPushPendingCount = 0;   // settings staged in the cloud; 0 = nothing queued
+// Fixed storage, not String: written on the HTTPS task, read by /configPush on the webserver
+// task with no lock — a race on a char array can tear text, never the heap.
+char cfgPushPendingNote[84] = "";  // short admin description shown in the notice (firmware caps at 80)
+uint8_t cfgPushAppliedCount = 0;   // settings the previous boot's push wrote; 0 = nothing to report
+String  cfgPushAppliedKeys  = "";  // comma-separated param names it changed (capped, see CFGPUSH_KEYS_CAP)
+
+// Opt-in collector for the param names applyImportConfig actually CHANGED (settingWrite is
+// compare-first, so an unchanged value never lands here); nullptr = don't collect. Lives here,
+// not next to applyImportConfig in 8_functions.ino, because 4_functions.ino sets it and the
+// Arduino prototype generator forward-declares functions only — not variables. Deliberately a
+// global rather than a defaulted parameter: the generator re-emits the default and the
+// duplicate declaration fails to compile.
+String *cfgImportChangedNames = nullptr;
+
 // WiFiClientSecure secureClient;  // Reusable SSL client to prevent stack overflow when we had individual ones for each upload   ABANDONED, THIS WAS NOT GOOD IN FLAKY WIFI
 unsigned long lastHttpsOperationTime = 0;
 const unsigned long HTTPS_MIN_INTERVAL = 500;            // min spacing between any HTTPS calls — protects core0 tiny system stacks (ipc0 = 1024 bytes)
@@ -644,8 +666,8 @@ const unsigned long REBOOT_RELAXED_MS       = 172800000UL;  // 48 h
 const unsigned long REBOOT_HARD_MS          = 259200000UL;  // 72 h
 const unsigned long REBOOT_QUIET_HOLD_MS    = 300000UL;     // quiet window must hold this long
 const int   REBOOT_SOC_FLOOR_X100  = 3000;   // quiet-tier SoC preference (SOC_percent is %×100)
-const float REBOOT_VBAT_FLOOR_V    = 11.8f;  // ×(BATTERY_VOLTAGE/12) — quiet/relaxed battery floor
-const float REBOOT_VBAT_BROWNOUT_V = 11.5f;  // ×(BATTERY_VOLTAGE/12) — hard tier: a reboot's WiFi
+const float REBOOT_VBAT_FLOOR_V    = 11.8f;  // ×(SYSTEM_VOLTAGE_CLASS/12) — quiet/relaxed battery floor
+const float REBOOT_VBAT_BROWNOUT_V = 11.5f;  // ×(SYSTEM_VOLTAGE_CLASS/12) — hard tier: a reboot's WiFi
                                              // startup current spike into a near-dead battery risks
                                              // a brown-out boot-loop / NVS write corruption
 const int   REBOOT_HEAP_FLOOR_KB       = 20;          // largest contiguous internal block below this = TLS effectively dead (HTTPS preflight skips <15 KB)
@@ -667,24 +689,25 @@ unsigned long queueDrainHoldStart = 0;  // millis() when we started waiting for 
 // App-usage analytics: page dwell / button-press counters POSTed by the web UI to /track,
 // merged into a fixed PSRAM pool of opaque string keys ("p:<page>" / "b:<button>" — the
 // firmware never knows what the names mean, so new pages/buttons need no firmware change).
-// Uploaded to track-behavior once per epoch day — the period boundary is wall-clock, not a
-// millis timer, so it is immune to maintenance reboots, and for the same reason the pool is
-// persisted to /usage.bin at the shutdown/restart flush points and reloaded at boot.
+// Uploaded to track-behavior once per LOCAL calendar day — the boundary is local midnight
+// via the client-reported UTC offset (wall-clock epoch math, not a millis timer), so it is
+// immune to maintenance reboots, and for the same reason the pool is persisted to /usage.bin
+// at the shutdown/restart flush points and reloaded at boot.
 // Accumulates in every mode (AP included); only the upload requires Client mode + cloud.
 struct UsageSlot {
-  char key[32];
-  uint32_t n;   // event count (page opens / button presses)
-  uint32_t ms;  // visible dwell time, pages only
+  char key[44];  // 'p:'/'b:' + client key (client caps at 40 chars) + NUL
+  uint32_t n;    // event count (page opens / button presses)
+  uint32_t ms;   // visible dwell time, pages only
 };
 const int USAGE_SLOTS = 192;
-const int USAGE_PAYLOAD_SIZE = 16384;
-const unsigned long USAGE_UPLOAD_PERIOD_S = 86400;
+const int USAGE_PAYLOAD_SIZE = 24576;
 UsageSlot *usageSlots = nullptr;  // ps_malloc'd in setup()
 uint16_t usageSlotCount = 0;
 uint32_t usageOverflowN = 0;  // increments that arrived after all slots were taken
 uint32_t usageOpens = 0;      // period app-open count (all clients)
 uint32_t usageOpensApp = 0;   // subset from Capacitor clients
 int64_t usagePeriodStartEpoch = 0;  // 0 = clock has never been valid this period
+int32_t usageTzOffsetS = 0;         // last client-reported UTC offset (seconds east); persisted in /usage.bin
 bool usageAppSeen = false;          // a Capacitor client posted this period
 bool usageDirty = false;            // accumulator changed since last dumpUsageAccum()
 unsigned long lastUsageUploadAttempt = 0;
@@ -695,7 +718,7 @@ SemaphoreHandle_t cxStartMutex = NULL;
 // Lifetime totals (NVS "storage" namespace via saveNVSDataFull, same pattern as EngineRunTime_AllTime)
 double UsageOpenTime_AllTime = 0.0;  // seconds of visible app time
 uint32_t UsageOpens_AllTime = 0;
-uint32_t UsageDays_AllTime = 0;  // completed upload periods (periods with data)
+uint32_t UsageDays_AllTime = 0;  // DELIVERED usage uploads (incremented on HTTP 200 in executeUploadUsage)
 int32_t prev_UsageOpenTime_AllTime = 0;
 int32_t prev_UsageOpens_AllTime = 0;
 int32_t prev_UsageDays_AllTime = 0;
@@ -853,7 +876,7 @@ bool g_blackBoxPrevValid = false;   // true if last session's magic matched (RTC
 // lost only on a true power-down — accepted). Histogram of RAW bus voltage, referenced to Bulk.
 // Fine: Bulk .. Bulk+3.6V in 0.2V steps (18 bins; top ≈18V at a 14.4 Bulk). Coarse:
 // Bulk+3.6 .. Bulk+15.6V in 1.0V steps (12 bins). +1 overflow bin. Bin widths scale
-// ×(BATTERY_VOLTAGE/12) so the bin count is fixed across 12/24/48V. Separate from the session
+// ×(SYSTEM_VOLTAGE_CLASS/12) so the bin count is fixed across 12/24/48V. Separate from the session
 // counters (g_voltSpikeCount etc.), which reset on reboot and /resetVoltageProtectionCounters;
 // this struct is zeroed only by a magic mismatch or /resetOvTelemetryLifetime.
 #define OV_HIST_FINE_BINS 18
@@ -1294,7 +1317,7 @@ volatile bool faCommissionGate = false;         // Phase 2: relax the matrix ste
 // Commissioning "rest" hold (between guided steps). The open wizard dialog pings commissionHeartbeat
 // every ~2 s; if the ping goes stale (dialog closed / crashed / Wi-Fi dropped) the hold drops and
 // normal charging resumes within COMMISSION_HEARTBEAT_TIMEOUT_MS. Both the floor and the ramp scale
-// ×12/BATTERY_VOLTAGE (vNorm), so a 12 V base gives 4/2/1 % and 5/2.5/1.25 %/s at 12/24/48 V.
+// ×12/SYSTEM_VOLTAGE_CLASS (vNorm), so a 12 V base gives 4/2/1 % and 5/2.5/1.25 %/s at 12/24/48 V.
 volatile uint32_t lastCommissionHeartbeatMs = 0;        // millis() of the last dialog heartbeat (0 = stale/exited)
 #define COMMISSION_REST_FLOOR_PCT 4.0f                  // 12 V-base rest hold floor (% duty); bench-tune knob
 #define COMMISSION_REST_RAMP_PCT 5.0f                   // 12 V-base rest ramp rate (%/s)
@@ -1350,7 +1373,7 @@ float ChargingVoltageTargetReq = 0;              // Instantaneous DESIRED target
 float VoltageHardwareLimit = BulkVoltage + 0.3;  // boot placeholder; updateINA228OvervoltageThreshold() derives the real limit (lithium: Bulk + 0.3×class, else: tracks AlternatorHardShutdownV)
 bool inBulkStage = true;
 
-// System voltage class (12/24/48V) lives in BATTERY_VOLTAGE (set from Vessel Info). It is the sole
+// System voltage class (12/24/48V) lives in SYSTEM_VOLTAGE_CLASS (set from Vessel Info). It is the sole
 // source of truth: the CV/CC gain normalization, knee/slew scaling, and duty ceiling all divide by
 // it, and a class change (via /saveVesselInfo → applyNominalVoltageChange) rescales the charge-voltage
 // profile + hard-shutdown trip. The boot SoC anchor auto-detects class from measured voltage instead.
@@ -1437,7 +1460,7 @@ uint32_t hardOCStartMs = 0;
 const int pwmPin = 14;  // field PWM pin
 //const int pwmChannel = 0;      //0–7 available for high-speed PWM  (ESP32)
 const int pwmResolution = 12;          // Error = +0.010%    PWM Resolution = ±0.024% (1/4096)
-float SwitchingFrequency = 400;        // Field switching frequency (doesn't much matter, avoid human hearing range is nice depending on install location)
+float SwitchingFrequency = 19000;      // Field switching frequency. Inaudible, and REQUIRED-class on P-type wiring: below ~5kHz the LM5109A bootstrap (C4 drained by R108) UVLO-chops during long on-pulses. NOT higher: LEDC 12-bit tops out at 19455Hz (divider must exceed 1.0) — 19500 is rejected by the driver and would kill boot attach (bench-confirmed 2026-08-16). Efficiency measured flat 100Hz-19kHz.
 const int MIN_SAFE_FREQUENCY = 50;     // Above most audible issues // set to 2000 later
 const int MAX_SAFE_FREQUENCY = 25000;  // Below core loss and EMI concerns
 // Max Field % is the REAL per-bus field-duty cap (no hidden scaling). Its default is scaled down at
@@ -3040,7 +3063,7 @@ float    bhBaselineCapacityAh = 0.0f;       // first measured capacity (used whe
 // anchor is the existing FullChargeDetected. Capacity = Ah bridged between them ÷ SoC span.
 #define  CAP_OCV_ROWS 11
 const uint8_t capOcvSocPct[CAP_OCV_ROWS] = {100, 90, 80, 60, 40, 30, 20, 15, 10, 5, 0};   // fixed breakpoints
-float    capOcvVolt[CAP_OCV_ROWS] = {13.6f, 13.4f, 13.3f, 13.2f, 13.1f, 13.0f, 12.9f, 12.8f, 12.5f, 12.0f, 10.0f};  // RESTED 12V LiFePO4 default; user-editable, scaled by BATTERY_VOLTAGE/12 at lookup
+float    capOcvVolt[CAP_OCV_ROWS] = {13.6f, 13.4f, 13.3f, 13.2f, 13.1f, 13.0f, 12.9f, 12.8f, 12.5f, 12.0f, 10.0f};  // RESTED 12V LiFePO4 default; user-editable, scaled by SYSTEM_VOLTAGE_CLASS/12 at lookup
 // Chemistry rested-voltage presets (12V-referenced), mirror of web CAP_OCV_PRESETS. Loaded into
 // capOcvVolt[] by chemistry at commissioning so both the SoC seed and the capacity anchor read the
 // bank's real curve; a hand-tuned curve (matching no preset) is left untouched.
@@ -3346,8 +3369,8 @@ int CVTuningMode = 0;             // 0=off, 1=on
 bool cvWaveExitWindDown = false;  // one-shot: set when the waveform test is turned off so the elevated target glides back to base via the down-slew instead of snapping (a snap would drop the target below the still-high actual voltage and trip fast-OV/iExcess)
 float cvBaseTarget = 0.0f;        // real ChargingVoltageTarget captured at test start; global so wave gen + scorer share it
 
-const float CV_SETTLE_V_THRESH    = 0.10f;   // V at 12V — settling threshold; ×(BATTERY_VOLTAGE/12) at use
-const float CV_HIGH_DEADBAND_V   = 0.025f;  // V at 12V — HIGH phase overshoot dead-band, ×(BATTERY_VOLTAGE/12) at use; below this is free
+const float CV_SETTLE_V_THRESH    = 0.10f;   // V at 12V — settling threshold; ×(SYSTEM_VOLTAGE_CLASS/12) at use
+const float CV_HIGH_DEADBAND_V   = 0.025f;  // V at 12V — HIGH phase overshoot dead-band, ×(SYSTEM_VOLTAGE_CLASS/12) at use; below this is free
 const float CV_LOW_GRACE_SEC     = 1.0f;    // s — grace period from LOW phase start before undershoot scoring begins
 const float CV_LOW_RAMP_SEC      = 10.0f;   // s — undershoot weight ramps 0→1 over this window after grace
 const float CV_UNDERSHOOT_SCALE  = 0.15f;   // undershoot ISE weight relative to overshoot ISE
@@ -3470,7 +3493,7 @@ float pidError = 0.0f;  // PID error for display (A)
 
 // --- Output current PID ---
 // PidKp/Ki/Kd are 12V-EQUIVALENT gains — the same numbers work on 12/24/48V banks. recomputeCcGains()
-// bakes in x(12/BATTERY_VOLTAGE) to reach the duty-space gains the loop applies (PidK*_active), because
+// bakes in x(12/SYSTEM_VOLTAGE_CLASS) to reach the duty-space gains the loop applies (PidK*_active), because
 // field current per duty-% scales with bus voltage. Do NOT scale these per-class by hand.
 // Seeds are the 2026-07-03 plant fit (tau 112 ms, IMC) de-rated 30%: that fit is one alternator at one
 // operating point, and a fresh install on a different plant oscillates at full gain. The Ki/Kp ratio
@@ -3478,14 +3501,14 @@ float pidError = 0.0f;  // PID error for display (A)
 float PidKp = 0.4662f;  // 12V-equivalent proportional gain
 float PidKi = 4.5384f;  // 12V-equivalent integral gain
 float PidKd = 0.0f;  // 12V-equivalent derivative gain (default off; current-loop D adds noise, little benefit)
-volatile float PidKp_active = 0.579f;  // DERIVED duty-space gain the PID uses (PidKp × 12/BATTERY_VOLTAGE). Set by recomputeCcGains().
+volatile float PidKp_active = 0.579f;  // DERIVED duty-space gain the PID uses (PidKp × 12/SYSTEM_VOLTAGE_CLASS). Set by recomputeCcGains().
 volatile float PidKi_active = 5.150f;  // DERIVED duty-space Ki.
 volatile float PidKd_active = 0.0f;  // DERIVED duty-space Kd.
 // --- Voltage (CV) PID ---
 // ── CV gain-mode system (Auto α/K vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
 // VoltageKp/VoltageKi below are the MANUAL gains (12V-equivalent space). The control loop never reads
 // them directly — it reads VoltageKp_active/VoltageKi_active, which recomputeCvGains() derives from the
-// selected mode and bakes the 12V-block normalization (×12/BATTERY_VOLTAGE) into.
+// selected mode and bakes the 12V-block normalization (×12/SYSTEM_VOLTAGE_CLASS) into.
 uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) — DEFAULT, so a fresh/never-commissioned
                                   // device runs the seeded manual gains; 1 = AUTO (ohmic-anchored, Kp = α/K).
                                   // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply (cxCVPlantApply).
@@ -3586,9 +3609,9 @@ const float CV_TGT_PACE_LEAD_V = 0.02f;  // V ×class at use — down-glide hold
 bool  cvWindDownActive = false;       // cleared by runShutdownPath/runCommissionIdle/MANUAL like lastVoltageControlActive
 float cvWindDownCap    = 0.0f;        // ramped ceiling on Icv (and cv_I) while active
 float cvWindDownFinalV = 0.0f;        // commanded final target latched at arm; follows further drops, abort on raise
-volatile float VoltageKp_active = 8.5f;  // DERIVED pack-space Kp the loop uses (selected gain × 12/BATTERY_VOLTAGE). Set by recomputeCvGains().
+volatile float VoltageKp_active = 8.5f;  // DERIVED pack-space Kp the loop uses (selected gain × 12/SYSTEM_VOLTAGE_CLASS). Set by recomputeCvGains().
 volatile float VoltageKi_active = 6.0f;  // DERIVED pack-space Ki the loop uses.
-volatile float VoltageKd_active = 10.0f; // DERIVED pack-space D gain the loop uses (VoltageKd × 12/BATTERY_VOLTAGE × temp derate). Set by recomputeCvGains(), same pipeline as Kp/Ki.
+volatile float VoltageKd_active = 10.0f; // DERIVED pack-space D gain the loop uses (VoltageKd × 12/SYSTEM_VOLTAGE_CLASS × temp derate). Set by recomputeCvGains(), same pipeline as Kp/Ki.
 volatile float VoltageKp = 8.5f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID); from commissioning CV plant fit (K20=32.2 mV/A, 12 V-equiv)
 volatile float VoltageKi = 6.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi; from commissioning CV plant fit. Deferred cv_I anti-windup still open (see CV_Loop_Dev_Summary.md Future Work)
 // CV D term — trim is a position subtracted at the Icv output, never integrated into cv_I, so it
@@ -3851,7 +3874,7 @@ const float SETPOINT_FALL_DEFAULT = 50.0f;  // A/s
 // glide), not the base rate during the test. Bypassing duty here (like the CC Off path) is a valid future
 // change if a need arises.
 uint8_t cvTestSlewMode = 2;
-const float VTGT_RAMP_DEFAULT = 0.050f;  // V/s @12V — factory target ramp for cvTestSlewMode=Default; scaled ×BATTERY_VOLTAGE/12 at use
+const float VTGT_RAMP_DEFAULT = 0.050f;  // V/s @12V — factory target ramp for cvTestSlewMode=Default; scaled ×SYSTEM_VOLTAGE_CLASS/12 at use
 uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise governor (anti-windup clamp). 0 = rises are not clamped — integrator can wind up into an OV trip on an up-step; applies in the CV test and normal operation
 uint8_t cvRecovEnable = 1;   // master switch for the post-protection integrator refill (deficit-gated Ki boost, replaced the timed window 2026-07-21). 1 = up-integration runs at Ki × up-to-cvRecovKiMax, tapering with the remaining reseed deficit; 0 = plain PI walks itself back (pace scales with post-cut error). Default ON since the 07-22 lithium A/B (single fire, ~5× refill rate, healed exit, no overshoot)
 uint8_t loadServeBoostEnable = 1;  // load-serve Ki boost (07-22): while the battery shunt shows sustained discharge in CV, up-integration runs at the refill's boosted rate toward the measured house loads — a stiff plant hides a 35A load behind ~0.25V of error, so plain Ki picks it up in ~30s. Shunt-gated; inert without one. Dev default ON, production TBD
@@ -3873,7 +3896,7 @@ float cvRecovKiMax = 5.0f;   // refill Ki multiplier at the moment of release (M
 // current sits ~5% above the pre-trip hold, so without this the post-cut return is integrator-paced.
 uint8_t cvRecovBoostEnable = 1;   // master switch for the recovery P-boost. DEFAULT ON — seen live at 3×/1.5V (2026-07-20 G2 recovery, ~2.4× in the valley); 4×/0.6V untested — turn off if a faster climb re-trips OV on the approach
 float   cvRecovBoostMax    = 4.0f;  // P-gain multiplier at ≥ cvRecovBoostErrV of shortfall; 1.0 = no boost, taper is linear from 1× at target. Clamp [1,8]
-float   cvRecovBoostErrV   = 0.6f;  // shortfall (V, per-12V-block — scaled ×BATTERY_VOLTAGE/12 at use) at which the boost reaches cvRecovBoostMax. Clamp [0.1,5]
+float   cvRecovBoostErrV   = 0.6f;  // shortfall (V, per-12V-block — scaled ×SYSTEM_VOLTAGE_CLASS/12 at use) at which the boost reaches cvRecovBoostMax. Clamp [0.1,5]
 float   cvRecovBoostFloorV = 0.2f;  // dead area (V, per-12V-block — scaled ×class at use): no boost within this shortfall, ramp starts at 1× from its edge. Keeps boost gain out of small-signal regulation (the 07-24 0.7 Hz idle wander was boost-sustained). Clamp [0,5]; 0 = boost from zero shortfall
 float   cvRecovDeepBandV = 0.75f;  // deep-recovery band (V, per-12V-block — scaled ×class at use): shortfall beyond this is DEEP — the starve-walk speeds up (cvRecovDeepMult) with a widened pause band, and the OV-episode P-boost ramp slides up to start here instead of going flat-off. Every observed recovery re-fire happened ABOVE target, so depth below this band cannot be the echo the episode pause guards against (12:45 07-25 stuck: flat-off + 1.5A/s walk held the bus 2V low for 45s). Clamp [0,5]; set large (5) to disable deep mode entirely
 float   cvRecovDeepMult  = 5.0f;   // starve-walk rate multiplier at full depth (2× cvRecovDeepBandV of shortfall), ramping linearly from 1× at the band edge. Clamp [1,20]; 1 = walk at the near-target crawl everywhere
@@ -5375,6 +5398,11 @@ void setup() {
   digitalWrite(21, LOW);  // Start with alarm off
   alarmOutputState = false;
   pinMode(42, INPUT);  // bmsLogic
+  // The Arduino core defaults LEDC to the 40MHz XTAL clock on S3, which caps 12-bit PWM at 9727Hz —
+  // 19kHz attach fails outright (bench 2026-08-16). Force the 80MHz APB clock (ceiling 19455Hz).
+  // Safe here: field PWM is the only LEDC user, and the WiFi-nap ladder only swings CPU 240<->80MHz,
+  // where APB stays 80MHz. Must run before the first ledcAttach (first setDutyPercent call).
+  ledcSetClockSource(LEDC_USE_APB_CLK);
   // PWM setup (needed for basic operation)
   //ledcAttach(pwmPin, SwitchingFrequency, pwmResolution);
 
@@ -5383,7 +5411,7 @@ void setup() {
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "*");
 
   InitSystemSettings();       // load all settings from NVS. If no keys exist, create them.
-  altApplyClassScales();      // alt-health Vbus cell size needs BATTERY_VOLTAGE — initAlternatorHealth ran before settings
+  altApplyClassScales();      // alt-health Vbus cell size needs SYSTEM_VOLTAGE_CLASS — initAlternatorHealth ran before settings
   altSeedClassKnobs();        // deferred first-creation seeding of the class-dependent registry knobs (same reason)
   bhInitSettings();           // Battery Health: DCIR test config + persisted DCIR/capacity blobs
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
@@ -6260,18 +6288,21 @@ void loop() {
           }
         }
 
-        // App-usage analytics — one small POST per epoch day (the boundary is wall-clock, so
-        // maintenance restarts can't stretch or skip a period). Retries at most once per minute
-        // while a gate fails. An empty period just rolls forward without uploading. Reset happens
-        // at queue time: a send that later fails loses that day (lossy by design, matches the
-        // accumulator's power-cut policy). fieldCutSettled (hardware gate), NOT fieldOffSettled:
-        // the period roll writes /usage.bin, and the duty-based gate reads "off" during a live
-        // duty-0 CV hold (2026-08-13 loop-stall incident).
+        // App-usage analytics — one small POST per LOCAL calendar day (boundary = local
+        // midnight via usageTzOffsetS; wall-clock, so maintenance restarts can't stretch or
+        // skip a period). Retries at most once per minute while a gate fails. An empty period
+        // just rolls forward without uploading. Reset happens at queue time: a send that later
+        // fails loses that day (lossy by design, matches the accumulator's power-cut policy);
+        // UsageDays_AllTime counts DELIVERED uploads in executeUploadUsage, not queue admission.
+        // fieldCutSettled (hardware gate), NOT fieldOffSettled: the period roll writes
+        // /usage.bin, and the duty-based gate reads "off" during a live duty-0 CV hold
+        // (2026-08-13 loop-stall incident) — so charging across midnight defers the roll to
+        // the first field-off minute after.
         if (hardwarePresent == 1 && fieldCutSettled(10000)
             && millis() - lastUsageUploadAttempt >= 60000) {
           time_t usageNowEp = time(NULL);
           if (usageNowEp > 1700000000LL && usagePeriodStartEpoch > 0
-              && usageNowEp - usagePeriodStartEpoch >= (time_t)USAGE_UPLOAD_PERIOD_S) {
+              && (usageNowEp + usageTzOffsetS) / 86400 != (usagePeriodStartEpoch + usageTzOffsetS) / 86400) {
             lastUsageUploadAttempt = millis();
             if (usageSlotCount == 0 && usageOpens == 0) {
               resetUsageAccum(usageNowEp);  // nothing happened this period — just start the next one
@@ -6283,7 +6314,6 @@ void loop() {
               req.payload = (char *)ps_malloc(req.payloadCap);
               if (req.payload && buildUsagePayload(req.payload, req.payloadCap)) {
                 if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
-                  UsageDays_AllTime++;
                   resetUsageAccum(usageNowEp);
                   dumpUsageAccum();  // file must not resurrect the closed period after a reboot
                 } else {

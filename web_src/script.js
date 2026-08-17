@@ -901,6 +901,8 @@ const CSV2_FIELDS = [
     "LittleFsFreeKb",  // free space on the userdata LittleFS partition, kB (refreshed ~60s firmware-side)
     "cloudUpAgeS",     // seconds since last ack-confirmed cloud payload upload; -1 = never this boot
     "deviceEpoch",     // regulator wall clock, UTC epoch seconds; 0 = clock never set this boot
+    "cfgPushPending",  // admin config push staged in the cloud: settings it will change; 0 = none queued
+    "cfgPushApplied",  // admin config push applied on the previous boot: settings it changed; 0 = nothing to report
 ];
 
 // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). Sits between CSV1 (10 Hz)
@@ -4987,6 +4989,164 @@ function handleForcedUpdate(data) {
     }
 }
 
+// ── Admin config push notices ────────────────────────────────────────────────────────────
+// Two separate states, both carried as plain counts on CSV2:
+//   cfgPushPending — a config is staged in the cloud and will apply at the next restart. The
+//     device learns this from the 6 h forced-update poll, so a watching owner can restart early
+//     instead of waiting out the 24/72 h maintenance ladder. Dismissible; it is only a heads-up.
+//   cfgPushApplied — a push already rewrote settings on the previous boot. NOT dismissible: the
+//     only button acks it on the device, because "your settings were changed remotely" must not
+//     be missable. Survives reboots in NVS until that ack lands.
+// Detail text (the admin note, the changed-key list) comes from one /configPush fetch, done
+// lazily when a modal is first shown — CSV2 is positional integers and can't carry strings.
+let cfgPushDetail = null;         // last /configPush body
+let cfgPushDetailFor = -1;        // pending count the cached detail was fetched for
+// Pending count the user dismissed with "Later"; re-arms when the count changes or drops to 0.
+// Keyed on the count, not the config id, because CSV2 is positional integers — so an admin who
+// swaps one queued push for a DIFFERENT push of the same size, with no poll in between, will not
+// re-pop the notice on a dashboard left open. A page reload always re-arms it.
+let cfgPushPendingDismissed = 0;
+
+function cfgPushEnsureDetail(pendingCount) {
+    if (cfgPushDetailFor === pendingCount && cfgPushDetail) return Promise.resolve(cfgPushDetail);
+    return fetch(buildURL('/configPush'))
+        .then(r => r.json())
+        .then(d => { cfgPushDetail = d; cfgPushDetailFor = pendingCount; return d; })
+        .catch(() => null);
+}
+
+function cfgPushOverlay() {
+    let ov = document.getElementById('cfgpush-overlay');
+    if (!ov) {
+        ov = document.createElement('div');
+        ov.id = 'cfgpush-overlay';
+        ov.style.cssText = 'display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9100; align-items:center; justify-content:center;';
+        document.body.appendChild(ov);
+    }
+    return ov;
+}
+
+// Panel body is assembled from trusted pieces only: counts are numbers, the changed-key list is
+// firmware CONFIG_MANIFEST constants, and the admin note was stripped of quotes/angle brackets
+// on arrival in executeCheckForcedUpdate. Keep it that way if a new field is added here.
+function cfgPushPanel(title, inner) {
+    return `
+      <div style="background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 60px); display:flex; flex-direction:column;">
+        <div style="padding:10px 16px 9px; border-bottom:1px solid #333; background:#252525; border-radius:8px 8px 0 0;">
+          <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">${title}</span>
+        </div>
+        <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; overflow-y:auto;">${inner}</div>
+      </div>`;
+}
+
+function cfgPushKeyList(keys) {
+    if (!keys) return '';
+    const names = keys.split(',').filter(Boolean);
+    if (!names.length) return '';
+    return `<div style="margin:12px 0 4px; padding:10px 12px; background:#171717; border:1px solid #333; border-radius:5px;
+                        font-family:ui-monospace,Menlo,monospace; font-size:11.5px; color:#8fd9d4; word-break:break-word;">
+              ${names.join(', ')}
+            </div>`;
+}
+
+function cfgPushShowApplied(count, keys) {
+    const ov = cfgPushOverlay();
+    ov.innerHTML = cfgPushPanel('Settings Changed Remotely', `
+        <p style="margin:0 0 10px;">
+          <strong>${count}</strong> setting${count === 1 ? ' was' : 's were'} changed on this regulator by a
+          configuration update from X Engineering, applied during the last restart.
+        </p>
+        ${cfgPushKeyList(keys)}
+        <p style="margin:12px 0 16px; font-size:12.5px; color:#999;">
+          Every value is visible and editable on the Settings page as usual.
+        </p>
+        <button id="cfgpush-ack-btn"
+                style="display:block; width:100%; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d;
+                       font-weight:700; font-size:14px; border:none; border-radius:5px; padding:10px 16px; cursor:pointer;">
+          Got It
+        </button>`);
+    ov.style.display = 'flex';
+    document.getElementById('cfgpush-ack-btn').onclick = () => {
+        // Hide first: the device clears its counter on this call, so the next CSV2 frame is
+        // already 0 and would never reach the clearing branch below if the panel stayed up.
+        ov.style.display = 'none';
+        cfgPushDetail = null;
+        cfgPushDetailFor = -1;
+        fetch(buildURL('/configPush?ack=1')).catch(() => { });
+    };
+}
+
+function cfgPushShowPending(count, note) {
+    const ov = cfgPushOverlay();
+    ov.innerHTML = cfgPushPanel('Settings Update Pending', `
+        <p style="margin:0 0 10px;">
+          X Engineering has queued a configuration update for this regulator —
+          <strong>${count}</strong> setting${count === 1 ? '' : 's'}.
+        </p>
+        ${note ? `<p style="margin:0 0 10px; color:#2ec4b6;">${note}</p>` : ''}
+        <p style="margin:0 0 16px; font-size:12.5px; color:#999;">
+          It installs by itself the next time the regulator restarts, which normally happens within a
+          day or two while the engine is off. Restart now to apply it immediately — the field drive
+          drops for about 30 seconds.
+        </p>
+        <button id="cfgpush-restart-btn"
+                style="display:block; width:100%; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d;
+                       font-weight:700; font-size:14px; border:none; border-radius:5px; padding:10px 16px; cursor:pointer;">
+          Restart Now and Apply
+        </button>
+        <button id="cfgpush-later-btn"
+                style="display:block; width:100%; margin-top:8px; background:#3a3a3a; border:1px solid #555; color:#ddd;
+                       font-size:13px; border-radius:5px; padding:9px 16px; cursor:pointer;">
+          Later
+        </button>`);
+    ov.style.display = 'flex';
+    document.getElementById('cfgpush-restart-btn').onclick = async () => {
+        // RebootRegulator sits behind the /get arm gate — arm just-in-time (same pattern as
+        // triggerForcedUpdate) or an unarmed dashboard gets a silent 403 while this popup
+        // claims "Restarting". The panel stays up until arming succeeds.
+        try {
+            await fetchWithTimeout(buildURL('/armSettings?arm=1'), {}, 8000);
+        } catch (e) {
+            xAlert('Could not reach the device to restart it. Check the connection and try again.');
+            return;
+        }
+        ov.style.display = 'none';
+        cfgPushPendingDismissed = count;
+        fetch(buildURL('/get?RebootRegulator=1')).catch(() => { });
+        xAlert('Restarting. The update installs during boot, then the regulator restarts a second time to load it. Reconnect in about a minute.', 'Restarting');
+    };
+    document.getElementById('cfgpush-later-btn').onclick = () => {
+        ov.style.display = 'none';
+        cfgPushPendingDismissed = count;
+    };
+}
+
+function handleConfigPush(data) {
+    const applied = Number(data.cfgPushApplied) || 0;
+    const pending = Number(data.cfgPushPending) || 0;
+    const ov = document.getElementById('cfgpush-overlay');
+    const shown = ov && ov.style.display !== 'none';
+
+    // Clear a panel the device no longer has a reason to show (admin cancelled the push, or the
+    // ack landed). Mirrors the forced-update bug where an unconditional early return left a
+    // cancelled overlay stuck on screen until a hard reload.
+    if (!applied && !pending) {
+        if (shown) ov.style.display = 'none';
+        if (pending !== cfgPushPendingDismissed) cfgPushPendingDismissed = 0;
+        return;
+    }
+    if (shown) return;   // one panel at a time; do not re-render under the user
+
+    // Applied first — it is the ackable one and blocks nothing else from showing afterwards.
+    if (applied) {
+        cfgPushEnsureDetail(pending).then(d => cfgPushShowApplied(applied, d ? d.appliedKeys : ''));
+        return;
+    }
+    if (pending && pending !== cfgPushPendingDismissed) {
+        cfgPushEnsureDetail(pending).then(d => cfgPushShowPending(pending, d ? d.pendingNote : ''));
+    }
+}
+
 // Disable all form inputs (when past deadline). Stamps each input it disables so enableAllInputs
 // releases ONLY those — disables owned by other features (knee-learn cell locks, ready-gated
 // commit buttons, demo-mode props) must not be trampled by this path running every CSV2 frame.
@@ -6999,7 +7159,7 @@ function battDefNotice(tier, title, body) {
 
 // Per-chemistry Battery Health capacity-trend tuning. 12V-referenced rested open-circuit-voltage
 // curves at the fixed SoC breakpoints {100,90,80,60,40,30,20,15,10,5,0}; firmware scales by
-// BATTERY_VOLTAGE/12 at lookup, so these are entered as 12V values regardless of system voltage.
+// SYSTEM_VOLTAGE_CLASS/12 at lookup, so these are entered as 12V values regardless of system voltage.
 // Firmware loads the chemistry-matched curve into capOcvVolt[] at commissioning (applyChemistryOcvPreset,
 // 8_functions.ino), so these presets drive BOTH the SoC seed and the capacity anchor; AGM rests slightly
 // above lead-acid. The anchor window differs because lead-acid/AGM voltage maps to SoC across the whole
@@ -7612,18 +7772,17 @@ async function openRpmCap(next, back) {
 
 function rpmCapRender() {
     const s = _rpmCap, u = (s.unit === 'kw') ? 'kW' : 'A';
-    const inCss = 'width:72px; background:#161616; color:#ddd; border:1px solid #3a3a3a; border-radius:4px; padding:5px 7px; font-size:13px; text-align:right; box-sizing:border-box;';
     const step = (s.unit === 'kw') ? '0.01' : '1';
     let rows = '';
     for (let i = 0; i < 10; i++) {
-        const pre = (i === 0) ? '<span style="color:#667;font-weight:800;margin-right:3px;">&lt;</span>' : '';
-        const suf = (i === 9) ? '<span style="color:#667;font-weight:800;margin-left:3px;">+</span>' : '';
+        const pre = '<span class="crl-mk">' + (i === 0 ? '&lt;' : '') + '</span>';
+        const suf = '<span class="crl-mk">' + (i === 9 ? '+' : '') + '</span>';
         rows +=
             '<tr>' +
-            '<td style="padding:3px 8px; white-space:nowrap; text-align:right; color:#9aa;">' + pre +
-            '<input type="number" step="1" min="0" value="' + s.rpm[i] + '" oninput="rpmCapEdit(' + i + ',\'rpm\',this.value)" style="' + inCss + '">' + suf + '</td>' +
-            '<td style="padding:3px 8px;"><input type="number" step="' + step + '" min="0" value="' + rpmCapShown(s.lo[i]) + '" oninput="rpmCapEdit(' + i + ',\'lo\',this.value)" style="' + inCss + '"></td>' +
-            '<td style="padding:3px 8px;"><input type="number" step="' + step + '" min="0" value="' + rpmCapShown(s.hi[i]) + '" oninput="rpmCapEdit(' + i + ',\'hi\',this.value)" style="' + inCss + '"></td>' +
+            '<td><div class="crl-rpm">' + pre +
+            '<input class="crl-in" type="number" step="1" min="0" value="' + s.rpm[i] + '" oninput="rpmCapEdit(' + i + ',\'rpm\',this.value)">' + suf + '</div></td>' +
+            '<td><input class="crl-in" type="number" step="' + step + '" min="0" value="' + rpmCapShown(s.lo[i]) + '" oninput="rpmCapEdit(' + i + ',\'lo\',this.value)"></td>' +
+            '<td><input class="crl-in" type="number" step="' + step + '" min="0" value="' + rpmCapShown(s.hi[i]) + '" oninput="rpmCapEdit(' + i + ',\'hi\',this.value)"></td>' +
             '</tr>';
     }
     document.getElementById('rpmcap-body').innerHTML =
@@ -7634,11 +7793,10 @@ function rpmCapRender() {
         '<button type="button" class="cap-mode-btn' + (s.unit === 'amps' ? ' cap-mode-active' : '') + '" onclick="rpmCapSetUnit(\'amps\')">Amps</button>' +
         '<button type="button" class="cap-mode-btn' + (s.unit === 'kw' ? ' cap-mode-active' : '') + '" onclick="rpmCapSetUnit(\'kw\')">kW</button>' +
         '</div></div>' +
-        '<table style="width:100%; border-collapse:collapse; font-size:13px;">' +
-        '<thead><tr style="color:#9cc; font-size:11px;">' +
-        '<th style="text-align:left; padding:0 8px 6px; border-bottom:1px solid #333;">Engine RPM</th>' +
-        '<th style="text-align:right; padding:0 8px 6px; border-bottom:1px solid #333;">Low (' + u + ')</th>' +
-        '<th style="text-align:right; padding:0 8px 6px; border-bottom:1px solid #333;">High (' + u + ')</th>' +
+        '<table class="crl-table">' +
+        '<colgroup><col style="width:36%"><col style="width:32%"><col style="width:32%"></colgroup>' +
+        '<thead><tr>' +
+        '<th>Engine RPM</th><th>Low (' + u + ')</th><th>High (' + u + ')</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table>' +
         '<p style="color:#9aa; font-size:12.5px; margin:14px 0 0; line-height:1.5;">Between the speeds you enter, the limit follows a straight line (linear interpolation); below the first speed and above the last it holds flat.</p>' +
         '<p style="font-size:13px; margin:14px 0 0; line-height:1.5;">The regulator is now in <strong style="color:' + (currentChargeRateMode === 'low' ? '#2ec4b6' : '#f0a500') + ';">' + (currentChargeRateMode === 'low' ? 'Low' : 'High') + '</strong> charge rate. Commissioning runs in whichever mode you continue with.</p>';
@@ -8361,7 +8519,7 @@ function fetchAccState() {
 
 // ===== Overvoltage History (Live Data ▸ Diag) =====
 // Lifetime OV histogram + counters from device RTC RAM (/getOvTelemetry), fetched when the
-// section opens. Band edges are built from the returned bulk + k (BATTERY_VOLTAGE/12), so
+// section opens. Band edges are built from the returned bulk + k (SYSTEM_VOLTAGE_CLASS/12), so
 // nothing is hardcoded client-side; time_ms arrives as decimal strings (uint64-safe).
 function fetchOvTelemetry() {
     const body = document.getElementById('ovtBinsBody');
@@ -12207,7 +12365,7 @@ function submitSimpleParam(paramName, val, extra) {
         .catch(err => diagLog(paramName + ' submit failed: ' + err));
 }
 
-// System voltage (12/24/48 V) lives in Vessel Info (BATTERY_VOLTAGE) — the single source of truth.
+// System voltage (12/24/48 V) lives in Vessel Info (firmware global SYSTEM_VOLTAGE_CLASS) — the single source of truth.
 // When the user changes it and saves, /saveVesselInfo rescales the whole charge-voltage profile by
 // newV/oldV and re-derives the hard-shutdown trip. This warns first with an old→new preview (read
 // from the live echo values) and returns false if the user cancels, so the save can be aborted.
@@ -13265,6 +13423,7 @@ window.addEventListener("load", function () {
             }
 
             handleForcedUpdate(data);
+            handleConfigPush(data);
 
             // Scheduled-restart warning: banner + one-shot popup per page-load cycle
             try {
@@ -28258,7 +28417,7 @@ let usageCurPage = null;
 let usageCurStart = 0;    // performance.now() when the current page became visible; 0 = clock stopped
 
 function usageSanitize(s) {
-    return String(s).replace(/[^A-Za-z0-9_:.\-]/g, '_').slice(0, 28);
+    return String(s).replace(/[^A-Za-z0-9_:.\-]/g, '_').slice(0, 40);
 }
 function usagePageEntry(key) {
     if (!usagePages[key] && Object.keys(usagePages).length >= USAGE_MAX_KEYS) key = '~other';
@@ -28312,33 +28471,40 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-// Capture phase: several app handlers stopPropagation, and the tooltip owner already
-// established the capture-phase precedent. Key priority: data-an > onclick fn(+first
-// string arg) > submitMessage's form-row input name > element id.
-document.addEventListener('click', function (e) {
-    const el = e.target.closest ? e.target.closest('[onclick], button, input[type=submit], input[type=button]') : null;
-    if (!el) return;
-    if (el.classList.contains('sub-tab') || el.classList.contains('main-tab')) return;  // page tracking covers tabs
-    if (el.closest('.tooltip, .sinfo, .tooltip-box')) return;                           // tooltip taps are noise
+// Key derivation shared by the click listener and the stats card's reverse label lookup.
+// Priority: data-an > onclick fn(+up to two leading string args — the 2nd arg keeps panel
+// switchers like showAltTab from merging into one key) > submitMessage's form-row input
+// name > element id. Returns null for tab switches (page tracking covers those).
+function usageKeyFor(el) {
+    if (el.classList.contains('sub-tab') || el.classList.contains('main-tab')) return null;
     let key = el.getAttribute('data-an');
     if (!key) {
         const oc = el.getAttribute('onclick') || '';
-        const m = oc.match(/^\s*([A-Za-z_$][\w$]*)\s*\(\s*(?:'([^']*)')?/);
+        const m = oc.match(/^\s*([A-Za-z_$][\w$]*)\s*\(\s*(?:'([^']*)')?\s*(?:,\s*'([^']*)')?/);
         if (m) {
-            if (m[1] === 'showSubTab' || m[1] === 'showMainTab') return;
+            if (m[1] === 'showSubTab' || m[1] === 'showMainTab') return null;
             if (m[1] === 'submitMessage') {
                 const row = el.closest('.form-row');
                 const inp = row && row.querySelector('input[name], select[name]');
                 key = inp && inp.name ? 'submit:' + inp.name : 'submitMessage';
             } else {
-                key = m[2] ? m[1] + ':' + m[2] : m[1];
+                key = m[1] + (m[2] ? ':' + m[2] : '') + (m[3] ? ':' + m[3] : '');
             }
         } else if (el.id) {
             key = el.id;
         }
     }
+    return key ? usageSanitize(key) : null;
+}
+
+// Capture phase: several app handlers stopPropagation, and the tooltip owner already
+// established the capture-phase precedent.
+document.addEventListener('click', function (e) {
+    const el = e.target.closest ? e.target.closest('[onclick], button, input[type=submit], input[type=button]') : null;
+    if (!el) return;
+    if (el.closest('.tooltip, .sinfo, .tooltip-box')) return;  // tooltip taps are noise
+    let key = usageKeyFor(el);
     if (!key) return;
-    key = usageSanitize(key);
     if (!usageBtns[key] && Object.keys(usageBtns).length >= USAGE_MAX_KEYS) key = '~other';
     usageBtns[key] = (usageBtns[key] || 0) + 1;
 }, true);
@@ -28352,7 +28518,8 @@ function usageBuildDelta() {
         usageCloseDwell();
         usageCurStart = performance.now();
     }
-    return { o: usageOpens, a: IS_CAPACITOR ? 1 : 0, p: usagePages, b: usageBtns };
+    // z = UTC offset in seconds east — the device rolls its "day" at local midnight with it
+    return { o: usageOpens, a: IS_CAPACITOR ? 1 : 0, z: -new Date().getTimezoneOffset() * 60, p: usagePages, b: usageBtns };
 }
 function usageClearDelta() {
     usageOpens = 0;
@@ -28430,6 +28597,52 @@ function usageFmtDur(ms) {
     if (ms >= 60000) return Math.round(ms / 60000) + ' min';
     return Math.round(ms / 1000) + ' s';
 }
+
+// Friendly names for the stats card, resolved from the live DOM at display time so the
+// tracker stays registry-free. Display-only — stored/uploaded keys are untouched.
+function usageElText(el) {
+    if (!el) return '';
+    if (el.tagName === 'INPUT') return (el.value || '').trim();
+    const src = (el.querySelector('.tab-label-full') || el).cloneNode(true);
+    src.querySelectorAll('.tooltip, .sinfo, .tooltip-box, [id$="_echo"]').forEach(n => n.remove());
+    // "(  )" leftovers from removed echo spans, e.g. "Margin Below Knee (%) ()"
+    return src.textContent.replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
+}
+// Page keys are sub-tab content ids ("<main>-<sub>") or a main-tab content id (the load
+// seed) — rebuild "Main › Sub" from the real tab buttons' onclick args.
+function usagePageNames() {
+    const names = {};
+    document.querySelectorAll('.main-tab').forEach(b => {
+        const m = (b.getAttribute('onclick') || '').match(/showMainTab\('([^']+)'/);
+        if (m) names[m[1]] = usageElText(b);
+    });
+    document.querySelectorAll('.sub-tab').forEach(b => {
+        const m = (b.getAttribute('onclick') || '').match(/showSubTab\('([^']+)'\s*,\s*'([^']+)'/);
+        if (m) names[m[1] + '-' + m[2]] = (names[m[1]] ? names[m[1]] + ' › ' : '') + usageElText(b);
+    });
+    return names;
+}
+// key -> {label, ctx}: run usageKeyFor over every clickable element and take the first
+// match. submit:* keys label as "Set: <form-row label>"; ctx = the page the control lives on.
+function usageBtnNames(pageNames) {
+    const map = {};
+    document.querySelectorAll('[onclick], button, input[type=submit], input[type=button]').forEach(el => {
+        const key = usageKeyFor(el);
+        if (!key || map[key]) return;
+        let label = '';
+        if (key.indexOf('submit:') === 0) {
+            const row = el.closest('.form-row');
+            const t = usageElText(row && row.querySelector('.form-label'));
+            if (t) label = 'Set: ' + t.replace(/[:\s]+$/, '');
+        }
+        if (!label) label = usageElText(el);
+        if (!label) return;  // icon-only control — the raw key falls through instead
+        const sec = el.closest('.sub-tab-content') || el.closest('.tab-content');
+        map[key] = { label: label, ctx: (sec && pageNames[sec.id]) || '' };
+    });
+    return map;
+}
+
 let usageStatsInFlight = false;
 function usageFetchStats() {
     if (usageStatsInFlight) return;
@@ -28445,30 +28658,47 @@ function usageFetchStats() {
             set('usageLifeTime', ((j.life.s || 0) / 3600).toFixed(1) + ' h');
             set('usageLifeOpens', j.life.opens);
             set('usageLifeDays', j.life.days);
-            const fill = (id, rows, fmt) => {
+            const pageNames = usagePageNames();
+            const btnNames = (j.today.btns && j.today.btns.length) ? usageBtnNames(pageNames) : {};
+            const nameCell = (label, ctx) => {
+                const td = document.createElement('td');
+                td.textContent = label;
+                if (ctx) {
+                    const s = document.createElement('span');
+                    s.className = 'usage-ctx';
+                    s.textContent = ' · ' + ctx;
+                    td.appendChild(s);
+                }
+                return td;
+            };
+            const numCell = v => { const td = document.createElement('td'); td.textContent = v; return td; };
+            const fill = (id, rows, span, makeCells) => {
                 const box = document.getElementById(id);
                 if (!box) return;
                 box.textContent = '';
                 if (!rows || !rows.length) {
-                    box.innerHTML = '<div class="metric-row"><span class="metric-label">No data yet</span></div>';
+                    const tr = document.createElement('tr');
+                    const td = document.createElement('td');
+                    td.colSpan = span;
+                    td.className = 'usage-none';
+                    td.textContent = 'No data yet';
+                    tr.appendChild(td);
+                    box.appendChild(tr);
                     return;
                 }
                 rows.forEach(row => {
-                    const div = document.createElement('div');
-                    div.className = 'metric-row';
-                    const lab = document.createElement('span');
-                    lab.className = 'metric-label';
-                    lab.textContent = row[0];
-                    const val = document.createElement('span');
-                    val.className = 'metric-value';
-                    val.textContent = fmt(row);
-                    div.appendChild(lab);
-                    div.appendChild(val);
-                    box.appendChild(div);
+                    const tr = document.createElement('tr');
+                    tr.title = row[0];  // raw tracking key on hover
+                    makeCells(row).forEach(td => tr.appendChild(td));
+                    box.appendChild(tr);
                 });
             };
-            fill('usageTopPages', j.today.pages, row => row[1] + 'x  ' + usageFmtDur(row[2]));
-            fill('usageTopBtns', j.today.btns, row => row[1] + 'x');
+            fill('usageTopPages', j.today.pages, 3, row =>
+                [nameCell(pageNames[row[0]] || row[0], ''), numCell(row[1]), numCell(usageFmtDur(row[2]))]);
+            fill('usageTopBtns', j.today.btns, 2, row => {
+                const inf = btnNames[row[0]];
+                return [nameCell(inf ? inf.label : row[0], inf ? inf.ctx : ''), numCell(row[1])];
+            });
         })
         .catch(() => { usageStatsInFlight = false; });
 }

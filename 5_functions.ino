@@ -596,7 +596,7 @@ void checkAndRestart() {
     return;
   }
 
-  float vScale = BATTERY_VOLTAGE / 12.0f;
+  float vScale = SYSTEM_VOLTAGE_CLASS / 12.0f;
   bool vValid = (IBV > 5.0f);  // a dead/absent INA228 reads ~0 V; sensor-dead must not block the ladder forever
   bool engineOff = !engineSpinning();
   bool fieldOff = (fieldActiveStatus == 0);
@@ -1182,9 +1182,9 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   //     CHARGE CYCLE CALCULATION
   // =================================================================
   // One cycle = one full battery capacity worth of energy charged.
-  // Nominal bank class comes from user-entered BATTERY_VOLTAGE, never guessed from measured
+  // Nominal bank class comes from user-entered SYSTEM_VOLTAGE_CLASS, never guessed from measured
   // voltage (a deeply-discharged 24V bank sagging below 16V would mis-bucket as 12V, 2× cycle error).
-  float nominalVoltage = (float)BATTERY_VOLTAGE;
+  float nominalVoltage = (float)SYSTEM_VOLTAGE_CLASS;
 
   float batteryCapacity_Wh = BatteryCapacity_Ah * nominalVoltage;
 
@@ -1781,7 +1781,7 @@ void CheckAlarms() {
     static unsigned long lastVoltLowMsgMs = 0;
     // The > floor rejects a disconnected/0V reading; scale it by bank class (8V on 12V → 16/32V on
     // 24/48V) so it stays a "sensor disconnected" floor and never sits above a real low-V alarm point.
-    if (VoltageAlarmLow > 0 && currentVoltage < VoltageAlarmLow && currentVoltage > 8.0 * BATTERY_VOLTAGE / 12.0f) {
+    if (VoltageAlarmLow > 0 && currentVoltage < VoltageAlarmLow && currentVoltage > 8.0 * SYSTEM_VOLTAGE_CLASS / 12.0f) {
       currentAlarmCondition = true;
       alarmReason = "Low battery voltage";
       if (millis() - lastVoltLowMsgMs >= 30000) {
@@ -2485,7 +2485,7 @@ bool clearINA228AlertLatch(uint8_t i2cAddress) {
 // Returns 0..OV_HIST_BINS-1, or -1 if raw bus voltage is at/below Bulk (struct + bin layout
 // documented at the OvTelemetry declaration in Xregulator.ino).
 int ovHistBin(float rawV) {
-  float k = (float)BATTERY_VOLTAGE / 12.0f;
+  float k = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
   float v = rawV - BulkVoltage;  // volts above Bulk (raw)
   if (v <= 0.0f) return -1;
   float fineW = 0.2f * k, fineTop = 3.6f * k;  // 18 fine bins; top ≈18V at a 14.4 Bulk
@@ -2535,7 +2535,7 @@ void updateINA228OvervoltageThreshold() {
   // bulk + 0.5 fallback if never commissioned). At one voltage the pair stays complementary
   // (raw per-tick vs ~1s average) and the INA228 becomes the software-failed-to-protect /
   // MCU-hang backstop that should read ~0 trips normally (2026-07-13 chemistry split).
-  if (batteryIsLithium()) VoltageHardwareLimit = BulkVoltage + 0.3f * ((float)BATTERY_VOLTAGE / 12.0f);
+  if (batteryIsLithium()) VoltageHardwareLimit = BulkVoltage + 0.3f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
   else VoltageHardwareLimit = AlternatorHardShutdownV;
 
   const double LSB = 0.003125;                                           // 3.125 mV/LSB
@@ -3368,7 +3368,7 @@ void ReadAnalogInputs_Fake() {
 
     // Fake battery voltage, 11.5–15.0V per-cell-scaled by class (unscaled 12V numbers would
     // fail isVoltageSensorPlausible and trip the disagreement fault on a 24/48V-configured unit)
-    float simK = (float)BATTERY_VOLTAGE / 12.0f;
+    float simK = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
     fakeVoltage += (random(-80, 80) / 100.0) * simK;  // ±0.8 V per update at 12V
     if (fakeVoltage < 11.5 * simK) fakeVoltage = 11.5 * simK;
     if (fakeVoltage > 15.0 * simK) fakeVoltage = 15.0 * simK;
@@ -4410,7 +4410,7 @@ bool fieldCutSettled(uint32_t extraMs) {
 // commit duration is safe. See git log for the original 9-phase implementation.
 
 // First-boot SoC seed, deferred from loadNVSData() to the end of setup() so IBV holds a real
-// INA228 reading and BATTERY_TYPE / BATTERY_VOLTAGE / BatteryCapacity_Ah hold the vessel-info
+// INA228 reading and BATTERY_TYPE / SYSTEM_VOLTAGE_CLASS / BatteryCapacity_Ah hold the vessel-info
 // values (all were still defaults/zero at loadNVSData time, which seeded 0% every fresh boot).
 // On a factory-fresh device (Vessel Info never saved) it defers further: saveVesselInfoToNvs()
 // re-invokes it after the first Vessel Info save, so the estimate never runs on the compile-time
@@ -4422,7 +4422,7 @@ void seedSocFromVoltage() {
   socSeedPending = false;
 
   float voltage = getBatteryVoltage();
-  float socM = BATTERY_VOLTAGE / 12.0f;  // bank-class scale for the 12V-referenced thresholds
+  float socM = SYSTEM_VOLTAGE_CLASS / 12.0f;  // bank-class scale for the 12V-referenced thresholds
   int estimatedSoC = 50;                 // fallback if the INA never produced a sane reading
 
   // Hoisted so the /socseed snapshot below can record them; snapVlo/plo..vhi/phi are the
@@ -4473,7 +4473,7 @@ void seedSocFromVoltage() {
     vOcv = voltage - corr;
 
     // One lookup for every chemistry: capOcvVolt[] is chemistry-matched at commissioning
-    // (applyChemistryOcvPreset) and honors a hand-tuned curve. ocvToSoC scales by BATTERY_VOLTAGE/12.
+    // (applyChemistryOcvPreset) and honors a hand-tuned curve. ocvToSoC scales by SYSTEM_VOLTAGE_CLASS/12.
     estimatedSoC = (int)(ocvToSoC(vOcv) + 0.5f);
     if (vOcv >= capOcvVolt[0] * socM) {
       snapVlo = snapVhi = capOcvVolt[0] * socM;
@@ -4514,7 +4514,7 @@ void seedSocFromVoltage() {
               + ",\"tF\":" + (isnan(boardTempF) ? String("null") : String(boardTempF, 1))
               + ",\"rs\":" + String(rTempScale, 3)
               + ",\"cap\":" + String(BatteryCapacity_Ah)
-              + ",\"sysV\":" + String((int)BATTERY_VOLTAGE)
+              + ",\"sysV\":" + String((int)SYSTEM_VOLTAGE_CLASS)
               + ",\"lith\":" + (isLithium ? "1" : "0")
               + ",\"chem\":\"" + String(BATTERY_TYPE) + "\""
               + ",\"vocv\":" + String(vOcv, 3)
