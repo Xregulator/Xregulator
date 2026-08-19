@@ -13717,6 +13717,18 @@
         });
       });
 
+      // Leaderboards section-nav: the child page asks us to scroll, because the
+      // iframe is sized to its full content and never scrolls itself.
+      window.addEventListener("message", (e) => {
+        if (!ALLOWED_ORIGINS.has(e.origin)) return;
+        if (!e.data || e.data.type !== "LB_SCROLL_TO") return;
+        const iframe = document.getElementById('leaderboards-iframe');
+        if (!iframe || iframe.contentWindow !== e.source) return;
+        const y = Math.max(0, Math.min(20000, Number(e.data.y) || 0));
+        const top = iframe.getBoundingClientRect().top + window.scrollY + y - 10;
+        window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+      });
+
       // Request height when iframes load
       function requestHeightFromIframe(iframe) {
         if (iframe && iframe.contentWindow) {
