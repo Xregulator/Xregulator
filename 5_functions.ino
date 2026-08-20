@@ -93,6 +93,59 @@ void Heading(const tN2kMsg &N2kMsg) {
   }
 }
 //*****************************************************************************
+// Best 60-second average speed over ground — the number behind the Sustained Speed
+// record and the fleet speed board. SOG arrives at ~0.5 Hz (COGSOG throttles itself to
+// 2 s), so the window is integrated time-weighted from timestamped samples instead of
+// binned; the metric stays correct if that cadence ever changes. Samples are stored at
+// most 1/s so the ring always spans more than a minute whatever the source rate. A score
+// needs a fully covered 60 s with no gap past SUST_MAX_GAP_MS — a NMEA dropout must not
+// be able to manufacture a record out of two samples an hour apart.
+void updateSustainedSpeed(float sogKn) {
+  static uint8_t head = 0, count = 0;
+  if (!sustT || !sustV) return;   // PSRAM ring (allocated in setup)
+  uint32_t *t = sustT;
+  float    *v = sustV;
+
+  const uint32_t now = millis();
+  const uint8_t newest = (uint8_t)((head + SUST_RING_SIZE - 1) % SUST_RING_SIZE);
+
+  if (count) {
+    if (now < t[newest]) count = 0;                          // millis() rollover
+    else if (now - t[newest] < SUST_STORE_MIN_MS) return;    // decimate to 1 Hz
+    else if (now - t[newest] > SUST_MAX_GAP_MS) count = 0;   // dropout — window starts over
+  }
+
+  t[head] = now;
+  v[head] = sogKn;
+  head = (uint8_t)((head + 1) % SUST_RING_SIZE);
+  if (count < SUST_RING_SIZE) count++;
+
+  sogSust1m = 0.0f;
+  if (count < 2) return;
+
+  // Newest → oldest, step-hold: each sample's value held until the next one arrived.
+  double area = 0.0;   // kn·ms
+  uint32_t span = 0;
+  bool covered = false;
+  for (uint8_t k = 1; k < count; k++) {
+    const uint8_t newerIdx = (uint8_t)((head + SUST_RING_SIZE - k) % SUST_RING_SIZE);
+    const uint8_t olderIdx = (uint8_t)((head + SUST_RING_SIZE - k - 1) % SUST_RING_SIZE);
+    uint32_t dt = t[newerIdx] - t[olderIdx];
+    if (dt == 0) continue;
+    if (dt > SUST_MAX_GAP_MS) break;
+    if (span + dt >= SUST_WINDOW_MS) { dt = SUST_WINDOW_MS - span; covered = true; }
+    area += (double)v[olderIdx] * dt;
+    span += dt;
+    if (covered) break;
+  }
+  if (!covered || span == 0) return;
+
+  sogSust1m = (float)(area / span);
+  if (sogSust1m > MaxSpeed) MaxSpeed = sogSust1m;
+  if (sogSust1m > MaxSpeed_AllTime) MaxSpeed_AllTime = sogSust1m;
+}
+
+//*****************************************************************************
 void COGSOG(const tN2kMsg &N2kMsg) {
   static unsigned long lastCOGSOGUpdate = 0;
   if (millis() - lastCOGSOGUpdate < 2000) return;
@@ -114,12 +167,7 @@ void COGSOG(const tN2kMsg &N2kMsg) {
       SOGNMEA = SOG * 1.94384;     // m/s → knots
       MARK_FRESH(IDX_SOG_NMEA);
 
-      if (SOGNMEA > MaxSpeed) {
-        MaxSpeed = SOGNMEA;
-      }
-      if (SOGNMEA > MaxSpeed_AllTime) {
-        MaxSpeed_AllTime = SOGNMEA;
-      }
+      updateSustainedSpeed(SOGNMEA);
       wmIgnUpdate(wmIgn_SOG, SOGNMEA);  // ignition-cycle watermark
     }
 
@@ -258,8 +306,20 @@ void DCStatus(const tN2kMsg &N2kMsg) {
   double RippleVoltage;
   double Capacity;
 
-  if (NMEA2KVerbose != 1) return;  // display-only handler (~1 Hz on a bus with a BMV) — gate like SystemTime
-  if (ParseN2kDCStatus(N2kMsg, SID, DCInstance, DCType, StateOfCharge, StateOfHealth, TimeRemaining, RippleVoltage, Capacity)) {
+  if (!ParseN2kDCStatus(N2kMsg, SID, DCInstance, DCType, StateOfCharge, StateOfHealth, TimeRemaining, RippleVoltage, Capacity)) {
+    if (NMEA2KVerbose == 1) {
+      OutputStream->print("Failed to parse PGN: ");
+      OutputStream->println(N2kMsg.PGN);
+    }
+    return;
+  }
+  // Ingest SOC/SOH from the selected battery bank (display/telemetry only, never control)
+  if (DCInstance == n2kRxBattInstance && DCType == N2kDCt_Battery) {
+    n2kRxSoc = (StateOfCharge > 100) ? -1 : (int)StateOfCharge;  // >100 = N2K not-available encoding
+    n2kRxSoh = (StateOfHealth > 100) ? -1 : (int)StateOfHealth;
+    if (n2kRxSoc >= 0 || n2kRxSoh >= 0) MARK_FRESH(IDX_N2K_SOC);
+  }
+  if (NMEA2KVerbose == 1) {  // print firehose gated like SystemTime
     OutputStream->print("DC instance: ");
     OutputStream->println(DCInstance);
     OutputStream->print("  - type: ");
@@ -274,9 +334,38 @@ void DCStatus(const tN2kMsg &N2kMsg) {
     OutputStream->println(RippleVoltage);
     OutputStream->print("  - capacity: ");
     OutputStream->println(Capacity);
-  } else {
-    OutputStream->print("Failed to parse PGN: ");
-    OutputStream->println(N2kMsg.PGN);
+  }
+}
+//*****************************************************************************
+void BatteryStatus(const tN2kMsg &N2kMsg) {
+  unsigned char SID;
+  unsigned char BatteryInstance;
+  double BatteryVoltage;
+  double BatteryCurrent;
+  double BatteryTemperature;
+
+  if (!ParseN2kDCBatStatus(N2kMsg, BatteryInstance, BatteryVoltage, BatteryCurrent, BatteryTemperature, SID)) {
+    if (NMEA2KVerbose == 1) {
+      OutputStream->print("Failed to parse PGN: ");
+      OutputStream->println(N2kMsg.PGN);
+    }
+    return;
+  }
+  // Ingest V/A/T from the selected battery bank — a shunt or BMS "virtual shunt" bridged
+  // onto N2K (display/telemetry only, never control). Missing fields stay NAN, never fabricated.
+  if (BatteryInstance == n2kRxBattInstance) {
+    if (N2kIsNA(BatteryVoltage) && N2kIsNA(BatteryCurrent) && N2kIsNA(BatteryTemperature)) return;
+    n2kRxBattV = N2kIsNA(BatteryVoltage) ? NAN : (float)BatteryVoltage;
+    n2kRxBattA = N2kIsNA(BatteryCurrent) ? NAN : (float)BatteryCurrent;
+    n2kRxBattTempF = N2kIsNA(BatteryTemperature) ? NAN : (float)KelvinToF(BatteryTemperature);
+    MARK_FRESH(IDX_N2K_BATT);
+  }
+  if (NMEA2KVerbose == 1) {
+    OutputStream->print("Battery instance: ");
+    OutputStream->println(BatteryInstance);
+    PrintLabelValWithConversionCheckUnDef("  - voltage (V): ", BatteryVoltage, 0, true);
+    PrintLabelValWithConversionCheckUnDef("  - current (A): ", BatteryCurrent, 0, true);
+    PrintLabelValWithConversionCheckUnDef("  - temperature (C): ", BatteryTemperature, &KelvinToC, true);
   }
 }
 //*****************************************************************************
@@ -437,6 +526,10 @@ void Attitude(const tN2kMsg &N2kMsg) {
   }
 }
 void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
+  // Receive toggle off: drop bus data here. ParseMessages may still be running purely to service
+  // the transmit node's protocol layer (address claim, heartbeat), which the library handles
+  // before this handler — the user's "receive off" must still mean no nav/battery data flows in.
+  if (NMEA2KData != 1) return;
   int iHandler;
   if (NMEA2KVerbose == 1) {
     OutputStream->print("In Main Handler: ");
@@ -447,6 +540,201 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
 
   if (NMEA2000Handlers[iHandler].PGN != 0) {
     NMEA2000Handlers[iHandler].Handler(N2kMsg);
+  }
+}
+
+// ===== NMEA2000 transmit (producer) — spec: Working Markdown Docs/NMEA2K_TRANSMIT_SPEC.md =====
+
+tN2kChargeState n2kChargeStateFromStage(uint8_t stage) {
+  switch (stage) {
+    case CHARGE_STAGE_BULK: return N2kCS_Bulk;
+    case CHARGE_STAGE_ABSORPTION: return N2kCS_Absorption;
+    case CHARGE_STAGE_FLOAT: return N2kCS_Float;
+    case CHARGE_STAGE_MAINTAIN: return N2kCS_Float;
+    case CHARGE_STAGE_MANUAL:
+    case CHARGE_STAGE_TARGET_V:
+    case CHARGE_STAGE_COMMISSION: return N2kCS_Constant_VI;
+    default: return N2kCS_Not_Charging;  // NONE, IDLE
+  }
+}
+
+// The alternator temperature the alarm engine uses: TempSource picks OneWire vs thermistor,
+// -99 is the thermistor's disconnected sentinel. NAN = no usable reading. Same 20s freshness
+// test as the stale alarm / temp-stale field cut — without it a sensor that dies mid-run
+// transmits its last good value forever and the MFD data-lost alarm can never fire.
+float n2kAltTempF() {
+  unsigned long ts = dataTimestamps[(TempSource == 0) ? IDX_ALTERNATOR_TEMP : IDX_THERMISTOR_TEMP];
+  if (ts == 0 || (millis() - ts) > 20000) return NAN;
+  if (TempSource == 0) return AlternatorTemperatureF;
+  return (temperatureThermistor == -99) ? NAN : (float)temperatureThermistor;
+}
+
+// Sends AT MOST one PGN per loop pass (rotating scan for fairness); compose + enqueue is µs-scale
+// because the _xeng driver never blocks — frames the TWAI queue refuses land in the core library's
+// retry ring and eventually drop (counted). Missing sources publish N2K not-available, never a
+// stale/fabricated number; the single-value 130312 is skipped entirely instead.
+void nmea2kTransmitTick() {
+  if (n2kTxEnable != 1) return;
+
+  // Persist a claim/renegotiation result. NVS write is deferred to field-off (no flash in the
+  // control path); claims normally complete at boot with the field down anyway.
+  if (NMEA2000.ReadResetAddressChanged()) {
+    n2kSrcAddrLive = NMEA2000.GetN2kSource();
+    n2kAddrPending = (uint8_t)n2kSrcAddrLive;
+  }
+  if (n2kAddrPending != 255 && gpio4IsLow) {
+    settingWrite(NK_n2kSrcAddr, String((int)n2kAddrPending).c_str());
+    n2kAddrPending = 255;
+  }
+
+  enum : uint8_t { SLOT_BATT = 0,
+                   SLOT_BATT_DC,
+                   SLOT_ALT,
+                   SLOT_ALT_DC,
+                   SLOT_TEMP,
+                   SLOT_CHGR,
+                   SLOT_ENG_RAPID,
+                   SLOT_ENG_DYN,
+                   SLOT_BATTCFG,
+                   SLOT_N };
+  static const uint32_t ivl[SLOT_N] = { 1500, 1500, 1500, 1500, 2000, 1500, 100, 500, 15000 };  // ms, NMEA-recommended rates
+  static uint32_t nextDue[SLOT_N];
+  static bool seeded = false;
+  // Per-stream SIDs: each 127508+127506 pair shares one (ties the pair to the same sample set)
+  // and each stream bumps its own, so disabling one stream can't freeze another's SID.
+  static uint8_t sidBatt = 0, sidAlt = 0, sidTemp = 0;
+  static uint8_t rr = 0;
+  static tN2kChargeState lastChgState = N2kCS_Unavailable;
+  uint32_t now = millis();
+  if (!seeded) {  // stagger initial phases so the 1500ms PGNs never bunch into one pass
+    seeded = true;
+    for (uint8_t i = 0; i < SLOT_N; i++) nextDue[i] = now + 500 + 200 * i;
+  }
+
+  // Charge-stage change sends 127507 promptly instead of waiting out its interval
+  if (n2kChgrEnable == 1 && n2kChargeStateFromStage(getChargeStageDisplayCode()) != lastChgState && (int32_t)(now - nextDue[SLOT_CHGR]) < 0) {
+    nextDue[SLOT_CHGR] = now;
+  }
+
+  for (uint8_t k = 0; k < SLOT_N; k++) {
+    uint8_t s = (rr + k) % SLOT_N;
+    if ((int32_t)(now - nextDue[s]) < 0) continue;
+    nextDue[s] = now + ivl[s];
+
+    tN2kMsg N2kMsg;
+    bool composed = false;
+    switch (s) {
+      case SLOT_BATT:
+        if (n2kBattEnable == 1) {
+          sidBatt = (uint8_t)((sidBatt + 1) % 253);
+          SetN2kDCBatStatus(N2kMsg, (unsigned char)n2kBattInstance, getBatteryVoltage(),
+                            HAS_BATT_SHUNT ? (double)Bcur : N2kDoubleNA,
+                            N2kDoubleNA,  // no battery temperature source today
+                            sidBatt);
+          composed = true;
+        }
+        break;
+      case SLOT_BATT_DC:
+        if (n2kBattEnable == 1) {
+          SetN2kDCStatus(N2kMsg, sidBatt, (unsigned char)n2kBattInstance, N2kDCt_Battery,
+                         (HAS_BATT_SHUNT && socInfoAvailable) ? (unsigned char)(SOC_percent / 100) : N2kUInt8NA,
+                         N2kUInt8NA, N2kDoubleNA, N2kDoubleNA, N2kDoubleNA);
+          composed = true;
+        }
+        break;
+      case SLOT_ALT:
+        if (n2kAltEnable == 1) {
+          float tF = n2kAltTempF();
+          sidAlt = (uint8_t)((sidAlt + 1) % 253);
+          SetN2kDCBatStatus(N2kMsg, (unsigned char)n2kAltInstance, (double)BatteryV, (double)MeasuredAmps,
+                            isfinite(tF) ? FToKelvin(tF) : N2kDoubleNA, sidAlt);
+          composed = true;
+        }
+        break;
+      case SLOT_ALT_DC:
+        if (n2kAltEnable == 1) {
+          SetN2kDCStatus(N2kMsg, sidAlt, (unsigned char)n2kAltInstance, N2kDCt_Alternator,
+                         N2kUInt8NA, N2kUInt8NA, N2kDoubleNA, N2kDoubleNA, N2kDoubleNA);
+          composed = true;
+        }
+        break;
+      case SLOT_TEMP:
+        if (n2kAltTempEnable == 1) {
+          float tF = n2kAltTempF();
+          if (isfinite(tF)) {  // skipped entirely while the sensor is dead — MFD data-lost alarms own that case
+            sidTemp = (uint8_t)((sidTemp + 1) % 253);
+            SetN2kTemperature(N2kMsg, sidTemp, (unsigned char)n2kTempInstance, (tN2kTempSource)n2kTempSource,
+                              FToKelvin(tF), N2kDoubleNA);
+            composed = true;
+          }
+        }
+        break;
+      case SLOT_CHGR:
+        if (n2kChgrEnable == 1) {
+          lastChgState = n2kChargeStateFromStage(getChargeStageDisplayCode());
+          SetN2kChargerStatus(N2kMsg, (unsigned char)n2kChgrInstance, (unsigned char)n2kBattInstance,
+                              lastChgState, N2kCM_Standalone,
+                              (OnOff == 1) ? N2kOnOff_On : N2kOnOff_Off);
+          composed = true;
+        }
+        break;
+      case SLOT_ENG_RAPID:
+        if (n2kEngRpmEnable == 1) {
+          SetN2kEngineParamRapid(N2kMsg, (unsigned char)n2kEngInstance, (double)RPM);
+          composed = true;
+        }
+        break;
+      case SLOT_ENG_DYN:
+        if (n2kEngDynEnable == 1) {
+          tN2kEngineDiscreteStatus1 s1 = 0;
+          if (n2kEngBitsEnable == 1) {
+            // Over Temperature: HARD over-temp field cut or the user's high-temp alarm point —
+            // deliberately never the thermal derate (output reduction is normal operation).
+            bool hardTempCut = gpio4IsLow && (g_fieldEventReason == REASON_TEMP_CRITICAL || g_fieldEventReason == REASON_TEMP_WARNING || g_fieldEventReason == REASON_TEMP_SUSTAINED);
+            float tF = n2kAltTempF();
+            if (hardTempCut || (TempAlarm > 0 && isfinite(tF) && tF > TempAlarm)) s1.Bits.OverTemperature = 1;
+            float v = getBatteryVoltage();
+            // same class-scaled disconnected-sensor floor as CheckAlarms
+            if (VoltageAlarmLow > 0 && v < VoltageAlarmLow && v > 8.0f * SYSTEM_VOLTAGE_CLASS / 12.0f) s1.Bits.LowSystemVoltage = 1;
+            // Charge Indicator = not charging when it should be: protective field cut (the JS
+            // FIELD_FAULT_REASONS set: 1-9, 12, 13, 15-17 — covers the implausible-sensor cuts)
+            // while the engine turns fast enough that the field would otherwise be allowed.
+            bool faultCut = gpio4IsLow && g_fieldEventReason >= 1 && g_fieldEventReason <= 17
+                            && g_fieldEventReason != REASON_CHARGING_DISABLED && g_fieldEventReason != REASON_MANUAL_MODE && g_fieldEventReason != REASON_RPM_TOO_LOW;
+            if (faultCut && RPM > MinRPMForField) s1.Bits.ChargeIndicator = 1;
+          }
+          SetN2kEngineDynamicParam(N2kMsg, (unsigned char)n2kEngInstance, N2kDoubleNA, N2kDoubleNA, N2kDoubleNA,
+                                   (double)BatteryV, N2kDoubleNA, N2kDoubleNA, N2kDoubleNA, N2kDoubleNA,
+                                   N2kInt8NA, N2kInt8NA, s1, 0);
+          composed = true;
+        }
+        break;
+      case SLOT_BATTCFG:
+        if (n2kBattCfgEnable == 1) {
+          tN2kBatType bt = N2kDCbt_Flooded;
+          tN2kBatChem bc = N2kDCbc_LeadAcid;
+          if (BATTERY_TYPE.equalsIgnoreCase("lifepo4")) bc = N2kDCbc_LiIon;
+          else if (BATTERY_TYPE.equalsIgnoreCase("agm")) bt = N2kDCbt_AGM;
+          else if (BATTERY_TYPE.equalsIgnoreCase("gel")) bt = N2kDCbt_Gel;
+          tN2kBatNomVolt nv = (SYSTEM_VOLTAGE_CLASS == 12) ? N2kDCbnv_12v
+                              : (SYSTEM_VOLTAGE_CLASS == 24) ? N2kDCbnv_24v
+                              : (SYSTEM_VOLTAGE_CLASS == 48) ? N2kDCbnv_48v
+                                                             : (tN2kBatNomVolt)0x0F;  // no 36V code in the 4-bit field — NA
+          SetN2kBatConf(N2kMsg, (unsigned char)n2kBattInstance, bt,
+                        (bt == N2kDCbt_Flooded && bc == N2kDCbc_LeadAcid) ? N2kDCES_Yes : N2kDCES_No,
+                        nv, bc, AhToCoulomb((double)BatteryCapacity_Ah), N2kInt8NA,
+                        PeukertExponent_scaled / 100.0, (int8_t)(ChargeEfficiency_scaled / 10));
+          composed = true;
+        }
+        break;
+    }
+    if (composed) {
+      if (NMEA2000.SendMsg(N2kMsg)) n2kTxCount++;
+      else n2kTxDropCount++;
+      rr = (uint8_t)((s + 1) % SLOT_N);
+      break;  // one PGN per pass — the TX cost never stacks inside a control tick
+    }
+    // disabled or skipped slot: interval already advanced, keep scanning so it can't starve the others
   }
 }
 
@@ -1780,7 +2068,7 @@ void CheckAlarms() {
 
     static unsigned long lastVoltLowMsgMs = 0;
     // The > floor rejects a disconnected/0V reading; scale it by bank class (8V on 12V → 16/32V on
-    // 24/48V) so it stays a "sensor disconnected" floor and never sits above a real low-V alarm point.
+    // 24/36/48V) so it stays a "sensor disconnected" floor and never sits above a real low-V alarm point.
     if (VoltageAlarmLow > 0 && currentVoltage < VoltageAlarmLow && currentVoltage > 8.0 * SYSTEM_VOLTAGE_CLASS / 12.0f) {
       currentAlarmCondition = true;
       alarmReason = "Low battery voltage";
@@ -2689,7 +2977,7 @@ void _ReadAnalogInputs_inner() {
                      if (inaBusDt > inaBusReadWorstUs) inaBusReadWorstUs = inaBusDt;
                      if (inaBusDt > 15000UL) inaBusSlowCount++;          // ≥1 Wire-timeout's worth = bus stall
 
-                     if (!isnan(IBV) && IBV > 5.0 && IBV < 70.0 && !isnan(ShuntVoltage_mV)) {
+                     if (!isnan(IBV) && IBV > 5.0 && IBV < fminf(85.0f, 70.0f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f)) && !isnan(ShuntVoltage_mV)) {  // garbage-reject ceiling scales with class, capped at INA228 85V full scale
                        Bcur = (ShuntResistanceMicroOhm > 0) ? (ShuntVoltage_mV * 1000.0f / ShuntResistanceMicroOhm) : 0.0f;
                        Bcur = Bcur + BatteryCOffset;
                        if (InvertBattAmps == 1) {
@@ -2868,7 +3156,7 @@ void _ReadAnalogInputs_inner() {
                          case 0:
                            Channel0V = Raw / 32768.0 * 6.144 * 21.0401;  // divider 1,000,000Ω / 49.9kΩ, scale ≈21.0401
                            BatteryV = Channel0V;
-                           if (BatteryV > 5.0 && BatteryV < 70.0) {  // Sanity check
+                           if (BatteryV > 5.0 && BatteryV < fminf(125.0f, 70.0f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f))) {  // Sanity check — ceiling scales with class, capped near the ADS divider range
                              MARK_FRESH(IDX_BATTERY_V);
                              battVFreshFlag = true;
                              adsGapUpdate(0, now);  // CH0 battV inter-sample gap meter
@@ -3342,8 +3630,7 @@ void ReadAnalogInputs_Fake() {
     SOGNMEA = fakeSOG;
     MARK_FRESH(IDX_SOG_NMEA);
 
-    if (fakeSOG > MaxSpeed)         MaxSpeed         = fakeSOG;
-    if (fakeSOG > MaxSpeed_AllTime) MaxSpeed_AllTime = fakeSOG;
+    updateSustainedSpeed(fakeSOG);
 
 
     fakeCOG += (random(-40, 40) / 10.0);  // ±4° per update
@@ -3371,7 +3658,7 @@ void ReadAnalogInputs_Fake() {
     MARK_FRESH(IDX_APPARENT_WIND_ANGLE);
 
     // Fake battery voltage, 11.5–15.0V per-cell-scaled by class (unscaled 12V numbers would
-    // fail isVoltageSensorPlausible and trip the disagreement fault on a 24/48V-configured unit)
+    // fail isVoltageSensorPlausible and trip the disagreement fault on a 24/36/48V-configured unit)
     float simK = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
     fakeVoltage += (random(-80, 80) / 100.0) * simK;  // ±0.8 V per update at 12V
     if (fakeVoltage < 11.5 * simK) fakeVoltage = 11.5 * simK;

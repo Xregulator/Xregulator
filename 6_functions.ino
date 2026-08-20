@@ -146,10 +146,10 @@ float computeCvTempScale() {
 
 // recomputeCvGains — derive VoltageKp_active/VoltageKi_active from the gain mode + measured stiffness.
 // Call after any related setting change, on board-temp drift, and at boot. Computed in 12V-equivalent
-// space (same numbers on 12/24/48 V), then ×vNorm bakes back to pack space; the battery-temp derate is
+// space (same numbers on 12/24/36/48 V), then ×vNorm bakes back to pack space; the battery-temp derate is
 // the final multiplier in BOTH modes (the plant shifts with temperature however the gains were chosen).
 void recomputeCvGains() {
-  float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;     // 1, 0.5, 0.25 for 12/24/48 V
+  float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;     // 1, 0.5, 0.33, 0.25 for 12/24/36/48 V
   cvPlantK = cvPlantKa;                             // the ~0.6 s stiffness anchor; the √t-tail (cvPlantKb) is retired
   bool plantValid = (cvPlantK > 1e-6f);
   float kpNorm, kiNorm, kdNorm;                     // 12V-equivalent gains (what the user sees)
@@ -176,20 +176,20 @@ void recomputeCvGains() {
   cvTempDerateScale = computeCvTempScale();         // battery-temp correction (1.0 unless commissioned + enabled)
   VoltageKp_active = kpNorm * vNorm * cvTempDerateScale;   // pack-space gains the loop uses with raw pack-volt error
   VoltageKi_active = kiNorm * vNorm * cvTempDerateScale;
-  // D gain normalizes identically to P/I (×vNorm×derate), so one number works on 12/24/48 V and tracks the
+  // D gain normalizes identically to P/I (×vNorm×derate), so one number works on 12/24/36/48 V and tracks the
   // battery-temp derate. In Auto it is the plant-anchored Td·Kp; in Manual it is the typed VoltageKd.
   VoltageKd_active = kdNorm * vNorm * cvTempDerateScale;
 }
 
 // recomputeCcGains — CC (output-current) analog of recomputeCvGains. PidKp/Ki/Kd are 12V-equivalent;
 // ×(12/SYSTEM_VOLTAGE_CLASS) bakes them into the duty-space gains the inner current PID actually applies,
-// so one set of tunings behaves identically on 12/24/48 V (field current per duty-% scales with bus
+// so one set of tunings behaves identically on 12/24/36/48 V (field current per duty-% scales with bus
 // voltage). Call after any PidK* change and after a SYSTEM_VOLTAGE_CLASS change. currentPID is a global
 // object (constructed before setup), so SetTunings is safe to call unconditionally. The hunt
 // governor's Ki derate applies here — the single SetTunings choke point — so every recompute path
 // (setting change, class change, governor step) preserves it.
 void recomputeCcGains() {
-  float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;     // 1, 0.5, 0.25 for 12/24/48 V
+  float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;     // 1, 0.5, 0.33, 0.25 for 12/24/36/48 V
   PidKp_active = PidKp * vNorm;
   PidKi_active = PidKi * vNorm;
   PidKd_active = PidKd * vNorm;
@@ -557,7 +557,7 @@ void applyCcOutputLimits() {
   currentPID.SetOutputLimits((double)MinDuty, (double)ccDutyCeiling());
 }
 
-// applyNominalVoltageChange — single entry point for a system-voltage class change (12/24/48 V),
+// applyNominalVoltageChange — single entry point for a system-voltage class change (12/24/36/48 V),
 // triggered from the Vessel Info save (SYSTEM_VOLTAGE_CLASS is the sole source of truth). Call AFTER
 // setting SYSTEM_VOLTAGE_CLASS = newV. When the class actually changes it persists the new class to NVS
 // (NK_BatteryVoltage), then rescales the PERSISTED
@@ -580,7 +580,7 @@ void applyCcOutputLimits() {
 // The per-RPM Min% floor table is the one commissioned artifact this RESETS rather than rescales
 // (to the 1% default, knee tracker unlearned) — see the block at the end of the function.
 void applyNominalVoltageChange(int oldV, int newV) {
-  if (newV != oldV && oldV > 0 && (newV == 12 || newV == 24 || newV == 48)) {
+  if (newV != oldV && oldV > 0 && (newV == 12 || newV == 24 || newV == 36 || newV == 48)) {
     settingWrite(NK_BatteryVoltage, String(newV).c_str());  // persist class FIRST, same transaction as the profile below
     float ratio = (float)newV / (float)oldV;
     BulkVoltage           *= ratio;
@@ -615,6 +615,9 @@ void applyNominalVoltageChange(int oldV, int newV) {
     capSettleRateMv10         *= ratio;  // mV/10min rest-settle gate
     cvWaveAmplitudeV          *= ratio;  // CV waveform-test step height
     altVbusTol                *= ratio;  // alt-health bus-voltage steadiness band
+    Ymin2                     *= ratio;  // voltage-plot axis window follows the bus
+    Ymax2                     *= ratio;
+    cvPlantKa                 *= ratio;  // Auto-gain V/A anchor is per-bus stiffness; recomputeCvGains below re-derives from it (unscaled it leaves Auto Kp/Ki newV/oldV too hot)
     // Knee duty-domain knobs are stored in REAL duty-% for the bus, so rescale them by the INVERSE
     // ratio (oldV/newV): a 5% margin at 12V becomes 1.25% at 48V. Persist so the dashboard box shows
     // the new value — the math is visible, never hidden behind a runtime multiply.
@@ -669,6 +672,9 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
     settingWrite(NK_cvWindDownStopV, String(cvWindDownStopV, 3).c_str());
     settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str());
+    settingWrite(NK_Ymin2, String(Ymin2).c_str());
+    settingWrite(NK_Ymax2, String(Ymax2).c_str());
+    settingWrite(NK_cvPlantKa, String(cvPlantKa, 5).c_str());
     // Min% floor table: RESET, never rescaled. The duty-knee is class-invariant by design (see
     // rpmMinDutyTable in Xregulator.ino — the field-strength and rectifier-threshold effects
     // cancel), but MaxDuty just moved by 12/newV as a real per-bus FIELD-CURRENT cap, so floors
@@ -1251,8 +1257,8 @@ void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float 
   shutdownPhase = SHUTDOWN_PHASE_NONE;   // so a later real shutdown starts its ramp fresh from here
 
   const float vNorm = 12.0f / fmaxf(1.0f, (float)SYSTEM_VOLTAGE_CLASS);
-  const float restFloor = COMMISSION_REST_FLOOR_PCT * vNorm;   // 4 / 2 / 1 % @ 12 / 24 / 48 V
-  const float restRamp = COMMISSION_REST_RAMP_PCT * vNorm;     // 5 / 2.5 / 1.25 %/s
+  const float restFloor = COMMISSION_REST_FLOOR_PCT * vNorm;   // 4 / 2 / 1.33 / 1 % @ 12 / 24 / 36 / 48 V
+  const float restRamp = COMMISSION_REST_RAMP_PCT * vNorm;     // 5 / 2.5 / 1.67 / 1.25 %/s
   const float restTarget = restFloor;
 
   // Re-assert the field enable unconditionally: the mode arbiter guarantees no fault or lockout is
@@ -1454,7 +1460,7 @@ void commitCVTuningRecord() {
   // ISE/T: (HIGH ISE + LOW re-overshoot ISE + LOW undershoot ISE) ÷ total active time, ×1000.
   // HIGH overshoot above the class-scaled dead-band weighted ×cvKOvershoot; LOW undershoot ×0.15
   // with time ramp. ÷ class ratio² (the integrators are V²-domain) so the score and its
-  // good<10/<20 dashboard bands read 12V-equivalent on 24/48V banks.
+  // good<10/<20 dashboard bands read 12V-equivalent on 24/36/48V banks.
   float scoreNorm = (12.0f / (float)SYSTEM_VOLTAGE_CLASS) * (12.0f / (float)SYSTEM_VOLTAGE_CLASS);
   rec.score = (rec.activeTimeSec > 0.0f)
                 ? (1000.0f * scoreNorm * (cvTuningScore.totalIntegratedOvershootVs + cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
@@ -4974,7 +4980,7 @@ void AdjustFieldLearnMode() {
     // constrained-direction rules: the CV-entry climb (Icv pinned at the ceiling) and a
     // step-down descent (Icv pinned at zero) exclude themselves — no arrival/regulation
     // regimes needed. Measured in 12V-EQUIVALENT volts so every published mV figure (CSV2,
-    // /cvtuninglog live, cloud acc_volt_* columns) compares across 12/24/48V systems.
+    // /cvtuninglog live, cloud acc_volt_* columns) compares across 12/24/36/48V systems.
     {
       float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;
       // Per-tick delta so temp-comp drift (mV-scale per tick) never reads as a step; track the
@@ -5121,7 +5127,7 @@ void setDutyPercent(float percent) {
   // Field-duty safety net for higher-voltage banks. Every duty path (Auto/manual/limp/fault) lands
   // here, so this is the one place that hard-bounds field duty even on the open-loop paths that bypass
   // the PID's MaxDuty limit (manual/limp/fault). MaxDuty is the real per-bus cap (its default is scaled
-  // down on 24/48V so worst-case field current never exceeds the 12V case); clamp to it. Gated to >12V
+  // down on 24/36/48V so worst-case field current never exceeds the 12V case); clamp to it. Gated to >12V
   // so 12V manual mode bypasses MaxDuty (up to the 99% bootstrap cap above). Duty-ratio proxy, not a
   // measured amp limit.
   if (SYSTEM_VOLTAGE_CLASS > 12 && percent > MaxDuty) {
@@ -5209,7 +5215,7 @@ void updateChargingStage() {
     }
   }
 
-  // Two-sided hysteresis: timer arms when V reaches BulkVoltage − ENTER, resets only when V falls below BulkVoltage − EXIT. Prevents 30–50 mV idle noise (12V-bank figure) from resetting the hold timer — scaled ×V/12 so the band tracks the ~proportionally larger idle noise on 24/48V banks (BulkVoltage is class-scaled).
+  // Two-sided hysteresis: timer arms when V reaches BulkVoltage − ENTER, resets only when V falls below BulkVoltage − EXIT. Prevents 30–50 mV idle noise (12V-bank figure) from resetting the hold timer — scaled ×V/12 so the band tracks the ~proportionally larger idle noise on 24/36/48V banks (BulkVoltage is class-scaled).
   const float BULK_V_BAND_ENTER = 0.05f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
   const float BULK_V_BAND_EXIT  = 0.10f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
 
@@ -5520,7 +5526,7 @@ bool isVoltageDisagreementWarning(uint32_t nowMs, float batteryV, float ibv,
   // VoltageDisagreeThreshold is already class-scaled at storage (seedVScale at creation +
   // applyNominalVoltageChange on a live class change), exactly like OvMeasMarginV — so it is compared
   // RAW. A prior build ALSO multiplied ×V/12 here, double-scaling it (×4 at 24V, ×16 at 48V) and
-  // desensitizing MODE_WARNING_RAMP_AND_LOCKOUT (which DISABLES charging) on 24/48V systems.
+  // desensitizing MODE_WARNING_RAMP_AND_LOCKOUT (which DISABLES charging) on 24/36/48V systems.
   if (fabsf(batteryV - ibv) > VoltageDisagreeThreshold) {
     if (!voltageDisagreementActive) {
       voltageDisagreementStart = nowMs;
@@ -5538,25 +5544,17 @@ bool isVoltageDisagreementWarning(uint32_t nowMs, float batteryV, float ibv,
 /**
  * isVoltageDisagreementCritical()
  * 
- * Automatically scales critical disagreement threshold based on system voltage:
- * - 12V system: >1.0V difference is critical
- * - 24V system: >2.0V difference is critical
- * - 48V system: >4.0V difference is critical
- * 
+ * Critical disagreement threshold is 1.0V on a 12V bank, scaled by the system voltage class
+ * (2.0V @24V, 3.0V @36V, 4.0V @48V). Keyed on SYSTEM_VOLTAGE_CLASS, not a BulkVoltage band —
+ * BulkVoltage banding mis-bucketed near class edges (a 36V bulk ~41.7V landed in the 48V band).
+ *
  * A critical disagreement means one sensor has completely failed and we
  * cannot trust voltage readings for field control decisions.
- * 
+ *
  * @return true if sensors disagree by critical amount or either is invalid
  */
 bool isVoltageDisagreementCritical() {
-  float criticalThreshold;
-  if (BulkVoltage < 18.0f) {
-    criticalThreshold = 1.0f;
-  } else if (BulkVoltage < 36.0f) {
-    criticalThreshold = 2.0f;
-  } else {
-    criticalThreshold = 4.0f;
-  }
+  float criticalThreshold = 1.0f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
 
   if (isnan(BatteryV) || isnan(IBV)) return true;
   if (BatteryV < 0.1f || IBV < 0.1f) return true;
@@ -7280,6 +7278,7 @@ String kneeLearnStateJson() {
  * Voltage ranges (with safety buffer):
  * - 12V system: 4.5V to 15.5V
  * - 24V system: 9.0V to 32.5V   (upper allows a 24V AGM equalization ~31-32V)
+ * - 36V system: 13.5V to 46.5V  (upper allows equalization, same 15.5V/12V-cell ceiling as the 12V class)
  * - 48V system: 18V to 60.5V
  *
  * @return true if at least one voltage sensor shows plausible reading
@@ -7293,6 +7292,10 @@ bool isVoltageSensorPlausible() {
     // 48V system (normal bulk = 55.2-57.6V)
     minPlausible = 18.0f;  // Dead battery - 0.5V buffer
     maxPlausible = 60.5f;  // Max charging + 0.5V buffer
+  } else if (SYSTEM_VOLTAGE_CLASS >= 36) {
+    // 36V system (normal bulk = 41.4-43.2V)
+    minPlausible = 13.5f;  // Dead battery - 0.5V buffer
+    maxPlausible = 46.5f;  // Max charging/equalization + buffer
   } else if (SYSTEM_VOLTAGE_CLASS >= 24) {
     // 24V system (normal bulk = 27.6-28.8V)
     minPlausible = 9.0f;   // Dead battery - 0.5V buffer

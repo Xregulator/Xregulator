@@ -656,6 +656,16 @@ enum Csv2Index {
   CSV2_blameIdx1, CSV2_blameUs1,  // worst field-on pass blame: top 3 timed consumers of the pass that set loopFieldOnSes
   CSV2_blameIdx2, CSV2_blameUs2,  // idx = ftBlameReg[] position (255 = empty), us = that call's duration in µs
   CSV2_blameIdx3, CSV2_blameUs3,
+  CSV2_ft_n2kTx_win,   // NMEA2000 transmit tick worst µs (window)
+  CSV2_ft_n2kTx_ses,   // NMEA2000 transmit tick worst µs (session)
+  CSV2_n2kTxCount,     // N2K messages accepted by SendMsg since Reset Peak Values
+  CSV2_n2kTxDrops,     // N2K messages dropped (TX queue + retry ring full — normal with no bus attached)
+  CSV2_n2kSrcAddr,     // claimed N2K source address; -1 = listen-only / not claimed
+  CSV2_n2kRxBattV,     // received 127508 battery voltage (V ×100; -2000000000 = not available)
+  CSV2_n2kRxBattA,     // received 127508 battery current (A ×100, signed; -2000000000 = not available)
+  CSV2_n2kRxBattTempF, // received 127508 battery temperature (F ×10; -2000000000 = not available)
+  CSV2_n2kRxSoc,       // received 127506 state of charge (%; -1 = not available)
+  CSV2_n2kRxSoh,       // received 127506 state of health (%; -1 = not available)
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1047,6 +1057,23 @@ enum Csv3Index {
   CSV3_cvRecovFlareBandV,      // arrival flare band (V per 12V block); ×1000
   CSV3_cvRecovFlareFrac,       // arrival flare ceiling floor, fraction of recovery goal; ×100
   CSV3_TachLieEnable,          // tach-lie plausibility cut enable (0/1)
+  CSV3_n2kTxEnable,            // NMEA2000 transmit master (0/1) — mode applied at boot
+  CSV3_n2kDeviceInstance,      // N2K device instance
+  CSV3_n2kBattEnable,          // battery 127508+127506 pair (0/1)
+  CSV3_n2kBattInstance,
+  CSV3_n2kBattCfgEnable,       // 127513 battery configuration (0/1)
+  CSV3_n2kAltEnable,           // alternator 127508+127506 DCType=Alternator pair (0/1)
+  CSV3_n2kAltInstance,
+  CSV3_n2kAltTempEnable,       // 130312 alternator temperature (0/1)
+  CSV3_n2kTempInstance,
+  CSV3_n2kTempSource,          // tN2kTempSource code (3 = Engine Room)
+  CSV3_n2kChgrEnable,          // 127507 charger status (0/1)
+  CSV3_n2kChgrInstance,
+  CSV3_n2kEngRpmEnable,        // 127488 engine RPM (0/1)
+  CSV3_n2kEngInstance,
+  CSV3_n2kEngDynEnable,        // 127489 engine dynamic (0/1)
+  CSV3_n2kEngBitsEnable,       // discrete warning bits inside 127489 (0/1)
+  CSV3_n2kRxBattInstance,      // battery instance to ingest (127508/127506 receive)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1083,8 +1110,10 @@ enum TsIndex {
   TS_IMU,
   TS_VictronSolar,  // VE.Direct solar (PPV/VPV) staleness
   TS_StwNMEA,       // Speed Through Water (SOW, PGN 128259) staleness
+  TS_N2kBatt,       // received Battery Status (PGN 127508) staleness
+  TS_N2kSoc,        // received DC Detailed Status (PGN 127506) staleness
 
-  TS_FIELD_COUNT  // = 30
+  TS_FIELD_COUNT  // = 32
 };
 
 
@@ -3473,12 +3502,12 @@ void setupServer() {
     }
     ENGINE_MAKE = doc["engine_make"].as<String>();
     ENGINE_HP = doc["engine_hp"];
-    // System voltage is the sole source of truth for the 12/24/48V class. On a change, rescale the
+    // System voltage is the sole source of truth for the 12/24/36/48V class. On a change, rescale the
     // whole charge-voltage profile + re-derive the hard-shutdown trip + the INA228 OV limit + both
     // control loops' normalized gains (CV and CC). The dashboard warns the user before submitting.
     int oldBatteryVoltage = SYSTEM_VOLTAGE_CLASS;
     int newBatteryVoltage = doc["battery_voltage"] | (int)SYSTEM_VOLTAGE_CLASS;
-    if (newBatteryVoltage != 12 && newBatteryVoltage != 24 && newBatteryVoltage != 48) newBatteryVoltage = oldBatteryVoltage;
+    if (newBatteryVoltage != 12 && newBatteryVoltage != 24 && newBatteryVoltage != 36 && newBatteryVoltage != 48) newBatteryVoltage = oldBatteryVoltage;
     int    oldCapacityAh = BatteryCapacity_Ah;
     String oldBatteryType = BATTERY_TYPE;
     SYSTEM_VOLTAGE_CLASS = (uint8_t)newBatteryVoltage;
@@ -4520,7 +4549,7 @@ void setupServer() {
       BulkVoltage = inputMessage.toFloat();
       updateINA228OvervoltageThreshold();  // important!  update the hardware overvoltage limit provided by INA228
     }
-    // NOTE: system voltage (12/24/48V) is NOT a /get setting — it lives in Vessel Info and the whole
+    // NOTE: system voltage (12/24/36/48V) is NOT a /get setting — it lives in Vessel Info and the whole
     // class-change rescale (charge profile, hard-shutdown, INA228 OV, normalized CV/CC gains) runs in
     // the /saveVesselInfo handler via applyNominalVoltageChange(). SYSTEM_VOLTAGE_CLASS is the sole source.
     if (request->hasParam("wavePeriod")) {
@@ -4749,6 +4778,115 @@ void setupServer() {
       inputMessage = request->getParam("NMEA2KData")->value();
       settingWrite(NK_NMEA2KData, inputMessage.c_str());
       NMEA2KData = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kTxEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kTxEnable")->value();
+      settingWrite(NK_n2kTxEn, inputMessage.c_str());
+      int newVal = inputMessage.toInt();
+      if (newVal != n2kTxEnable) queueConsoleMessage("NMEA2000 transmit: bus mode is set at boot — reboot to apply");
+      n2kTxEnable = newVal;  // per-PGN toggles/instances below apply live; only the node/listen mode itself is boot-time
+    }
+    if (request->hasParam("n2kDeviceInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kDeviceInstance")->value();
+      n2kDeviceInstance = constrain(inputMessage.toInt(), 0, 252);
+      settingWrite(NK_n2kDevInst, String(n2kDeviceInstance).c_str());
+      queueConsoleMessage("NMEA2000 device instance: applied at boot — reboot to take effect on the bus");
+    }
+    if (request->hasParam("n2kBattEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kBattEnable")->value();
+      settingWrite(NK_n2kBattEn, inputMessage.c_str());
+      n2kBattEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kBattInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kBattInstance")->value();
+      n2kBattInstance = constrain(inputMessage.toInt(), 0, 252);
+      settingWrite(NK_n2kBattInst, String(n2kBattInstance).c_str());
+    }
+    if (request->hasParam("n2kBattCfgEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kBattCfgEnable")->value();
+      settingWrite(NK_n2kBattCfgEn, inputMessage.c_str());
+      n2kBattCfgEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kAltEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kAltEnable")->value();
+      settingWrite(NK_n2kAltEn, inputMessage.c_str());
+      n2kAltEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kAltInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kAltInstance")->value();
+      n2kAltInstance = constrain(inputMessage.toInt(), 0, 252);
+      settingWrite(NK_n2kAltInst, String(n2kAltInstance).c_str());
+    }
+    if (request->hasParam("n2kAltTempEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kAltTempEnable")->value();
+      settingWrite(NK_n2kAltTempEn, inputMessage.c_str());
+      n2kAltTempEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kTempInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kTempInstance")->value();
+      n2kTempInstance = constrain(inputMessage.toInt(), 0, 252);
+      settingWrite(NK_n2kTempInst, String(n2kTempInstance).c_str());
+    }
+    if (request->hasParam("n2kTempSource")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kTempSource")->value();
+      n2kTempSource = constrain(inputMessage.toInt(), 0, 15);  // tN2kTempSource 4-bit field
+      settingWrite(NK_n2kTempSrc, String(n2kTempSource).c_str());
+    }
+    if (request->hasParam("n2kChgrEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kChgrEnable")->value();
+      settingWrite(NK_n2kChgrEn, inputMessage.c_str());
+      n2kChgrEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kChgrInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kChgrInstance")->value();
+      n2kChgrInstance = constrain(inputMessage.toInt(), 0, 252);
+      settingWrite(NK_n2kChgrInst, String(n2kChgrInstance).c_str());
+    }
+    if (request->hasParam("n2kEngRpmEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kEngRpmEnable")->value();
+      settingWrite(NK_n2kEngRpmEn, inputMessage.c_str());
+      n2kEngRpmEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kEngInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kEngInstance")->value();
+      n2kEngInstance = constrain(inputMessage.toInt(), 0, 252);
+      settingWrite(NK_n2kEngInst, String(n2kEngInstance).c_str());
+    }
+    if (request->hasParam("n2kEngDynEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kEngDynEnable")->value();
+      settingWrite(NK_n2kEngDynEn, inputMessage.c_str());
+      n2kEngDynEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kEngBitsEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kEngBitsEnable")->value();
+      settingWrite(NK_n2kEngBitsEn, inputMessage.c_str());
+      n2kEngBitsEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kRxBattInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kRxBattInstance")->value();
+      n2kRxBattInstance = constrain(inputMessage.toInt(), 0, 252);
+      settingWrite(NK_n2kRxBattInst, String(n2kRxBattInstance).c_str());
+      n2kRxBattV = n2kRxBattA = n2kRxBattTempF = NAN;  // clear the old bank's values; SOC too
+      n2kRxSoc = n2kRxSoh = -1;
+      dataTimestamps[IDX_N2K_BATT] = 0;
+      dataTimestamps[IDX_N2K_SOC] = 0;
     }
     if (request->hasParam("waveAmplitude")) {
       foundParameter = true;
@@ -5168,7 +5306,7 @@ void setupServer() {
       foundParameter = true;
       MaxSpeed = 0;
       nvsPersistNow = true;
-      queueConsoleMessage("Max Speed: Reset requested from web interface");
+      queueConsoleMessage("Sustained Speed: Reset requested from web interface");
     }
     // Lifetime nav/sailing records — individual resets (moved off the diagnostics "Reset Peak
     // Values" button). prev_* shadows are intentionally NOT touched so saveNVSDataFull() sees the
@@ -6991,6 +7129,9 @@ void setupServer() {
       ft_altHealth.worstSession = 0;
       ft_altFold.worstSession = 0;
       ft_boatPerf.worstSession = 0;
+      ft_n2kTx.worstSession = 0;
+      n2kTxCount = 0;
+      n2kTxDropCount = 0;
       ft_huntGov.worstSession = 0;
       VeTime2 = 0;
       cpuLoadCore0Max = 0;
@@ -7834,7 +7975,7 @@ void setupServer() {
                       i > 0 ? "," : "", kneeAnchorRPM[i], kneeAnchorDuty[i], kneeAnchorTempF[i]);
     }
     // "aborted" = protection-abort latch, reported independently of "active" (see /fieldcurve.json note).
-    // "ceilLimited" = the sweep stopped at the 24/48V field-duty ceiling before finding onset.
+    // "ceilLimited" = the sweep stopped at the 24/36/48V field-duty ceiling before finding onset.
     pos += snprintf(buf + pos, 1024 - pos, "],\"ceilLimited\":%d,\"aborted\":%d,\"abort\":\"%s\","
                     "\"abortWhy\":%d,\"abortNext\":%d,\"abortV\":%.2f,\"abortD\":%.1f}",
                     fieldCurveCeilingLimited ? 1 : 0, fieldCurveAbortRequested ? 1 : 0, fieldCurveAbortMsg,
@@ -8760,7 +8901,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
@@ -9322,7 +9463,17 @@ void SendWifiData() {
                                SafeInt(ch2GapFieldOnWorstMs),
                                (int)loopBlameIdx[0], (int)loopBlameUs[0],
                                (int)loopBlameIdx[1], (int)loopBlameUs[1],
-                               (int)loopBlameIdx[2], (int)loopBlameUs[2]);
+                               (int)loopBlameIdx[2], (int)loopBlameUs[2],
+                               SafeInt(ft_n2kTx.worstWindow),
+                               SafeInt(ft_n2kTx.worstSession),
+                               SafeInt(n2kTxCount),
+                               SafeInt(n2kTxDropCount),
+                               n2kSrcAddrLive,
+                               isnan(n2kRxBattV) ? ROLL_EMPTY : (int)lroundf(n2kRxBattV * 100.0f),      // NAN -> sentinel: SafeInt's -1 collides with real small negative currents
+                               isnan(n2kRxBattA) ? ROLL_EMPTY : (int)lroundf(n2kRxBattA * 100.0f),
+                               isnan(n2kRxBattTempF) ? ROLL_EMPTY : (int)lroundf(n2kRxBattTempF * 10.0f),
+                               n2kRxSoc,
+                               n2kRxSoh);
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
@@ -9389,7 +9540,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -9747,7 +9899,24 @@ void SendWifiData() {
                                SafeInt(cvRecovDeepMult, 100),
                                SafeInt(cvRecovFlareBandV, 1000),
                                SafeInt(cvRecovFlareFrac, 100),
-                               (int)TachLieEnable);
+                               (int)TachLieEnable,
+                               SafeInt(n2kTxEnable),
+                               SafeInt(n2kDeviceInstance),
+                               SafeInt(n2kBattEnable),
+                               SafeInt(n2kBattInstance),
+                               SafeInt(n2kBattCfgEnable),
+                               SafeInt(n2kAltEnable),
+                               SafeInt(n2kAltInstance),
+                               SafeInt(n2kAltTempEnable),
+                               SafeInt(n2kTempInstance),
+                               SafeInt(n2kTempSource),
+                               SafeInt(n2kChgrEnable),
+                               SafeInt(n2kChgrInstance),
+                               SafeInt(n2kEngRpmEnable),
+                               SafeInt(n2kEngInstance),
+                               SafeInt(n2kEngDynEnable),
+                               SafeInt(n2kEngBitsEnable),
+                               SafeInt(n2kRxBattInstance));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;
@@ -9773,7 +9942,7 @@ void SendWifiData() {
       }
     }
     int timestampPayloadLen = snprintf(timestampPayload, TIMESTAMP_PAYLOAD_SIZE,
-                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
                                        (unsigned long)TS_FIELD_COUNT,
                                        (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),
                                        (dataTimestamps[IDX_LATITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LATITUDE_NMEA]),
@@ -9804,7 +9973,9 @@ void SendWifiData() {
                                        (dataTimestamps[IDX_AMBIENT_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_AMBIENT_TEMP]),
                                        (dataTimestamps[IDX_IMU] == 0) ? 999999 : (now - dataTimestamps[IDX_IMU]),
                                        (dataTimestamps[IDX_VICTRON_SOLAR] == 0) ? 999999 : (now - dataTimestamps[IDX_VICTRON_SOLAR]),
-                                       (dataTimestamps[IDX_STW_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_STW_NMEA])
+                                       (dataTimestamps[IDX_STW_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_STW_NMEA]),
+                                       (dataTimestamps[IDX_N2K_BATT] == 0) ? 999999 : (now - dataTimestamps[IDX_N2K_BATT]),
+                                       (dataTimestamps[IDX_N2K_SOC] == 0) ? 999999 : (now - dataTimestamps[IDX_N2K_SOC])
     );
     if (timestampPayloadLen < 0 || timestampPayloadLen >= TIMESTAMP_PAYLOAD_SIZE) {
       Serial.printf("timestampPayload truncated or format error: %d\n", timestampPayloadLen);

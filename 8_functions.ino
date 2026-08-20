@@ -890,6 +890,23 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "capLimitMode", NK_capLimitMode, 1 },
   { "NMEA0183Data", NK_NMEA0183Data, 1 },
   { "NMEA2KData", NK_NMEA2KData, 1 },
+  { "n2kTxEnable", NK_n2kTxEn, 1 },
+  { "n2kDeviceInstance", NK_n2kDevInst, 1 },
+  { "n2kBattEnable", NK_n2kBattEn, 1 },
+  { "n2kBattInstance", NK_n2kBattInst, 1 },
+  { "n2kBattCfgEnable", NK_n2kBattCfgEn, 1 },
+  { "n2kAltEnable", NK_n2kAltEn, 1 },
+  { "n2kAltInstance", NK_n2kAltInst, 1 },
+  { "n2kAltTempEnable", NK_n2kAltTempEn, 1 },
+  { "n2kTempInstance", NK_n2kTempInst, 1 },
+  { "n2kTempSource", NK_n2kTempSrc, 1 },
+  { "n2kChgrEnable", NK_n2kChgrEn, 1 },
+  { "n2kChgrInstance", NK_n2kChgrInst, 1 },
+  { "n2kEngRpmEnable", NK_n2kEngRpmEn, 1 },
+  { "n2kEngInstance", NK_n2kEngInst, 1 },
+  { "n2kEngDynEnable", NK_n2kEngDynEn, 1 },
+  { "n2kEngBitsEnable", NK_n2kEngBitsEn, 1 },
+  { "n2kRxBattInstance", NK_n2kRxBattInst, 1 },
   { "VeData", NK_VeData, 1 },
   { "weatherModeEnabled", NK_weatherModeEnabled, 1 },
   { "gpsTimeSourceMode", NK_gpsTimeSourceMode, 1 },
@@ -1592,6 +1609,7 @@ void bhComputeDcir() {
   uint32_t win = bhDwellMs / 3; if (win < 200) win = 200;
 
   float Rsum = 0.0f, Rsq = 0.0f; int Rn = 0;   // Rsq → per-edge std-dev (fit consistency)
+  const float rK = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;   // mΩ is V/A: sanity bound scales with series blocks
   // Score toggle numbers k = 3 .. bhNumEdges+2 (1-indexed). Array index = k-1.
   for (int k = 3; k <= (int)bhNumEdges + 2; k++) {
     if (k >= bhToggleCount) break;
@@ -1609,7 +1627,7 @@ void bhComputeDcir() {
     float dV = va - vb, dI = ia - ib;
     if (fabsf(dI) < 0.5f * bhStepDeltaA) continue;     // step never manifested (protection clamp / field cut)
     float R = (dV / dI) * 1000.0f;                     // mΩ
-    if (R < 0.1f || R > 500.0f) continue;              // sanity bound
+    if (R < 0.1f * rK || R > 500.0f * rK) continue;    // sanity bound
     Rsum += R; Rsq += R * R; Rn++;
   }
   if (Rn < 2) { bhAbort("insufficient valid steps (protections firing or step too small?)"); return; }
@@ -1748,7 +1766,7 @@ static void cvpfSizeStep() {
   float Kupper   = Klong * 1.5f;                                             // pessimistic (bigger K → smaller ΔI)
   // CVPF cushions are fixed ABSOLUTE volts, not class-scaled: the probe ΔV is sensor-resolution-limited
   // (excellent noise floor), so a fixed step gives full SNR at any bank voltage and the step peak it bounds
-  // is ~absolute. Scaling these up would only shrink the achievable step on a stiff 24/48V bank for no gain.
+  // is ~absolute. Scaling these up would only shrink the achievable step on a stiff 24/36/48V bank for no gain.
   float headroom = fmaxf(0.05f, AlternatorHardShutdownV - cvpfPilotVbase - CVPF_V_RESERVE);
   float di = cvpfDiMaxA;
   di = fminf(di, headroom / fmaxf(1e-3f, Kupper));

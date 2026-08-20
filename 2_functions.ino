@@ -140,7 +140,7 @@ bool fsRemove(const char *path) {
 #define NK_BatteryCOffset "BatteryCOffset"
 #define NK_BatteryCapacity_Ah "BatteryCapctyAh"
 #define NK_BatteryCurrentSource "BatteryCrrntSrc"
-#define NK_BatteryVoltage "BatteryVoltage"   // 12/24/48 nominal bank class
+#define NK_BatteryVoltage "BatteryVoltage"   // 12/24/36/48 nominal bank class
 #define NK_Beta "Beta"
 #define NK_BulkVoltage "BulkVoltage"
 #define NK_CAPSIZE_THRESHOLD_DEG "CAPSIZETHRESHOL"
@@ -528,6 +528,25 @@ bool fsRemove(const char *path) {
 #define NK_imuDistClFt     "imuDistClFt"
 #define NK_imuHtWlFt       "imuHtWlFt"
 #define NK_vesselSaved     "vesselSaved"
+// NMEA2000 transmit (producer)
+#define NK_n2kTxEn         "n2kTxEn"
+#define NK_n2kDevInst      "n2kDevInst"
+#define NK_n2kBattEn       "n2kBattEn"
+#define NK_n2kBattInst     "n2kBattInst"
+#define NK_n2kBattCfgEn    "n2kBattCfgEn"
+#define NK_n2kAltEn        "n2kAltEn"
+#define NK_n2kAltInst      "n2kAltInst"
+#define NK_n2kAltTempEn    "n2kAltTempEn"
+#define NK_n2kTempInst     "n2kTempInst"
+#define NK_n2kTempSrc      "n2kTempSrc"
+#define NK_n2kChgrEn       "n2kChgrEn"
+#define NK_n2kChgrInst     "n2kChgrInst"
+#define NK_n2kEngRpmEn     "n2kEngRpmEn"
+#define NK_n2kEngInst      "n2kEngInst"
+#define NK_n2kEngDynEn     "n2kEngDynEn"
+#define NK_n2kEngBitsEn    "n2kEngBitsEn"
+#define NK_n2kSrcAddr      "n2kSrcAddr"
+#define NK_n2kRxBattInst   "n2kRxBattInst"
 
 #define SETTINGS_NVS_NAMESPACE "settings"
 
@@ -1812,6 +1831,7 @@ void resetSensorWindow() {
 
   currentWindow->sog_min = 999900;
   currentWindow->sog_max = 0;
+  currentWindow->sogSust1m_max = 0;
   currentWindow->sog_area_v_us = 0;
   currentWindow->sog_valid_us = 0;
 
@@ -2125,6 +2145,9 @@ void updateSensorWindow() {
     int32_t sog = (int32_t)(SOGNMEA * 100.0);
     if (sog < currentWindow->sog_min) currentWindow->sog_min = sog;
     if (sog > currentWindow->sog_max) currentWindow->sog_max = sog;
+    // 0 while the 60-s window is uncovered — nothing to record then.
+    int32_t sust = (int32_t)(sogSust1m * 100.0);
+    if (sust > currentWindow->sogSust1m_max) currentWindow->sogSust1m_max = sust;
     if (shouldAccumulate) {
       currentWindow->sog_area_v_us += (int64_t)sog * delta_us;
       currentWindow->sog_valid_us += delta_us;
@@ -2242,7 +2265,9 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     // Edge fn inserts an explicit column whitelist, so it safely ignores this. See CLOUD_PLATFORM.md §3a.
     // v2 adds imu_suspicious (IMU install-validation flag).
     // v3 adds engine-on-weighted averages (*_onavg) + engine_on_pct coverage.
-    "\"payload_v\":3,"
+    // v4 adds sog_sust1m_max — the window's best 60-s average SOG, which now feeds the
+    // cloud speed board in place of sog_max (a single-sample peak).
+    "\"payload_v\":4,"
     "\"current_time_source\":%d,"
     // Battery
     "\"batt_volt_min\":%.2f,\"batt_volt_max\":%.2f,\"batt_volt_avg\":%.2f,"
@@ -2264,6 +2289,7 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     "\"u_target_amps_min\":%.2f,\"u_target_amps_max\":%.2f,\"u_target_amps_avg\":%.2f,"
     // NMEA navigation
     "\"sog_min\":%.2f,\"sog_max\":%.2f,\"sog_avg\":%.2f,"
+    "\"sog_sust1m_max\":%.2f,"
     "\"lat_current\":%.6f,\"lon_current\":%.6f,"
     // NMEA wind & sailing
     "\"aws_min\":%.2f,\"aws_max\":%.2f,\"aws_avg\":%.2f,"
@@ -2327,6 +2353,7 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     SAFE_AVG_100(snap.window.uTargetAmps_area_v_us, snap.window.uTargetAmps_valid_us),
     snap.window.sog_min / 100.0, snap.window.sog_max / 100.0,
     SAFE_AVG_100(snap.window.sog_area_v_us, snap.window.sog_valid_us),
+    snap.window.sogSust1m_max / 100.0,
     snap.window.lat_current, snap.window.lon_current,
     snap.window.aws_min / 100.0, snap.window.aws_max / 100.0,
     SAFE_AVG_100(snap.window.aws_area_v_us, snap.window.aws_valid_us),

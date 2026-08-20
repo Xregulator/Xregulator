@@ -33,3 +33,13 @@ derived image asset is likewise made available under CC BY-SA 3.0.
 - **License:** MIT — notice kept in the library source.
 - **Modifications:** actuator-aware tracking anti-windup methods (described in the
   library source).
+
+### NMEA2000 ESP32-S3 CAN driver — `NMEA2000_esp32_xeng`
+
+- **Origin:** NMEA2000_twai by Svante Karlsson (TWAI driver for the NMEA2000 library by
+  Timo Lappalainen, which is used unmodified alongside it)
+- **Source:** NMEA2000_twai (GitHub; installed copy carries no upstream URL in its manifest)
+- **License:** MIT (Copyright (c) 2024 Svante Karlsson) — notice kept in the library LICENSE file.
+- **Modifications:** transmit is unconditionally non-blocking (stock waited up to 100 ms
+  per fast-packet frame when the TWAI queue was full, e.g. with no bus attached); failed
+  frames fall through to the core library's send-frame retry ring.

@@ -590,7 +590,7 @@ float altPruneK       = 6.0f;    // cloud prune neighbor count (echoed; applied 
 float altRidgeFrac    = 0.10f;   // LWLR ridge fraction (× slope-block trace/NAXIS) — fit stability vs slope fidelity
 float altRiskThresh   = 0.15f;   // classifier risk above which an in-radius point shows "learning" instead of a %
 // High-field-low-output alert thresholds (independent safety net — see altHealth_tick):
-float altHiFieldPct   = 80.0f;   // high-drive threshold as % of the live field ceiling (MaxDuty), so it works on 24/48V compressed spans
+float altHiFieldPct   = 80.0f;   // high-drive threshold as % of the live field ceiling (MaxDuty), so it works on 24/36/48V compressed spans
 float altLowOutAmps   = 10.0f;   // output at/below this counts as low (A)
 float altHiFieldSec   = 30.0f;   // both conditions must persist this long before the alert fires (s)
 
@@ -750,7 +750,7 @@ static void altSimTick(uint32_t nowMs) {
   float rpm = 800.0f + ri * 400.0f;             // 800..3600
   float exc = 3.0f + ei * 2.5f;                 // 3..13
   float tF = 80.0f + 0.02f * rpm;               // hotter at higher RPM
-  float vbus = 13.6f;
+  float vbus = 13.6f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
   float a = 1.4f * exc * (1.0f - expf(-rpm / 1200.0f));   // rises with rpm knee + excitation
   a *= 1.0f - 0.0008f * (tF - 77.0f);                     // derate with temp
   if (altSimLoops >= 2) altSimDeg -= 0.0006f;             // after 2 full sweeps, degrade
@@ -1617,7 +1617,7 @@ void altHealth_tick(uint32_t nowMs) {
   {
     static uint32_t hiFieldSinceMs = 0;
     // altHiFieldPct reads as % of the live field ceiling (MaxDuty), not absolute duty — absolute
-    // 80% is unreachable on 24/48V banks where the ceiling is ~50/25%, deadening the alert.
+    // 80% is unreachable on 24/36/48V banks where the ceiling is ~50/33/25%, deadening the alert.
     bool cond = foldFresh && altLiveValid
                 && altLive_duty >= altHiFieldPct * (ccDutyCeiling() / 100.0f) && altLive_amps <= altLowOutAmps;
     if (!cond) {
@@ -4636,7 +4636,7 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     // so the ramp tears down cleanly. No bespoke per-target headroom abort is needed here.
     //
     // Effective ramp ceiling: Max Field % (MaxDuty) is the real per-bus field-duty cap and setDutyPercent
-    // clamps the APPLIED duty down to it on a 24/48V bank. Cap the ramp at that same ceiling so we STOP
+    // clamps the APPLIED duty down to it on a 24/36/48V bank. Cap the ramp at that same ceiling so we STOP
     // there instead of marching stepDuty up into a frozen-duty region that records flat/false amps and a
     // bogus curve. If the amp target isn't reached by then, we flag fieldCurveCeilingLimited so the
     // dashboard can tell the user to raise Max Field % and re-run for the full curve.
@@ -4683,7 +4683,7 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
           return true;
         }
         // Stop ceiling for "no onset found": the configured Min%-floor ceiling, but never command above
-        // the 24/48V field-duty limit (a real onset above that limit can't be reached anyway).
+        // the 24/36/48V field-duty limit (a real onset above that limit can't be reached anyway).
         float onsetCeil = kneeMaxFloorPct + kneeMarginPct;
         bool  onsetCeilDutyCapped = false;
         if (effDutyCeil < onsetCeil) { onsetCeil = effDutyCeil; onsetCeilDutyCapped = true; }
@@ -4711,7 +4711,7 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 
       if (reachedLimit || reachedCeil || bufFull) {
         // Stopped at the duty-limit ceiling (not the natural 92% backstop) without hitting the amp
-        // target → the curve is truncated by the 24/48V field-duty limit. Flag it + tell the user.
+        // target → the curve is truncated by the 24/36/48V field-duty limit. Flag it + tell the user.
         if (reachedCeil && !reachedLimit && effDutyCeil < FIELDCURVE_DUTY_MAX) {
           fieldCurveCeilingLimited = true;
           queueConsoleMessageF("Field curve: stopped at %.0f%% duty (Max Field %% limit) before reaching %.0fA — "

@@ -37,7 +37,7 @@ INA228 INA(0x40);
 //DONT MOVE THE NEXT 6 LINES AROUND, MUST STAY IN THIS ORDER
 #define ESP32_CAN_RX_PIN GPIO_NUM_16                           //
 #define ESP32_CAN_TX_PIN GPIO_NUM_17                           //
-#include <NMEA2000_esp32.h>                                    // (This one is for ESP32-S3, thank you Svante Karlsson and Timo Lappalainen )
+#include <NMEA2000_esp32_xeng.h>                               // _xeng fork of NMEA2000_twai (Svante Karlsson / Timo Lappalainen): transmit never blocks — stock waits up to 100ms/frame on fast-packet frames when the TX queue is full (no bus attached)
 tNMEA2000_esp32 NMEA2000(ESP32_CAN_TX_PIN, ESP32_CAN_RX_PIN);  // necessary for ESP32-S3 library
 #include <N2kMessages.h>
 #include <N2kMessagesEnumToStr.h>  // questionably needed
@@ -876,7 +876,7 @@ bool g_blackBoxPrevValid = false;   // true if last session's magic matched (RTC
 // lost only on a true power-down — accepted). Histogram of RAW bus voltage, referenced to Bulk.
 // Fine: Bulk .. Bulk+3.6V in 0.2V steps (18 bins; top ≈18V at a 14.4 Bulk). Coarse:
 // Bulk+3.6 .. Bulk+15.6V in 1.0V steps (12 bins). +1 overflow bin. Bin widths scale
-// ×(SYSTEM_VOLTAGE_CLASS/12) so the bin count is fixed across 12/24/48V. Separate from the session
+// ×(SYSTEM_VOLTAGE_CLASS/12) so the bin count is fixed across 12/24/36/48V. Separate from the session
 // counters (g_voltSpikeCount etc.), which reset on reboot and /resetVoltageProtectionCounters;
 // this struct is zeroed only by a magic mismatch or /resetOvTelemetryLifetime.
 #define OV_HIST_FINE_BINS 18
@@ -1317,7 +1317,7 @@ volatile bool faCommissionGate = false;         // Phase 2: relax the matrix ste
 // Commissioning "rest" hold (between guided steps). The open wizard dialog pings commissionHeartbeat
 // every ~2 s; if the ping goes stale (dialog closed / crashed / Wi-Fi dropped) the hold drops and
 // normal charging resumes within COMMISSION_HEARTBEAT_TIMEOUT_MS. Both the floor and the ramp scale
-// ×12/SYSTEM_VOLTAGE_CLASS (vNorm), so a 12 V base gives 4/2/1 % and 5/2.5/1.25 %/s at 12/24/48 V.
+// ×12/SYSTEM_VOLTAGE_CLASS (vNorm), so a 12 V base gives 4/2/1.33/1 % and 5/2.5/1.67/1.25 %/s at 12/24/36/48 V.
 volatile uint32_t lastCommissionHeartbeatMs = 0;        // millis() of the last dialog heartbeat (0 = stale/exited)
 #define COMMISSION_REST_FLOOR_PCT 4.0f                  // 12 V-base rest hold floor (% duty); bench-tune knob
 #define COMMISSION_REST_RAMP_PCT 5.0f                   // 12 V-base rest ramp rate (%/s)
@@ -1373,10 +1373,10 @@ float ChargingVoltageTargetReq = 0;              // Instantaneous DESIRED target
 float VoltageHardwareLimit = BulkVoltage + 0.3;  // boot placeholder; updateINA228OvervoltageThreshold() derives the real limit (lithium: Bulk + 0.3×class, else: tracks AlternatorHardShutdownV)
 bool inBulkStage = true;
 
-// System voltage class (12/24/48V) lives in SYSTEM_VOLTAGE_CLASS (set from Vessel Info). It is the sole
-// source of truth: the CV/CC gain normalization, knee/slew scaling, and duty ceiling all divide by
-// it, and a class change (via /saveVesselInfo → applyNominalVoltageChange) rescales the charge-voltage
-// profile + hard-shutdown trip. The boot SoC anchor auto-detects class from measured voltage instead.
+// System voltage class (12/24/36/48V) lives in SYSTEM_VOLTAGE_CLASS (set from Vessel Info). It is the sole
+// source of truth: the CV/CC gain normalization, knee/slew scaling, duty ceiling, and the boot SoC
+// anchor's OCV brackets (seedSocFromVoltage) all scale by it, and a class change (via /saveVesselInfo →
+// applyNominalVoltageChange) rescales the charge-voltage profile + hard-shutdown trip.
 
 enum ChargeStageDisplayCode : uint8_t {
   CHARGE_STAGE_NONE = 0,
@@ -1595,8 +1595,17 @@ float ChargeCycles_AllTime = 0;  // count (lifetime)
 // Travel (nm, kts)
 float TotalDistance = 0.0f;                      // nm (session)
 float TotalDistance_AllTime = 0.0f;              // nm (lifetime)
-float MaxSpeed = 0.0f;                           // kts (session)
-float MaxSpeed_AllTime = 0.0f;                   // kts (lifetime)
+float MaxSpeed = 0.0f;                           // kts, best 60-s average (session)
+float MaxSpeed_AllTime = 0.0f;                   // kts, best 60-s average (lifetime)
+float sogSust1m = 0.0f;                          // kts, SOG averaged over the last 60 s (0 = window not covered)
+// Sustained-speed ring (updateSustainedSpeed in 5_functions.ino). Sized in samples:
+// stores at most 1/s, so 96 slots always span more than the 60 s window.
+#define SUST_WINDOW_MS    60000UL
+#define SUST_MAX_GAP_MS    8000UL   // 4 missed COGSOG updates
+#define SUST_STORE_MIN_MS    900UL
+#define SUST_RING_SIZE        96
+uint32_t *sustT = nullptr;                       // ps_malloc'd in setup(): sample millis()
+float    *sustV = nullptr;                       // ps_malloc'd in setup(): sample knots
 // Longest single trip (nm). Trip ends after 60 min continuous GPS-invalid OR continuous SOG < 1.5 kn.
 float LongestSingleTrip_Nm_AllTime = 0.0f;       // nm (lifetime — winning trip)
 float currentTripDistanceNm = 0.0f;              // nm (in-progress trip; NVS-persisted with epoch)
@@ -1817,6 +1826,7 @@ struct SensorWindow {
   // Speed over ground
   int32_t sog_min = 999900;
   int32_t sog_max = 0;
+  int32_t sogSust1m_max = 0;   // kts ×100, best 60-s average seen this window (feeds the cloud speed board)
   int64_t sog_area_v_us = 0;
   uint64_t sog_valid_us = 0;
 
@@ -2818,6 +2828,7 @@ FuncTiming ft_ReadVEData;
 FuncTiming ft_altHealth;
 FuncTiming ft_altFold;     // 200 Hz alt fold (IDW eval cost) — distinct from ft_altHealth (SSE wrapper)
 FuncTiming ft_boatPerf;
+FuncTiming ft_n2kTx;  // NMEA2000 transmit tick — proof the TX path stays out of the control loop's time budget
 FuncTiming ft_huntGov;  // oscillation-damper evaluation — self-gated to one Goertzel pass per 32 control ticks; instrumented because it sits inline in the control loop
 FuncTiming ft_fastAltDrain;     // fast alt-current channel bounded DMA drain (~1 ms cap per loop pass)
 FuncTiming ft_faMatrixFlush;    // fast alt-current disturbance matrix → flash (field-off gated, like the long-term ring)
@@ -2895,7 +2906,7 @@ FuncTiming *const ftBlameReg[] = {
   &ft_ch1_compute_stats, &ft_SendWifiData, &ft_checkWiFiConnection, &ft_checkTimeSync,
   &ft_uploadSensorHistory, &ft_uploadBufferedRecords, &ft_buildConfigPayload,
   &ft_dumpLongTermRing, &ft_faMatrixFlush, &ft_fastAltDrain, &ft_faDetector,
-  &ft_zeroLogService, &ft_bhFlushCapNVS, &ft_kneeLearnService
+  &ft_zeroLogService, &ft_bhFlushCapNVS, &ft_kneeLearnService, &ft_n2kTx
 };
 constexpr uint8_t FT_BLAME_N = sizeof(ftBlameReg) / sizeof(ftBlameReg[0]);
 
@@ -3534,7 +3545,7 @@ float pidError = 0.0f;  // PID error for display (A)
 // (0.06 V arm window, per-cell-scaled by class) stays a local const there.
 
 // --- Output current PID ---
-// PidKp/Ki/Kd are 12V-EQUIVALENT gains — the same numbers work on 12/24/48V banks. recomputeCcGains()
+// PidKp/Ki/Kd are 12V-EQUIVALENT gains — the same numbers work on 12/24/36/48V banks. recomputeCcGains()
 // bakes in x(12/SYSTEM_VOLTAGE_CLASS) to reach the duty-space gains the loop applies (PidK*_active), because
 // field current per duty-% scales with bus voltage. Do NOT scale these per-class by hand.
 // Seeds are the 2026-07-03 plant fit (tau 112 ms, IMC) de-rated 30%: that fit is one alternator at one
@@ -3976,7 +3987,7 @@ uint32_t TempSustainedTimeout = 120000;  // ms - WARNING temp sustained this lon
 // the old +0.3 line inside the G2 filter lag); AGM/flooded 16.0 V absolute ×(V/12) (lead-acid
 // damage is time-integrated, indifferent to brief bounded spikes — the ceiling protects the DC
 // loads' published continuous ratings instead, 2026-07-13).
-float AlternatorHardShutdownV = 14.4f;    // V — absolute hard-shutdown threshold; this 14.4 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with the conservative BulkVoltage + 0.5 V fallback (13.9 Bulk → 14.4; 24V/48V get 30.0/60.0 V); the chemistry-specific value (AGM/flooded 16 V absolute) arrives via the commissioning proposal.
+float AlternatorHardShutdownV = 14.4f;    // V — absolute hard-shutdown threshold; this 14.4 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with the conservative BulkVoltage + 0.5 V fallback (13.9 Bulk + 0.5 × class/12 → 14.4/28.8/43.2/57.6 V at 12/24/36/48 V); the chemistry-specific value (AGM/flooded 16 V absolute) arrives via the commissioning proposal.
 float VoltageDisagreeThreshold = 0.15f;   // V difference between BatteryV and IBV for disagreement detection
 uint32_t VoltageDisagreeTimeout = 10000;  // ms - sustained disagreement this long triggers warning
 uint32_t VoltageDisagreeCriticalTimeoutMs = 3000;
@@ -4770,8 +4781,10 @@ enum DataIndex {
   IDX_WATER_DEPTH,               // 35 - NMEA2k WaterDepth (PGN 128267)
   IDX_STW_NMEA,                  // 36 - Speed Through Water / SOW (PGN 128259) for the boat-performance polar
   IDX_VICTRON_SOLAR,             // 37 - Victron VE.Direct solar (PPV/VPV) staleness
+  IDX_N2K_BATT,                  // 38 - NMEA2k received Battery Status (PGN 127508) V/A/T
+  IDX_N2K_SOC,                   // 39 - NMEA2k received DC Detailed Status (PGN 127506) SOC/SOH
   // Keep this last and increment when new added
-  MAX_DATA_INDICES = 38
+  MAX_DATA_INDICES = 40
 };
 
 unsigned long dataTimestamps[MAX_DATA_INDICES];  // Uses the enum size automatically
@@ -4940,6 +4953,7 @@ void Rudder(const tN2kMsg &N2kMsg);
 void Speed(const tN2kMsg &N2kMsg);
 void WaterDepth(const tN2kMsg &N2kMsg);
 void DCStatus(const tN2kMsg &N2kMsg);
+void BatteryStatus(const tN2kMsg &N2kMsg);
 void BatteryConfigurationStatus(const tN2kMsg &N2kMsg);
 void COGSOG(const tN2kMsg &N2kMsg);
 void GNSS(const tN2kMsg &N2kMsg);
@@ -4955,6 +4969,7 @@ tNMEA2000Handler NMEA2000Handlers[] = {
   { 127250L, &Heading },
   { 127257L, &Attitude },
   { 127506L, &DCStatus },
+  { 127508L, &BatteryStatus },
   { 127513L, &BatteryConfigurationStatus },
   { 128259L, &Speed },
   { 128267L, &WaterDepth },
@@ -4965,7 +4980,41 @@ tNMEA2000Handler NMEA2000Handlers[] = {
   { 0, 0 }
 };
 
-Stream *OutputStream = &Serial;  
+Stream *OutputStream = &Serial;
+
+// ===== NMEA2000 transmit (producer) settings — spec: Working Markdown Docs/NMEA2K_TRANSMIT_SPEC.md =====
+int n2kTxEnable = 0;        // master transmit switch; 0 = listen-only exactly as before (no bus presence). Mode is set at boot — changing this takes effect after reboot
+int n2kDeviceInstance = 0;  // N2K device instance (bump for a second regulator on the same bus)
+int n2kBattEnable = 1;      // battery bank 127508+127506 pair
+int n2kBattInstance = 0;
+int n2kBattCfgEnable = 0;   // 127513 battery configuration (off: a BMV/shunt device often already claims the bank's instance)
+int n2kAltEnable = 1;       // alternator as its own DC instance: 127508 + 127506 DCType=Alternator
+int n2kAltInstance = 1;
+int n2kAltTempEnable = 1;   // 130312 alternator temperature — suppressed entirely while the sensor reads NAN (MFD "data lost" alarms cover the failed-sensor case)
+int n2kTempInstance = 4;
+int n2kTempSource = 3;      // tN2kTempSource; 3 = Engine Room (no Alternator source exists in the standard set)
+int n2kChgrEnable = 1;      // 127507 charger status
+int n2kChgrInstance = 0;
+int n2kEngRpmEnable = 0;    // 127488 engine RPM (off: conflicts with a real engine gateway on the same instance)
+int n2kEngInstance = 0;
+int n2kEngDynEnable = 0;    // 127489 engine dynamic (alternator voltage + warning bits)
+int n2kEngBitsEnable = 1;   // include the discrete warning bits in 127489 (hard over-temp cut/alarm, low voltage, not-charging) — never fires on thermal derating
+uint32_t n2kTxCount = 0;      // frames/messages accepted by SendMsg since Reset Peak Values
+uint32_t n2kTxDropCount = 0;  // SendMsg failures (TX queue + retry ring full — normal when no bus is attached)
+int n2kSrcAddrLive = -1;      // claimed source address; -1 = not claimed / listen-only
+uint8_t n2kAddrPending = 255;    // address-claim result awaiting NVS persist (255 = none) — flushed field-off only, per the no-flash-in-control-path rule
+const unsigned long N2kTransmitMessages[] PROGMEM = { 127488UL, 127489UL, 127506UL, 127507UL, 127508UL, 127513UL, 130312UL, 0 };
+// Mirrors NMEA2000Handlers[] so the library's 126464 RX PGN list is truthful (spec §8)
+const unsigned long N2kReceiveMessages[] PROGMEM = { 126992UL, 127245UL, 127250UL, 127257UL, 127506UL, 127508UL, 127513UL, 128259UL, 128267UL, 129026UL, 129029UL, 129540UL, 130306UL, 0 };
+void nmea2kTransmitTick();
+// ===== NMEA2000 received battery data (127508 + 127506 at n2kRxBattInstance) =====
+// Display/telemetry only — never an input to field control, protections, targets, or SoC.
+int n2kRxBattInstance = 0;   // battery instance to read (a shunt/BMS "virtual shunt" bridged onto N2K)
+float n2kRxBattV = NAN;      // received battery voltage (127508)
+float n2kRxBattA = NAN;      // received battery current (127508, signed)
+float n2kRxBattTempF = NAN;  // received battery temperature (127508)
+int n2kRxSoc = -1;           // received state of charge % (127506); -1 = not available
+int n2kRxSoh = -1;           // received state of health % (127506); -1 = not available
 
 //ADS1115 more pre-setup crap
 uint32_t adsI2CErrorCount = 0;
@@ -5211,6 +5260,12 @@ void setup() {
   sensorRing = (SensorSnapshot *)ps_malloc(SENSOR_RING_SIZE * sizeof(SensorSnapshot));
   if (!sensorRing) Serial.println("FATAL: sensorRing ps_malloc failed");
   else memset(sensorRing, 0, SENSOR_RING_SIZE * sizeof(SensorSnapshot));
+  sustT = (uint32_t *)ps_malloc(SUST_RING_SIZE * sizeof(uint32_t));
+  if (!sustT) Serial.println("FATAL: sustT ps_malloc failed");
+  else memset(sustT, 0, SUST_RING_SIZE * sizeof(uint32_t));
+  sustV = (float *)ps_malloc(SUST_RING_SIZE * sizeof(float));
+  if (!sustV) Serial.println("FATAL: sustV ps_malloc failed");
+  else memset(sustV, 0, SUST_RING_SIZE * sizeof(float));
   baroPressureHistory = (uint16_t *)ps_malloc(BARO_HISTORY_SIZE * sizeof(uint16_t));
   if (!baroPressureHistory) Serial.println("FATAL: baroPressureHistory ps_malloc failed");
   else memset(baroPressureHistory, 0, BARO_HISTORY_SIZE * sizeof(uint16_t));
@@ -5389,6 +5444,7 @@ void setup() {
   memset(&ft_altHealth, 0, sizeof(FuncTiming));
   memset(&ft_altFold, 0, sizeof(FuncTiming));
   memset(&ft_boatPerf, 0, sizeof(FuncTiming));
+  memset(&ft_n2kTx, 0, sizeof(FuncTiming));
   memset(&ft_huntGov, 0, sizeof(FuncTiming));
   memset(&ft_fastAltDrain, 0, sizeof(FuncTiming));
   memset(&ft_faMatrixFlush, 0, sizeof(FuncTiming));
@@ -6140,8 +6196,11 @@ void loop() {
         VeTime = ft_ReadVEData.worstWindow;
         VeTime2 = ft_ReadVEData.worstSession;
       }
-      if (NMEA2KData == 1 && hardwarePresent == 1) {
+      // n2kTxEnable also forces ParseMessages: node mode needs it for address claim + heartbeat
+      // servicing even if the user left the receive toggle off.
+      if ((NMEA2KData == 1 || n2kTxEnable == 1) && hardwarePresent == 1) {
         NMEA2000.ParseMessages();  // CAN bus (only with real hardware)
+        TIMED_CALL(ft_n2kTx, nmea2kTransmitTick());
       }
       TIMED_CALL(ft_CheckAlarms, CheckAlarms());  // Process alarms (runs with fake or real data)
       calculateThermalStress();                   // alternator lifetime modeling (runs with fake or real data)
@@ -6456,6 +6515,7 @@ void loop() {
     ft_altHealth.worstWindow = 0;
     ft_altFold.worstWindow = 0;
     ft_boatPerf.worstWindow = 0;
+    ft_n2kTx.worstWindow = 0;
     ft_huntGov.worstWindow = 0;
     loopWorst80Win = 0;  // 80MHz low-power loop worst — rolling 5s window
     loopFieldOnWin = 0;  // field-ON loop worst — rolling 5s window

@@ -682,6 +682,30 @@ if (!BMP388Disconnected) {
   NMEA2000.EnableForward(false);
   NMEA2000.SetMsgHandler(HandleNMEA2000Msg);
   //  NMEA2000.SetN2kCANMsgBufSize(2);
+  // Transmit (producer) mode — spec: Working Markdown Docs/NMEA2K_TRANSMIT_SPEC.md. Applied at boot
+  // only; the /get handler tells the user a toggle change needs a reboot. n2kTxEnable off keeps the
+  // library's listen-only default: zero bus presence, no address claim, exactly the pre-TX behavior.
+  // InitSystemSettings() has already run (setup order), so the n2k* globals hold NVS values here.
+  if (n2kTxEnable == 1) {
+    NMEA2000.SetN2kCANSendFrameBufSize(80);  // software retry ring for frames the non-blocking _xeng driver refuses (TWAI queue full / no bus)
+    uint64_t mac = ESP.getEfuseMac();
+    static char n2kSerial[9];
+    snprintf(n2kSerial, sizeof(n2kSerial), "%08lX", (unsigned long)(mac & 0xFFFFFFFFUL));
+    NMEA2000.SetProductInformation(n2kSerial, 100, "Xregulator", FIRMWARE_VERSION, "V10",
+                                   2);  // LEN 2 = 100 mA: isolated CAN side is backbone-powered (ISO1050 + MPM3610)
+    NMEA2000.SetDeviceInformation((unsigned long)(mac & 0x1FFFFFUL),  // 21-bit unique number for address claim
+                                  141,    // device function: DC Generator/Alternator
+                                  35,     // device class: Electrical Generation
+                                  2046);  // open manufacturer code (no NMEA membership)
+    NMEA2000.SetDeviceInformationInstances((unsigned char)(n2kDeviceInstance & 0x07),
+                                           (unsigned char)((n2kDeviceInstance >> 3) & 0x1F));
+    int savedAddr = settingExists(NK_n2kSrcAddr) ? settingRead(NK_n2kSrcAddr).toInt() : 22;
+    if (savedAddr < 0 || savedAddr > 251) savedAddr = 22;
+    NMEA2000.SetMode(tNMEA2000::N2km_ListenAndNode, (uint8_t)savedAddr);
+    NMEA2000.ExtendTransmitMessages(N2kTransmitMessages);
+    NMEA2000.ExtendReceiveMessages(N2kReceiveMessages);
+    n2kSrcAddrLive = savedAddr;
+  }
   NMEA2000.Open();
   Serial.println("NMEA2K Running...");
 
@@ -875,20 +899,20 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     capLimitMode = constrain(settingRead(NK_capLimitMode).toInt(), 0, 1);
   }
-  // System voltage class (12/24/48). The CV/CC gain normalization (recomputeCv/CcGains, called
+  // System voltage class (12/24/36/48). The CV/CC gain normalization (recomputeCv/CcGains, called
   // at the end of this function) divides by SYSTEM_VOLTAGE_CLASS, so a zero here is fatal.
   if (!settingExists(NK_BatteryVoltage)) {
-    if (SYSTEM_VOLTAGE_CLASS != 12 && SYSTEM_VOLTAGE_CLASS != 24 && SYSTEM_VOLTAGE_CLASS != 48) SYSTEM_VOLTAGE_CLASS = 12;
+    if (SYSTEM_VOLTAGE_CLASS != 12 && SYSTEM_VOLTAGE_CLASS != 24 && SYSTEM_VOLTAGE_CLASS != 36 && SYSTEM_VOLTAGE_CLASS != 48) SYSTEM_VOLTAGE_CLASS = 12;
     settingWrite(NK_BatteryVoltage, String((int)SYSTEM_VOLTAGE_CLASS).c_str());
   } else {
     int v = settingRead(NK_BatteryVoltage).toInt();
-    if (v != 12 && v != 24 && v != 48) v = 12;  // reject corrupt NVS value (guards vNorm = 12/SYSTEM_VOLTAGE_CLASS div-by-zero/NaN)
+    if (v != 12 && v != 24 && v != 36 && v != 48) v = 12;  // reject corrupt NVS value (guards vNorm = 12/SYSTEM_VOLTAGE_CLASS div-by-zero/NaN)
     SYSTEM_VOLTAGE_CLASS = (uint8_t)v;
   }
   // First-creation class scaling. Every hardcoded default below is a 12V value; volt-domain seeds
   // scale ×(V/12), duty-domain seeds ×(12/V) — the same two domains applyNominalVoltageChange
   // rescales on a live class change. Existing keys always load verbatim, so this only fires when a
-  // key is first created on a device already provisioned 24/48V (fresh NVS with the class known, or
+  // key is first created on a device already provisioned 24/36/48V (fresh NVS with the class known, or
   // a firmware update introducing a new setting).
   const float seedVScale = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
   const float seedDScale = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;
@@ -1150,6 +1174,91 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     NMEA2KData = settingRead(NK_NMEA2KData).toInt();
   }
+  if (!settingExists(NK_n2kTxEn)) {
+    settingWrite(NK_n2kTxEn, String(n2kTxEnable).c_str());
+  } else {
+    n2kTxEnable = settingRead(NK_n2kTxEn).toInt();
+  }
+  if (!settingExists(NK_n2kDevInst)) {
+    settingWrite(NK_n2kDevInst, String(n2kDeviceInstance).c_str());
+  } else {
+    n2kDeviceInstance = settingRead(NK_n2kDevInst).toInt();
+  }
+  if (!settingExists(NK_n2kBattEn)) {
+    settingWrite(NK_n2kBattEn, String(n2kBattEnable).c_str());
+  } else {
+    n2kBattEnable = settingRead(NK_n2kBattEn).toInt();
+  }
+  if (!settingExists(NK_n2kBattInst)) {
+    settingWrite(NK_n2kBattInst, String(n2kBattInstance).c_str());
+  } else {
+    n2kBattInstance = settingRead(NK_n2kBattInst).toInt();
+  }
+  if (!settingExists(NK_n2kBattCfgEn)) {
+    settingWrite(NK_n2kBattCfgEn, String(n2kBattCfgEnable).c_str());
+  } else {
+    n2kBattCfgEnable = settingRead(NK_n2kBattCfgEn).toInt();
+  }
+  if (!settingExists(NK_n2kAltEn)) {
+    settingWrite(NK_n2kAltEn, String(n2kAltEnable).c_str());
+  } else {
+    n2kAltEnable = settingRead(NK_n2kAltEn).toInt();
+  }
+  if (!settingExists(NK_n2kAltInst)) {
+    settingWrite(NK_n2kAltInst, String(n2kAltInstance).c_str());
+  } else {
+    n2kAltInstance = settingRead(NK_n2kAltInst).toInt();
+  }
+  if (!settingExists(NK_n2kAltTempEn)) {
+    settingWrite(NK_n2kAltTempEn, String(n2kAltTempEnable).c_str());
+  } else {
+    n2kAltTempEnable = settingRead(NK_n2kAltTempEn).toInt();
+  }
+  if (!settingExists(NK_n2kTempInst)) {
+    settingWrite(NK_n2kTempInst, String(n2kTempInstance).c_str());
+  } else {
+    n2kTempInstance = settingRead(NK_n2kTempInst).toInt();
+  }
+  if (!settingExists(NK_n2kTempSrc)) {
+    settingWrite(NK_n2kTempSrc, String(n2kTempSource).c_str());
+  } else {
+    n2kTempSource = settingRead(NK_n2kTempSrc).toInt();
+  }
+  if (!settingExists(NK_n2kChgrEn)) {
+    settingWrite(NK_n2kChgrEn, String(n2kChgrEnable).c_str());
+  } else {
+    n2kChgrEnable = settingRead(NK_n2kChgrEn).toInt();
+  }
+  if (!settingExists(NK_n2kChgrInst)) {
+    settingWrite(NK_n2kChgrInst, String(n2kChgrInstance).c_str());
+  } else {
+    n2kChgrInstance = settingRead(NK_n2kChgrInst).toInt();
+  }
+  if (!settingExists(NK_n2kEngRpmEn)) {
+    settingWrite(NK_n2kEngRpmEn, String(n2kEngRpmEnable).c_str());
+  } else {
+    n2kEngRpmEnable = settingRead(NK_n2kEngRpmEn).toInt();
+  }
+  if (!settingExists(NK_n2kEngInst)) {
+    settingWrite(NK_n2kEngInst, String(n2kEngInstance).c_str());
+  } else {
+    n2kEngInstance = settingRead(NK_n2kEngInst).toInt();
+  }
+  if (!settingExists(NK_n2kEngDynEn)) {
+    settingWrite(NK_n2kEngDynEn, String(n2kEngDynEnable).c_str());
+  } else {
+    n2kEngDynEnable = settingRead(NK_n2kEngDynEn).toInt();
+  }
+  if (!settingExists(NK_n2kEngBitsEn)) {
+    settingWrite(NK_n2kEngBitsEn, String(n2kEngBitsEnable).c_str());
+  } else {
+    n2kEngBitsEnable = settingRead(NK_n2kEngBitsEn).toInt();
+  }
+  if (!settingExists(NK_n2kRxBattInst)) {
+    settingWrite(NK_n2kRxBattInst, String(n2kRxBattInstance).c_str());
+  } else {
+    n2kRxBattInstance = settingRead(NK_n2kRxBattInst).toInt();
+  }
   if (!settingExists(NK_waveAmplitude)) {
     settingWrite(NK_waveAmplitude, String(waveAmplitude).c_str());
   } else {
@@ -1341,12 +1450,15 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     Ymax1 = settingRead(NK_Ymax1).toInt();
   }
+  // Voltage-plot axis bounds are volt-domain: first creation scales the 12V default window ×(V/12)
   if (!settingExists(NK_Ymin2)) {
+    Ymin2 *= seedVScale;
     settingWrite(NK_Ymin2, String(Ymin2).c_str());
   } else {
     Ymin2 = settingRead(NK_Ymin2).toFloat();
   }
   if (!settingExists(NK_Ymax2)) {
+    Ymax2 *= seedVScale;
     settingWrite(NK_Ymax2, String(Ymax2).c_str());
   } else {
     Ymax2 = settingRead(NK_Ymax2).toFloat();
@@ -1871,6 +1983,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     cvTestSlewMode = (uint8_t)settingRead(NK_cvTestSlewMode).toInt();
   }
   if (!settingExists(NK_cvPlantKa)) {
+    cvPlantKa *= seedVScale;  // V/A plant stiffness is per-bus: n series 12V blocks ≈ n× the V/A
     settingWrite(NK_cvPlantKa, String(cvPlantKa, 5).c_str());
     settingWrite(NK_cvPlantKb, String(cvPlantKb, 5).c_str());
   } else {

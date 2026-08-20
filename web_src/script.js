@@ -909,9 +909,23 @@ const CSV2_FIELDS = [
     "blameIdx1", "blameUs1",  // worst field-on pass blame: top 3 timed consumers (idx into FT_BLAME_NAMES, 255 = empty; µs)
     "blameIdx2", "blameUs2",
     "blameIdx3", "blameUs3",
+    "ft_n2kTx_win", "ft_n2kTx_ses",   // NMEA2000 transmit tick worst µs
+    "n2kTxCount", "n2kTxDrops",       // N2K messages accepted / dropped since Reset Peak Values
+    "n2kSrcAddr",                     // claimed N2K source address (-1 = listen-only)
+    "n2kRxBattV",                     // received 127508 battery voltage (V ×100; -2000000000 = NA)
+    "n2kRxBattA",                     // received 127508 battery current (A ×100, signed; -2000000000 = NA)
+    "n2kRxBattTempF",                 // received 127508 battery temperature (F ×10; -2000000000 = NA)
+    "n2kRxSoc",                       // received 127506 state of charge (%; -1 = NA)
+    "n2kRxSoh",                       // received 127506 state of health (%; -1 = NA)
 ];
 
 // Order MUST match ftBlameReg[] in Xregulator.ino — the blame indices in CSV2 point here.
+// tN2kTempSource display names (index = wire code) — the standard set has no Alternator source,
+// hence the user-selectable source + instance on the NMEA2K tab.
+const N2K_TEMP_SOURCE_NAMES = ["Sea", "Outside", "Inside", "Engine Room", "Main Cabin", "Live Well",
+    "Bait Well", "Refrigeration", "Heating System", "Dew Point", "Apparent Wind Chill",
+    "Theoretical Wind Chill", "Heat Index", "Freezer", "Exhaust Gas", "Shaft Seal"];
+
 const FT_BLAME_NAMES = [
     "Analog Inputs", "VE Direct", "Alt Control", "Derived Metrics",
     "Alarms", "Battery SOC", "Log Dashboard", "System Health",
@@ -919,7 +933,7 @@ const FT_BLAME_NAMES = [
     "CH1 Stats", "WiFi Send", "WiFi Check", "Time Sync",
     "Sensor History", "Upload Buffered", "Config Payload",
     "LT Ring Flush", "Ripple Flush", "Fast Alt Drain", "Fault Detector",
-    "Zero-Drift Log", "Batt Health Save", "Knee Save",
+    "Zero-Drift Log", "Batt Health Save", "Knee Save", "N2K TX",
 ];
 
 // Worst field-on pass blame line under "Loop Time when Field is On" — names + ms of the top
@@ -2953,6 +2967,23 @@ const CSV3_FIELDS = [
     "cvRecovFlareBandV",             // arrival flare band (V per 12V block); ×1000
     "cvRecovFlareFrac",              // arrival flare ceiling floor, fraction of recovery goal; ×100
     "TachLieEnable",                 // tach-lie plausibility cut enable (0/1)
+    "n2kTxEnable",                   // NMEA2000 transmit master (0/1)
+    "n2kDeviceInstance",
+    "n2kBattEnable",
+    "n2kBattInstance",
+    "n2kBattCfgEnable",
+    "n2kAltEnable",
+    "n2kAltInstance",
+    "n2kAltTempEnable",
+    "n2kTempInstance",
+    "n2kTempSource",                 // tN2kTempSource code (3 = Engine Room)
+    "n2kChgrEnable",
+    "n2kChgrInstance",
+    "n2kEngRpmEnable",
+    "n2kEngInstance",
+    "n2kEngDynEnable",
+    "n2kEngBitsEnable",
+    "n2kRxBattInstance",             // battery instance to ingest (127508/127506 receive)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -2985,6 +3016,8 @@ const TS_FIELDS = [
     "ts_IMU",
     "ts_VictronSolar",
     "ts_StwNMEA",
+    "ts_N2kBatt",
+    "ts_N2kSoc",
 ];
 
 // Detect if running in Capacitor (iOS/Android) vs web browser
@@ -6344,6 +6377,23 @@ function updateAllEchosOptimized(data) {
         { key: 'VeData', id: 'VeData_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'NMEA0183Data', id: 'NMEA0183Data_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'NMEA2KData', id: 'NMEA2KData_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kTxEnable', id: 'n2kTxEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kDeviceInstance', id: 'n2kDeviceInstance_echo', transform: v => v },
+        { key: 'n2kBattEnable', id: 'n2kBattEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kBattInstance', id: 'n2kBattInstance_echo', transform: v => v },
+        { key: 'n2kBattCfgEnable', id: 'n2kBattCfgEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kAltEnable', id: 'n2kAltEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kAltInstance', id: 'n2kAltInstance_echo', transform: v => v },
+        { key: 'n2kAltTempEnable', id: 'n2kAltTempEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kTempInstance', id: 'n2kTempInstance_echo', transform: v => v },
+        { key: 'n2kTempSource', id: 'n2kTempSource_echo', transform: v => (N2K_TEMP_SOURCE_NAMES[v] ?? v) },
+        { key: 'n2kChgrEnable', id: 'n2kChgrEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kChgrInstance', id: 'n2kChgrInstance_echo', transform: v => v },
+        { key: 'n2kEngRpmEnable', id: 'n2kEngRpmEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kEngInstance', id: 'n2kEngInstance_echo', transform: v => v },
+        { key: 'n2kEngDynEnable', id: 'n2kEngDynEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kEngBitsEnable', id: 'n2kEngBitsEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kRxBattInstance', id: 'n2kRxBattInstance_echo', transform: v => v },
         { key: 'waveAmplitude', id: 'waveAmplitude_echo', transform: v => v },
         { key: 'tuningWaveFloor', id: 'tuningWaveFloor_echo', transform: v => v },
         { key: 'CurrentThreshold', id: 'CurrentThreshold_echo', transform: v => v / 100 },
@@ -6639,6 +6689,7 @@ function updateAllEchosOptimized(data) {
         { key: 'AmpSensorRange',        name: 'AmpSensorRange' },
         { key: 'gpsTimeSourceMode',     name: 'gpsTimeSourceMode' },
         { key: 'UseFloat',              name: 'UseFloat' },
+        { key: 'n2kTempSource',         name: 'n2kTempSource' },
     ]);
     selectSyncs.forEach(({ key, name }) => {
         if (key in data) {
@@ -7025,7 +7076,8 @@ async function handleVesselInfoSave(event) {
     // charge-voltage profile + hard-shutdown trip for the new class. Cancelling aborts the save.
     const _oldV = parseInt(window._nominalStored, 10);
     const _newV = vesselData.battery_voltage;
-    if ((_newV === 12 || _newV === 24 || _newV === 48) && (_oldV === 12 || _oldV === 24 || _oldV === 48)
+    const _classOk = v => v === 12 || v === 24 || v === 36 || v === 48;
+    if (_classOk(_newV) && _classOk(_oldV)
         && _newV !== _oldV && !(await confirmVoltageRescale(_oldV, _newV))) {
         return;  // user cancelled — leave the form unsaved
     }
@@ -7161,7 +7213,7 @@ const BATTDEF_MODE_NAMES = ['No Float (idle)', 'Voltage Float', 'Zero-Current Fl
 // Per-chemistry rationale shown under the proposal summary. Framed around what each battery wants —
 // these are battery-specific recommendations, NOT alternator limits (the alternator has its own).
 // Each entry is a fn of (proposed Bulk V, proposed hard-shutdown V), both class-scaled, so the
-// cited numbers match 12/24/48 V banks.
+// cited numbers match 12/24/36/48 V banks.
 const BATTDEF_CHEM_COPY = {
     lifepo4: v => 'For lithium (LiFePO4), Bulk and Absorption are set to ' + v + ' V — roughly a high-90s% state of charge, which avoids the higher-voltage cell stress of a full charge. Float is disabled. The charge current limit is set to a moderate fraction of the bank\'s capacity. You may want to manually increase it if you prioritize charging time vs. battery lifetime.',
     agm: (v, hardV) => 'For AGM, the default charge current limit is set to a high fraction of the bank\'s capacity: a high charge rate reduces sulfation and extends AGM cycle life, and AGM cells accept high in-rush current. The charge voltages are kept toward the lower end of the acceptable range to limit cell stress. Lead-acid and AGM batteries also want a higher charge voltage when cold and a lower one when hot. The hard overvoltage cut is set to ' + hardV + ' V: brief voltage excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), so instead of cutting the field on momentary spikes the ceiling is placed to protect connected DC loads, whose published continuous ratings usually top out around that level or higher.',
@@ -7234,7 +7286,7 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
         lead_acid: { bulkV: 14.6, absV: 14.6, floatV: 13.4, durH: 8,    rebulkV: 12.4, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.3, limC: 0.20, cold: 0, peukert: 1.25, chgEff: 88, vAlmHi: 15.8, vAlmLo: 11.5, socAlm: 40, absBase: 90, absMax: 240, ovMeasMargin: 0.5 }
     }[type];
     if (!T) return null;
-    const kV = (sysV === 24) ? 2 : (sysV === 48) ? 4 : 1;   // 12V-equivalent voltages scale by class
+    const kV = (isFinite(sysV) && sysV > 0) ? sysV / 12 : 1;   // 12V-equivalent voltages scale by class
     const C = (isFinite(capAh) && capAh > 0) ? capAh : 0;
     const r1 = v => Math.round(v * 10) / 10, r2 = v => Math.round(v * 100) / 100;
     // Lithium proposal is No Float: a full LFP bank wants the charge source to step aside, not hold
@@ -7296,7 +7348,7 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
         rows.push({ param: 'capSocLowMax', label: 'Capacity Anchor — Sample At or Below (%)', value: anchor.lowMax });
         rows.push({ param: 'capMinSpan', label: 'Capacity Anchor — Minimum Span (%)', value: anchor.span });
         rows.push({ param: 'capRestFloor', label: 'Capacity Anchor — Rest Before OCV Trusted (min)', value: anchor.restFloor });
-        rows.push({ param: 'capSettleRate', label: 'Capacity Anchor — Voltage Settle Rate (mV/10min)', value: anchor.settleRate });
+        rows.push({ param: 'capSettleRate', label: 'Capacity Anchor — Voltage Settle Rate (mV/10min)', value: r2(anchor.settleRate * kV) });  // mV/10min is volt-domain: real per-bus, like the firmware seed/rescale
     }
     if (C) {   // DCIR step ~C/4, clamped, so a small bank isn't pulsed at the fixed 30-60 A (crest = 2x low)
         const step = Math.min(30, Math.max(10, Math.round(C / 4)));
@@ -7317,7 +7369,7 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
     rows.push({ param: 'CvKdArmV', label: 'Voltage D Term — Arm Window Below Target (V)', value: r2(0.5 * kV) });
 
     // Setpoint slew is a per-bank V/s rate, so like the D-term thresholds it scales × class (0.15 V/s on 12V
-    // rides as 0.30 on 24V / 0.60 on 48V). 12V base 0.15 matches the firmware initializer's seedVScale seed.
+    // rides as 0.30 on 24V / 0.45 on 36V / 0.60 on 48V). 12V base 0.15 matches the firmware initializer's seedVScale seed.
     rows.push({ param: 'vTgtRampUp', label: 'Voltage Setpoint — Rise Rate (V/s)', value: r2(0.15 * kV) });
     rows.push({ param: 'vTgtRampDn', label: 'Voltage Setpoint — Fall Rate (V/s)', value: r2(0.15 * kV) });
 
@@ -12015,6 +12067,15 @@ function updateTogglesFromData(data) {
         updateCheckbox("VeData_checkbox", data.VeData, "VeData");
         updateCheckbox("NMEA0183Data_checkbox", data.NMEA0183Data, "NMEA0183Data");
         updateCheckbox("NMEA2KData_checkbox", data.NMEA2KData, "NMEA2KData");
+        updateCheckbox("n2kTxEnable_checkbox", data.n2kTxEnable, "n2kTxEnable");
+        updateCheckbox("n2kBattEnable_checkbox", data.n2kBattEnable, "n2kBattEnable");
+        updateCheckbox("n2kBattCfgEnable_checkbox", data.n2kBattCfgEnable, "n2kBattCfgEnable");
+        updateCheckbox("n2kAltEnable_checkbox", data.n2kAltEnable, "n2kAltEnable");
+        updateCheckbox("n2kAltTempEnable_checkbox", data.n2kAltTempEnable, "n2kAltTempEnable");
+        updateCheckbox("n2kChgrEnable_checkbox", data.n2kChgrEnable, "n2kChgrEnable");
+        updateCheckbox("n2kEngRpmEnable_checkbox", data.n2kEngRpmEnable, "n2kEngRpmEnable");
+        updateCheckbox("n2kEngDynEnable_checkbox", data.n2kEngDynEnable, "n2kEngDynEnable");
+        updateCheckbox("n2kEngBitsEnable_checkbox", data.n2kEngBitsEnable, "n2kEngBitsEnable");
         updateCheckbox("IgnoreTemperature_checkbox", data.IgnoreTemperature, "IgnoreTemperature");
         updateCheckbox("IgnoreRPM_checkbox", data.IgnoreRPM, "IgnoreRPM");
         updateCheckbox("bmsLogic_checkbox", data.bmsLogic, "bmsLogic");
@@ -12396,11 +12457,11 @@ function submitSimpleParam(paramName, val, extra) {
         .catch(err => diagLog(paramName + ' submit failed: ' + err));
 }
 
-// System voltage (12/24/48 V) lives in Vessel Info (firmware global SYSTEM_VOLTAGE_CLASS) — the single source of truth.
+// System voltage (12/24/36/48 V) lives in Vessel Info (firmware global SYSTEM_VOLTAGE_CLASS) — the single source of truth.
 // When the user changes it and saves, /saveVesselInfo rescales the whole charge-voltage profile by
 // newV/oldV and re-derives the hard-shutdown trip. This warns first with an old→new preview (read
 // from the live echo values) and returns false if the user cancels, so the save can be aborted.
-// oldV/newV are 12/24/48; window._nominalStored holds the last-loaded class (set from the vessel fetch).
+// oldV/newV are 12/24/36/48; window._nominalStored holds the last-loaded class (set from the vessel fetch).
 async function confirmVoltageRescale(oldV, newV) {
     const ratio = newV / oldV;
     const fmt = n => Number.isFinite(n) ? n.toFixed(2) : '?';
@@ -14193,6 +14254,11 @@ window.addEventListener("load", function () {
                 ["ft_altFold_ses_ID", "ft_altFold_ses"],
                 ["ft_boatPerf_win_ID", "ft_boatPerf_win"],
                 ["ft_boatPerf_ses_ID", "ft_boatPerf_ses"],
+                ["ft_n2kTx_win_ID", "ft_n2kTx_win"],
+                ["ft_n2kTx_ses_ID", "ft_n2kTx_ses"],
+                ["n2kSrcAddr_ID", "n2kSrcAddr"],
+                ["n2kTxCount_ID", "n2kTxCount"],
+                ["n2kTxDrops_ID", "n2kTxDrops"],
                 ["ft_huntGov_win_ID", "ft_huntGov_win"],
                 ["ft_huntGov_ses_ID", "ft_huntGov_ses"],
                 ["VeTime2_ID", "VeTime2"],
@@ -14363,6 +14429,34 @@ window.addEventListener("load", function () {
                     const e = Number(data.VictronError);
                     setText('VictronErrorID', e < 0 ? '—' : (e === 0 ? 'OK' : ('Err ' + e)));
                 }
+            })();
+
+            // NMEA2000 received battery data (127508 V/A/T + 127506 SOC) — NMEA2K sub-tab status row.
+            // Staleness comes from the TS stream ages (window.sensorAges); values ride CSV2.
+            (function () {
+                const row = document.getElementById('n2kRxBatt_row');
+                if (!row || data.n2kRxBattV === undefined) return;
+                const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+                const ages = window.sensorAges || {};
+                const battAge = Number(ages.n2kBatt ?? 999999);
+                const socAge = Number(ages.n2kSoc ?? 999999);
+                if (battAge >= 999999 && socAge >= 999999) {
+                    setText('n2kRxBattStatus_ID', 'no data');
+                    row.style.opacity = '0.5';
+                    return;
+                }
+                const STALE_MS = 20000;
+                const stale = Math.min(battAge, socAge) > STALE_MS;
+                setText('n2kRxBattStatus_ID', stale ? 'stale' : 'live');
+                row.style.opacity = stale ? '0.5' : '';
+                const NA = -1999999999;  // firmware sends -2000000000 for a missing float field
+                const num = (v, div, fix, unit) => (v === undefined || Number(v) <= NA) ? '—' : (Number(v) / div).toFixed(fix) + unit;
+                setText('n2kRxBattV_ID', num(data.n2kRxBattV, 100, 2, ' V'));
+                setText('n2kRxBattA_ID', num(data.n2kRxBattA, 100, 1, ' A'));
+                const tRaw = Number(data.n2kRxBattTempF);
+                setText('n2kRxBattTempF_ID', (data.n2kRxBattTempF === undefined || tRaw <= NA) ? '—' : toDisplayTemp(tRaw / 10).toFixed(1) + ' ' + tempUnitLabel());
+                const soc = Number(data.n2kRxSoc);
+                setText('n2kRxSoc_ID', (data.n2kRxSoc === undefined || soc < 0) ? '—' : soc + ' %');
             })();
 
             // (live engine fuel flow + economy GPH/NMPG readouts moved to the CSVData4 / NavStream handler)
@@ -15095,7 +15189,9 @@ window.addEventListener("load", function () {
                 ambientTemp: data.ts_AmbientTemp,
                 imu: data.ts_IMU,
                 victronSolar: data.ts_VictronSolar,
-                stwNMEA: data.ts_StwNMEA
+                stwNMEA: data.ts_StwNMEA,
+                n2kBatt: data.ts_N2kBatt,
+                n2kSoc: data.ts_N2kSoc
             };
         }, false);
 
@@ -15159,6 +15255,15 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("VeData_checkbox").checked = (document.getElementById("VeData").value === "1");
     document.getElementById("NMEA0183Data_checkbox").checked = (document.getElementById("NMEA0183Data").value === "1");
     document.getElementById("NMEA2KData_checkbox").checked = (document.getElementById("NMEA2KData").value === "1");
+    document.getElementById("n2kTxEnable_checkbox").checked = (document.getElementById("n2kTxEnable").value === "1");
+    document.getElementById("n2kBattEnable_checkbox").checked = (document.getElementById("n2kBattEnable").value === "1");
+    document.getElementById("n2kBattCfgEnable_checkbox").checked = (document.getElementById("n2kBattCfgEnable").value === "1");
+    document.getElementById("n2kAltEnable_checkbox").checked = (document.getElementById("n2kAltEnable").value === "1");
+    document.getElementById("n2kAltTempEnable_checkbox").checked = (document.getElementById("n2kAltTempEnable").value === "1");
+    document.getElementById("n2kChgrEnable_checkbox").checked = (document.getElementById("n2kChgrEnable").value === "1");
+    document.getElementById("n2kEngRpmEnable_checkbox").checked = (document.getElementById("n2kEngRpmEnable").value === "1");
+    document.getElementById("n2kEngDynEnable_checkbox").checked = (document.getElementById("n2kEngDynEnable").value === "1");
+    document.getElementById("n2kEngBitsEnable_checkbox").checked = (document.getElementById("n2kEngBitsEnable").value === "1");
     document.getElementById("IgnoreTemperature_checkbox").checked = (document.getElementById("IgnoreTemperature").value === "1");
     document.getElementById("IgnoreRPM_checkbox").checked = (document.getElementById("IgnoreRPM").value === "1");
     document.getElementById("bmsLogic_checkbox").checked = (document.getElementById("bmsLogic").value === "1");
@@ -16306,7 +16411,7 @@ function updateLifeIndicators(data) {
 
 
 // Open-loop field modes (manual / limp-home) command duty directly, bypassing the current-limiting
-// loop. On a 24/48V bank each duty-percent drives ~2×/4× the field current of 12V, so a duty that's
+// loop. On a 24/36/48V bank each duty-percent drives ~2×/3×/4× the field current of 12V, so a duty that's
 // safe at 12V can over-current the field. Warn (don't cap) each time the user enters one of these
 // modes on a higher-voltage system. window._nominalStored is the system voltage from the Vessel Info fetch/save.
 function warnHighVoltageOpenLoop(modeName) {
@@ -19448,40 +19553,55 @@ function updateTestPanelParams(testName) {
     }
 }
 
-// Class-scaled input attributes: Min Field steps inversely with the bank class (1 / 0.5 / 0.25 %
-// at 12/24/48V — the usable duty span compresses), and the CV wave amplitude limits scale
+// Class-scaled input attributes: Min Field steps inversely with the bank class (1 / 0.5 / 0.33 / 0.25 %
+// at 12/24/36/48V — the usable duty span compresses), and the CV wave amplitude limits scale
 // per-cell. Static HTML carries the 12V values; this refines them once the class is known.
 function applyClassScaledInputAttrs() {
     const k = (parseInt(window._nominalStored, 10) || 12) / 12;
+    // 36V is the first class where k (=3) isn't a power of two: raw products pick up float dust
+    // (0.05*3 = 0.15000000000000002) and 1/k is non-terminating, so round to 6 decimals.
+    const r = x => String(Math.round(x * 1e6) / 1e6);
     const md = document.querySelector('input[name="MinDuty"]');
-    if (md) md.step = String(1 / k);
+    // At 36V, 1/k = 1/3 never terminates, so ANY finite step makes typed round values (e.g. 1)
+    // a stepMismatch and the native form submit blocks the Set — step-free is the only correct attr.
+    if (md) md.step = (k === 3) ? 'any' : r(1 / k);
     const cw = document.querySelector('input[name="cvWaveAmplitudeV"]');
-    if (cw) { cw.min = String(0.05 * k); cw.max = String(2.0 * k); cw.step = String(0.05 * k); }
+    if (cw) { cw.min = r(0.05 * k); cw.max = r(2.0 * k); cw.step = r(0.05 * k); }
     // D-term deadband + slope ceiling (V/s), arm window (V), target ramp rates (V/s) and the
     // wind-down stop margin (V) are WYSIWYG per-bus (scale ×class), so their input bounds must
-    // too, else a 24/48 V user is capped at the 12 V ceiling. Kd/cap are NOT here — Kd is
+    // too, else a 24/36/48 V user is capped at the 12 V ceiling. Kd/cap are NOT here — Kd is
     // voltage-normalized (12 V-equivalent) and the cap is flat amps, both class-invariant; the
     // stress-test bands are 12 V-equivalent by design (scaled ×class at use), so not here either.
     const db = document.querySelector('input[name="CvKdDeadbandVps"]');
-    if (db) { db.max = String(4 * k); db.step = String(0.05 * k); }
+    if (db) { db.max = r(4 * k); db.step = r(0.05 * k); }
     const ds = document.querySelector('input[name="CvKdDbSlope"]');
-    if (ds) { ds.max = String(0.05 * k); ds.step = String(0.0005 * k); }
+    if (ds) { ds.max = r(0.05 * k); ds.step = r(0.0005 * k); }
     const df = document.querySelector('input[name="CvKdDbFloor"]');
-    if (df) { df.max = String(2 * k); df.step = String(0.05 * k); }
+    if (df) { df.max = r(2 * k); df.step = r(0.05 * k); }
     const dc = document.querySelector('input[name="CvKdDbCeil"]');
-    if (dc) { dc.max = String(4 * k); dc.step = String(0.1 * k); }
+    if (dc) { dc.max = r(4 * k); dc.step = r(0.1 * k); }
     const sc = document.querySelector('input[name="CvKdSlopeCeil"]');
-    if (sc) { sc.min = String(1 * k); sc.max = String(20 * k); sc.step = String(0.5 * k); }
+    if (sc) { sc.min = r(1 * k); sc.max = r(20 * k); sc.step = r(0.5 * k); }
     const ws = document.querySelector('input[name="cvWindDownStopV"]');
-    if (ws) { ws.max = String(0.3 * k); ws.step = String(0.005 * k); }
+    if (ws) { ws.max = r(0.3 * k); ws.step = r(0.005 * k); }
     const ru = document.querySelector('input[name="vTgtRampUp"]');
-    if (ru) { ru.max = String(5 * k); ru.step = String(0.001 * k); }
+    if (ru) { ru.max = r(5 * k); ru.step = r(0.001 * k); }
     const rd = document.querySelector('input[name="vTgtRampDn"]');
-    if (rd) { rd.max = String(5 * k); rd.step = String(0.001 * k); }
+    if (rd) { rd.max = r(5 * k); rd.step = r(0.001 * k); }
     const dm = document.getElementById('cvKdMarginInput');
-    if (dm) { dm.max = String(2 * k); dm.step = String(0.05 * k); }
+    if (dm) { dm.max = r(2 * k); dm.step = r(0.05 * k); }
     const aw = document.querySelector('input[name="CvKdArmV"]');
-    if (aw) { aw.max = String(3 * k); aw.step = String(0.1 * k); }
+    if (aw) { aw.max = r(3 * k); aw.step = r(0.1 * k); }
+    // OV / iExcess protection margins are stored real per-bus too; bounds mirror the firmware
+    // /get clamps (×class/12) so a >12 V user isn't blocked below the legal range.
+    const om = document.querySelector('input[name="OvMeasMarginV"]');
+    if (om) { om.min = r(0.02 * k); om.max = r(0.5 * k); om.step = r(0.005 * k); }
+    const op = document.querySelector('input[name="OvPredMarginV"]');
+    if (op) { op.min = r(0.05 * k); op.max = r(1.0 * k); op.step = r(0.01 * k); }
+    const ia = document.querySelector('input[name="IExcessArmMarginV"]');
+    if (ia) { ia.min = r(0.02 * k); ia.max = r(5.0 * k); ia.step = r(0.005 * k); }
+    const fh = document.querySelector('input[name="FastSetpointRiseHeadroomV"]');
+    if (fh) { fh.min = r(0.05 * k); fh.max = r(2.0 * k); fh.step = r(0.05 * k); }
 }
 
 function updateCVPanelDelta() {
@@ -20058,8 +20178,8 @@ function sysidUpdatePreflight() {
     const minRpm  = parseFloat(getField("MinRPMForField_echo") ?? 500);
     const amps    = parseFloat(getField("MeasAmpsID") ?? 0);
     const battV   = parseFloat(getField("IBVID") ?? getField("BatteryVID") ?? 0);
-    // Class-scaled: a fixed 11.0V floor is trivially true on 24/48V banks (no low-bus screen),
-    // and an unscaled 14.8 fallback would read a healthy 24/48V bus as "above bulk".
+    // Class-scaled: a fixed 11.0V floor is trivially true on 24/36/48V banks (no low-bus screen),
+    // and an unscaled 14.8 fallback would read a healthy 24/36/48V bus as "above bulk".
     const nomK    = (parseInt(window._nominalStored, 10) || 12) / 12;
     const bulkV   = parseFloat(getField("BulkVoltage_echo") ?? (14.8 * nomK));
 
@@ -20613,7 +20733,7 @@ function sysidFitFOPDT(pts, g0, fsHz) {
     if (isFinite(Kp) && Kp > 0) {
         // g0 is A per %duty measured at the CURRENT bus voltage, so Kp/Ki land in that bus's duty-space.
         // Stored PidKp/PidKi are 12V-equivalent (recomputeCcGains re-applies ×12/Vbatt at use), so convert
-        // the seed here by ×(Vbatt/12): 12V → ×1 no-op; 24/48V cancels the recompute back to the measured
+        // the seed here by ×(Vbatt/12): 12V → ×1 no-op; 24/36/48V cancels the recompute back to the measured
         // gain instead of leaving the loop under-gained. Unknown class defaults to 12 → can only under-, never over-gain.
         const vClass = (parseInt(window._nominalStored, 10) || 12) / 12;
         out.Kp = Kp * vClass;
@@ -24107,7 +24227,7 @@ function renderSlopeDeadbandPlot() {
         verdictId: haveDb ? 'slopeDeadbandVerdict' : null, verdictFn: slopeVerdict
     });
 }
-// Voltage-class multiplier (1 / 2 / 4 at 12/24/48 V). The deadband clamps below are V/s, which scales
+// Voltage-class multiplier (1 / 2 / 3 / 4 at 12/24/36/48 V). The deadband clamps below are V/s, which scales
 // with the bus class — unlike the G3 amps twin these were copied from, where the clamps are class-invariant.
 function dbndClassK() { return (parseInt(window._nominalStored, 10) || 12) / 12; }
 // The runtime clamps the evaluated deadband to [CvKdDbFloor, CvKdDbCeil], so a margin past the ceiling
