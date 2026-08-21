@@ -1713,8 +1713,12 @@ const time_t SOFTCLOCK_SANE_EPOCH = 1577836800;
 // "once TIME_GPS, never NTP again" bug).
 unsigned long lastNmea2kSystemTimeMs = 0;  // millis() of last successful PGN 126992 SystemTime parse
 unsigned long lastNmea2kGnssMs       = 0;  // millis() of last successful PGN 129029 GNSS position parse
+unsigned long lastNmea2kSogMs        = 0;  // millis() of last PGN 129026 parse with a valid SOG field
+unsigned long lastNmea2kCogMs        = 0;  // millis() of last PGN 129026 parse with a valid COG field
 unsigned long lastPhoneTimeMs        = 0;  // millis() of last phone-sourced time POST
 unsigned long lastPhoneGpsMs         = 0;  // millis() of last phone-sourced GPS POST
+unsigned long lastPhoneSpdMs         = 0;  // millis() of last phone-sourced speed POST
+unsigned long lastPhoneHdgMs         = 0;  // millis() of last phone-sourced heading POST
 const unsigned long NMEA_TIME_FRESH_MS = 300000UL;   // 5 min — fall back to other sources if no SystemTime
 const unsigned long NMEA_GPS_FRESH_MS  = 60000UL;    //  1 min — GPS PGN cadence is ~1-2s, anything >60s is dead
 const unsigned long PHONE_FRESH_MS     = 120000UL;   //  2 min — app posts every ~30-60s
@@ -1724,6 +1728,8 @@ const unsigned long PHONE_FRESH_MS     = 120000UL;   //  2 min — app posts eve
 double LatitudePhone  = 0.0;
 double LongitudePhone = 0.0;
 time_t PhoneTimeEpoch = 0;  // Unix seconds the phone reported, anchored at lastPhoneTimeMs
+float  SpeedPhone     = 0.0f;  // knots (Geolocation API reports m/s; converted at the /set_phone_data handler)
+float  HeadingPhone   = 0.0f;  // degrees, course over ground from the phone GNSS (doppler, true north)
 
 // Manually typed coordinates (Weather Mode "Override manually"). When
 // gpsManualActive is set, these win over BOTH boat NMEA and phone GPS and stick
@@ -1738,6 +1744,17 @@ bool   gpsManualActive = false;
 // `currentGpsSource` for the dashboard's live source indicator.
 enum GpsSource { GPS_NONE, GPS_NMEA, GPS_PHONE, GPS_MANUAL };
 GpsSource currentGpsSource = GPS_NONE;
+// Which source owns speed/course (SOGNMEA/COGNMEA). Selectable ONLY — phone speed is
+// never an automatic fallback (user decision 2026-08-21): speedSourceMode below picks
+// the owner outright, independent of gpsTimeSourceMode. Never GPS_MANUAL (typed
+// coordinates carry no speed). Published in CSV2 slot `currentSpeedSource`.
+GpsSource currentSpeedSource = GPS_NMEA;
+
+// Owner of speed/course. SPD_SRC_PHONE = phone GNSS doppler via /set_phone_data
+// (client posts ~2 s in this mode); NMEA PGN 129026 writes are suppressed so the
+// record chain never mixes sources. Persisted NVS Pattern B.
+enum SpeedSourceMode { SPD_SRC_NMEA, SPD_SRC_PHONE };
+uint8_t speedSourceMode = SPD_SRC_NMEA;
 
 // User override for the GPS+time priority chain. Default GTS_AUTO runs the
 // freshness-arbitrated chain. The forced modes pin behaviour even if the
@@ -1835,6 +1852,7 @@ struct SensorWindow {
   int32_t sog_min = 999900;
   int32_t sog_max = 0;
   int32_t sogSust1m_max = 0;   // kts ×100, best 60-s average seen this window (feeds the cloud speed board)
+  uint8_t sogSustPhone = 0;    // 1 = the standing sogSust1m_max was phone-GPS-sourced (leaderboard disqualification flag)
   int64_t sog_area_v_us = 0;
   uint64_t sog_valid_us = 0;
 
@@ -3276,6 +3294,13 @@ float tuningSweepBattV      = 0.0f;    // bus voltage snapshot during the sweep
 bool  tuningSweepDutyRailed = false;   // field duty hit 0%/100% on any sine peak
 float tuningSweepWorstCoh   = 1.0f;    // min IN-BAND fit coherence (0..1, 1=clean); rolled-off points excluded so slow alternators don't false-fail
 float tuningSweepFsHz       = 0.0f;    // control-tick rate measured DURING the last sweep (samples/accumulate-window); 0 = not measured
+// Protection-abort latch (latched in applyImmediateCut, first cause wins, cleared at sweep start).
+// Served by /tuningbode so the dashboard can name the real cause and discard the run. Pre-latch, the
+// sweep ran on through the cut + lockout, the low duty rail set tuningSweepDutyRailed, and the
+// dashboard blamed field saturation / cruising speed for what was really a protection cut.
+volatile uint8_t tuningSweepAbortReason = 0;  // 0 = none; else FieldEventReason code
+float tuningSweepAbortVolts = 0.0f;           // bus volts at the cut
+float tuningSweepAbortDuty  = 0.0f;           // commanded field % at the cut
 
 // Current closed-loop sine-sweep history (50-record ring, /tuningsweeplog.bin).
 struct TuningSweepRecord {
@@ -3945,11 +3970,17 @@ uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise
 uint8_t cvRecovEnable = 1;   // master switch for the post-protection integrator refill (deficit-gated Ki boost, replaced the timed window 2026-07-21). 1 = up-integration runs at Ki × up-to-cvRecovKiMax, tapering with the remaining reseed deficit; 0 = plain PI walks itself back (pace scales with post-cut error). Default ON since the 07-22 lithium A/B (single fire, ~5× refill rate, healed exit, no overshoot)
 uint8_t loadServeBoostEnable = 1;  // load-serve Ki boost (07-22): while the battery shunt shows sustained discharge in CV, up-integration runs at the refill's boosted rate toward the measured house loads — a stiff plant hides a 35A load behind ~0.25V of error, so plain Ki picks it up in ~30s. Shunt-gated; inert without one. Dev default ON, production TBD
 uint8_t reseedCorrEnable = 1;      // demand-corrected reseed (07-22, the 8-fire train): subtract the measured load drop at the fire from the release reseed + refill goal (shunt-gated), and escalate the ratchet ×0.85 per re-fire <1.5s after release (shunt-independent). OFF = plain ReseedFrac reseed
-// --- Hunt Governor (universal anti-oscillation damper — Hunt_Governor_Spec.md) ---
-uint8_t HuntGovEnable = 0;           // 1 = watch applied duty for a sustained 0.3–3 Hz hunt (idle-knee speed-coupled plant, 07-22 22:16 AGM logs) and derate the inner-loop Ki until it dies; an episode gain cuts cannot quiet is reverted in full (external cyclic source). Opt-in (operator decision 08-20); NVS-seeded units keep their stored value
-volatile float g_huntDerate = 1.0f;  // live Ki multiplier [0.25..1]; applied inside recomputeCcGains so every SetTunings path preserves it. Session-only — never persisted
+// --- Hunt Governor v2 (persistent speed-map oscillation damper — HUNT_GOVERNOR_V2_SPEC.md) ---
+uint8_t HuntGovEnable = 0;           // 1 = watch applied duty for a sustained 0.3–3 Hz hunt (idle-knee speed-coupled plant, 07-22 22:16 AGM logs); a verified single cut to HuntCutPct is mapped as a persistent speed pocket and applied proactively on pocket entry. Opt-in (operator decision 08-20); NVS-seeded units keep their stored value
+volatile float g_huntDerate = 1.0f;  // live Ki multiplier; applied inside recomputeCcGains so every SetTunings path preserves it. In v2 this is the map value at the current speed (HuntCutPct/100 inside a pocket core), or the held test cut during an episode
+volatile float g_huntKdScale = 1.0f; // live CV D-term multiplier (second damper lever, 08-21 D-driven variant): 0 during a D test and inside a verified D-pocket core, wing-tapered between. Applied at the kdTrim choke point every tick — a PARTIAL D cut only moves the deadband limit cycle to a larger amplitude, so the D lever is binary off, never HuntCutPct
 float g_huntFreqHz = 0.0f;           // last confirmed wobble frequency (CSV1/ledger)
-uint8_t g_huntState = 0;  // 0 idle, 1 episode, 2 hold(creep toward session ceiling), 3 standdown — the state machine's own variable, file-global so CSV1 can stream it to the Diag panel (derate alone can't tell "watching at reduced gain" from "actively damping")
+uint8_t g_huntState = 0;  // 0 watching (gain follows the pocket map), 1 testing Ki (single cut applied, verdict pending), 3 cooldown after a failed test, 4 testing the CV D-term lever (D paused, Ki untouched); 2 is unused in v2 (was the v1 hold/creep state) — file-global so CSV1 can stream it to the Diag panel
+uint8_t HuntCutPct = 50;       // gain the damper cuts TO during a test and holds inside a pocket core, % of user Ki. One big cut gives the verify comparison its S/N; also the map floor — repeat episodes widen pockets, never deepen. Clamp [25,80]
+uint8_t HuntVerifyPct = 15;    // required ripple reduction (%) for a test to pass, 3-scan average vs 3-scan average — single windows jitter more than this on their own. Clamp [5,60]
+uint8_t HuntWingPct = 15;      // pocket edge taper width, % of speed beyond each core end over which gain ramps linearly back to full. Clamp [5,40]
+uint8_t HuntCooldownMin = 10;  // minutes after a failed test before another test may open. Clamp [1,60]
+uint8_t HuntSteadyPct = 3;     // engine-speed steadiness tolerance (%): scan-mean RPM must stay within this of the episode reference through qualify+verify, else the episode aborts with nothing kept. Clamp [1,10]
 float cvRecovSec = 2.5f;     // retired timed-window ramp span, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovEmaxV = 0.25f;  // retired timed-window error cap, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovKiMax = 5.0f;   // refill Ki multiplier at the moment of release (M tapers linearly to 1× as the deficit heals). Clamp [1,10]
@@ -5533,6 +5564,7 @@ void setup() {
   initNVSCache();                  // Sync change-detection cache with loaded NVS values to prevent false writes
   restoreSoftClock();              // Re-establish a usable timebase (retained RTC, else NVS epoch) so AP-mode/no-internet Long Term records aren't stamped 0 and rendered as phantom gaps. Snaps to truth when a real source reports.
   loadUsageAccum();                // App-usage accumulator survives the maintenance restart (dumped at the shutdown flush points)
+  huntMapLoad();                   // Oscillation-damper speed pockets (RAM-authoritative; this is the boot restore)
   {  // Seed Free Data Storage once — boot is a guaranteed-safe moment for the ~100ms usedBytes() traversal
     size_t fsTotal = 0, fsUsed = 0;
     if (fsStatsTry(fsTotal, fsUsed) && fsTotal >= fsUsed) LittleFsFreeKb = (int)((fsTotal - fsUsed) / 1024);
@@ -6519,6 +6551,7 @@ void loop() {
         if (hardwarePresent == 1 && fieldCutSettled(10000)) {
           cxLedgerDrainService();
           huntLedgerService();  // hunt-episode records queued in RAM by the control path → flash, here only
+          huntMapService();     // damper pocket map — same rule: flash only here, never in the control path
         }
       }
       TIMED_CALL(ft_ch1_compute_stats, ch1_compute_stats());

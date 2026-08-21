@@ -777,6 +777,8 @@
             <!-- data-alt-panel drives the active-pill match in showAltTab; the button's onclick
                  cannot be relied on (goToTuning() never contains its panel id "tuning"). -->
             <div class="alt-tabs alt-tabs-primary">
+              <button class="alt-tab-btn alt-tab-btn-primary" data-alt-panel="alt-panel-commissioning"
+                      onclick="showAltTab('primary', 'alt-panel-commissioning')">Commissioning</button>
               <button class="alt-tab-btn alt-tab-btn-primary active" data-alt-panel="alt-panel-alt-setup"
                       onclick="showAltTab('primary', 'alt-panel-alt-setup')">Basic</button>
               <button class="alt-tab-btn alt-tab-btn-primary" data-alt-panel="alt-panel-quick-view"
@@ -790,6 +792,41 @@
               <button class="alt-tab-btn alt-tab-btn-primary" data-alt-panel="settings-diag"
                       onclick="showAltTab('primary', 'settings-diag')">Diag</button>
             </div>
+
+            <!-- Commissioning — first alt-tab. Was a Tuning sub-tab; the wizard is the
+                 entry point for a new install, so it leads the Alternator tabs. -->
+            <div id="alt-panel-commissioning" class="alt-panel alt-panel-primary">
+              <div class="settings-card">
+
+                <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px 0;line-height:1.55;">
+                  A  wizard to pre-tune the current and voltage control loops (and some additional parameters) for this alternator.
+                </p>
+
+                <!-- Overall status line — always present (the badge hides once commissioned). -->
+                <div class="form-row" style="margin-bottom:14px;">
+                  <div class="form-label"><span>Status:</span></div>
+                  <div class="form-input"><strong id="commission-overall" style="color:var(--text-muted);">…</strong></div>
+                </div>
+
+                <hr />
+                <p class="card-group-title" style="margin:12px 0 10px 0;">Steps</p>
+                <p style="font-size:12px;color:var(--text-muted);margin:0 0 4px 0;">Progress is saved on the regulator, so it survives a page reload and shows the same on any device. The badge on the right of each step shows its state: <strong style="color:#2e7d32;">✓ DONE</strong> = finished, <strong style="color:#1565c0;">▶</strong> = the step you're on (RUNNING while the wizard is open, RESUME when paused), ○ = not yet run. Tick the steps to run, then press the button below — coupled steps are selected automatically.</p>
+                <!-- Select-all master + per-step checkboxes rendered by renderCommissionStatus(). -->
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:6px 0 2px 2px;cursor:pointer;">
+                  <input type="checkbox" id="commission-select-all" onchange="cxToggleSelectAll(this.checked)" checked> Select all steps
+                </label>
+                <!-- Checklist rendered by renderCommissionStatus(); rows mirror CX_PHASES / COMMISSION_STEPS. -->
+                <div id="commission-checklist" style="background:var(--card-light);padding:6px 16px 12px;border-radius:var(--radius);border-left:4px solid var(--accent);"></div>
+
+                <!-- Start button sits BELOW the checklist so the steps are chosen first. Label/class/help/action
+                     adapt to the ticked plan vs. done-mask in renderCommissionStatus()/cxStartIntent():
+                     Start / Continue / Clear-and-restart. commissionPrimaryAction() routes a wholesale redo
+                     through the revert path. -->
+                <button id="commission-start-btn" onclick="commissionPrimaryAction()" class="btn-primary" style="width:100%;padding:12px;margin-top:12px;">Start commissioning…</button>
+                <p id="commission-start-help" style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Only the ticked steps will run.</p>
+
+              </div>
+            </div><!-- END alt-panel-commissioning -->
 
             <div id="alt-panel-quick-view" class="alt-panel alt-panel-primary">
 
@@ -1376,7 +1413,7 @@
                       </div>
 
                       <div id="minpct-cal-hint" style="display:none; margin-top:10px; font-size:12px; color:#c77d1a;">
-                        No calibration data yet — run the Min% floor commissioning step (Setup &#9656; Commissioning) to measure the per-RPM onset floors.
+                        No calibration data yet — run the Min% floor commissioning step (Setup &#9656; Alternator &#9656; Commissioning) to measure the per-RPM onset floors.
                       </div>
                       <div class="btn-row" style="margin-top:10px;">
                         <button type="button" class="btn-danger-ghost btn-sm" onclick="resetKneeLearn()">Reset Learned Floors</button>
@@ -3153,8 +3190,7 @@
   <div id="tuning" class="alt-panel alt-panel-primary">
     <!-- Tuning Sub-tabs -->
     <div class="sub-tabs">
-      <button class="tuning-tab active" onclick="showTuningPanel('commissioning', event)">Commissioning</button>
-      <button class="tuning-tab" onclick="showTuningPanel('plant-delay', event)">Plant Delay</button>
+      <button class="tuning-tab active" onclick="showTuningPanel('plant-delay', event)">Plant Delay</button>
       <button class="tuning-tab" onclick="showTuningPanel('current', event)">Current</button>
       <button class="tuning-tab" onclick="showTuningPanel('voltage', event)">Voltage</button>
       <button class="tuning-tab" onclick="showTuningPanel('temperature', event)">Temperature</button>
@@ -3162,42 +3198,8 @@
       <button class="tuning-tab" onclick="showTuningPanel('about', event)">About</button>
     </div>
 
-    <!-- Commissioning -->
-    <div id="tuning-commissioning" class="tuning-panel active">
-      <div class="settings-card">
-
-        <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px 0;line-height:1.55;">
-          A  wizard to pre-tune the current and voltage control loops (and some additional parameters) for this alternator.
-        </p>
-
-        <!-- Overall status line — always present (the badge hides once commissioned). -->
-        <div class="form-row" style="margin-bottom:14px;">
-          <div class="form-label"><span>Status:</span></div>
-          <div class="form-input"><strong id="commission-overall" style="color:var(--text-muted);">…</strong></div>
-        </div>
-
-        <hr />
-        <p class="card-group-title" style="margin:12px 0 10px 0;">Steps</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 4px 0;">Progress is saved on the regulator, so it survives a page reload and shows the same on any device. The badge on the right of each step shows its state: <strong style="color:#2e7d32;">✓ DONE</strong> = finished, <strong style="color:#1565c0;">▶</strong> = the step you're on (RUNNING while the wizard is open, RESUME when paused), ○ = not yet run. Tick the steps to run, then press the button below — coupled steps are selected automatically.</p>
-        <!-- Select-all master + per-step checkboxes rendered by renderCommissionStatus(). -->
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:6px 0 2px 2px;cursor:pointer;">
-          <input type="checkbox" id="commission-select-all" onchange="cxToggleSelectAll(this.checked)" checked> Select all steps
-        </label>
-        <!-- Checklist rendered by renderCommissionStatus(); rows mirror CX_PHASES / COMMISSION_STEPS. -->
-        <div id="commission-checklist" style="background:var(--card-light);padding:6px 16px 12px;border-radius:var(--radius);border-left:4px solid var(--accent);"></div>
-
-        <!-- Start button sits BELOW the checklist so the steps are chosen first. Label/class/help/action
-             adapt to the ticked plan vs. done-mask in renderCommissionStatus()/cxStartIntent():
-             Start / Continue / Clear-and-restart. commissionPrimaryAction() routes a wholesale redo
-             through the revert path. -->
-        <button id="commission-start-btn" onclick="commissionPrimaryAction()" class="btn-primary" style="width:100%;padding:12px;margin-top:12px;">Start commissioning…</button>
-        <p id="commission-start-help" style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Only the ticked steps will run.</p>
-
-      </div>
-    </div>
-
     <!-- Plant Delay -->
-    <div id="tuning-plant-delay" class="tuning-panel">
+    <div id="tuning-plant-delay" class="tuning-panel active">
       <div class="settings-card">
 
         <p class="card-group-title" style="margin:0 0 10px 0;">Test Parameters</p>
@@ -4083,7 +4085,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Oscillation Damper (<span id="HuntGovEnable_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Watches for sustained slow hunting — a steady wobble in field drive, engine speed, and voltage, swinging about once a second, that some engine/alternator/belt combinations develop at low engine speed under heavy load. When it sees one, it turns down the strength of the regulator's response in steps and checks whether the wobble actually shrinks. The reduction is kept only if the wobble dies out entirely, or at least halves and stays halved — and it never goes below a quarter of normal strength. If turning the strength down does not calm the wobble (a cycling load or the engine itself is the likely cause), full strength is restored automatically and the damper stops trying for ten minutes. After a successful fix, the reduced setting is held while engine speed stays near where the wobble happened; once speed moves well away — roughly a quarter below or a third above that point — the setting climbs slowly back to full over a few minutes. The speed check uses a slow average, so the release can lag a real speed change by ten seconds or more. Each episode is kept in a small permanent log on the device; live state and history are under Live Data ▸ Diag ▸ Oscillation Damper. <strong>Off:</strong> hunting persists at full strength until conditions change.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Watches for sustained slow hunting — a steady wobble in field drive, engine speed, and voltage, swinging about once a second, that some engine/alternator/belt combinations develop at low engine speed under heavy load. When it sees one while engine speed is holding steady, it makes a single test cut in the strength of the regulator's response (to the Damped Gain below) and measures the wobble again. If the wobble shrinks by at least the Required Improvement, that engine speed is saved as a trouble spot in a permanent map, and the reduced strength is applied whenever the engine is at that speed from then on — before any wobble appears — tapering back to full strength away from it. A wobble that keeps the fast voltage damper (the D-term) rhythmically switching direction is tested differently: the damper pauses the D-term first, and if that stops the wobble, the D-term alone is switched off across that trouble spot while everything else keeps full strength. If the wobble responds to neither test, the cause is outside the regulator (a cycling load, or the engine's own governor): full strength is restored and no new test runs for the Retest Cooldown. The map survives restarts; the Clear System button under Live Data ▸ Diag ▸ Oscillation Damper erases it, and it clears automatically when the system voltage class changes, engine speed is recalibrated, or the Alternator Health record is reset after a hardware swap. <strong>Off:</strong> full strength always; the map is kept but not applied.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4095,6 +4097,76 @@
                       </label>
                       <span class="toggle-label">On</span>
                       <input id="HuntGovEnable" name="HuntGovEnable" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Damped Gain (% of PID Ki) (<span id="HuntCutPct_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">The strength the damper cuts to during a wobble test, and holds across a mapped trouble spot — as a percentage of the PID Ki you set. One large cut makes the pass/fail measurement unambiguous against normal noise. Lower holds the response softer inside trouble spots; higher gives up less response but makes a genuine improvement harder to tell from luck. Repeat episodes widen a trouble spot across speed; they never cut deeper than this.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="HuntCutPct" type="number" step="1" min="25" max="80" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Required Improvement (%) (<span id="HuntVerifyPct_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How much the wobble must shrink — comparing averaged readings before and after the test cut — for the cut to be kept and mapped. Higher demands stronger proof, so fewer false trouble spots but a real one may take more episodes to confirm; lower accepts weaker evidence.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="HuntVerifyPct" type="number" step="1" min="5" max="60" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Pocket Edge Taper (% of speed) (<span id="HuntWingPct_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How far beyond each end of a mapped trouble spot the reduced strength tapers back to full, as a percentage of engine speed. Wider covers more of the neighborhood either side of proven wobble speeds; narrower confines the reduction to exactly where wobbles were verified.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="HuntWingPct" type="number" step="1" min="5" max="40" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Retest Cooldown (min) (<span id="HuntCooldownMin_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How long the damper waits after a failed test before it will test again. A failed test means the wobble did not respond to the gain cut, so its cause is likely external — retesting immediately would only repeat the disturbance.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="HuntCooldownMin" type="number" step="1" min="1" max="60" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Speed Steadiness (%) (<span id="HuntSteadyPct_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How steady engine speed must hold, as a percentage of the speed where the wobble was first seen, through detection and the whole test. If speed drifts further than this before the verdict, the test is abandoned with nothing kept — a moving throttle is not hunting. The wobble's own speed ripple rides on a steady average and does not count against it.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="HuntSteadyPct" type="number" step="1" min="1" max="10" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
@@ -6944,7 +7016,7 @@
                   <span>Shunt Resistance uOhms (micro)(<span id="ShuntResistanceMicroOhm_echo">?</span>):</span>
                   <span class="tooltip">
                     ℹ️
-                    <span class="tooltip-box" style="max-width:min(360px, calc(100vw - 32px)); max-height:60vh; overflow:auto;">Resistance of your current shunt in micro-ohms (µΩ). The current sensor converts the shunt's measured voltage drop to amps using this value — a wrong value scales all current and SoC readings proportionally. Shunts are rated by a full-scale millivolt drop at a rated current, and the resistance follows: µΩ = mV ÷ amps × 1000. Victron SmartShunt / BMV are the 50&nbsp;mV family (500&nbsp;A = 100&nbsp;µΩ, 1000&nbsp;A = 50&nbsp;µΩ, 2000&nbsp;A = 25&nbsp;µΩ). Check your shunt's datasheet for the exact rating.
+                    <span class="tooltip-box" style="max-width:min(360px, calc(100vw - 36px)); max-height:60vh; overflow:auto;">Resistance of your current shunt in micro-ohms (µΩ). The current sensor converts the shunt's measured voltage drop to amps using this value — a wrong value scales all current and SoC readings proportionally. Shunts are rated by a full-scale millivolt drop at a rated current, and the resistance follows: µΩ = mV ÷ amps × 1000. Victron SmartShunt / BMV are the 50&nbsp;mV family (500&nbsp;A = 100&nbsp;µΩ, 1000&nbsp;A = 50&nbsp;µΩ, 2000&nbsp;A = 25&nbsp;µΩ). Check your shunt's datasheet for the exact rating.
                       <table style="width:100%; margin-top:6px; border-collapse:collapse; font-size:11px; text-align:right;">
                         <tr style="color:#bcd;"><th style="text-align:left;">Rated</th><th>µΩ</th><th>mΩ</th></tr>
                         <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">50 mV — Victron / marine</td></tr>
@@ -8345,57 +8417,6 @@
                   </div>
                 </div>
               </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Dashboard Update Rate (ms) (<span id="webgaugesinterval_echo">?</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box">How often the dashboard receives fresh sensor data, in milliseconds
-                      (default 100 ms ≈ 10/s). Affects the display only, not how the regulator controls the
-                      alternator.
-                      <br><br>
-                      <b>Advanced — not recommended.</b> Several display features assume the default rate; changing
-                      it has downstream effects (plot spacing, buffer windows) that may need firmware changes to
-                      track correctly. Leave at default unless you know why you're changing it.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="webgaugesinterval" type="number" step="10" min="50" max="2000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Fast Channel Plot Sampling (<span id="battMaxMode_echo">?</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box">Several signals are measured far faster than the dashboard send rate,
-                      so each sent point can only represent one instant of that window. This selects what that point
-                      reports: Average takes the mean of the window (smoothed, anti-aliased); Max reports the
-                      largest-magnitude sample so brief peaks and spikes are not missed. Max applies to the battery
-                      voltage, battery current, and alternator current traces and readouts; the other averaged
-                      channels stay on the mean either way.
-                      <br><br>
-                      <b>Diagnostic.</b> Max makes those readouts show the window peak rather than the present value,
-                      and it corrupts Voltage Control Autotuning — use Average for normal operation and commissioning.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <select name="battMaxMode">
-                      <option value="0">Average</option>
-                      <option value="1">Max</option>
-                    </select>
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
             </details>
 
             <!-- Display Preferences Section -->
@@ -8615,6 +8636,57 @@
                       </label>
                       <span class="toggle-label">On</span>
                       <input id="LimpHome" name="LimpHome" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Dashboard Update Rate (ms) (<span id="webgaugesinterval_echo">?</span>):</span>
+                    <span class="tooltip">
+                      ℹ️
+                      <span class="tooltip-box">How often the dashboard receives fresh sensor data, in milliseconds
+                        (default 100 ms ≈ 10/s). Affects the display only, not how the regulator controls the
+                        alternator.
+                        <br><br>
+                        <b>Advanced — not recommended.</b> Several display features assume the default rate; changing
+                        it has downstream effects (plot spacing, buffer windows) that may need firmware changes to
+                        track correctly. Leave at default unless you know why you're changing it.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="webgaugesinterval" type="number" step="10" min="50" max="2000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Fast Channel Plot Sampling (<span id="battMaxMode_echo">?</span>):</span>
+                    <span class="tooltip">
+                      ℹ️
+                      <span class="tooltip-box">Several signals are measured far faster than the dashboard send rate,
+                        so each sent point can only represent one instant of that window. This selects what that point
+                        reports: Average takes the mean of the window (smoothed, anti-aliased); Max reports the
+                        largest-magnitude sample so brief peaks and spikes are not missed. Max applies to the battery
+                        voltage, battery current, and alternator current traces and readouts; the other averaged
+                        channels stay on the mean either way.
+                        <br><br>
+                        <b>Diagnostic.</b> Max makes those readouts show the window peak rather than the present value,
+                        and it corrupts Voltage Control Autotuning — use Average for normal operation and commissioning.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <select name="battMaxMode">
+                        <option value="0">Average</option>
+                        <option value="1">Max</option>
+                      </select>
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
@@ -10362,10 +10434,11 @@
 
       <div class="settings-card">
 
-        <!-- Kept outside the accordion below: nothing ever opens it, so a warning inside is never seen. -->
-        <div id="imuInstallWarn" class="imu-install-warn" style="display:none;"></div>
         <details>
           <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Comfort &amp; Motion</summary>
+        <!-- Inside the accordion on purpose: it qualifies the heel/pitch/slam numbers below, so it
+             is only worth showing to someone who has opened them. -->
+        <div id="imuInstallWarn" class="imu-install-warn" style="display:none;"></div>
         <div class="grid">
           <!-- Motion — always-on basics -->
           <div class="card-group" id="imu-current-motion-group">
@@ -13191,11 +13264,16 @@
             Some engine, alternator and belt combinations develop a slow wobble at low engine speed
             under heavy load — a steady swing, somewhere between about a third of a cycle and two
             cycles per second, in field drive, engine speed and voltage together. The damper watches
-            field drive for that wobble and temporarily reduces the current loop's integral gain
-            until it dies. Every reduction is verified: it is kept only if the wobble measurably
-            responds. If it does not respond, the cause is outside the regulator — a cycling load, or
-            the engine's own governor — and full gain is restored. No gain change is ever stored
-            permanently; everything here clears on restart.
+            field drive for that wobble while engine speed is steady, makes a single test cut in the
+            current loop's integral gain, and keeps the cut only if the wobble measurably shrinks.
+            A verified cut is saved as a trouble spot on a permanent speed map: the reduced gain is
+            applied whenever the engine is at that speed — before any wobble appears — tapering back
+            to full gain away from it. The damper has a second lever: a wobble that keeps the
+            voltage damper (the D-term) rhythmically switching direction is tested by pausing the
+            D-term instead — if the wobble stops, the D-term is switched off at that speed and
+            everything else stays at full strength. A wobble that responds to neither lever is not
+            the regulator (a cycling load, or the engine's own governor) and full strength is
+            restored. The map survives restarts; Clear System below erases it.
           </p>
 
           <div class="metric-row telemetry-row" style="align-items:flex-start;">
@@ -13210,7 +13288,7 @@
           <div class="form-row">
             <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
               <span>Oscillation Damper</span>
-              <span class="tooltip">ℹ️<span class="tooltip-box">The same switch as Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters — either one sets it. <strong>On:</strong> the damper watches for a slow steady wobble and turns down the strength of the regulator's response in steps until the wobble dies, keeping the reduction only if the wobble measurably shrinks — never below a quarter of normal strength. After a fix, the reduced setting is held until engine speed moves well away from where the wobble happened, then climbs slowly back to full. <strong>Off:</strong> the regulator always runs at full strength, and hunting persists until conditions change. Switching it off restores full strength immediately, including any reduction being held right now.</span></span>
+              <span class="tooltip">ℹ️<span class="tooltip-box">The same switch as Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters — either one sets it, and the test/map settings live there too. <strong>On:</strong> the damper tests a detected wobble with a single gain cut — or by pausing the voltage damper (D-term) when that is the part swinging — maps verified trouble spots by engine speed, and applies the fix across them proactively. <strong>Off:</strong> the regulator always runs at full strength; the learned map is kept but not applied. Switching it off restores full strength immediately.</span></span>
             </div>
             <div class="form-input">
               <form action="/get" method="GET" target="hidden-form">
@@ -13229,7 +13307,7 @@
           <div class="metric-row telemetry-row">
             <span class="metric-label telemetry-label">Current-loop gain now, as a share of your PID Ki
               <span class="tooltip">ℹ️
-                <span class="tooltip-box">The integral gain the current loop is actually running at, as a percentage of the PID Ki you set. 100% is your full setting; anything less is the damper holding it down. It climbs back at about 0.2% per second, and after a verified episode it parks just above the level that proved quiet — so it will not reach 100% again until engine speed moves well away from where the wobble happened, or the regulator restarts.</span></span>
+                <span class="tooltip-box">The integral gain the current loop is actually running at, as a percentage of the PID Ki you set. 100% is your full setting; anything less means the engine is inside a mapped trouble spot, or a test cut is being verified right now. It follows the speed map directly — full gain outside every pocket, the Damped Gain inside one, ramping across the tapered edges.</span></span>
             </span>
             <span class="metric-value telemetry-value"><span id="hgGainPct">—</span></span>
           </div>
@@ -13243,8 +13321,40 @@
           </div>
           <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
           <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Voltage damper (D-term)
+              <span class="tooltip">ℹ️
+                <span class="tooltip-box">The regulator's fast voltage damper. Normally Running. During a damper test it can be paused, and if pausing it stopped a verified wobble it stays off across that trouble spot on the speed map — shown purple on the plot — while every other gain stays at full strength. It is never reduced partway: a half-strength damper would let the same wobble settle at a larger swing.</span></span>
+            </span>
+            <span class="metric-value telemetry-value"><span id="hgKdState">—</span></span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+          <div class="metric-row telemetry-row">
             <span class="metric-label telemetry-label">Episodes on record</span>
             <span class="metric-value telemetry-value"><span id="hgEpisodeCount">—</span></span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+
+          <!-- Speed map: the live gain-vs-speed profile from /huntmap (trapezoid pockets), episode
+               dots from the same /huntledger parse as the list below, and a live engine-speed
+               marker. Built by renderHuntMap(); stays hidden until there is a pocket or an episode
+               with an engine speed. -->
+          <div id="hgMapWrap" style="display:none;margin-top:10px;">
+            <div id="hgMapPlot"></div>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:0.78em;color:var(--text-muted);">
+              <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:14px;height:3px;background:#3a7bd5;display:inline-block;flex:none;"></span>Gain applied vs engine speed</span>
+              <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:9px;height:9px;border-radius:50%;background:#3a7bd5;display:inline-block;flex:none;"></span>Verified episode</span>
+              <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:9px;height:9px;border-radius:50%;border:2px solid #c07f2f;display:inline-block;box-sizing:border-box;flex:none;"></span>Did not respond</span>
+              <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:9px;height:9px;border-radius:50%;background:#8256b0;display:inline-block;flex:none;"></span>Voltage damper switched off</span>
+              <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:14px;height:9px;background:rgba(130,86,176,0.25);display:inline-block;flex:none;"></span>Voltage-damper-off span</span>
+              <span id="hgMapExcluded"></span>
+            </div>
+            <p style="font-size:0.74em;color:var(--text-muted);margin:6px 0 0 0;">
+              The blue line is the live rule: the current-loop gain the regulator applies at each
+              engine speed — full everywhere, reduced across each learned trouble spot (the shaded
+              span), ramping back to full over the tapered edges. Dots are the evidence: filled blue
+              at the speed of each verified episode, hollow amber where a wobble did not respond.
+              The dashed vertical line is the engine right now.
+            </p>
           </div>
 
           <!-- Stacked entries, not a table: every diag-section is capped at 600px, and the seven
@@ -13260,8 +13370,14 @@
             <a id="hgRawLink" href="/huntledger" target="_blank" rel="noopener">/huntledger</a>.
           </p>
 
-          <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
-            <button type="button" class="btn-secondary" onclick="fetchHuntLedger()">↺ Refresh</button>
+          <div style="display:flex;gap:10px;margin-top:8px;align-items:center;flex-wrap:wrap;">
+            <button type="button" class="btn-secondary" onclick="fetchHuntLedger()">↺ Re-read episode record</button>
+            <span style="font-size:0.74em;color:var(--text-muted);">Fetches the record again from the regulator, including episodes not yet saved to its flash. Reads only — nothing is changed, cleared, or restarted.</span>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:8px;align-items:center;flex-wrap:wrap;">
+            <button type="button" class="btn-secondary" onclick="clearHuntSystem()">Clear System</button>
+            <span id="hgClearStatus" style="font-size:0.8em;color:var(--accent);"></span>
+            <span style="font-size:0.74em;color:var(--text-muted);">Permanently erases everything the damper has learned — the speed map and the episode record — and cancels any test in progress. Gain returns to 100% everywhere until a new wobble is verified. Requires the dashboard to be unlocked.</span>
           </div>
         </div>
       </details>
@@ -13523,7 +13639,9 @@
             better severity measure there.
           </p>
 
-          <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+          <!-- wrap: the two labels together are wider than a 320px phone and pushed the whole page
+               into horizontal scroll -->
+          <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;">
             <button type="button" class="btn-secondary" onclick="fetchOvTelemetry()">↺ Refresh</button>
             <button type="button" class="btn-secondary" onclick="resetOvTelemetryLifetime()">Reset Lifetime OV History</button>
           </div>
@@ -13994,6 +14112,7 @@
                 NMEA only: ignore phone and NTP even if NMEA is dead.<br>
                 Phone only: ignore NMEA and NTP even if phone is offline.<br>
                 NTP time only: use internet time only; GPS still falls through Auto.<br>
+                Governs position and time. Speed and course have their own selector below.<br>
                 Forcing a stale source still shows its last value (greyed) so you can diagnose.<br>
                 Note: a position typed manually in Setup ▸ Solar overrides every option here until you clear it there.
               </span>
@@ -14007,6 +14126,35 @@
                 <option value="1">NMEA only</option>
                 <option value="2">Phone only</option>
                 <option value="3">NTP time only</option>
+              </select>
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Speed / Course Source (<span id="speedSourceMode_echo">?</span>):</span>
+            <span class="tooltip">
+              ℹ️
+              <span class="tooltip-box">
+                Which source owns speed over ground and course: the NMEA 2000 bus, or this
+                app's phone GPS. The phone is never used automatically — only when selected
+                here.<br>
+                With Phone GPS selected, the app streams GPS fixes to the regulator about
+                every 2 seconds while it is open in the foreground; speed greys out when the
+                app stops posting. Continuous GPS use increases phone battery drain.<br>
+                Speed records set while Phone GPS is selected are flagged in cloud uploads
+                and excluded from the speed leaderboard.
+              </span>
+            </span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <select id="speedSourceMode" name="speedSourceMode"
+                onchange="speedSourceModeChanged(this)">
+                <option value="0">NMEA 2000</option>
+                <option value="1">Phone GPS (this app)</option>
               </select>
             </form>
           </div>
@@ -14769,8 +14917,8 @@
        save-chain promise. -->
   <div id="maint-ack-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9200; align-items:flex-start; justify-content:flex-start; overflow:auto; padding:20px; box-sizing:border-box;">
     <div style="position:relative; margin:auto 0; background:#1e1e1e; color:#ddd; width:470px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); display:flex; flex-direction:column;">
-      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
-        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Automatic Maintenance Restarts</span>
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:flex-start; justify-content:space-between; gap:10px; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em; line-height:1.35;">FYI Note:<br>Automatic Maintenance Restarts</span>
         <button onclick="maintAckClose()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
       </div>
       <div style="padding:18px 20px 16px; font-size:0.92em; line-height:1.5; overflow-y:auto; flex:1; min-height:0;">

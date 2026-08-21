@@ -292,6 +292,11 @@ bool fsRemove(const char *path) {
 #define NK_cvRecovFlareFrac "cvRcvFlareFrac"
 #define NK_loadServeBoostEnable "loadServeBoost"
 #define NK_HuntGovEnable "HuntGovEn"
+#define NK_HuntCutPct "HuntCutPct"
+#define NK_HuntVerifyPct "HuntVerifyPct"
+#define NK_HuntWingPct "HuntWingPct"
+#define NK_HuntCooldownMin "HuntCooldwnMin"
+#define NK_HuntSteadyPct "HuntSteadyPct"
 #define NK_reseedCorrEnable "reseedCorrEn"
 #define NK_dutySlewEnable "dutySlewEn"
 #define NK_testSlewMode "testSlewMode"
@@ -424,6 +429,7 @@ bool fsRemove(const char *path) {
 #define NK_displayTempUnit "displayTempUnit"
 #define NK_gpsManualActive "gpsManualActive"
 #define NK_gpsTimeSourceMode "gpsTimeSourceMd"
+#define NK_speedSourceMode "speedSourceMode"
 #define NK_hardwarePresent "hardwarePresent"
 #define NK_maxPoints "maxPoints"
 #define NK_perfPaused "perfPaused"
@@ -1372,7 +1378,9 @@ void TempTask(void *parameter) {
     float pendingMaxTempAllTime = 0.0f;
 
     // A single isConnected() false-negative is usually OneWire noise (field-PWM coupling), not a real
-    // disconnect — at 19kHz field PWM every 1-Wire bit slot spans switching edges, so corruption is
+    // disconnect — at a user-set 19kHz every 1-Wire bit slot spans switching edges (~5 CRC fails/min,
+    // a third never recovering); at the 400Hz default edges are sparse and hits are rare (2 in 48min,
+    // both recovered, 2026-08-21). Either way corruption is
     // probabilistic and an immediate re-roll usually lands clean (the CRC retry recovers ~2/3 the same
     // way). Retry in place before counting a miss. Tearing down enumeration on a counted miss forces the
     // slow re-enumerate path and its retry delays, which can stack past the 20s control-staleness gate
@@ -1842,6 +1850,7 @@ void resetSensorWindow() {
   currentWindow->sog_min = 999900;
   currentWindow->sog_max = 0;
   currentWindow->sogSust1m_max = 0;
+  currentWindow->sogSustPhone = 0;
   currentWindow->sog_area_v_us = 0;
   currentWindow->sog_valid_us = 0;
 
@@ -2157,7 +2166,12 @@ void updateSensorWindow() {
     if (sog > currentWindow->sog_max) currentWindow->sog_max = sog;
     // 0 while the 60-s window is uncovered — nothing to record then.
     int32_t sust = (int32_t)(sogSust1m * 100.0);
-    if (sust > currentWindow->sogSust1m_max) currentWindow->sogSust1m_max = sust;
+    if (sust > currentWindow->sogSust1m_max) {
+      currentWindow->sogSust1m_max = sust;
+      // Stamp the standing max's source so the cloud speed board can disqualify
+      // phone-GPS-sourced records (speedSourceMode is exclusive, so no mixing).
+      currentWindow->sogSustPhone = (currentSpeedSource == GPS_PHONE) ? 1 : 0;
+    }
     if (shouldAccumulate) {
       currentWindow->sog_area_v_us += (int64_t)sog * delta_us;
       currentWindow->sog_valid_us += delta_us;
@@ -2277,7 +2291,9 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     // v3 adds engine-on-weighted averages (*_onavg) + engine_on_pct coverage.
     // v4 adds sog_sust1m_max — the window's best 60-s average SOG, which now feeds the
     // cloud speed board in place of sog_max (a single-sample peak).
-    "\"payload_v\":4,"
+    // v5 adds speed_source_phone — true when the window's standing sog_sust1m_max was
+    // phone-GPS-sourced (selectable speedSourceMode), so leaderboards can disqualify.
+    "\"payload_v\":5,"
     "\"current_time_source\":%d,"
     // Battery
     "\"batt_volt_min\":%.2f,\"batt_volt_max\":%.2f,\"batt_volt_avg\":%.2f,"
@@ -2300,6 +2316,7 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     // NMEA navigation
     "\"sog_min\":%.2f,\"sog_max\":%.2f,\"sog_avg\":%.2f,"
     "\"sog_sust1m_max\":%.2f,"
+    "\"speed_source_phone\":%s,"
     "\"lat_current\":%.6f,\"lon_current\":%.6f,"
     // NMEA wind & sailing
     "\"aws_min\":%.2f,\"aws_max\":%.2f,\"aws_avg\":%.2f,"
@@ -2364,6 +2381,7 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     snap.window.sog_min / 100.0, snap.window.sog_max / 100.0,
     SAFE_AVG_100(snap.window.sog_area_v_us, snap.window.sog_valid_us),
     snap.window.sogSust1m_max / 100.0,
+    snap.window.sogSustPhone ? "true" : "false",
     snap.window.lat_current, snap.window.lon_current,
     snap.window.aws_min / 100.0, snap.window.aws_max / 100.0,
     SAFE_AVG_100(snap.window.aws_area_v_us, snap.window.aws_valid_us),

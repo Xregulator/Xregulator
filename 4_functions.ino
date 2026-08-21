@@ -1126,6 +1126,12 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     gpsTimeSourceMode = (uint8_t)settingRead(NK_gpsTimeSourceMode).toInt();
     if (gpsTimeSourceMode > GTS_NTP) gpsTimeSourceMode = GTS_AUTO;  // sanity
   }
+  if (!settingExists(NK_speedSourceMode)) {
+    settingWrite(NK_speedSourceMode, String(speedSourceMode).c_str());
+  } else {
+    speedSourceMode = (uint8_t)settingRead(NK_speedSourceMode).toInt();
+    if (speedSourceMode > SPD_SRC_PHONE) speedSourceMode = SPD_SRC_NMEA;  // sanity
+  }
   if (!settingExists(NK_MaintainMode)) {
     settingWrite(NK_MaintainMode, String(MaintainMode).c_str());
   } else {
@@ -1954,6 +1960,31 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_HuntGovEnable, String((int)HuntGovEnable).c_str());
   } else {
     HuntGovEnable = (uint8_t)settingRead(NK_HuntGovEnable).toInt();
+  }
+  if (!settingExists(NK_HuntCutPct)) {
+    settingWrite(NK_HuntCutPct, String((int)HuntCutPct).c_str());
+  } else {
+    HuntCutPct = (uint8_t)settingRead(NK_HuntCutPct).toInt();
+  }
+  if (!settingExists(NK_HuntVerifyPct)) {
+    settingWrite(NK_HuntVerifyPct, String((int)HuntVerifyPct).c_str());
+  } else {
+    HuntVerifyPct = (uint8_t)settingRead(NK_HuntVerifyPct).toInt();
+  }
+  if (!settingExists(NK_HuntWingPct)) {
+    settingWrite(NK_HuntWingPct, String((int)HuntWingPct).c_str());
+  } else {
+    HuntWingPct = (uint8_t)settingRead(NK_HuntWingPct).toInt();
+  }
+  if (!settingExists(NK_HuntCooldownMin)) {
+    settingWrite(NK_HuntCooldownMin, String((int)HuntCooldownMin).c_str());
+  } else {
+    HuntCooldownMin = (uint8_t)settingRead(NK_HuntCooldownMin).toInt();
+  }
+  if (!settingExists(NK_HuntSteadyPct)) {
+    settingWrite(NK_HuntSteadyPct, String((int)HuntSteadyPct).c_str());
+  } else {
+    HuntSteadyPct = (uint8_t)settingRead(NK_HuntSteadyPct).toInt();
   }
   if (!settingExists(NK_reseedCorrEnable)) {
     settingWrite(NK_reseedCorrEnable, String((int)reseedCorrEnable).c_str());
@@ -5122,6 +5153,26 @@ void consumePhoneGps() {
   currentGpsSource = GPS_PHONE;
 }
 
+// Phone speed/course — selectable source, never an automatic fallback (user decision
+// 2026-08-21): acts only when speedSourceMode == SPD_SRC_PHONE. Called from the
+// /set_phone_data handler on each accepted sample (client posts ~2 s in phone mode), so
+// the record chain gets real samples at NMEA-like cadence. No per-tick re-assert: if the
+// app stops posting, IS_STALE greys the value ~10 s later — the honest display. Not gated
+// on gpsManualActive (typed coordinates carry no speed).
+void applyPhoneSpeed(bool newSpd, bool newHdg) {
+  if (speedSourceMode != SPD_SRC_PHONE) return;
+  if (newSpd) {
+    SOGNMEA = SpeedPhone;
+    MARK_FRESH(IDX_SOG_NMEA);
+    updateSustainedSpeed(SOGNMEA);
+    wmIgnUpdate(wmIgn_SOG, SOGNMEA);
+  }
+  if (newHdg) {
+    COGNMEA = HeadingPhone;
+    MARK_FRESH(IDX_COG_NMEA);
+  }
+}
+
 // Resolve current GPS + time source labels every loop tick. Behaviour depends
 // on user-set gpsTimeSourceMode:
 //   GTS_AUTO  — freshness-arbitrated priority chain (NMEA→Phone→NTP). Promotes
@@ -5180,6 +5231,11 @@ void resolveSources() {
       }
       break;
   }
+
+  // ── Speed/course source ────────────────────────────────────────────────
+  // Selectable, not arbitrated: speedSourceMode owns speed/course outright.
+  // A dead selected source shows its last value greyed via IS_STALE.
+  currentSpeedSource = (speedSourceMode == SPD_SRC_PHONE) ? GPS_PHONE : GPS_NMEA;
 
   // ── Time source label ──────────────────────────────────────────────────
   // (Forced modes never need label-flipping here — the syncTime* setters are

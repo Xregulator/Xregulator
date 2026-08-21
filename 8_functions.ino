@@ -730,6 +730,11 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "loadServeBoostEnable", NK_loadServeBoostEnable, 1 },
   { "reseedCorrEnable", NK_reseedCorrEnable, 1 },
   { "HuntGovEnable", NK_HuntGovEnable, 1 },
+  { "HuntCutPct", NK_HuntCutPct, 1 },
+  { "HuntVerifyPct", NK_HuntVerifyPct, 1 },
+  { "HuntWingPct", NK_HuntWingPct, 1 },
+  { "HuntCooldownMin", NK_HuntCooldownMin, 1 },
+  { "HuntSteadyPct", NK_HuntSteadyPct, 1 },
   { "cvRecovSec", NK_cvRecovSec, 1 },      // retired, inert — kept so shared configs stay complete
   { "cvRecovEmaxV", NK_cvRecovEmaxV, 1 },  // retired, inert — kept so shared configs stay complete
   { "cvRecovKiMax", NK_cvRecovKiMax, 1 },
@@ -916,6 +921,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "VeData", NK_VeData, 1 },
   { "weatherModeEnabled", NK_weatherModeEnabled, 1 },
   { "gpsTimeSourceMode", NK_gpsTimeSourceMode, 1 },
+  { "speedSourceMode", NK_speedSourceMode, 1 },
   { "wifiNapEnabled", NK_wifiNapEnabled, 1 },
   { "ZeroLogEnable", NK_ZeroLogEnable, 1 },
   { "performanceRatio", NK_performanceRatio, 1 },

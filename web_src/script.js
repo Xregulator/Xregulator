@@ -350,7 +350,7 @@ const CSV1_FIELDS = [
     "cvKdFiltV",         // IBV smoothed by CvKdVoltFiltTC (V ×100) — "Voltage for D term" trace
     "huntDerate",        // hunt-governor live Ki derate (×100; 100 = full gain)
     "huntFreqHz",        // hunt-governor last confirmed wobble frequency (Hz ×100; 0 = none this session)
-    "huntState",         // hunt-governor state: 0 watching, 1 damping, 2 verified/recovering, 3 standing down
+    "huntState",         // 0 watching, 1 testing, 3 cooldown (2 unused since v2)
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -763,6 +763,7 @@ const CSV2_FIELDS = [
     "restartRemainingSec",                     // seconds until scheduled reboot (0 = banner hidden)
     "currentGpsSource",                        // 0=none, 1=NMEA, 2=Phone, 3=Manual
     "currentTimeSource",                       // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting, 5=estimated
+    "currentSpeedSource",                      // 0=none, 1=NMEA, 2=Phone (speed/course can differ from position source)
     "loggingActive",                           // 439 — 1=logging active, 0=stopped (Stop/Start Logs)
     "sustainedTWS",                            // 2-min sustained true wind, knots ×10 (Beaufort + gale basis)
     "currentGaleMinutes",                      // live minutes continuously in a gale (sustained ≥34kt), int
@@ -924,6 +925,7 @@ const CSV2_FIELDS = [
     "dvccUntrustReason",              // 0 none, 1 CVL out of window, 2 CCL implausible, 3 flapping
     "ft_dvcc_win", "ft_dvcc_ses",     // DVCC brain tick worst µs
     "ft_n2kParse_win", "ft_n2kParse_ses",  // NMEA2000.ParseMessages worst µs — RX drain, scales with bus traffic
+    "huntKdScale",       // damper D-lever multiplier ×100 (100 = D-term running, 0 = paused for a test / mapped off at this speed)
 ];
 
 // Order MUST match ftBlameReg[] in Xregulator.ino — the blame indices in CSV2 point here.
@@ -2869,6 +2871,7 @@ const CSV3_FIELDS = [
     "NMEA2KData",                     // moved from CSV2 (0/1)
     "timeAxisModeChanging",           // moved from CSV2 (0/1)
     "gpsTimeSourceMode",              // 0=auto, 1=NMEA, 2=Phone, 3=NTP (time only)
+    "speedSourceMode",                // 0=NMEA 2000, 1=phone GPS (speed/course owner — selectable, never auto)
     // Fast alt-current diagnostic knobs (Pattern B echo)
     "faEnabled",                     // 0/1 — global ON/OFF
     "faAlarmEnable",                 // 0/1 — FAULT drives audible alarm
@@ -2999,6 +3002,11 @@ const CSV3_FIELDS = [
     "dvccSettleS",                   // settling time (s)
     "dvccCvlMin",                    // plausible-CVL window low (V ×100)
     "dvccCvlMax",                    // plausible-CVL window high (V ×100)
+    "HuntCutPct",                    // damper test/pocket gain, % of user Ki
+    "HuntVerifyPct",                 // damper verify bar, % ripple reduction required
+    "HuntWingPct",                   // damper pocket taper width, % of speed per side
+    "HuntCooldownMin",               // damper retest cooldown after a failed test (min)
+    "HuntSteadyPct",                 // damper engine-speed steadiness tolerance (%)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3293,9 +3301,12 @@ function showWebMatchBanner(fw) {
 // =====================================================================
 // When the boat's NMEA2K GPS is unavailable (transducer fault, bus issue,
 // or just not installed), the device falls back to phone-provided location
-// and time. We POST every 60s; firmware ignores it if NMEA is fresh, uses
-// it as a fallback otherwise. See /set_phone_data handler in 3_functions.ino
-// and the priority resolution functions consumePhoneGps() / syncTimeFromPhone().
+// and time (POST every 60s; firmware ignores it while NMEA is fresh). Speed
+// and course are different: never a fallback — they come from the phone only
+// when the user selects it (speedSourceMode), which switches this client to a
+// continuous GNSS watch posting every ~2 s. See /set_phone_data handler in
+// 3_functions.ino and consumePhoneGps() / applyPhoneSpeed() /
+// syncTimeFromPhone().
 
 const PHONE_DATA_POST_INTERVAL_MS = 60000;  // every 60 sec when foregrounded
 let phoneDataPosterTimer = null;
@@ -3311,7 +3322,10 @@ async function getPhoneLocation() {
                     timeout: 10000,
                     maximumAge: 60000
                 });
-                return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+                // speed (m/s) and heading (deg) ride along when the GNSS fix has them:
+                // iOS reports -1 for "not determinable" (stationary), browsers report null.
+                return { latitude: pos.coords.latitude, longitude: pos.coords.longitude,
+                         speed: pos.coords.speed, heading: pos.coords.heading };
             } catch (e) {
                 console.warn('[PhoneGPS] Capacitor Geolocation failed:', e && e.message);
                 return null;
@@ -3333,7 +3347,8 @@ async function getPhoneLocation() {
         }
         return new Promise(resolve => {
             navigator.geolocation.getCurrentPosition(
-                pos => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
+                pos => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude,
+                                 speed: pos.coords.speed, heading: pos.coords.heading }),
                 err => { diagWarn('[PhoneGPS] navigator.geolocation failed:', err && err.message); resolve(null); },
                 { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
             );
@@ -3342,22 +3357,154 @@ async function getPhoneLocation() {
     return null;  // no geolocation API available
 }
 
-async function postPhoneDataToDevice() {
-    // Both fields are trusted-LAN backup sources: epochMs is the device's primary clock on
-    // NMEA-less boats in AP mode, and GPS (lat/lon) is sent whenever a fix exists — NMEA
-    // always outranks it on the device, so no lock-state gating is needed.
+async function postPhoneFix(loc) {
+    // Shared POST for both the 60 s poll and the fast speed watch. epochMs always rides
+    // along (the device's primary clock on NMEA-less boats in AP mode).
     const params = new URLSearchParams();
     params.set('epochMs', String(Date.now()));
-    const loc = await getPhoneLocation();
     if (loc) {
         params.set('lat', loc.latitude.toFixed(6));
         params.set('lon', loc.longitude.toFixed(6));
+        // Speed/heading are optional per-fix: null and -1 both mean "not determinable"
+        // (Number(null) is 0, so null must be screened before the numeric checks —
+        // 0 is a REAL speed, at anchor). Unknown values are simply omitted.
+        const spd = (loc.speed === null || loc.speed === undefined) ? NaN : Number(loc.speed);
+        if (Number.isFinite(spd) && spd >= 0) params.set('spd', spd.toFixed(2));
+        const hdg = (loc.heading === null || loc.heading === undefined) ? NaN : Number(loc.heading);
+        if (Number.isFinite(hdg) && hdg >= 0 && hdg <= 360) params.set('hdg', hdg.toFixed(1));
     }
     try {
         await fetch(buildURL('/set_phone_data') + '?' + params.toString(), { method: 'GET' });
     } catch (e) {
         // Device unreachable — fine, we'll try again on the next tick.
     }
+}
+
+async function postPhoneDataToDevice() {
+    // All fields are trusted-LAN backup sources — NMEA always outranks phone GPS/time on
+    // the device, and speed applies only when the user selected the phone as speed source,
+    // so no lock-state gating is needed.
+    const loc = await getPhoneLocation();
+    await postPhoneFix(loc);
+}
+
+// ── Fast speed path ──
+// When the user selects the phone as the speed/course source (speedSourceMode = 1, echoed
+// on CSV3), a continuous GNSS watch replaces the 60 s poll for cadence: fixes stream in at
+// ~1 Hz and post every PHONE_SPEED_POST_INTERVAL_MS, giving the device's record chain
+// NMEA-like sample density (its sustained-speed window rejects gaps > 8 s). The 60 s
+// poller keeps running for time/position backup; its extra posts are harmless. The watch
+// stops the moment the mode leaves phone.
+const PHONE_SPEED_POST_INTERVAL_MS = 2000;
+let phoneSpeedWatchId = null;      // Capacitor CallbackID string or browser watch number; 'pending' while starting
+let phoneSpeedWatchIsCap = false;
+let phoneSpeedLastPostMs = 0;
+
+function phoneSpeedWatchFix(pos) {
+    if (!pos || !pos.coords) return;   // Capacitor delivers (null, err) on errors
+    const nowMs = Date.now();
+    if (nowMs - phoneSpeedLastPostMs < PHONE_SPEED_POST_INTERVAL_MS) return;
+    phoneSpeedLastPostMs = nowMs;
+    postPhoneFix({ latitude: pos.coords.latitude, longitude: pos.coords.longitude,
+                   speed: pos.coords.speed, heading: pos.coords.heading });
+}
+
+// True when the app binary carries the BackgroundSpeed native plugin (build 17+):
+// CLLocationManager + native posting that keeps speed flowing with the app backgrounded
+// or the screen locked. Older binaries and browsers fall back to the JS foreground watch.
+function phoneSpeedNativePlugin() {
+    return (typeof IS_CAPACITOR !== 'undefined' && IS_CAPACITOR &&
+            window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundSpeed) || null;
+}
+let phoneSpeedNativeActive = false;
+
+async function updatePhoneSpeedPoster(mode) {
+    const wantFast = Number(mode) === 1;
+    const bs = phoneSpeedNativePlugin();
+    if (wantFast && bs) {
+        // Re-called on every CSV3 echo; the plugin treats a repeat start as a config
+        // refresh, so a changed device IP is picked up within a minute.
+        try {
+            await bs.start({ postUrl: buildURL('/set_phone_data') });
+            phoneSpeedNativeActive = true;
+            return;
+        } catch (e) {
+            console.warn('[PhoneGPS] BackgroundSpeed start failed, falling back to JS watch:', e && e.message);
+        }
+    }
+    if (!wantFast && phoneSpeedNativeActive) {
+        phoneSpeedNativeActive = false;
+        if (bs) { try { bs.stop(); } catch (e) { } }
+    }
+    if (wantFast && phoneSpeedWatchId === null) {
+        if (IS_CAPACITOR) {
+            if (!(window.Capacitor.Plugins && window.Capacitor.Plugins.Geolocation)) return;
+            phoneSpeedWatchId = 'pending';   // re-entry guard while the start promise resolves
+            phoneSpeedWatchIsCap = true;
+            try {
+                const id = await window.Capacitor.Plugins.Geolocation.watchPosition(
+                    { enableHighAccuracy: true, timeout: 10000 },
+                    p => phoneSpeedWatchFix(p));
+                if (phoneSpeedWatchId === 'pending') {
+                    phoneSpeedWatchId = id;
+                } else {
+                    // Mode flipped off while the watch was starting — kill the orphan.
+                    try { window.Capacitor.Plugins.Geolocation.clearWatch({ id }); } catch (e2) { }
+                }
+            } catch (e) {
+                console.warn('[PhoneGPS] watchPosition failed:', e && e.message);
+                if (phoneSpeedWatchId === 'pending') phoneSpeedWatchId = null;
+            }
+        } else if (typeof navigator !== 'undefined' && navigator.geolocation &&
+                   !(typeof window !== 'undefined' && window.isSecureContext === false)) {
+            phoneSpeedWatchIsCap = false;
+            phoneSpeedWatchId = navigator.geolocation.watchPosition(
+                p => phoneSpeedWatchFix(p),
+                err => diagWarn('[PhoneGPS] watch failed:', err && err.message),
+                { enableHighAccuracy: true, timeout: 10000 });
+        }
+    } else if (!wantFast && phoneSpeedWatchId !== null) {
+        const id = phoneSpeedWatchId;
+        phoneSpeedWatchId = null;   // 'pending' case: the starter sees this and self-cancels
+        if (id === 'pending') return;
+        if (phoneSpeedWatchIsCap) {
+            try { window.Capacitor.Plugins.Geolocation.clearWatch({ id: id }); } catch (e) { }
+        } else {
+            try { navigator.geolocation.clearWatch(id); } catch (e) { }
+        }
+    }
+}
+window.updatePhoneSpeedPoster = updatePhoneSpeedPoster;
+
+// Selection-time warning: switching to phone speed has real tradeoffs, so the select
+// submits only after an explicit acknowledgment. Cancel reverts the dropdown to NMEA
+// (binary setting, so a change to phone always came from NMEA; the CSV3 echo re-syncs
+// it regardless on the next frame).
+async function speedSourceModeChanged(sel) {
+    if (Number(sel.value) === 1) {
+        // First bullet reflects what THIS client can actually do: with the native
+        // BackgroundSpeed plugin the stream survives backgrounding; without it (older
+        // app binary, or a browser) it is foreground-only.
+        const runLine = phoneSpeedNativePlugin()
+            ? '- Runs continuously, including with the app in the background or the ' +
+              'screen locked, for as long as iOS allows. Battery drain is substantial ' +
+              'with GPS running full-time; keep the phone on a charger underway. iOS ' +
+              'shows the location indicator while this is active.\n'
+            : '- Works only while the app is open in the foreground on a phone aboard; ' +
+              'speed greys out about 10 seconds after posting stops. Continuous GPS ' +
+              'use increases phone battery drain.\n';
+        const ok = await xConfirm(
+            'Speed and course will come from this phone instead of NMEA 2000.\n\n' +
+            runLine +
+            '- Speed records set in this mode are flagged in cloud uploads and are ' +
+            'excluded from the speed leaderboard. If a phone-sourced run becomes your ' +
+            'best ever, your boat stays off the board until an NMEA-sourced record beats it.',
+            { title: 'Use phone GPS for speed?', okText: 'Use Phone GPS' }
+        );
+        if (!ok) { sel.value = '0'; return; }
+    }
+    sel.form.submit();
+    submitMessage();
 }
 
 function startPhoneDataPoster() {
@@ -6497,6 +6644,7 @@ function updateAllEchosOptimized(data) {
         { key: 'BatteryCurrentSource', id: 'BatteryCurrentSource_echo', transform: v => ({0: 'INA228 Shunt', 1: 'NMEA2K', 2: 'NMEA0183', 3: 'Victron VE.Direct'}[v] ?? v) },
         { key: 'timeAxisModeChanging', id: 'timeAxisModeChanging_echo', transform: v => v == 1 ? 'UNIX' : 'Elapsed' },
         { key: 'gpsTimeSourceMode', id: 'gpsTimeSourceMode_echo', transform: v => ({0:'Auto', 1:'NMEA only', 2:'Phone only', 3:'NTP time only'}[v] ?? '?') },
+        { key: 'speedSourceMode', id: 'speedSourceMode_echo', transform: v => ({0:'NMEA 2000', 1:'Phone GPS'}[v] ?? '?') },
         { key: 'webgaugesinterval', id: 'webgaugesinterval_echo', transform: v => v },
         // plotTimeWindow has no text echo — its buttons highlight the active value instead (below)
         { key: 'weatherModeEnabled', id: 'weatherModeEnabled_echo', transform: v => v == 1 ? 'On' : 'Off' },
@@ -6615,6 +6763,11 @@ function updateAllEchosOptimized(data) {
         { key: 'protTestReps',      id: 'protTestReps_echo',      transform: v => v },
         { key: 'protTestAmps',      id: 'protTestAmps_echo',      transform: v => v == 0 ? 'auto' : v },
         { key: 'HuntGovEnable',     id: 'HuntGovEnable_echo',     transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'HuntCutPct',        id: 'HuntCutPct_echo',        transform: v => v },
+        { key: 'HuntVerifyPct',     id: 'HuntVerifyPct_echo',     transform: v => v },
+        { key: 'HuntWingPct',       id: 'HuntWingPct_echo',       transform: v => v },
+        { key: 'HuntCooldownMin',   id: 'HuntCooldownMin_echo',   transform: v => v },
+        { key: 'HuntSteadyPct',     id: 'HuntSteadyPct_echo',     transform: v => v },
         { key: 'cvHelpersEnabled',  id: 'cvHelpersEnabled_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'coldChargeLockoutEnable', id: 'coldChargeLockoutEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'MinChargeTempF',    id: 'MinChargeTempF_echo',    transform: v => Math.round(toDisplayTemp(v)) },
@@ -6731,6 +6884,7 @@ function updateAllEchosOptimized(data) {
     const selectSyncs = updateAllEchosOptimized._selectSyncs || (updateAllEchosOptimized._selectSyncs = [
         { key: 'AmpSensorRange',        name: 'AmpSensorRange' },
         { key: 'gpsTimeSourceMode',     name: 'gpsTimeSourceMode' },
+        { key: 'speedSourceMode',       name: 'speedSourceMode' },
         { key: 'UseFloat',              name: 'UseFloat' },
         { key: 'n2kTempSource',         name: 'n2kTempSource' },
         { key: 'dvccSrcType',           name: 'dvccSrcType' },
@@ -6863,25 +7017,92 @@ document.addEventListener("click", function (e) {
     if (e.target.closest(".tooltip-box")) return;
     const tip = e.target.closest(".tooltip, .sinfo");
     const wasOpen = tip && tip.classList.contains("active");
-    document.querySelectorAll(".tooltip.active, .sinfo.active").forEach(el => el.classList.remove("active"));
-    _sinfoOpenN = 0;
+    closeTooltipBoxes();
     if (!tip || wasOpen) return;
     if (tip.classList.contains("sinfo")) { sinfoRender(tip); _sinfoOpenN = 1; }
     tip.classList.add("active");
-    clampTooltipBox(tip);
+    _openTipEl = tip;
+    placeTooltipBox(tip);
+    window.addEventListener("scroll", _tipReflow, true);
+    window.addEventListener("resize", _tipReflow);
 }, true);
 
-// Shift a just-opened box sideways so it never pokes past a viewport edge — a right-side
-// icon opening a 300px centered box used to widen the page into horizontal scroll on phones.
-function clampTooltipBox(tip) {
-    const box = tip.querySelector(".tooltip-box");
+let _openTipEl = null;          // the one badge whose box is open, or null
+let _tipReflowQueued = false;
+
+// Properties placeTooltipBox() writes. Cleared one by one, never via cssText — some boxes
+// carry hand-written inline styles (max-width / max-height) that must survive a close.
+const TIP_PLACED_PROPS = ["position", "left", "top", "right", "bottom", "transform"];
+
+function closeTooltipBoxes() {
+    document.querySelectorAll(".tooltip.active, .sinfo.active").forEach(el => {
+        el.classList.remove("active");
+        const box = el.querySelector(".tooltip-box");
+        if (box) TIP_PLACED_PROPS.forEach(p => box.style[p] = "");
+    });
+    _sinfoOpenN = 0;
+    _openTipEl = null;
+    window.removeEventListener("scroll", _tipReflow, true);
+    window.removeEventListener("resize", _tipReflow);
+}
+
+// Place an open box in VIEWPORT coordinates. position:fixed is load-bearing, not cosmetic:
+// the card grids are CSS multi-column, and Chromium SLICES an absolutely-positioned box that
+// crosses a column break — the tail of a long tooltip painted as a second orphaned box at the
+// top of the next column. A fixed box is outside the fragmentation context so it cannot split.
+// Placement is measured (park at 0,0, read back where that landed) rather than computed from
+// offsets, so it stays right even when an ancestor's transform makes it the containing block.
+function placeTooltipBox(tip) {
+    const box = tip && tip.querySelector(".tooltip-box");
     if (!box) return;
-    box.style.transform = "";
-    const r = box.getBoundingClientRect();
-    let shift = 0;
-    if (r.right > window.innerWidth - 8) shift = window.innerWidth - 8 - r.right;
-    if (r.left + shift < 8) shift = 8 - r.left;
-    box.style.transform = "translateX(calc(-50% + " + shift + "px))";
+    box.style.position = "fixed";
+    box.style.right = "auto";
+    box.style.bottom = "auto";
+    box.style.transform = "none";
+    box.style.left = "0px";
+    box.style.top = "0px";
+    const b = box.getBoundingClientRect();
+    const a = tip.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const M = 8;
+    // Centred under the badge, then pulled inside both edges — a right-side icon opening a
+    // 300px centred box used to widen the page into horizontal scroll on phones.
+    let x = Math.max(M, Math.min(a.left + a.width / 2 - b.width / 2, vw - M - b.width));
+    // Below the badge by preference. A fixed box cannot be scrolled into view the way the old
+    // absolute one could, so when it won't fit below it flips above the badge, and only clamps
+    // into the viewport (covering the badge) when it fits neither way.
+    const safeTop = _tipSafeTop() + M;
+    let y = a.bottom + 5;
+    if (y + b.height > vh - M) {
+        const above = a.top - 5 - b.height;
+        y = above >= safeTop ? above : Math.max(safeTop, vh - M - b.height);
+    }
+    box.style.left = (x - b.left) + "px";
+    box.style.top = (y - b.top) + "px";
+}
+
+// Bottom edge of the app header while it is stuck to the top; 0 when it isn't. The header
+// sits at z-index 1000 and the box at 999, so a box placed under it would be swallowed.
+function _tipSafeTop() {
+    const h = document.querySelector(".permanent-header-sticky");
+    if (!h) return 0;
+    const r = h.getBoundingClientRect();
+    return (r.top <= 0 && r.bottom > 0) ? r.bottom : 0;
+}
+
+// A fixed box doesn't ride the page, so follow the badge on scroll/resize — and give up and
+// close once the badge itself has left the viewport, rather than stranding the box mid-screen.
+function _tipReflow() {
+    if (_tipReflowQueued) return;
+    _tipReflowQueued = true;
+    requestAnimationFrame(() => {
+        _tipReflowQueued = false;
+        if (!_openTipEl) return;
+        const a = _openTipEl.getBoundingClientRect();
+        if (a.bottom < 0 || a.top > document.documentElement.clientHeight) { closeTooltipBoxes(); return; }
+        placeTooltipBox(_openTipEl);
+    });
 }
 
 
@@ -8085,7 +8306,7 @@ function xConfirmSubmit(form, msg) {
 // sets the flag inside /saveVesselInfo). Age is judged against the BROWSER clock; the device soft clock
 // can be unset at sea. "Silence" persists in NVS until the next pass; "Ignore" re-asks next app open.
 const RECOMMISSION_MAX_AGE_S = 3 * 365.25 * 24 * 3600;
-const CX_NAV_HINT = 'To re-commission: go to Tuning → Commissioning and press Start Commissioning.';
+const CX_NAV_HINT = 'To re-commission: go to Setup → Alternator → Commissioning and press Start Commissioning.';
 
 async function checkRecommissionPrompt() {
     let r;
@@ -8707,19 +8928,20 @@ const HG_VERDICT = {
     'external-suspected': 'Not the regulator — full gain restored',
     'aborted': 'Abandoned — conditions changed mid-episode',
     'recovered': 'Settled on its own',
+    'damped-dterm': 'Wobble stopped — voltage damper switched off here',
+    'dterm-no-resp': 'Voltage damper was not the cause — turned back on',
 };
 
-// Wording is driven by state first, gain second: derate alone cannot separate "actively cutting
-// gain" from "parked below full gain since an earlier wobble", and those mean different things.
+// Wording is driven by state first, gain second: the derate alone cannot separate "inside a
+// mapped trouble spot" from "testing a cut right now", and those mean different things.
 function hgStateWord(state, pct, enabled) {
     if (enabled === false) return 'Off — hunting persists at full gain';
     switch (state) {
-        case 1: return 'Damping — cutting current-loop gain to kill a wobble';
-        case 2: return pct >= 100 ? 'Wobble damped — full gain restored'
-                                  : 'Wobble damped — holding reduced gain, recovering';
-        case 3: return 'Standing down — the last wobble did not respond to gain cuts';
-        default: return pct >= 100 ? 'Watching — no wobble, full gain'
-                                   : 'Watching — gain still held down from an earlier wobble';
+        case 1: return 'Testing — gain cut applied, measuring whether the wobble responds';
+        case 4: return 'Testing — voltage damper paused, measuring whether the wobble responds';
+        case 3: return 'Cooling down — the last wobble did not respond to the gain cut';
+        default: return pct >= 100 ? 'Watching — no trouble spot at this speed, full gain'
+                                   : 'In a mapped trouble spot — running reduced gain';
     }
 }
 
@@ -8748,6 +8970,23 @@ function huntGovLiveOnCsv1(data) {
     if (g) g.textContent = on ? pct + '%' : '100%';
     const f = document.getElementById('hgFreqNow');
     if (f) f.textContent = (on && freq > 0) ? freq.toFixed(2) + ' Hz' : 'none';
+    // Live engine-speed marker on the speed map: redraw at most 1/s, only when the plot is on
+    // screen and the marker would visibly move.
+    hgNowRpm = 'RPM' in data ? Number(data.RPM) || 0 : 0;
+    if (hgMapU && document.getElementById('hgMapPlot') && document.getElementById('hgMapPlot').offsetParent
+        && Date.now() - hgNowLastDrawMs > 1000 && Math.abs(hgNowRpm - hgNowDrawnRpm) >= 5) {
+        hgNowLastDrawMs = Date.now();
+        hgMapU.redraw();
+    }
+}
+
+// Voltage-damper (D-term) lever readout — CSV2 cadence is plenty (it moves on pocket entry/exit
+// and test open/close). Old firmware without the field leaves the row at its placeholder.
+function huntGovLiveOnCsv2(data) {
+    const el = document.getElementById('hgKdState');
+    if (!el || data.huntKdScale === undefined) return;
+    const pct = Number(data.huntKdScale);
+    el.textContent = pct >= 99 ? 'Running' : pct <= 1 ? 'Off at this speed' : 'Reduced (pocket edge)';
 }
 
 function fetchHuntLedger() {
@@ -8755,7 +8994,13 @@ function fetchHuntLedger() {
     const count = document.getElementById('hgEpisodeCount');
     const link = document.getElementById('hgRawLink');
     if (link) link.href = buildURL('/huntledger');   // Capacitor: a bare /huntledger href resolves to localhost
-    const note = m => { if (list) list.innerHTML = '<div style="padding:6px 0;color:var(--text-muted);">' + m + '</div>'; };
+    // note() covers every empty/error path, so it also hides the episode map — the map only
+    // ever shows in the success path below, fed from the same parse as the list.
+    const note = m => {
+        if (list) list.innerHTML = '<div style="padding:6px 0;color:var(--text-muted);">' + m + '</div>';
+        const w = document.getElementById('hgMapWrap');
+        if (w) w.style.display = 'none';
+    };
     fetch(buildURL('/huntledger'))
         .then(r => r.ok ? r.text() : null)
         .then(t => {
@@ -8766,27 +9011,34 @@ function fetchHuntLedger() {
             if (count) count.textContent = rows.length ? String(rows.length) : 'none';
             if (!rows.length) {
                 note('No wobble has ever been detected on this regulator — there has been nothing to damp. This is the normal, healthy case.');
+                renderHuntMap([]);   // pockets can outlive their evidence rows (ledger cap-trim) — still draw them
                 return;
             }
             let html = '';
+            const eps = [];   // parsed once here, shared with the episode map
             for (let i = rows.length - 1; i >= 0; i--) {      // newest first
                 const c = rows[i].split(',');
                 if (c.length < 9) continue;
                 const epoch = Number(c[0]), rpm = Number(c[1]), cv = Number(c[2]);
                 const freq = Number(c[3]), a0 = Number(c[4]), aEnd = Number(c[5]);
                 const steps = Number(c[6]), verdict = c[7], derate = Number(c[8]);
+                eps.push({ rpm: rpm, verdict: verdict, derate: derate });
                 // Episodes logged before the clock synced carry a meaningless epoch — say so
                 // rather than printing 1970.
                 const when = epoch > 1577836800 ? new Date(epoch * 1000).toLocaleString()
                                                 : 'time unknown — logged before clock sync';
+                // D-lever records carry the voltage-movement metric (V/s), not field swing — the
+                // D-driven wobble lives in volts and barely registers in the field drive.
+                const isDterm = (verdict === 'damped-dterm' || verdict === 'dterm-no-resp');
                 const facts = [
                     (rpm > 0 ? rpm + ' rpm' : 'engine speed not recorded'),
                     (cv ? 'voltage-limited' : 'current-limited'),
                     freq.toFixed(2) + ' Hz wobble',
                     // "aborted" is logged with no end amplitude — the episode never reached a verdict.
                     (verdict === 'aborted' ? 'field swing ' + a0.toFixed(1) + '% at the start'
-                                           : 'field swing ' + a0.toFixed(1) + '% → ' + aEnd.toFixed(1) + '%'),
-                    (steps === 1 ? '1 gain cut' : steps + ' gain cuts'),
+                        : isDterm ? 'voltage movement ' + a0.toFixed(2) + ' → ' + aEnd.toFixed(2) + ' V/s'
+                                  : 'field swing ' + a0.toFixed(1) + '% → ' + aEnd.toFixed(1) + '%'),
+                    (isDterm ? 'voltage damper paused' : steps === 1 ? '1 gain cut' : steps + ' gain cuts'),
                     'gain left at ' + Math.round(derate * 100) + '%',
                 ];
                 html += '<div style="border-top:1px solid var(--border);padding:7px 0;">'
@@ -8798,8 +9050,189 @@ function fetchHuntLedger() {
                     + '</div>';
             }
             if (list) list.innerHTML = html || '<div style="padding:6px 0;color:var(--text-muted);">No readable episodes in the record.</div>';
+            renderHuntMap(eps);
         })
         .catch(() => { note('Not available.'); if (count) count.textContent = '—'; });
+}
+
+// ── Speed map: live gain-vs-speed profile (trapezoid pockets from /huntmap) + episode dots ──
+// The firmware's pocket map IS the control rule; this plot draws it verbatim: full gain
+// everywhere, the Damped Gain across each pocket core, linear taper over the wings. Dots are
+// ledger evidence (blue filled = verified, amber hollow = did not respond); the dashed vertical
+// is the live engine speed off CSV1. Colors are fixed and CVD-validated against both card
+// surfaces; axis/grid theming comes from the uPlot wrapper.
+let hgMapU = null;
+let hgMapData = { xs: [], profile: [], kept: [], rest: [], xlo: 0, xhi: 1000 };
+let hgMapState = { pockets: [], cut: 50, wing: 15, enabled: 1 };
+let hgNowRpm = 0;
+let hgNowDrawnRpm = -1;
+let hgNowLastDrawMs = 0;
+
+// JS mirror of the firmware's huntMapGain(), in percent — Ki pockets (lever 0) only; D pockets
+// (lever 1) act on the voltage damper, not this gain, and draw as their own shading. Damper off =
+// firmware applies full gain everywhere, so the profile draws flat; shading and dots still show
+// the retained map.
+function hgProfileGain(r) {
+    if (!hgMapState.enabled) return 100;
+    const cut = hgMapState.cut, wing = hgMapState.wing / 100;
+    let g = 100;
+    hgMapState.pockets.forEach(p => {
+        if (Number(p.lever) === 1) return;
+        const wLo = p.lo * (1 - wing), wHi = p.hi * (1 + wing);
+        if (r < wLo || r > wHi) return;
+        let gi;
+        if (r < p.lo) gi = 100 - (100 - cut) * (r - wLo) / (p.lo - wLo);
+        else if (r > p.hi) gi = 100 - (100 - cut) * (wHi - r) / (wHi - p.hi);
+        else gi = cut;
+        if (gi < g) g = gi;
+    });
+    return g;
+}
+
+function hgMapXRange() { return [hgMapData.xlo, hgMapData.xhi]; }
+
+// Fixed 105 ceiling; floor follows the deepest value on screen so an empty map still frames sanely
+function hgMapYRange() {
+    let mn = 100;
+    hgMapData.profile.forEach(v => { if (v != null && v < mn) mn = v; });
+    hgMapData.kept.forEach(v => { if (v != null && v < mn) mn = v; });
+    hgMapData.rest.forEach(v => { if (v != null && v < mn) mn = v; });
+    (hgMapData.dkept || []).forEach(v => { if (v != null && v < mn) mn = v; });
+    return [Math.max(0, Math.min(80, Math.floor((mn - 8) / 10) * 10)), 105];
+}
+
+// Entry point from fetchHuntLedger: pulls the live map, then draws it with the episode dots.
+// A failed /huntmap (old firmware, demo mode) degrades to a flat full-gain line + dots.
+function renderHuntMap(eps) {
+    fetch(buildURL('/huntmap'))
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null)
+        .then(map => {
+            hgMapState = (map && Array.isArray(map.pockets))
+                ? { pockets: map.pockets, cut: Number(map.cut) || 50, wing: Number(map.wing) || 15,
+                    enabled: map.enabled === undefined ? 1 : Number(map.enabled) }
+                : { pockets: [], cut: 50, wing: 15, enabled: 1 };
+            hgMapBuild(eps || []);
+        });
+}
+
+function hgMapBuild(eps) {
+    const wrap = document.getElementById('hgMapWrap');
+    const el = document.getElementById('hgMapPlot');
+    if (!wrap || !el) return;
+    const pts = eps.filter(e => e.rpm > 0);   // rpm 0 = engine speed not recorded — unplottable
+    const excl = document.getElementById('hgMapExcluded');
+    if (excl) {
+        const n = eps.length - pts.length;
+        excl.textContent = n === 0 ? ''
+            : n === 1 ? '1 episode without an engine speed is not shown'
+                      : n + ' episodes without an engine speed are not shown';
+    }
+    if ((!pts.length && !hgMapState.pockets.length) || typeof uPlot === 'undefined') { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+    const wing = hgMapState.wing / 100;
+    let xlo = Infinity, xhi = -Infinity;
+    hgMapState.pockets.forEach(p => { xlo = Math.min(xlo, p.lo * (1 - wing)); xhi = Math.max(xhi, p.hi * (1 + wing)); });
+    pts.forEach(e => { xlo = Math.min(xlo, e.rpm); xhi = Math.max(xhi, e.rpm); });
+    const pad = Math.max(80, 0.12 * (xhi - xlo));
+    xlo = Math.max(0, xlo - pad);
+    xhi = xhi + pad;
+    // x list: domain ends + every trapezoid vertex + every dot speed, ascending (duplicates fine)
+    const xset = [xlo, xhi];
+    hgMapState.pockets.forEach(p => { xset.push(p.lo * (1 - wing), p.lo, p.hi, p.hi * (1 + wing)); });
+    pts.forEach(e => xset.push(e.rpm));
+    xset.sort((a, b) => a - b);
+    const xs = [], profile = [], kept = [], rest = [], dkept = [];
+    xset.forEach(x => { xs.push(x); profile.push(hgProfileGain(x)); kept.push(null); rest.push(null); dkept.push(null); });
+    pts.forEach(e => {   // first free slot matching this rpm, so same-speed episodes each keep a dot
+        for (let i = 0; i < xs.length; i++) {
+            if (xs[i] !== e.rpm || kept[i] !== null || rest[i] !== null || dkept[i] !== null) continue;
+            if (e.verdict === 'damped' || e.verdict === 'damped-partial') kept[i] = e.derate * 100;
+            // D-verified dot sits at the Ki gain (usually 100%) — the pocket it made acts on the
+            // voltage damper, drawn as purple shading, not on this line
+            else if (e.verdict === 'damped-dterm') dkept[i] = e.derate * 100;
+            else rest[i] = e.derate * 100;
+            break;
+        }
+    });
+    hgMapData = { xs: xs, profile: profile, kept: kept, rest: rest, dkept: dkept, xlo: xlo, xhi: xhi };
+    if (hgMapU) { hgMapU.setData([xs, profile, kept, rest, dkept]); return; }   // setData re-runs the range fns
+    const opts = {
+        width: plotFitWidth(el, 280),
+        height: 200,
+        padding: [10, 8, 0, 0],
+        series: [
+            { label: 'rpm' },
+            { label: 'gain', stroke: '#3a7bd5', width: 2, points: { show: false } },
+            { label: 'verified', stroke: '#3a7bd5', paths: () => null,
+              points: { show: true, size: 8, fill: '#3a7bd5', stroke: '#3a7bd5' } },
+            { label: 'no response', stroke: '#c07f2f', paths: () => null,
+              points: { show: true, size: 8, width: 1.8, fill: 'transparent', stroke: '#c07f2f' } },
+            { label: 'voltage damper off', stroke: '#8256b0', paths: () => null,
+              points: { show: true, size: 8, fill: '#8256b0', stroke: '#8256b0' } },
+        ],
+        scales: {
+            x: { time: false, range: () => hgMapXRange() },
+            y: { auto: false, range: () => hgMapYRange() },
+        },
+        axes: [
+            { grid: { show: true }, values: (u, t) => t.map(v => String(v)) },
+            { scale: 'y', grid: { show: true }, side: 3, values: (u, t) => t.map(v => v + '%') },
+        ],
+        legend: { show: false },
+        cursor: { drag: { x: false, y: false } },
+        hooks: {
+            // drawAxes fires after grid/axes but before series, so shading sits UNDER line and dots
+            drawAxes: [u => {
+                const ctx = u.ctx; ctx.save();
+                ctx.beginPath(); ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height); ctx.clip();
+                const wg = hgMapState.wing / 100;
+                hgMapState.pockets.forEach(p => {
+                    // Ki pockets blue, voltage-damper (D) pockets purple — independent rules that may overlap
+                    ctx.fillStyle = Number(p.lever) === 1 ? 'rgba(130,86,176,0.12)' : 'rgba(58,123,213,0.10)';
+                    const x0 = u.valToPos(p.lo * (1 - wg), 'x', true), x1 = u.valToPos(p.hi * (1 + wg), 'x', true);
+                    ctx.fillRect(x0, u.bbox.top, x1 - x0, u.bbox.height);
+                });
+                ctx.restore();
+            }],
+            draw: [u => {
+                if (!(hgNowRpm > 0) || hgNowRpm < hgMapData.xlo || hgNowRpm > hgMapData.xhi) return;
+                const ctx = u.ctx; ctx.save();
+                const x = u.valToPos(hgNowRpm, 'x', true);
+                ctx.strokeStyle = 'rgba(192,127,47,0.9)'; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+                ctx.beginPath(); ctx.moveTo(x, u.bbox.top); ctx.lineTo(x, u.bbox.top + u.bbox.height); ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = 'rgba(192,127,47,0.95)'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+                ctx.fillText('now', x + 5, u.bbox.top + 14);
+                hgNowDrawnRpm = hgNowRpm;
+                ctx.restore();
+            }],
+        },
+    };
+    hgMapU = new uPlot(opts, [xs, profile, kept, rest, dkept], el);
+    new ResizeObserver(() => {
+        if (hgMapU) hgMapU.setSize({ width: plotFitWidth(el, 280), height: 200 });
+    }).observe(el);
+}
+
+// Clear System: pockets + episode record + any test in flight, all together, on the device.
+// Arm-gated on the firmware side like every other mutation — a locked dashboard gets a 403.
+async function clearHuntSystem() {
+    if (!await xConfirm('Permanently erase everything the Oscillation Damper has learned — the speed map AND the episode record? Gain returns to 100% everywhere until a new wobble is verified. This cannot be undone.')) return;
+    const status = document.getElementById('hgClearStatus');
+    fetch(buildURL('/huntclear'), { method: 'POST' })
+        .then(r => {
+            if (!r.ok) {
+                if (status) status.textContent = (r.status === 403)
+                    ? 'Rejected — dashboard locked. Unlock first.'
+                    : ('Rejected — HTTP ' + r.status);
+                return;
+            }
+            if (status) status.textContent = 'Cleared.';
+            setTimeout(() => { if (status) status.textContent = ''; }, 4000);
+            fetchHuntLedger();
+        })
+        .catch(() => { if (status) status.textContent = 'Send failed.'; });
 }
 
 function commitCVTuningScore() {
@@ -13561,6 +13994,9 @@ window.addEventListener("load", function () {
             // Gate-tuning readouts: render the firmware 10s extremes next to each threshold.
             try { gateReadoutOnCsv2(data); } catch (e) { }
 
+            // Oscillation damper: voltage-damper (D-term) lever state rides CSV2.
+            try { huntGovLiveOnCsv2(data); } catch (e) { }
+
             // IMU zero/level status moved to the CSV3 listener (offsets now ride CSV3 for a fast echo)
 
             // Beaufort scale + gale duration (from the 2-min SUSTAINED true wind, never the
@@ -13612,10 +14048,14 @@ window.addEventListener("load", function () {
                         gpsBadge.textContent = ({ 0: 'no GPS', 1: 'NMEA 2000', 2: 'iOS app', 3: 'Manual' })[Number(data.currentGpsSource)] ?? '—';
                     }
                 }
+                if (data.currentSpeedSource !== undefined) {
+                    window.currentSpeedSource = Number(data.currentSpeedSource);
+                }
                 if (ind && (data.currentGpsSource !== undefined || data.currentTimeSource !== undefined)) {
                     const gpsLbl  = ({0:'no GPS', 1:'NMEA GPS', 2:'Phone GPS', 3:'Manual'})[Number(data.currentGpsSource)] ?? '?';
+                    const spdLbl  = ({0:'no speed', 1:'NMEA speed', 2:'phone speed'})[Number(data.currentSpeedSource)] ?? '?';
                     const timeLbl = ({0:'no time', 1:'GPS time', 2:'phone time', 3:'NTP time', 4:'drifting', 5:'estimated'})[Number(data.currentTimeSource)] ?? '?';
-                    ind.textContent = gpsLbl + ' · ' + timeLbl;
+                    ind.textContent = gpsLbl + ' · ' + spdLbl + ' · ' + timeLbl;
                     const esp32Src = document.getElementById('esp32TimeSourceID');
                     if (esp32Src) esp32Src.textContent = timeLbl + ' · ' + gpsLbl;
                 }
@@ -14856,6 +15296,13 @@ window.addEventListener("load", function () {
             const data = Object.fromEntries(CSV3_FIELDS.map((key, i) => [key, values[i]]));
             g_lastCsv3 = data;  // cache for cvBinToCsv header
 
+            // Fast phone-speed watch follows the speedSourceMode echo: start the GNSS
+            // watch when the user selects phone, stop it when they leave. Wrapped so a
+            // geolocation failure can never take down the rest of this dispatcher.
+            try {
+                if (data.speedSourceMode !== undefined) updatePhoneSpeedPoster(data.speedSourceMode);
+            } catch (e) { }
+
             // IMU zero/level calibration status (offsets sent deg ×100). Rides CSV3 so it
             // echoes within ~one tick of capture instead of waiting up to 5s. While a capture
             // is running we hold the "calculating…" label (set on the Zero Now click) and skip the
@@ -15888,7 +16335,7 @@ function showTuningPanel(name, evt = null) {
 function goToTuning(subTab) {
     if (!subTab) {
         const active = document.querySelector('#tuning .tuning-panel.active');
-        subTab = active ? active.id.replace('tuning-', '') : 'commissioning';
+        subTab = active ? active.id.replace('tuning-', '') : 'plant-delay';
     }
     showMainTab('settings');
     showSubTab('settings', 'alternator');
@@ -15907,6 +16354,14 @@ function goToVoltageTuning() {
         sec.open = true;
         requestAnimationFrame(() => sec.scrollIntoView({ behavior: 'smooth', block: 'start' }));
     }
+}
+// Commissioning is the FIRST alt-tab under Setup > Alternator (id="alt-panel-commissioning").
+// It used to be a Tuning sub-tab — deep-links go through here, never goToTuning('commissioning').
+function goToCommissioning() {
+    showMainTab('settings');
+    showSubTab('settings', 'alternator');
+    showAltTab('primary', 'alt-panel-commissioning');
+    window.scrollTo(0, 0);
 }
 function goToCVMode() {
     showMainTab('settings');
@@ -16632,6 +17087,7 @@ function sinfoRender(el) {
 function sinfoRefreshOpen() {
     if (!_sinfoOpenN) return;
     document.querySelectorAll('.sinfo.active').forEach(sinfoRender);
+    if (_openTipEl) placeTooltipBox(_openTipEl);   // live re-render changes the box height
 }
 
 // live-value helpers: echo text with a unit, and echo parsed as a number
@@ -16664,11 +17120,11 @@ const SINFO = {
     // ── Diag: Oscillation Damper ──
     huntGov: () => [
         ['Signal', S_DUTY + ' — the applied duty actually written to the field, sampled at a fixed 20&nbsp;samples/s so the analysis band never moves when the control loop cadence changes'],
-        ['Detects', 'a sustained tone in one of six fixed frequency slots from 0.31 to 2.34&nbsp;Hz, measured over a 6.4&nbsp;s window (Goertzel, Hann-weighted). It must beat 0.5% duty swing AND stand 3× above the other slots, on two windows in a row, before an episode opens'],
-        ['Ignored while', 'open loop, a protection or recovery is acting, any tuning/commissioning routine is running, manual field is on, or the current target has just moved — none of those are the plant hunting'],
-        ['Acts on', 'the current loop\'s integral gain (PID Ki), cut ×0.8 per step, at most 4 steps (×0.41), never below 25% of your setting'],
-        ['Kept only if', 'the wobble goes quiet for 3 windows, or holds at half its starting size for 3 windows. Otherwise the whole episode is reverted and the damper stands down for 10 minutes'],
-        ['Set', 'the Oscillation Damper switch in this panel, or the same switch on Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters, next to the PID Ki it acts on'],
+        ['Detects', 'a sustained tone in one of six fixed frequency slots from 0.31 to 2.34&nbsp;Hz, measured over a 6.4&nbsp;s window (Goertzel, Hann-weighted). It must beat 0.5% duty swing AND stand 3× above the other slots, on 3 scans in a row with engine speed steady (within ' + svv('HuntSteadyPct_echo', '%') + ' of where it started), before a test opens'],
+        ['Ignored while', 'open loop, a protection or recovery is acting, any tuning/commissioning routine is running, manual field is on, the current target has just moved, or engine speed is drifting — none of those are the plant hunting'],
+        ['Acts on', 'the current loop\'s integral gain (PID Ki): one cut to ' + svv('HuntCutPct_echo', '%') + ' of your setting, then a re-measure. Verified cuts are mapped by engine speed and applied proactively at that speed from then on, tapering to full gain over ' + svv('HuntWingPct_echo', '%') + ' of speed beyond the trouble spot'],
+        ['Kept only if', 'the wobble shrinks at least ' + svv('HuntVerifyPct_echo', '%') + ', averaged 3 scans before vs 3 after. Otherwise full gain is restored and no test runs for ' + svv('HuntCooldownMin_echo', ' min') + '. The map survives restarts; Clear System erases it'],
+        ['Set', 'the Oscillation Damper switch and its five settings on Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters, next to the PID Ki it acts on'],
     ],
     // ── Protections: Detection ──
     MaxTableValue: () => [
@@ -20041,6 +20497,17 @@ function _startTuningSweepNow() {
                     .then(r => r.ok ? r.json() : null)
                     .then(data => {
                         if (!data) return;
+                        // Protection cut the sweep — the firmware discarded the run (aborted rides with
+                        // done=1, so this must be checked first or the partial points get rendered).
+                        if (data.aborted) {
+                            clearInterval(tuningBodePollTimer); tuningBodePollTimer = null;
+                            setPendingToggleValue('TuningMode', 'TuningMode', 0);
+                            fetch(buildURL("/get?TuningMode=0")).catch(() => {});
+                            _setTestBtnRunning(false);
+                            if (statusEl) statusEl.textContent = 'Sweep aborted by ' +
+                                (cxCutCauseText(data.abortWhy | 0) || 'a protection') + ' — results discarded. See Live Data → Console.';
+                            return;
+                        }
                         if (statusEl) statusEl.textContent = data.active
                             ? ('Sweep running… ' + (data.pts ? data.pts.length : 0) + '/10')
                             : (data.done ? 'Sweep complete.' : 'Idle');
@@ -21729,7 +22196,7 @@ function rpmAlignFinish() {
 }
 // ✕ — bail out of the setup flow entirely (does NOT open the wizard), mirroring commPrepClose. The
 // tach settings edited so far are already written live and kept; commissioning can be started later
-// from Tuning ▸ Commissioning.
+// from Setup ▸ Alternator ▸ Commissioning.
 function rpmAlignCancel() {
     rpmAlignStopPoll();
     document.getElementById('rpmalign-modal-overlay').style.display = 'none';
@@ -21946,8 +22413,10 @@ function cxOvRampAdviceHtml() {
         '</ul></div>';
 }
 
-// One abort panel for both ramps. info = {why, next, v, d} from the firmware latch; without it (older
-// firmware, or a browser-side refusal) this degrades to the raw message it always showed.
+// One abort panel for the ramps and the verify sweep. info = {why, next, v, d} from the firmware
+// latch; without it (older firmware, or a browser-side refusal) this degrades to the raw message it
+// always showed. ovAdvice: true = the ramp OV advice, a function = caller-specific OV advice (the
+// verify sweep's remedy differs), falsy = generic clear-and-retry line even on an OV cut.
 function cxRampAbortHtml(lead, msg, info, consoleTag, retryWord, ovAdvice) {
     const wrap = h => '<div style="margin:10px 0;padding:8px 10px;background:#3a2222;border:1px solid #a55;border-radius:6px;color:#f0a500;">' + h + '</div>';
     const fallback = '<span style="font-size:13px;color:#caa;">Open <strong>Live Data → Console</strong> for the firmware reason. If there is no <em>' + consoleTag + '</em> line there, the regulator never ran it — fix the cause above, then ' + retryWord + ' again.</span>';
@@ -21966,12 +22435,35 @@ function cxRampAbortHtml(lead, msg, info, consoleTag, retryWord, ovAdvice) {
         const n = cxCutCauseText(info.next);
         if (n) h += '<br><span style="font-size:13px;color:#caa;">Then also: ' + n + '.</span>';
     }
-    if (ovAdvice && cxCutIsOv(why)) h += cxOvRampAdviceHtml();
+    if (ovAdvice && cxCutIsOv(why)) h += (typeof ovAdvice === 'function' ? ovAdvice() : cxOvRampAdviceHtml());
     else h += '<br><span style="font-size:13px;color:#caa;">Clear the cause, then ' + retryWord + ' again. <strong>Live Data → Console</strong> has the firmware line.</span>';
     return wrap(h);
 }
 function cxAbortInfoFrom(j) {
     return { why: j.abortWhy | 0, next: j.abortNext | 0, v: +j.abortV || 0, d: +j.abortD || 0 };
+}
+
+// OV advice for the verify sweep — different remedy than the ramps. The sweep's test current is
+// sized from the field-curve proposals, which come from the RPM-table limit at the test speed, so
+// an OV cut here means that limit exceeds what the bank can absorb — and every earlier step ran
+// against the same limit. The fix is lower the table and restart the WHOLE flow, not a step-local
+// re-run (which the ramp advice offers via lower SoC).
+function cxVerifyOvAdviceHtml() {
+    const col = (currentChargeRateMode === 'low') ? 'Low' : 'High';
+    return '<div style="font-size:13px;color:#caa;margin-top:6px;line-height:1.5;">' +
+        'The battery could not absorb the sweep\'s test current — bus voltage reached the shutdown ceiling mid-sweep. That test current is sized from your charge-current limit at this engine speed, so the limit is set higher than this battery can take:' +
+        '<ul style="margin:6px 0 0 18px;padding:0;">' +
+        '<li>Lower the current limits in the <strong>' + col + '</strong> column (the charge-rate mode you are commissioning in) of the table of current limits vs. RPM (<strong>Setup ▸ Alternator ▸ RPM Table</strong>), especially the rows near your test speed.</li>' +
+        '<li>Then <strong>restart commissioning from the beginning</strong>. Every earlier step\'s results were made against the old limits, so re-running just this step is not enough.</li>' +
+        '</ul></div>';
+}
+function cxVerifyAbortHtml(info) {
+    let h = cxRampAbortHtml('Sweep stopped', 'protection cut', info, 'Tuning sine sweep', 'run', cxVerifyOvAdviceHtml);
+    h += cxCutIsOv(info.why | 0)
+        ? '<div style="margin-top:10px;"><button onclick="commissionAbort()" class="btn-primary btn-sm">Abort commissioning (revert settings)</button> ' +
+          '<button onclick="cxVerifyStart()" class="btn-secondary btn-sm">Re-run sweep anyway</button></div>'
+        : '<div style="margin-top:10px;"><button onclick="cxVerifyStart()" class="btn-primary btn-sm">Re-run</button></div>';
+    return h;
 }
 
 // ── Stage 1 · Field curve — duty→amps map + saturation knee ───────────────────
@@ -22506,6 +22998,10 @@ function cxDrawBode(pts) {
 function cxRenderVerify(b) {
     cxRpmRefFetch();
     if (cx.verifyRunning) { b.innerHTML = '<p style="color:#4a9eff;">Closed-loop sweep running…</p>'; return; }
+    // A protection cut the sweep — the firmware discarded the run, so there is nothing to grade.
+    // Named cause + the right remedy replace the old behavior (sweep ran on through the cut +
+    // lockout, and the low duty rail was blamed on field saturation / cruising speed).
+    if (cx.verifyAbort) { b.innerHTML = cxVerifyAbortHtml(cx.verifyAbort); return; }
     if (!cx.verify) {
         const ref = cxRpmRefFor(3);
         b.innerHTML = '<p style="font-size:15px;line-height:1.5;"><strong>' +
@@ -22591,7 +23087,7 @@ function cxRenderVerify(b) {
 }
 function cxVerifyStart() {
     cxShowTab('tuning', 'current');   // closed-loop sine sweep → watch on Tuning ▸ Current
-    cx.verify = null; cx.verifyRunning = true; cxBodeMagY = null; cxBodePhY = null; commissionRender();
+    cx.verify = null; cx.verifyAbort = null; cx.verifyRunning = true; cxBodeMagY = null; cxBodePhY = null; commissionRender();
     // Drive the closed-loop sweep from values computed off the plant fit + field curve, not
     // whatever happens to be on the Tuning ▸ Current tab (unknown/stale at commissioning time).
     const p = cxVerifyParams();
@@ -22605,6 +23101,13 @@ function cxVerifyStart() {
             cxPollTimer = setInterval(() => {
                 waited += 1.5;
                 fetch(buildURL('/tuningbode')).then(r => r.json()).then(j => {
+                    if (j.aborted) {   // protection cut the sweep — firmware latched why and discarded the run
+                        cxStopPoll();
+                        cx.verifyAbort = cxAbortInfoFrom(j);
+                        cx.verifyRunning = false;
+                        cxGet('TuningMode=0').finally(() => commissionRender());
+                        return;
+                    }
                     if ((j.done && !j.active) || waited > 200) {
                         cxStopPoll();
                         const pts = j.pts || [];
@@ -25032,10 +25535,12 @@ const CX_HELPFUL_HINTS_HTML =
     '<p style="font-size:13px; line-height:1.5; margin:0 0 12px; opacity:0.85;">Some timely tips:</p>' +
     '<ul style="list-style:none; padding:0; margin:0; font-size:13px; line-height:1.6;">' +
     '<li style="margin-bottom:12px;">Leave <strong>Alternator Enable</strong> (in top right corner) toggled &ldquo;On&rdquo; permanently. The regulator only drives the field and produces charging current when the Ignition is On and Engine Speed is &gt; Min RPM (default 125).</li>' +
-    '<li style="margin-bottom:12px;">This regulator stays alive 24-7 in a low-power state to track battery SOC, comfort metrics, etc. To view this interface with the Ignition Off:</li>' +
-    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Client Mode:</strong> low-power doze is automatically woken when you open the App interface.</li>' +
-    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">AP (Hotspot) Mode:</strong> WiFi shuts down 30 minutes after last use. Wake up with the WiFi Wake button (5 minute increments) or Ignition On.</li>' +
-    '<li style="margin-bottom:0;">Take a few minutes to explore the interface <strong>tab by tab</strong>. Commissioning only sets what it measures &mdash; there are many non-critical settings it never touched, and now is a good time to look through them and fill in the ones that apply to your boat.</li>' +
+    '<li style="margin-bottom:12px;">This regulator stays alive 24/7 in a low-power state to track battery SOC, comfort metrics, etc. To view this interface with the Ignition Off:' +
+      '<ul style="list-style:none; margin:7px 0 0; padding:0 0 0 11px; border-left:2px solid #3a3a3a;">' +
+      '<li style="margin-bottom:7px;"><strong style="color:#2ec4b6;">Client Mode:</strong> low-power doze is automatically woken when you open the App interface.</li>' +
+      '<li><strong style="color:#2ec4b6;">AP (Hotspot) Mode:</strong> WiFi shuts down 30 minutes after last use. Wake up with the WiFi Wake button (5 minute increments) or Ignition On.</li>' +
+      '</ul></li>' +
+    '<li style="margin-bottom:0; color:#2ec4b6; font-weight:600;">You should at this time take a few minutes to explore the whole interface tab by tab. There are many non-critical settings not touched by Commissioning / the recommendation tools which you should sanity check and be aware of. Click the tooltips for more info.</li>' +
     '</ul>';
 // Terminal Helpful Hints page, drawn into the commissioning modal body after Finish. No per-phase
 // poll or RPM strip (the run is over); the abort row is hidden so it can't revert the saved tune.
@@ -25050,7 +25555,7 @@ function cxShowHelpfulHints() {
 }
 function cxHintsDone() {
     closeCommissionModal(); cx = null; cxPlanUserSet = false;   // re-default the plan next time
-    goToTuning('commissioning');   // land on the Commissioning checklist
+    goToCommissioning();   // land on the Commissioning checklist
 }
 async function commissionAbort() {
     if (!await xConfirm('Abort commissioning and revert all settings to the pre-commissioning snapshot?')) return;

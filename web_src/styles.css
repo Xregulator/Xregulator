@@ -2344,12 +2344,19 @@ a.btn-secondary {
   color: #bbb;
 }
 
+/* Opening a box hands it to placeTooltipBox(), which switches it to position:fixed and places
+   it in viewport coordinates. That is required, not decorative: .grid cards are CSS multi-column
+   and Chromium slices an absolutely-positioned box across a column break. The absolute rules
+   below are only the closed/no-JS resting state — do not add offsets here expecting them to
+   show, and keep the max-height so a long box can never run off the bottom of a fixed viewport. */
 .tooltip-box {
   display: none;
   position: absolute;
   top: 125%;
   left: 50%;
   transform: translateX(-50%);
+  max-height: 70vh;
+  overflow-y: auto;
   background: #333;
   color: #fff;
   padding: 6px 10px;
@@ -2358,7 +2365,10 @@ a.btn-secondary {
   white-space: normal;
   z-index: 999;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-  max-width: min(300px, calc(100vw - 16px));
+  /* 36px = the 8px placement margin each side plus this box's own 20px of horizontal padding.
+     The sheet has no global border-box reset, so max-width sizes CONTENT — budget for the
+     padding here or a narrow phone gets a box wider than the screen. */
+  max-width: min(300px, calc(100vw - 36px));
   min-width: 180px;
   width: fit-content;
   /* the icon is user-select:none and iOS inherits that into children — re-enable so the

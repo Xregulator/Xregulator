@@ -100,6 +100,15 @@ struct Episode {
   // axUnqual/axExcur × EP_FEED_DT_MS. Dumped in /altdebug.csv.
   uint32_t  axUnqual[NAXIS + 1] = {}, axExcur[NAXIS + 1] = {}, feedTicks = 0;
   bool      axWasUnq[NAXIS + 1] = {};
+  // Gate-blame attribution (boot-cumulative), banked by caller-set statBank (alt: 0 = idle,
+  // 1 = cruise rpm; sail/motor never set it → bank 0). soleBlock = ticks where exactly ONE
+  // axis was out-of-band with its dwell filled while every other axis was steady — during real
+  // transients several axes fail together, so the sole blocker is the gate that alone cost a run.
+  // emitDirty = candidate emits vetoed by that axis's trimmed boxcar range; emitSpanShort =
+  // vetoed because the boxcar hadn't yet spanned avgWinMs. All dumped in /altdebug.csv.
+  uint8_t   statBank = 0;
+  uint32_t  bankTicks[2] = {}, soleBlock[2][NAXIS + 1] = {};
+  uint32_t  emitDirty[2][NAXIS + 1] = {}, emitSpanShort[2] = {};
 
   // ringBuf/ringCap = the caller's PSRAM boxcar ring; maxDwellSec[NAXIS+1] sizes each axis's (and the
   // output band's) deque to its longest expected steady time. Deque storage is ps_malloc'd here.
@@ -151,6 +160,8 @@ struct Episode {
 
     // Per-axis sliding-window min/max over each axis's own trailing dwell window (clamped to storage).
     feedTicks++;
+    const uint8_t bk = statBank & 1;
+    int nBad = 0, badAxis = -1; bool badDwellOk = false;
     bool qualified = true;
     for (int a = 0; a < NAXIS; a++) {
       uint32_t win = (uint32_t)(cfg[a].steadySec * 1000.0f);
@@ -165,7 +176,7 @@ struct Episode {
         axWasUnq[a] = !inBand;
       }
       axisSteady[a] = dwellOk && inBand;
-      if (!axisSteady[a]) qualified = false;
+      if (!axisSteady[a]) { qualified = false; nBad++; badAxis = a; badDwellOk = dwellOk; }
     }
     if (outCfg.tol > 0) {
       uint32_t win = (uint32_t)(outCfg.steadySec * 1000.0f);
@@ -180,10 +191,12 @@ struct Episode {
         axWasUnq[NAXIS] = !inBand;
       }
       axisSteady[NAXIS] = dwellOk && inBand;
-      if (!axisSteady[NAXIS]) qualified = false;
+      if (!axisSteady[NAXIS]) { qualified = false; nBad++; badAxis = NAXIS; badDwellOk = dwellOk; }
     } else {
       axisSteady[NAXIS] = true;   // output band disabled (vessel-perf) → never blocks
     }
+    bankTicks[bk]++;
+    if (nBad == 1 && badDwellOk) soleBlock[bk][badAxis]++;   // dwell-fill misses aren't band violations — skip
 
     // Trailing boxcar average (the emitted value): push, then evict samples older than avgWinMs.
     avgRing[ringHead] = s;
@@ -210,8 +223,10 @@ struct Episode {
     if (qualified && (uint32_t)(s.tMs - lastEmitMs) >= EP_EMIT_PERIOD_MS && ringCount > 2) {
       int tail = (ringHead - ringCount + avgCap) % avgCap;
       bool clean = ((uint32_t)(s.tMs - avgRing[tail].tMs) + 2u * EP_FEED_DT_MS >= avgWinMs);
-      for (int a = 0; clean && a < NAXIS; a++) clean = (trimmedRange(a) <= cfg[a].tol);
-      if (clean && outCfg.tol > 0) clean = (trimmedRange(NAXIS) <= outCfg.tol);
+      if (!clean) emitSpanShort[bk]++;
+      for (int a = 0; clean && a < NAXIS; a++)
+        if (trimmedRange(a) > cfg[a].tol) { clean = false; emitDirty[bk][a]++; }
+      if (clean && outCfg.tol > 0 && trimmedRange(NAXIS) > outCfg.tol) { clean = false; emitDirty[bk][NAXIS]++; }
       if (clean) {
         lastEmitMs = s.tMs;
         if (out) {
@@ -549,9 +564,11 @@ static inline float altExcitation(float duty, float vbus, float tF) {
 // Steadiness/averaging axes: {RPM, field-duty %, Vbus, tempF}. Defined here (before every function
 // that references them) so the rest of the module can use the front. Generic engine: Xregulator.ino.
 #define ALT_NAXIS        4
-#define ALT_EMIT_AVG_MS  8000     // record/grade averaging window. 2 s let max-per-cell harvest lucky
-                                  // 2 s windows (~2-3% record inflation → healthy graded ~95%); 8 s is
-                                  // the current best guess pending /altwinstats.csv data from a real run
+#define ALT_EMIT_AVG_MS  2000     // record/grade averaging window. Sized from /altwinstats.csv on a real
+                                  // idle hour (2026-08-21): luckiest-2s-window inflation 0.25% vs 0.13%
+                                  // at 8 s, but 8 s passed only 11 of 53 ≥2 s steady runs — the old 8 s
+                                  // guess starved harvest (and all transient capture) for ~0.1% inflation
+#define ALT_STAT_CRUISE_RPM 1200.0f  // Episode statBank split for gate-blame counters: ≥ this rpm = cruise bank
 #define ALT_FRONT_CAP    4096     // sparse support points (PSRAM); sized to be unreachable even AP-mode/no-prune — cost scales with count, not cap (see ALT_HEALTH_LWLR_ENGINE_SPEC.md)
 #define ALT_EP_RING_CAP  1024     // Episode trailing-boxcar buffer (PSRAM). Only ~ALT_EMIT_AVG_MS of
                                   // decimated samples are ever live in it (~80 at 10 Hz); generously
@@ -836,8 +853,8 @@ static bool altCapWarned = false;   // once per boot OR per Start Over (cleared 
 // Measures, during FULL-steady runs, how far a trailing W-second average of the graded amps signal
 // rides above the run's overall mean — exactly the inflation a max-per-cell record book harvests at
 // that window width. One steady run = one committed sample per window it spans ≥2×. Serves
-// /altwinstats.csv; once a real charging session has filled it, pick the knee where avgInflPct goes
-// small and hard-set ALT_EMIT_AVG_MS to it, then this probe can be deleted.
+// /altwinstats.csv. 2026-08-21: an idle hour set ALT_EMIT_AVG_MS = 2 s (0.25% inflation); probe kept
+// for one cruise-condition confirmation, then delete it (+ the 3_functions.ino route + the feed hook).
 #define AWP_NWIN 7
 static const float AWP_WIN_S[AWP_NWIN] = { 1, 2, 4, 8, 15, 30, 60 };
 #define AWP_RING_N 620                     // 62 s @ the 10 Hz probe cadence — covers the 60 s window
@@ -1026,6 +1043,7 @@ void altFold_tick(uint32_t nowMs) {
   s.x[0] = fRpm; s.x[1] = fDuty; s.x[2] = fVbus; s.x[3] = tF; s.out = fAmps; s.tMs = nowMs;
   s.ex[0] = fDuty; s.ex[1] = 0;   // retain run duty (excitation is derived from it) for cloud diagnosis
   FrontPoint<ALT_NAXIS> ep;
+  altEpisode.statBank = (fRpm >= ALT_STAT_CRUISE_RPM) ? 1 : 0;   // gate-blame counters split idle vs cruise
   bool emitted = altEpisode.feed(eligible, s, &ep);
   altSteady = (altEpisode.count > 0);                              // FULL steady (temp held altThermSec) → ring + surface + trend
   altWinProbeFeed(nowMs, fAmps, altSteady);                        // emit-window sizing probe (10 Hz internal decimation)
@@ -1322,6 +1340,30 @@ void altDebugCsvSend(AsyncWebServerRequest *request) {
                                   altEpisode.trimmedRange(0), altEpisode.trimmedRange(1), altEpisode.trimmedRange(2),
                                   altEpisode.trimmedRange(3), altEpisode.trimmedRange(ALT_NAXIS));
                 break;
+              case 15:   // sole-blocker ticks below ALT_STAT_CRUISE_RPM — the one axis out-of-band while all others steady
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,soleBlkIdle_rpm_duty_vbus_temp_amps_ticks,%lu,%lu,%lu,%lu,%lu,%lu\n",
+                                  (unsigned long)altEpisode.soleBlock[0][0], (unsigned long)altEpisode.soleBlock[0][1],
+                                  (unsigned long)altEpisode.soleBlock[0][2], (unsigned long)altEpisode.soleBlock[0][3],
+                                  (unsigned long)altEpisode.soleBlock[0][ALT_NAXIS], (unsigned long)altEpisode.bankTicks[0]);
+                break;
+              case 16:   // sole-blocker ticks at/above ALT_STAT_CRUISE_RPM
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,soleBlkCruise_rpm_duty_vbus_temp_amps_ticks,%lu,%lu,%lu,%lu,%lu,%lu\n",
+                                  (unsigned long)altEpisode.soleBlock[1][0], (unsigned long)altEpisode.soleBlock[1][1],
+                                  (unsigned long)altEpisode.soleBlock[1][2], (unsigned long)altEpisode.soleBlock[1][3],
+                                  (unsigned long)altEpisode.soleBlock[1][ALT_NAXIS], (unsigned long)altEpisode.bankTicks[1]);
+                break;
+              case 17:   // candidate emits vetoed per axis by the trimmed boxcar range (+ span-short), idle bank
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,emitDirtyIdle_rpm_duty_vbus_temp_amps_span,%lu,%lu,%lu,%lu,%lu,%lu\n",
+                                  (unsigned long)altEpisode.emitDirty[0][0], (unsigned long)altEpisode.emitDirty[0][1],
+                                  (unsigned long)altEpisode.emitDirty[0][2], (unsigned long)altEpisode.emitDirty[0][3],
+                                  (unsigned long)altEpisode.emitDirty[0][ALT_NAXIS], (unsigned long)altEpisode.emitSpanShort[0]);
+                break;
+              case 18:   // emit vetoes, cruise bank
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,emitDirtyCruise_rpm_duty_vbus_temp_amps_span,%lu,%lu,%lu,%lu,%lu,%lu\n",
+                                  (unsigned long)altEpisode.emitDirty[1][0], (unsigned long)altEpisode.emitDirty[1][1],
+                                  (unsigned long)altEpisode.emitDirty[1][2], (unsigned long)altEpisode.emitDirty[1][3],
+                                  (unsigned long)altEpisode.emitDirty[1][ALT_NAXIS], (unsigned long)altEpisode.emitSpanShort[1]);
+                break;
               default: st.phase = 3; st.idx = 0; break;
             }
             if (st.len > 0) st.idx++;
@@ -1565,6 +1607,10 @@ void initAlternatorHealth() {
                        altFront2.count, altFrontUp.count, altRefSource ? "Uploaded" : "MyHistory", altTrendCount);
 }
 void resetAlternatorHealth() {
+  // The Start Over confirm says "after replacing the alternator, regulator, or belt" — exactly the
+  // events that invalidate learned hunt pockets, so the damper map goes with the health record.
+  // Called here, before this function takes the fs lock itself (huntMapClearAll takes it too).
+  huntMapClearAll("alternator replaced / health record reset");
   if (!altFrontBuf) return;
   altFront2.count = 0; altFront2.source = 0;
   altPendingCount = 0; altFrontEmitCount = 0; altEmitQCount = 0; altCapWarned = false;
@@ -4977,6 +5023,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
       tuningSweepRpmSum = 0.0; tuningSweepRpmN = 0;
       tuningSweepBattV = BatteryV;
       tuningSweepDutyRailed = false;
+      tuningSweepAbortReason = 0; tuningSweepAbortVolts = 0.0f; tuningSweepAbortDuty = 0.0f;
       tuningSweepWorstCoh = 1.0f; gMaxSeen = 0.0f;
       queueConsoleMessageF("Tuning sine sweep: %d pts %.1f-%.1f Hz, %d cycles/pt, amp=%.1f A",
                            TUNING_SWEEP_NPOINTS, freqList[0], freqList[TUNING_SWEEP_NPOINTS - 1],
@@ -4995,6 +5042,15 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
       // Hold at the eased rest current after a sweep (not back at the center) so it doesn't pop up before
       // the dashboard releases TuningMode; hold at center before any sweep so a Run swings cleanly.
       out = tuningSweepDone ? TUNING_EASE_REST_A : baseA;
+      return;
+    }
+    // Protection cut mid-sweep: stop and discard. Points spanning the cut + lockout measure the
+    // outage, not the plant. No ease-down (field is already dead), no record commit; done=true so
+    // pollers that predate the aborted flag still terminate.
+    if (tuningSweepAbortReason != 0) {
+      tuningSweepActive = false;
+      tuningSweepDone = true;
+      out = TUNING_EASE_REST_A;
       return;
     }
     f = freqList[segIdx];

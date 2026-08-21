@@ -196,27 +196,26 @@ void recomputeCcGains() {
   currentPID.SetTunings(PidKp_active, PidKi_active * g_huntDerate, PidKd_active);
 }
 
-// ==================== HUNT GOVERNOR ====================
-// Universal anti-oscillation damper (Hunt_Governor_Spec.md). A marginally-stable loop meeting a
-// speed-rotated plant (idle knee: each %duty sags rpm, the sag cancels the field gain → plant
-// ~quadrature) rings at 0.3–3 Hz. Detect the symptom, derate inner Ki in ×0.8 steps, and keep the
-// derate ONLY if the wobble measurably responds — fully quiet, or held at ≤ HG_HALF_FRAC of its
-// confirmed starting amplitude — because an externally-forced wobble (cyclic load, faulty governor)
-// does not respond to our gain, so that episode reverts in full and stands down.
+// ==================== HUNT GOVERNOR v2 ====================
+// Persistent speed-map oscillation damper (HUNT_GOVERNOR_V2_SPEC.md). A marginally-stable loop
+// meeting a speed-rotated plant (idle knee: each %duty sags rpm, the sag cancels the field gain →
+// plant ~quadrature) rings at 0.3–3 Hz. v2: detect the symptom while engine speed is steady, make
+// ONE cut to HuntCutPct, and keep it ONLY if averaged ripple drops ≥ HuntVerifyPct — a verified cut
+// becomes a persistent speed pocket applied proactively on every future pass through that speed.
+// Repeat verifications widen a pocket, never deepen it; a wobble persisting inside a pocket at the
+// floor is reported as external/mechanical, not cut further.
 #define HG_RING_N 128            // 6.4 s at 50 ms — two periods of the lowest bin (hard floor for 0.31 Hz selectivity)
 #define HG_EVAL_EVERY 32         // evaluate every 1.6 s (window/4)
 #define HG_NBINS 6
-#define HG_STEP 0.8f
-#define HG_MAX_STEPS 4           // ×0.8^4 ≈ 0.41 per episode
-#define HG_FLOOR 0.25f           // absolute derate floor — stacked hold-state episodes stop here
 #define HG_TRIG_AMP 0.5f         // % duty — hunt logs measured 1.17–1.48, quiet-log median ~0.4
 #define HG_TRIG_RATIO 3.0f       // peak vs median of other bins — rejected a 2.22% broadband load transient amplitude alone would have flagged
-#define HG_QUIET_AMP 0.3f
-#define HG_QUIET_RATIO 2.0f
-#define HG_HALF_FRAC 0.5f        // partial-success bar: amplitude ≤ this ×a0 for 3 consecutive evals holds the derate (gain floor is ×0.41, so a non-responding wobble can't fake this)
-#define HG_ADJ_EVALS 8           // evals allowed after the final step (~12.8 s) for quiet/halved to confirm before the external-suspected revert
-#define HG_STANDDOWN_MS 600000UL
-#define HG_EPISODE_TIMEOUT_MS 90000UL
+#define HG_TRIG_AMP_D 0.15f      // relaxed duty bar for a D-attributed scan: the D-driven mode lives in VOLTS and its duty amplitude can sit below the quiet-log floor (08-21: 0.27% duty, 0.33 V p-p). Safe below the 0.4 quiet median ONLY because the kdTrim alternation requirement is the real gate — a quiet log has no alternations
+#define HG_QUALIFY_SCANS 3       // consecutive hunt+steady scans to open a test; baseline = their average (the HuntVerifyPct bar needs an averaged reference — single windows jitter more than 15% on their own)
+#define HG_BLIND_SCANS 4         // clean scans discarded after the cut while the 6.4 s window refills with post-cut data
+#define HG_READ_SCANS 3          // clean scans averaged for the verify reading
+#define HG_EP_TIMEOUT_SCANS 25   // ~40 s — contamination can freeze clean-scan progress; bail with nothing kept
+#define HG_RPM_MIN 100.0f        // below this there is no usable speed axis (no tach signal) — the damper stays inert
+#define HG_MAX_POCKETS 4         // merging keeps the real count low; least-recently-confirmed evicted if ever exceeded
 static const float HG_BIN_HZ[HG_NBINS] = { 0.31f, 0.47f, 0.70f, 1.05f, 1.56f, 2.34f };
 static float hgRing[HG_RING_N];  // 512 B, deliberately internal: control-adjacent and far below the PSRAM-rule size
 static uint16_t hgHead = 0;
@@ -225,6 +224,12 @@ static uint32_t hgContamTick = 0;  // hgTick at the last contaminated push — w
 static uint32_t hgLastPushMs = 0;
 static float hgDtEmaMs = 50.0f;
 static float hgSpEma = 0.0f;
+static float hgRpmSum = 0.0f;    // scan-mean RPM accumulator (drained each evaluation) — steadiness + pocket lookup both work on window means, so the hunt's own speed ripple never disqualifies itself
+static uint16_t hgRpmCnt = 0;
+static float hgSlopeSum = 0.0f;  // Σ|cvDSlope| over the scan (drained each evaluation) — the D-test verify metric: the D-driven mode lives in VOLTS (its duty amplitude can sit below the quiet-log Goertzel floor), and |dV/dt| at a fixed ring frequency is a voltage amplitude proxy
+static uint16_t hgSlopeCnt = 0;
+static uint16_t hgKdFlips = 0;   // kdTrim sign alternations since the last scan (drained each evaluation) — D-lever attribution
+static int8_t hgKdSign = 0;      // last nonzero kdTrim sign (zero spans between engagements don't break an alternation)
 
 // Per-control-tick sampler: ONE ring write plus the contamination flags — the analysis never runs
 // here. Self-clocked to ~50 ms so changes in loop cadence don't move the
@@ -242,6 +247,24 @@ void huntGovObserve(float dutyApplied, bool closedLoopOk) {
   hgRing[hgHead] = dutyApplied;
   hgHead = (uint16_t)((hgHead + 1) % HG_RING_N);
   hgTick++;
+  hgRpmSum += (float)RPM;
+  hgRpmCnt++;
+  // D-lever attribution (08-21 D-driven variant): a healthy D-term fires in brief one-sided bursts
+  // that decay within a second or two; sustained periodic sign ALTERNATION around zero mean is a
+  // D-term doing no net work — either useless or driving a limit cycle. 50 ms sampling is enough:
+  // the last-nonzero-sign compare catches an alternation even when the zero span between
+  // engagements is sampled.
+  if (g_cvKdTrimLive > 0.001f) {
+    if (hgKdSign < 0) hgKdFlips++;
+    hgKdSign = 1;
+  } else if (g_cvKdTrimLive < -0.001f) {
+    if (hgKdSign > 0) hgKdFlips++;
+    hgKdSign = -1;
+  }
+  if (voltageControlActive) {  // cvDSlope only updates in CV — never accumulate a stale CC-phase value
+    hgSlopeSum += fabsf(cvDSlope);
+    hgSlopeCnt++;
+  }
   float spDev = fabsf(setpointLimited - hgSpEma);
   hgSpEma += (dtMs / (2000.0f + dtMs)) * (setpointLimited - hgSpEma);
   bool contam = !closedLoopOk
@@ -362,13 +385,204 @@ void huntLedgerService() {
   fsReleaseLock();
 }
 
+// ── Pocket map ────────────────────────────────────────────────────────────────────────────
+// A pocket is a flat core [lo,hi] rpm held at HuntCutPct gain, with linear taper wings spanning
+// HuntWingPct of speed beyond each end. RAM is authoritative; /huntpockets.csv is the boot-restore
+// copy, written only by huntMapService() under the same field-off gate as the episode ledger (no
+// flash in the control path). Absolute RPM scale error is irrelevant — the map compares the
+// device's own readings against its own readings — but a recalibration rescales the axis, so
+// rpmAxisWipeExecute clears the map along with every other RPM-keyed artifact.
+struct HgPocket {
+  float lo, hi;      // flat-core bounds: min..max of the verified episode speeds
+  uint32_t epoch;    // last confirmation (eviction order)
+  uint8_t lever;     // which lever this pocket holds: 0 = inner Ki at HuntCutPct, 1 = CV D-term off. Pockets of different levers may overlap — they act on independent gains
+};
+static HgPocket hgPockets[HG_MAX_POCKETS];
+static uint8_t hgPocketN = 0;
+static bool hgMapDirty = false;
+
+// v2 episode state — file-scope so huntMapClearAll can cancel a test in flight
+static uint8_t hgConfirmCnt = 0;
+static float hgQualRpm0 = 0.0f, hgA0Sum = 0.0f, hgQualRpmSum = 0.0f;
+static float hgEpA0 = 0.0f, hgEpRefRpm = 0.0f;
+static uint8_t hgEpScans = 0, hgEpCleanScans = 0, hgReadN = 0;
+static float hgReadSum = 0.0f;
+static uint32_t hgCooldownUntilMs = 0;
+static float hgRpmMapEma = 0.0f;
+// D-lever episode state (state 4): baseline and read accumulator for the |cvDSlope| verify metric,
+// and the qualify-span alternation count that attributes the episode to the D-term
+static float hgSlope0 = 0.0f, hgQualSlopeSum = 0.0f, hgReadSlopeSum = 0.0f;
+static uint16_t hgQualFlips = 0;
+static bool hgEpVoltsMode = false;  // qualify duty average was below HG_TRIG_AMP (volts-mode wobble) — EVERY stage of this episode verifies on the slope metric; a sub-noise-floor duty comparison would be a coin flip
+
+// Applied gain at speed r for one lever: min across that lever's pockets of (the lever's cut
+// inside the core, linear ramp across the wings, full gain outside). Continuous in r, so there
+// is no edge to flap across.
+static float hgMapGainLever(float rpm, uint8_t lever, float cut) {
+  if (rpm < HG_RPM_MIN || hgPocketN == 0) return 1.0f;
+  float wing = (float)HuntWingPct / 100.0f;
+  float g = 1.0f;
+  for (uint8_t i = 0; i < hgPocketN; i++) {
+    const HgPocket &p = hgPockets[i];
+    if (p.lever != lever) continue;
+    float wLo = p.lo * (1.0f - wing), wHi = p.hi * (1.0f + wing);
+    if (rpm < wLo || rpm > wHi) continue;
+    float gi;
+    if (rpm < p.lo) gi = 1.0f - (1.0f - cut) * (rpm - wLo) / (p.lo - wLo);
+    else if (rpm > p.hi) gi = 1.0f - (1.0f - cut) * (wHi - rpm) / (wHi - p.hi);
+    else gi = cut;
+    if (gi < g) g = gi;
+  }
+  return g;
+}
+
+float huntMapGain(float rpm) {  // inner-Ki multiplier
+  return hgMapGainLever(rpm, 0, (float)HuntCutPct / 100.0f);
+}
+
+// CV D-term multiplier. The D cut is 0, not HuntCutPct: the deadband limit cycle parks where its
+// amplitude-dependent gain reaches |L|=1, so a PARTIAL D cut only moves the equilibrium to a
+// LARGER amplitude — the lever is binary off (08-21 measurement: |L|=1.00 with D, 0.45 without).
+float huntMapGainD(float rpm) {
+  return hgMapGainLever(rpm, 1, 0.0f);
+}
+
+// Fold a verified speed into the map: extend the pocket whose profile already covers it, else a
+// new pocket (evicting the least-recently-confirmed at the cap), then merge overlapping pockets.
+// Widening only — depth is fixed per lever (HuntCutPct for Ki, 0 for D). Matching and merging are
+// same-lever only: a Ki pocket and a D pocket overlapping in speed are independent rules.
+static void huntMapAdd(float rpm, uint8_t lever) {
+  float wing = (float)HuntWingPct / 100.0f;
+  uint32_t now = (uint32_t)time(nullptr);
+  int hit = -1;
+  for (uint8_t i = 0; i < hgPocketN; i++)
+    if (hgPockets[i].lever == lever
+        && rpm >= hgPockets[i].lo * (1.0f - wing) && rpm <= hgPockets[i].hi * (1.0f + wing)) { hit = i; break; }
+  if (hit >= 0) {
+    hgPockets[hit].lo = fminf(hgPockets[hit].lo, rpm);
+    hgPockets[hit].hi = fmaxf(hgPockets[hit].hi, rpm);
+    hgPockets[hit].epoch = now;
+  } else if (hgPocketN < HG_MAX_POCKETS) {
+    hgPockets[hgPocketN].lo = rpm;
+    hgPockets[hgPocketN].hi = rpm;
+    hgPockets[hgPocketN].epoch = now;
+    hgPockets[hgPocketN].lever = lever;
+    hgPocketN++;
+  } else {
+    int old = 0;
+    for (uint8_t i = 1; i < hgPocketN; i++)
+      if (hgPockets[i].epoch < hgPockets[old].epoch) old = i;
+    hgPockets[old].lo = rpm;
+    hgPockets[old].hi = rpm;
+    hgPockets[old].epoch = now;
+    hgPockets[old].lever = lever;
+  }
+  bool merged = true;   // O(n²) with restart — n ≤ 4
+  while (merged) {
+    merged = false;
+    for (uint8_t i = 0; i < hgPocketN && !merged; i++)
+      for (uint8_t j = i + 1; j < hgPocketN && !merged; j++)
+        if (hgPockets[i].lever == hgPockets[j].lever
+            && hgPockets[i].hi * (1.0f + wing) >= hgPockets[j].lo * (1.0f - wing)
+            && hgPockets[j].hi * (1.0f + wing) >= hgPockets[i].lo * (1.0f - wing)) {
+          hgPockets[i].lo = fminf(hgPockets[i].lo, hgPockets[j].lo);
+          hgPockets[i].hi = fmaxf(hgPockets[i].hi, hgPockets[j].hi);
+          if (hgPockets[j].epoch > hgPockets[i].epoch) hgPockets[i].epoch = hgPockets[j].epoch;
+          hgPockets[j] = hgPockets[hgPocketN - 1];
+          hgPocketN--;
+          merged = true;
+        }
+  }
+  hgMapDirty = true;
+}
+
+// Boot restore. setup() only, after the filesystem is mounted.
+void huntMapLoad() {
+  fsTakeLock();
+  File f = LittleFS.open("/huntpockets.csv", "r");
+  if (f) {
+    while (f.available() && hgPocketN < HG_MAX_POCKETS) {
+      String line = f.readStringUntil('\n');
+      float lo, hi;
+      unsigned long ep;
+      unsigned lever = 0;  // 3-field line (pre-D-lever format) = a Ki pocket
+      int got = sscanf(line.c_str(), "%f,%f,%lu,%u", &lo, &hi, &ep, &lever);
+      if (got >= 3 && lo >= HG_RPM_MIN && hi >= lo && hi <= 100000.0f && lever <= 1) {
+        hgPockets[hgPocketN].lo = lo;
+        hgPockets[hgPocketN].hi = hi;
+        hgPockets[hgPocketN].epoch = (uint32_t)ep;
+        hgPockets[hgPocketN].lever = (uint8_t)lever;
+        hgPocketN++;
+      }
+    }
+    f.close();
+  }
+  fsReleaseLock();
+}
+
+// The ONLY code that writes the map to flash. Main loop, same field-off-settled call site as
+// huntLedgerService.
+void huntMapService() {
+  if (!hgMapDirty) return;
+  fsTakeLock();
+  File f = LittleFS.open("/huntpockets.csv", "w");
+  if (f) {
+    for (uint8_t i = 0; i < hgPocketN; i++)
+      f.printf("%.0f,%.0f,%lu,%u\n", hgPockets[i].lo, hgPockets[i].hi, (unsigned long)hgPockets[i].epoch, (unsigned)hgPockets[i].lever);
+    f.close();
+    hgMapDirty = false;
+  }
+  fsFreeDirty = true;
+  fsReleaseLock();
+}
+
+// JSON for the /huntmap endpoint — the live map the Diag plot draws. Cut/wing ride along so the
+// client renders exactly the profile the firmware applies, atomically with the pockets.
+size_t huntMapJson(char *out, size_t cap) {
+  size_t n = (size_t)snprintf(out, cap, "{\"cut\":%d,\"wing\":%d,\"enabled\":%d,\"pockets\":[",
+                              (int)HuntCutPct, (int)HuntWingPct, (int)HuntGovEnable);
+  for (uint8_t i = 0; i < hgPocketN && n < cap; i++)
+    n += (size_t)snprintf(out + n, cap - n, "%s{\"lo\":%.0f,\"hi\":%.0f,\"epoch\":%lu,\"lever\":%u}",
+                          i ? "," : "", hgPockets[i].lo, hgPockets[i].hi, (unsigned long)hgPockets[i].epoch, (unsigned)hgPockets[i].lever);
+  if (n < cap - 2) n += (size_t)snprintf(out + n, cap - n, "]}");
+  if (n >= cap) n = cap - 1;  // snprintf accumulates would-be lengths — never let a truncated build overread the buffer
+  return n;
+}
+
+// Wipes everything the damper has learned: pockets, episode ledger, queued records, any test in
+// flight. Callers: /huntclear, the voltage-class change, rpmAxisWipeExecute — all flash-safe
+// contexts (HTTP task / Core 1), never the control path.
+void huntMapClearAll(const char *why) {
+  hgPocketN = 0;
+  hgMapDirty = false;
+  hgConfirmCnt = 0;
+  hgReadN = 0;
+  hgCooldownUntilMs = 0;
+  g_huntState = 0;
+  g_huntFreqHz = 0.0f;
+  hgQueueN = 0;
+  hgQueueDropped = 0;
+  g_huntKdScale = 1.0f;  // cancels a D test in flight and un-pockets the D lever
+  if (g_huntDerate < 1.0f) {
+    g_huntDerate = 1.0f;
+    recomputeCcGains();
+  }
+  fsTakeLock();
+  LittleFS.remove("/huntpockets.csv");
+  LittleFS.remove("/huntledger.csv");
+  fsFreeDirty = true;
+  fsReleaseLock();
+  queueConsoleMessageF("Oscillation damper: learned speed map and episode record cleared (%s)", why);
+}
+
 // Evaluation + state machine. Called every loop() pass from Xregulator.ino; self-gates to one
-// Goertzel pass (6 bins × 128 samples, tens of µs) per HG_EVAL_EVERY control ticks.
+// Goertzel pass (6 bins × 128 samples, tens of µs) per HG_EVAL_EVERY control ticks. v2 flow
+// (HUNT_GOVERNOR_V2_SPEC.md): qualify (HG_QUALIFY_SCANS hunt+steady scans) → one cut to
+// HuntCutPct → HG_BLIND_SCANS while the window refills → HG_READ_SCANS averaged → verdict
+// (≥ HuntVerifyPct averaged drop maps a pocket; anything else reverts, cooldown). Outside a
+// test, gain simply follows the pocket map at the current smoothed speed.
 void runHuntGovernor() {
   static uint32_t lastEvalTick = 0;
-  static uint8_t consec = 0, quietCnt = 0, halfCnt = 0, steps = 0, evalsSinceStep = 0;
-  static float a0 = 0.0f, aConfMax = 0.0f, baseDerate = 1.0f, sessCeil = 1.0f, rpmAtVerify = 0.0f, rpmEma = 0.0f;
-  static uint32_t standdownUntilMs = 0, episodeStartMs = 0;
   static float hann[HG_RING_N];
   static bool hannInit = false;
 
@@ -377,10 +591,15 @@ void runHuntGovernor() {
       g_huntDerate = 1.0f;
       recomputeCcGains();
     }
+    g_huntKdScale = 1.0f;  // damper off = full gain on BOTH levers; the map is kept but inert
     g_huntState = 0;
-    consec = 0;
-    sessCeil = 1.0f;
+    hgConfirmCnt = 0;
     g_huntFreqHz = 0.0f;
+    hgRpmSum = 0.0f;  // keep draining — the observer accumulates regardless, and a re-enable must not read a stale hours-long sum
+    hgRpmCnt = 0;
+    hgSlopeSum = 0.0f;
+    hgSlopeCnt = 0;
+    hgKdFlips = 0;
     return;
   }
   if (hgTick - lastEvalTick < HG_EVAL_EVERY) return;
@@ -390,152 +609,257 @@ void runHuntGovernor() {
     for (int i = 0; i < HG_RING_N; i++) hann[i] = 0.5f - 0.5f * cosf(2.0f * (float)M_PI * (float)i / (float)(HG_RING_N - 1));
     hannInit = true;
   }
-  rpmEma += 0.1f * ((float)RPM - rpmEma);  // τ ≈ 16 s at the 1.6 s eval cadence
-  // A large rpm-regime change voids the session ceiling — the pocket that justified it moved.
-  if (sessCeil < 0.999f && rpmAtVerify > 1.0f && (rpmEma < 0.75f * rpmAtVerify || rpmEma > 1.33f * rpmAtVerify)) sessCeil = 1.0f;
+
+  // Scan-mean engine speed — the working RPM for steadiness and pocket lookup
+  float scanRpm = hgRpmCnt ? (hgRpmSum / (float)hgRpmCnt) : 0.0f;
+  hgRpmSum = 0.0f;
+  hgRpmCnt = 0;
+  float scanSlope = hgSlopeCnt ? (hgSlopeSum / (float)hgSlopeCnt) : 0.0f;  // scan-mean |cvDSlope| — D-test verify metric
+  hgSlopeSum = 0.0f;
+  hgSlopeCnt = 0;
+  uint16_t scanFlips = hgKdFlips;  // kdTrim sign alternations this scan — D-lever attribution
+  hgKdFlips = 0;
+  // τ ≈ 2 scans for the map lookup — fast pocket entry; a long EMA would lag the reduction in by tens of seconds
+  hgRpmMapEma = (hgRpmMapEma <= 0.0f) ? scanRpm : hgRpmMapEma + 0.5f * (scanRpm - hgRpmMapEma);
+
+  float cut = (float)HuntCutPct / 100.0f;
+
+  // Gain follows the map whenever no test holds it pinned at the cut — per lever: Ki keeps
+  // following its map during a D test (state 4), and vice versa
+  if (g_huntState != 1) {
+    float mg = huntMapGain(hgRpmMapEma);
+    if (fabsf(mg - g_huntDerate) >= 0.01f) {
+      g_huntDerate = mg;
+      recomputeCcGains();
+    }
+  }
+  if (g_huntState != 4) {
+    float ds = huntMapGainD(hgRpmMapEma);
+    if (fabsf(ds - g_huntKdScale) >= 0.01f) g_huntKdScale = ds;  // applied per-tick at the kdTrim choke point — no recompute needed
+  }
 
   if (g_huntState == 3) {
-    if ((int32_t)(millis() - standdownUntilMs) < 0) return;
+    if ((int32_t)(millis() - hgCooldownUntilMs) < 0) return;
     g_huntState = 0;
   }
-  if (g_huntState == 2) {
-    if (g_huntDerate < sessCeil) {
-      g_huntDerate = fminf(sessCeil, g_huntDerate + 0.0032f);  // +0.2%/s at the 1.6 s cadence
-      recomputeCcGains();
+
+  bool windowClean = (hgTick >= HG_RING_N) && ((hgTick - hgContamTick) >= HG_RING_N);
+  float aPk = 0.0f, aMed = 0.0f;
+  int pk = 0;
+  bool dirtyScan = !windowClean;
+  if (windowClean) {
+    float fs = 1000.0f / fmaxf(hgDtEmaMs, 1.0f);
+    float s1[HG_NBINS] = { 0 }, s2[HG_NBINS] = { 0 }, coef[HG_NBINS];
+    bool binOk[HG_NBINS];
+    for (int b = 0; b < HG_NBINS; b++) {
+      binOk[b] = HG_BIN_HZ[b] < 0.4f * fs;
+      coef[b] = 2.0f * cosf(2.0f * (float)M_PI * HG_BIN_HZ[b] / fs);
     }
-    if (g_huntDerate >= 0.999f) {
-      g_huntDerate = 1.0f;
+    float mean = 0.0f;
+    for (int i = 0; i < HG_RING_N; i++) mean += hgRing[i];
+    mean /= (float)HG_RING_N;
+    float mn = 1e9f, mx = -1e9f;
+    for (int i = 0; i < HG_RING_N; i++) {
+      float raw = hgRing[(hgHead + i) % HG_RING_N];
+      if (raw < mn) mn = raw;
+      if (raw > mx) mx = raw;
+      float v = (raw - mean) * hann[i];
+      for (int b = 0; b < HG_NBINS; b++) {
+        float s0 = v + coef[b] * s1[b] - s2[b];
+        s2[b] = s1[b];
+        s1[b] = s0;
+      }
+    }
+    if (mx - mn > 12.0f) {  // step/transient the contamination flags didn't catch
+      dirtyScan = true;
+    } else {
+      float amps[HG_NBINS];
+      for (int b = 0; b < HG_NBINS; b++) {
+        float p = s1[b] * s1[b] + s2[b] * s2[b] - coef[b] * s1[b] * s2[b];
+        amps[b] = binOk[b] ? 2.0f * sqrtf(fmaxf(p, 0.0f)) / (0.5f * (float)HG_RING_N) : 0.0f;  // Hann coherent gain 0.5
+        if (amps[b] > amps[pk]) pk = b;
+      }
+      float others[HG_NBINS - 1];
+      int n = 0;
+      for (int b = 0; b < HG_NBINS; b++)
+        if (b != pk) others[n++] = amps[b];
+      for (int i = 1; i < n; i++) {
+        float k = others[i];
+        int j = i - 1;
+        while (j >= 0 && others[j] > k) {
+          others[j + 1] = others[j];
+          j--;
+        }
+        others[j + 1] = k;
+      }
+      aMed = others[n / 2];
+      aPk = amps[pk];
+    }
+  }
+  if (dirtyScan) {
+    hgConfirmCnt = 0;
+    if ((g_huntState == 1 || g_huntState == 4) && ++hgEpScans > HG_EP_TIMEOUT_SCANS) {  // contamination froze the test — bail, keep nothing
+      g_huntDerate = huntMapGain(hgRpmMapEma);  // restore BEFORE queuing — the record's derateExit must be the true exit gain
       recomputeCcGains();
+      g_huntKdScale = huntMapGainD(hgRpmMapEma);
+      hgLedgerQueue("aborted", g_huntFreqHz, hgEpA0, 0.0f, 1);
       g_huntState = 0;
     }
-  }
-  if (g_huntState == 1 && (uint32_t)(millis() - episodeStartMs) > HG_EPISODE_TIMEOUT_MS) {
-    // Stalled — usually a mid-episode transient froze evaluation. Revert, no standdown.
-    g_huntDerate = baseDerate;
-    recomputeCcGains();
-    hgLedgerQueue("aborted", g_huntFreqHz, a0, 0.0f, steps);
-    g_huntState = 0;
-    consec = 0;
-    return;
-  }
-  if (hgTick < HG_RING_N || (hgTick - hgContamTick) < HG_RING_N) {
-    consec = 0;
     return;
   }
 
-  float fs = 1000.0f / fmaxf(hgDtEmaMs, 1.0f);
-  float s1[HG_NBINS] = { 0 }, s2[HG_NBINS] = { 0 }, coef[HG_NBINS];
-  bool binOk[HG_NBINS];
-  for (int b = 0; b < HG_NBINS; b++) {
-    binOk[b] = HG_BIN_HZ[b] < 0.4f * fs;
-    coef[b] = 2.0f * cosf(2.0f * (float)M_PI * HG_BIN_HZ[b] / fs);
-  }
-  float mean = 0.0f;
-  for (int i = 0; i < HG_RING_N; i++) mean += hgRing[i];
-  mean /= (float)HG_RING_N;
-  float mn = 1e9f, mx = -1e9f;
-  for (int i = 0; i < HG_RING_N; i++) {
-    float raw = hgRing[(hgHead + i) % HG_RING_N];
-    if (raw < mn) mn = raw;
-    if (raw > mx) mx = raw;
-    float v = (raw - mean) * hann[i];
-    for (int b = 0; b < HG_NBINS; b++) {
-      float s0 = v + coef[b] * s1[b] - s2[b];
-      s2[b] = s1[b];
-      s1[b] = s0;
-    }
-  }
-  if (mx - mn > 12.0f) {  // step/transient the contamination flags didn't catch
-    consec = 0;
-    return;
-  }
-  float amps[HG_NBINS];
-  int pk = 0;
-  for (int b = 0; b < HG_NBINS; b++) {
-    float p = s1[b] * s1[b] + s2[b] * s2[b] - coef[b] * s1[b] * s2[b];
-    amps[b] = binOk[b] ? 2.0f * sqrtf(fmaxf(p, 0.0f)) / (0.5f * (float)HG_RING_N) : 0.0f;  // Hann coherent gain 0.5
-    if (amps[b] > amps[pk]) pk = b;
-  }
-  float others[HG_NBINS - 1];
-  int n = 0;
-  for (int b = 0; b < HG_NBINS; b++)
-    if (b != pk) others[n++] = amps[b];
-  for (int i = 1; i < n; i++) {
-    float k = others[i];
-    int j = i - 1;
-    while (j >= 0 && others[j] > k) {
-      others[j + 1] = others[j];
-      j--;
-    }
-    others[j + 1] = k;
-  }
-  float aMed = others[n / 2];
-  float aPk = amps[pk];
-  bool hunt = (aPk > HG_TRIG_AMP) && (aPk > HG_TRIG_RATIO * aMed);
-  bool quiet = (aPk < HG_QUIET_AMP) || (aPk < HG_QUIET_RATIO * aMed);
-
-  if (g_huntState == 1) {
-    evalsSinceStep++;
-    quietCnt = quiet ? (uint8_t)(quietCnt + 1) : 0;
-    halfCnt = (aPk <= HG_HALF_FRAC * a0) ? (uint8_t)(halfCnt + 1) : 0;
-    if (quietCnt >= 3) {
-      sessCeil = fminf(1.0f, g_huntDerate * 1.1f);  // recovery creep parks just above the verified quiet point for this session
-      rpmAtVerify = rpmEma;
-      hgLedgerQueue("damped", g_huntFreqHz, a0, aPk, steps);
-      queueConsoleMessageF("Oscillation damper: %.2f Hz wobble gone at %d%% current-loop gain", g_huntFreqHz, (int)(g_huntDerate * 100.0f));
-      g_huntState = 2;
-    } else if (steps < HG_MAX_STEPS) {
-      if (!quiet && evalsSinceStep >= 3) {  // 3 evals ≈ window refilled with post-step data
-        steps++;
-        evalsSinceStep = 0;
-        halfCnt = 0;
-        g_huntDerate = fmaxf(HG_FLOOR, g_huntDerate * HG_STEP);
-        recomputeCcGains();
-      }
-    } else if (halfCnt >= 3 && evalsSinceStep >= 3) {
-      // Partial success: not quiet, but the cuts have verified traction — amplitude held at ≤ half
-      // the confirmed start for 3 evals against a ×0.41 gain cut. Hold the derate; the hold-state
-      // re-confirmation path re-adjudicates from here if the wobble regrows during the creep.
-      sessCeil = fminf(1.0f, g_huntDerate * 1.1f);
-      rpmAtVerify = rpmEma;
-      hgLedgerQueue("damped-partial", g_huntFreqHz, a0, aPk, steps);
-      queueConsoleMessageF("Oscillation damper: %.2f Hz wobble cut from %.1f%% to %.1f%% duty swing — holding %d%% current-loop gain", g_huntFreqHz, a0, aPk, (int)(g_huntDerate * 100.0f));
-      g_huntState = 2;
-    } else if (evalsSinceStep >= HG_ADJ_EVALS) {  // adjudication window expired with neither quiet nor halved confirmed
-      g_huntDerate = baseDerate;
+  if (g_huntState == 1 || g_huntState == 4) {
+    hgEpScans++;
+    bool steady = (scanRpm >= HG_RPM_MIN) && (fabsf(scanRpm - hgEpRefRpm) <= hgEpRefRpm * (float)HuntSteadyPct / 100.0f);
+    if (!steady || hgEpScans > HG_EP_TIMEOUT_SCANS) {
+      // Couldn't verify on steady data — revert BOTH levers, keep nothing (transients never leave residue)
+      g_huntDerate = huntMapGain(hgRpmMapEma);  // restore BEFORE queuing — the record's derateExit must be the true exit gain
       recomputeCcGains();
-      hgLedgerQueue("external-suspected", g_huntFreqHz, a0, aPk, steps);
-      queueConsoleMessageF("Oscillation damper: gain cuts did not calm the %.2f Hz wobble — restored full gain (external cyclic load or engine issue suspected)", g_huntFreqHz);
-      standdownUntilMs = millis() + HG_STANDDOWN_MS;
+      g_huntKdScale = huntMapGainD(hgRpmMapEma);
+      hgLedgerQueue("aborted", g_huntFreqHz, hgEpA0, 0.0f, 1);
+      g_huntState = 0;
+      return;
+    }
+    hgEpCleanScans++;
+    if (hgEpCleanScans <= HG_BLIND_SCANS) return;  // window still refilling with post-cut data
+    hgReadSum += aPk;
+    hgReadSlopeSum += scanSlope;
+    hgReadN++;
+    if (hgReadN < HG_READ_SCANS) return;
+    float aPost = hgReadSum / (float)HG_READ_SCANS;
+
+    if (g_huntState == 4) {
+      // D-lever verdict — judged on the |cvDSlope| metric, not duty: the D-driven mode barely
+      // registers in duty, and physics predicts collapse, not a marginal drop (|L| 1.0 -> 0.45)
+      float slopePost = hgReadSlopeSum / (float)HG_READ_SCANS;
+      bool dPassed = slopePost <= hgSlope0 * (1.0f - (float)HuntVerifyPct / 100.0f);
+      if (dPassed) huntMapAdd(hgEpRefRpm, 1);
+      g_huntKdScale = huntMapGainD(hgRpmMapEma);  // pass: the new pocket now holds the cut (0 here); fail: back to the map (usually 1)
+      if (dPassed) {
+        hgLedgerQueue("damped-dterm", g_huntFreqHz, hgSlope0, slopePost, 1);
+        queueConsoleMessageF("Oscillation damper: %.2f Hz wobble stopped when the voltage damper (D-term) was paused (%.2f -> %.2f V/s movement) — D-term mapped off at %d rpm", g_huntFreqHz, hgSlope0, slopePost, (int)hgEpRefRpm);
+        g_huntState = 0;
+      } else {
+        hgLedgerQueue("dterm-no-resp", g_huntFreqHz, hgSlope0, slopePost, 1);
+        if (g_huntDerate > cut + 0.02f) {
+          // Chain to the Ki rung: the D-stage read scans are themselves a clean 3-scan average of
+          // the still-present wobble, so they become the Ki test's baselines — no extra wait
+          hgEpA0 = aPost;
+          hgSlope0 = slopePost;
+          hgEpScans = 0;
+          hgEpCleanScans = 0;
+          hgReadSum = 0.0f;
+          hgReadSlopeSum = 0.0f;
+          hgReadN = 0;
+          g_huntDerate = cut;
+          recomputeCcGains();
+          queueConsoleMessageF("Oscillation damper: pausing the voltage damper did not stop the %.2f Hz wobble — testing at %d%% current-loop gain", g_huntFreqHz, (int)HuntCutPct);
+          g_huntState = 1;
+        } else {
+          // Both levers exhausted at this speed — only now may the blame leave the regulator
+          queueConsoleMessageF("Oscillation damper: the %.2f Hz wobble responded to neither damper lever — external cyclic load or engine issue suspected", g_huntFreqHz);
+          hgCooldownUntilMs = millis() + (uint32_t)HuntCooldownMin * 60000UL;
+          g_huntState = 3;
+        }
+      }
+      return;
+    }
+
+    // Volts-mode episodes (qualify duty below the standard bar) judge Ki on the slope metric too:
+    // a duty comparison under the quiet-log floor would pass or fail on luck
+    bool passed = hgEpVoltsMode
+                    ? (hgReadSlopeSum / (float)HG_READ_SCANS) <= hgSlope0 * (1.0f - (float)HuntVerifyPct / 100.0f)
+                    : aPost <= hgEpA0 * (1.0f - (float)HuntVerifyPct / 100.0f);
+    if (passed) huntMapAdd(hgEpRefRpm, 0);
+    // Restore BEFORE queuing so the record's derateExit is the true exit gain: verified — the new
+    // pocket now holds the cut; failed — back to the map (usually full gain)
+    g_huntDerate = huntMapGain(hgRpmMapEma);
+    recomputeCcGains();
+    if (passed) {
+      hgLedgerQueue("damped", g_huntFreqHz, hgEpA0, aPost, 1);
+      queueConsoleMessageF("Oscillation damper: %.2f Hz wobble responded (%.1f%% -> %.1f%% swing) — %d%% current-loop gain mapped at %d rpm", g_huntFreqHz, hgEpA0, aPost, (int)HuntCutPct, (int)hgEpRefRpm);
+      g_huntState = 0;
+    } else {
+      hgLedgerQueue("external-suspected", g_huntFreqHz, hgEpA0, aPost, 1);
+      queueConsoleMessageF("Oscillation damper: the %.2f Hz wobble did not respond to the gain cut — full gain restored (external cyclic load or engine issue suspected)", g_huntFreqHz);
+      hgCooldownUntilMs = millis() + (uint32_t)HuntCooldownMin * 60000UL;
       g_huntState = 3;
-      consec = 0;
     }
     return;
   }
-  // Idle / hold: confirmation counter. A hold-state re-confirmation opens a new episode from the
-  // current derate, so a failed follow-up reverts to the verified level, never below it.
-  if (hunt) {
-    consec = (uint8_t)(consec + 1);
-    aConfMax = fmaxf(aConfMax, aPk);
+
+  // Watching: qualification. HG_QUALIFY_SCANS consecutive scans of hunt signature at a steady
+  // speed open a test; speed reference is the first confirming scan's mean. A scan qualifies on
+  // the duty signature OR on the D-attributed form: when the D-term is sign-alternating, the duty
+  // amplitude bar drops to HG_TRIG_AMP_D and the peakiness ratio relaxes to 2x — the alternation
+  // itself is the periodicity evidence (broadband load noise never alternates the trim).
+  bool kiHunt = (aPk > HG_TRIG_AMP) && (aPk > HG_TRIG_RATIO * aMed);
+  bool dHunt = (scanFlips >= 1) && (g_huntKdScale > 0.05f)
+               && (aPk > HG_TRIG_AMP_D) && (aPk > 2.0f * aMed);
+  if ((kiHunt || dHunt) && scanRpm >= HG_RPM_MIN
+      && (hgConfirmCnt == 0 || fabsf(scanRpm - hgQualRpm0) <= hgQualRpm0 * (float)HuntSteadyPct / 100.0f)) {
+    if (hgConfirmCnt == 0) {
+      hgQualRpm0 = scanRpm;
+      hgA0Sum = 0.0f;
+      hgQualRpmSum = 0.0f;
+      hgQualSlopeSum = 0.0f;
+      hgQualFlips = 0;
+    }
+    hgConfirmCnt++;
+    hgA0Sum += aPk;
+    hgQualRpmSum += scanRpm;
+    hgQualSlopeSum += scanSlope;
+    hgQualFlips = (uint16_t)fminf(65535.0f, (float)hgQualFlips + (float)scanFlips);
+    if (hgConfirmCnt >= HG_QUALIFY_SCANS) {
+      hgConfirmCnt = 0;
+      float a0 = hgA0Sum / (float)HG_QUALIFY_SCANS;
+      float refRpm = hgQualRpmSum / (float)HG_QUALIFY_SCANS;
+      g_huntFreqHz = HG_BIN_HZ[pk];
+      // Lever choice by attribution: the qualify span must show at least ~half the sign
+      // alternations the detected frequency would produce (2 per period; floor 3). An attributed
+      // episode tests the D lever FIRST — pausing the participant is directly causal, and the
+      // inner-Ki lever is three-for-three falsified on outer-loop-driven variants (idle-hunt
+      // memory 07-24/08-21). D inside a D-pocket (scale already ~0) can't attribute: no trim, no flips.
+      uint16_t flipBar = (uint16_t)fmaxf(3.0f, HG_BIN_HZ[pk] * (float)HG_QUALIFY_SCANS * 1.6f);
+      hgEpVoltsMode = (a0 < HG_TRIG_AMP);
+      if (hgQualFlips >= flipBar && g_huntKdScale > 0.05f) {
+        hgEpA0 = a0;
+        hgSlope0 = hgQualSlopeSum / (float)HG_QUALIFY_SCANS;
+        hgEpRefRpm = refRpm;
+        hgEpScans = 0;
+        hgEpCleanScans = 0;
+        hgReadSum = 0.0f;
+        hgReadSlopeSum = 0.0f;
+        hgReadN = 0;
+        g_huntKdScale = 0.0f;  // Ki untouched — it keeps following its map during the D stage
+        queueConsoleMessageF("Oscillation damper: %.2f Hz wobble at %d rpm with the voltage damper (D-term) cycling — testing with it paused", g_huntFreqHz, (int)refRpm);
+        g_huntState = 4;
+        return;
+      }
+      if (g_huntDerate <= cut + 0.02f) {
+        // At the Ki floor inside a pocket with no D attribution — nothing left to test. The pocket
+        // stands on a verified 2x-class response, so a wobble persisting here points at a physical cause.
+        hgLedgerQueue("external-suspected", g_huntFreqHz, a0, a0, 0);
+        queueConsoleMessageF("Oscillation damper: %.2f Hz wobble persists at %d%% gain inside a learned pocket — the cause is likely mechanical (belt tension, mounts, engine governor)", g_huntFreqHz, (int)roundf(g_huntDerate * 100.0f));
+        hgCooldownUntilMs = millis() + (uint32_t)HuntCooldownMin * 60000UL;
+        g_huntState = 3;
+        return;
+      }
+      hgEpA0 = a0;
+      hgSlope0 = hgQualSlopeSum / (float)HG_QUALIFY_SCANS;
+      hgEpRefRpm = refRpm;
+      hgEpScans = 0;
+      hgEpCleanScans = 0;
+      hgReadSum = 0.0f;
+      hgReadSlopeSum = 0.0f;
+      hgReadN = 0;
+      g_huntDerate = cut;
+      recomputeCcGains();
+      queueConsoleMessageF("Oscillation damper: %.2f Hz wobble at %d rpm (%.1f%% field swing) — testing at %d%% current-loop gain", g_huntFreqHz, (int)refRpm, a0, (int)HuntCutPct);
+      g_huntState = 1;
+    }
   } else {
-    consec = 0;
-    aConfMax = 0.0f;
-  }
-  if (consec >= 2) {
-    baseDerate = g_huntDerate;
-    a0 = aConfMax;  // max over the confirming evals — a trough-sampled reference would make the half-amplitude bar unfairly strict
-    aConfMax = 0.0f;  // next episode builds its own reference: after a damped-partial exit the residual wobble can keep hunt true through the hold, so the !hunt reset never fires and a re-opened episode would inherit this episode's ~2× larger a0 (half-amplitude bar then passes without the new cuts proving anything)
-    g_huntFreqHz = HG_BIN_HZ[pk];
-    steps = 1;
-    evalsSinceStep = 0;
-    quietCnt = 0;
-    halfCnt = 0;
-    episodeStartMs = millis();
-    g_huntDerate = fmaxf(HG_FLOOR, baseDerate * HG_STEP);
-    recomputeCcGains();
-    queueConsoleMessageF("Oscillation damper: %.2f Hz wobble detected (%.1f%% duty swing) — reducing current-loop gain", g_huntFreqHz, a0);
-    g_huntState = 1;
-    consec = 0;
+    hgConfirmCnt = 0;
   }
 }
 
@@ -708,6 +1032,7 @@ void applyNominalVoltageChange(int oldV, int newV) {
     }
     queueConsoleMessageF("System voltage %dV -> %dV: Min Field %% floors reset to the 1%% default and knee learning cleared (old floors were %dV-referenced and can exceed the new %d%% Max Field cap). Re-run the Min%% floor step.",
                          oldV, newV, oldV, MaxDuty);
+    huntMapClearAll("system voltage class changed");  // pockets learned on the old class describe a different alternator
     updateINA228OvervoltageThreshold();
   }
   recomputeCvGains();  // always re-derive the normalized active gains for the (possibly) new class
@@ -977,6 +1302,15 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
       fieldCutAbortMsg[sizeof(fieldCutAbortMsg) - 1] = '\0';
     }
     fieldCutAbortRequested = true;
+  }
+  // Closed-loop verify sine sweep (Tuning→Current auto-sweep) rides the same latch. Without it the
+  // sweep ran on through the cut + lockout and graded the corrupted points as a duty-rail result.
+  if (tuningSweepActive && tuningSweepAbortReason == 0) {
+    tuningSweepAbortReason = (uint8_t)reason;
+    tuningSweepAbortVolts = tick.currentBatteryVoltage;
+    tuningSweepAbortDuty = preCutDuty;
+    queueConsoleMessageF("Tuning sine sweep: ABORTED — protection fired (%s) — results discarded",
+                         reasonToString(reason));
   }
   // CV plant fit: abort directly (state resets at start — no stale-phase latch; cvpfState=3 blocks a
   // partial-buffer fit).
@@ -4283,7 +4617,9 @@ void AdjustFieldLearnMode() {
                     slopeExcess = cvDSlope;                              // legacy boost (below target only): full slope
                   }
                 }
-                kdTrim = clamp_f(VoltageKd_active * slopeExcess, -CvKdMaxTrimA, CvKdMaxTrimA);  // flat cap → per-cell-equal knee
+                // g_huntKdScale: damper D lever (0 = D paused/pocketed) — the single choke point, so the
+                // anti-windup and both Icv recomputes downstream all see the scaled trim
+                kdTrim = clamp_f(VoltageKd_active * g_huntKdScale * slopeExcess, -CvKdMaxTrimA, CvKdMaxTrimA);  // flat cap → per-cell-equal knee
               }
             }
             g_cvKdTrimLive = kdTrim;   // held position: consumed by the PI-block anti-windup and both Icv recomputes
@@ -5162,7 +5498,8 @@ void setDutyPercent(float percent) {
   // final write to the field PWM for every duty path, so it is the place to hard-stop a NaN.
   // Hard cap 99%: at 100% the LEDC output is solid DC with zero off-edges, so the high-side bootstrap
   // never refreshes on P-type wiring (C4 drains through R108 in ~0.6ms → UVLO chop). 99% guarantees a
-  // refresh slice every period (526ns at 19kHz ≈ 2.4 recharge time constants — verified sufficient).
+  // refresh slice every period: 25us at the 400Hz default, 526ns at the 19455Hz ceiling (≈ 2.4 recharge
+  // time constants — the ceiling is the tight case and it verified sufficient).
   if (isnan(percent)) percent = 0.0f;
   percent = constrain(percent, 0.0f, 99.0f);
 
@@ -7195,6 +7532,7 @@ void commissionClearMinPctBackup() {
 // The cloud half is owed separately — NK_RpmAxisWipePend gates front sync until it lands.
 void rpmAxisWipeExecute() {
   kneeLearnResetDefaults();       // Min% floor table + knee-learner state
+  huntMapClearAll("engine speed recalibrated");  // pocket centers are rpm-axis values
   commissionClearMinPctBackup();  // its NVS backup snapshot
   commissionClearRpmDependents(); // every RPM-binned commissioning stage (all but Prep + Field cut)
   systemIDLogClearAll();          // step-test ring (records are RPM-stamped)

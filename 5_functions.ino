@@ -159,16 +159,25 @@ void COGSOG(const tN2kMsg &N2kMsg) {
   if (ParseN2kCOGSOGRapid(N2kMsg, SID, HeadingReference, COG, SOG)) {
     // F-RES-04: bail entirely if both fields NA; otherwise update each independently.
     if (N2kIsNA(COG) && N2kIsNA(SOG)) return;
+    // When the user has selected phone GPS as the speed/course source, NMEA writes are
+    // suppressed entirely (freshness stamps still land, for /debug diagnostics) so the
+    // record chain and leaderboard flag never mix sources.
     if (!N2kIsNA(COG)) {
-      COGNMEA = COG * 180.0 / PI;
-      MARK_FRESH(IDX_COG_NMEA);
+      lastNmea2kCogMs = millis();
+      if (speedSourceMode != SPD_SRC_PHONE) {
+        COGNMEA = COG * 180.0 / PI;
+        MARK_FRESH(IDX_COG_NMEA);
+      }
     }
     if (!N2kIsNA(SOG)) {
-      SOGNMEA = SOG * 1.94384;     // m/s → knots
-      MARK_FRESH(IDX_SOG_NMEA);
+      lastNmea2kSogMs = millis();
+      if (speedSourceMode != SPD_SRC_PHONE) {
+        SOGNMEA = SOG * 1.94384;     // m/s → knots
+        MARK_FRESH(IDX_SOG_NMEA);
 
-      updateSustainedSpeed(SOGNMEA);
-      wmIgnUpdate(wmIgn_SOG, SOGNMEA);  // ignition-cycle watermark
+        updateSustainedSpeed(SOGNMEA);
+        wmIgnUpdate(wmIgn_SOG, SOGNMEA);  // ignition-cycle watermark
+      }
     }
 
   } else {

@@ -65,7 +65,7 @@ enum Csv1Index {
   CSV1_cvKdFiltV,        // IBV smoothed by CvKdVoltFiltTC (V ×100) — the D term's slope input; "Voltage for D term" trace
   CSV1_huntDerate,       // hunt-governor live Ki derate (×100; 100 = full gain)
   CSV1_huntFreqHz,       // hunt-governor last confirmed wobble frequency (Hz ×100; 0 = none seen this session). Rides CSV1 rather than CSV4 so the Diag live row can never show a fresh derate beside a stale frequency
-  CSV1_huntState,        // hunt-governor state: 0 watching, 1 damping episode, 2 verified/recovering, 3 standing down
+  CSV1_huntState,        // hunt-governor state: 0 watching (gain follows the pocket map), 1 testing a cut, 3 cooldown after a failed test (2 unused since v2)
 
   CSV1_FIELD_COUNT  // = 49
 };
@@ -475,6 +475,7 @@ enum Csv2Index {
   CSV2_restartRemainingSec,                        // seconds until scheduled reboot (0 = outside 10-min warning window)
   CSV2_currentGpsSource,                           // 0=none, 1=NMEA, 2=Phone, 3=Manual (GpsSource enum)
   CSV2_currentTimeSource,                          // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting (TimeSource enum)
+  CSV2_currentSpeedSource,                         // 0=none, 1=NMEA, 2=Phone (GpsSource enum; speed/course can differ from position source)
   CSV2_loggingActive,   // 1 if logging active, 0 if stopped (Stop/Start Logs)
   CSV2_sustainedTWS,                               // 2-min sustained true wind, knots ×10 (Beaufort + gale basis)
   CSV2_currentGaleMinutes,                         // live minutes continuously in a gale (sustained ≥34kt), int
@@ -675,6 +676,7 @@ enum Csv2Index {
   CSV2_ft_dvcc_ses,       // DVCC brain tick worst µs (session)
   CSV2_ft_n2kParse_win,   // NMEA2000.ParseMessages worst µs (window) — RX drain, scales with bus traffic
   CSV2_ft_n2kParse_ses,   // NMEA2000.ParseMessages worst µs (session)
+  CSV2_huntKdScale,       // damper D-lever multiplier ×100 (100 = D-term running, 0 = paused for a test / mapped off at this speed)
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -960,6 +962,7 @@ enum Csv3Index {
   CSV3_NMEA2KData,              // 0/1
   CSV3_timeAxisModeChanging,    // 0/1
   CSV3_gpsTimeSourceMode,       // 0=auto, 1=NMEA-forced, 2=Phone-forced, 3=NTP-time-forced
+  CSV3_speedSourceMode,         // 0=NMEA 2000, 1=phone GPS (speed/course owner — selectable, never auto)
   // Fast alt-current diagnostic knobs (Pattern B echo)
   CSV3_faEnabled,               // 0/1 — global ON/OFF
   CSV3_faAlarmEnable,           // 0/1 — FAULT drives audible alarm
@@ -1090,6 +1093,11 @@ enum Csv3Index {
   CSV3_dvccSettleS,            // settling time (s)
   CSV3_dvccCvlMin,             // plausible-CVL window low (V ×100)
   CSV3_dvccCvlMax,             // plausible-CVL window high (V ×100)
+  CSV3_HuntCutPct,             // damper test/pocket gain, % of user Ki
+  CSV3_HuntVerifyPct,          // damper verify bar, % ripple reduction required
+  CSV3_HuntWingPct,            // damper pocket taper width, % of speed per side
+  CSV3_HuntCooldownMin,        // damper retest cooldown after a failed test (min)
+  CSV3_HuntSteadyPct,          // damper engine-speed steadiness tolerance (%)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -2547,6 +2555,27 @@ void setupServer() {
       });
     response->addHeader("Cache-Control", "no-cache");
     request->send(response);
+  });
+
+  // Live damper speed-pocket map for the Diag plot: cut/wing/pockets in one JSON so the client
+  // renders exactly the profile the firmware applies. Tiny (≤4 pockets) — no PSRAM streaming.
+  server.on("/huntmap", HTTP_GET, [](AsyncWebServerRequest *request) {
+    char buf[384];
+    size_t n = huntMapJson(buf, sizeof(buf));
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", String(buf, n));
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
+  // Clear System for the oscillation damper: learned pockets + episode ledger + any test in
+  // flight, together. The web UI fronts this with an explicit confirm.
+  server.on("/huntclear", HTTP_POST, [](AsyncWebServerRequest *request) {
+    if (!settingsArmActive()) {
+      request->send(403, "text/plain", "Settings not armed");
+      return;
+    }
+    huntMapClearAll("cleared from the dashboard");
+    request->send(200, "text/plain", "OK");
   });
 
   // ── DVCC raw-frame capture (spec §8a): candidate CAN frames as hex text, for charge-limit
@@ -5338,6 +5367,16 @@ void setupServer() {
                                          : "NTP time only";
       queueConsoleMessageF("GPS/time source mode set to %s", lbl);
     }
+    if (request->hasParam("speedSourceMode")) {
+      foundParameter = true;
+      inputMessage = request->getParam("speedSourceMode")->value();
+      uint8_t m = (uint8_t)inputMessage.toInt();
+      if (m > SPD_SRC_PHONE) m = SPD_SRC_NMEA;  // sanity
+      speedSourceMode = m;
+      settingWrite(NK_speedSourceMode, String(speedSourceMode).c_str());
+      queueConsoleMessageF("Speed/course source set to %s",
+                           (m == SPD_SRC_PHONE) ? "phone GPS" : "NMEA 2000");
+    }
     if (request->hasParam("ResetThermTemp")) {
       foundParameter = true;
       MaxTemperatureThermistor = 0;
@@ -6380,6 +6419,31 @@ void setupServer() {
       HuntGovEnable = (uint8_t)(request->getParam("HuntGovEnable")->value().toInt() ? 1 : 0);
       settingWrite(NK_HuntGovEnable, String((int)HuntGovEnable).c_str());
       queueConsoleMessageF("Oscillation damper: %s", HuntGovEnable ? "ON" : "OFF — hunting persists at full gain");
+    }
+    if (request->hasParam("HuntCutPct")) {
+      foundParameter = true;
+      HuntCutPct = (uint8_t)constrain(request->getParam("HuntCutPct")->value().toInt(), 25, 80);
+      settingWrite(NK_HuntCutPct, String((int)HuntCutPct).c_str());
+    }
+    if (request->hasParam("HuntVerifyPct")) {
+      foundParameter = true;
+      HuntVerifyPct = (uint8_t)constrain(request->getParam("HuntVerifyPct")->value().toInt(), 5, 60);
+      settingWrite(NK_HuntVerifyPct, String((int)HuntVerifyPct).c_str());
+    }
+    if (request->hasParam("HuntWingPct")) {
+      foundParameter = true;
+      HuntWingPct = (uint8_t)constrain(request->getParam("HuntWingPct")->value().toInt(), 5, 40);
+      settingWrite(NK_HuntWingPct, String((int)HuntWingPct).c_str());
+    }
+    if (request->hasParam("HuntCooldownMin")) {
+      foundParameter = true;
+      HuntCooldownMin = (uint8_t)constrain(request->getParam("HuntCooldownMin")->value().toInt(), 1, 60);
+      settingWrite(NK_HuntCooldownMin, String((int)HuntCooldownMin).c_str());
+    }
+    if (request->hasParam("HuntSteadyPct")) {
+      foundParameter = true;
+      HuntSteadyPct = (uint8_t)constrain(request->getParam("HuntSteadyPct")->value().toInt(), 1, 10);
+      settingWrite(NK_HuntSteadyPct, String((int)HuntSteadyPct).c_str());
     }
     if (request->hasParam("cvRecovSec")) {  // retired timed-window knob — writes the inert global (UI field removed)
       foundParameter = true;
@@ -7554,6 +7618,8 @@ void setupServer() {
     const char *gpsSrcName  = (currentGpsSource == GPS_NMEA)   ? "NMEA"
                             : (currentGpsSource == GPS_PHONE)  ? "Phone"
                             : (currentGpsSource == GPS_MANUAL) ? "Manual" : "none";
+    const char *spdSrcName  = (currentSpeedSource == GPS_NMEA)  ? "NMEA"
+                            : (currentSpeedSource == GPS_PHONE) ? "Phone" : "none";
     unsigned long now = millis();
     // Ground truth for the Core-1 preemption investigation: where the network tasks
     // actually landed. async_tcp must read 0 if the Core-0 pin made it into THIS image
@@ -7580,6 +7646,7 @@ void setupServer() {
              "AdjustField worst full pass (ms): total=%.1f | thermal=%.1f snapshot=%.1f fastov=%.1f modes=%.1f control=%.1f duty=%.1f tail=%.1f\n"
              "Time source: %s (NMEA last sync: %lus ago, Phone last: %lus ago)\n"
              "GPS source:  %s (NMEA last fix: %lus ago, Phone last: %lus ago)\n"
+             "Speed source: %s (NMEA last SOG: %lus ago, Phone last: %lus ago)\n"
              "Lat/Lon: %.6f, %.6f\n"
              "FastAlt: %s range=%sdB windows ok=%lu disc=%lu matrixCells=%u sesPkpk=%.1fA sesPeak=%.1fA@%.0fHz\n",
              (running && running->label) ? running->label : "unknown",
@@ -7599,6 +7666,9 @@ void setupServer() {
              gpsSrcName,
              lastNmea2kGnssMs       ? (now - lastNmea2kGnssMs)       / 1000UL : 0UL,
              lastPhoneGpsMs         ? (now - lastPhoneGpsMs)         / 1000UL : 0UL,
+             spdSrcName,
+             lastNmea2kSogMs        ? (now - lastNmea2kSogMs)        / 1000UL : 0UL,
+             lastPhoneSpdMs         ? (now - lastPhoneSpdMs)         / 1000UL : 0UL,
              LatitudeNMEA, LongitudeNMEA,
              faStateName, faAttenIs12 ? "12" : "6",
              (unsigned long)faWindowsAccepted, (unsigned long)faWindowsDiscarded,
@@ -7637,8 +7707,8 @@ void setupServer() {
   // the fields you have.
   server.on("/set_phone_data", HTTP_GET, [](AsyncWebServerRequest *request) {
     // Deliberately NOT arm-gated: this is background telemetry (clients push every ~30-60s
-    // whether or not settings are armed), and phone GPS/time are backup sources a LAN client
-    // is trusted to provide. NMEA always outranks phone GPS, and range checks reject garbage.
+    // whether or not settings are armed), and phone GPS/speed/time are backup sources a LAN
+    // client is trusted to provide. NMEA always outranks phone data, and range checks reject garbage.
     bool acceptedGps = false, acceptedTime = false;
     if (request->hasParam("lat") && request->hasParam("lon")) {
       // Use strtod + endptr (not String::toDouble — that silently returns 0.0
@@ -7671,13 +7741,40 @@ void setupServer() {
         acceptedTime = true;
       }
     }
-    // Promote phone data into the effective globals if NMEA is stale. Both of
-    // these are no-ops when NMEA is fresh (NMEA wins), so it's safe to call
-    // unconditionally.
+    // Phone GNSS doppler speed (m/s, Geolocation coords.speed) and course over
+    // ground (degrees, coords.heading). Sent independently of lat/lon — heading
+    // is null on a stationary phone, so each gets its own freshness stamp.
+    bool acceptedSpd = false, acceptedHdg = false;
+    if (request->hasParam("spd")) {
+      const char *spdStr = request->getParam("spd")->value().c_str();
+      char *spdEnd = nullptr;
+      double spd = strtod(spdStr, &spdEnd);
+      // 77 m/s ≈ 150 kt — same ceiling as the odometer's implied-speed teleport gate.
+      if (spdEnd != spdStr && *spdEnd == '\0' && !isnan(spd) && spd >= 0.0 && spd <= 77.0) {
+        SpeedPhone = (float)(spd * 1.94384);  // m/s → knots, matching the NMEA path
+        lastPhoneSpdMs = millis();
+        acceptedSpd = true;
+      }
+    }
+    if (request->hasParam("hdg")) {
+      const char *hdgStr = request->getParam("hdg")->value().c_str();
+      char *hdgEnd = nullptr;
+      double hdg = strtod(hdgStr, &hdgEnd);
+      if (hdgEnd != hdgStr && *hdgEnd == '\0' && !isnan(hdg) && hdg >= 0.0 && hdg <= 360.0) {
+        HeadingPhone = (float)((hdg >= 360.0) ? 0.0 : hdg);
+        lastPhoneHdgMs = millis();
+        acceptedHdg = true;
+      }
+    }
+    // Promote phone data into the effective globals. GPS/time are no-ops when
+    // NMEA is fresh (NMEA wins); speed/course apply only when the user has
+    // selected phone as the speed source (never an automatic fallback).
     if (acceptedGps)  consumePhoneGps();
+    applyPhoneSpeed(acceptedSpd, acceptedHdg);
     if (acceptedTime) syncTimeFromPhone(PhoneTimeEpoch);
     char out[64];
-    snprintf(out, sizeof(out), "gps=%d time=%d", acceptedGps ? 1 : 0, acceptedTime ? 1 : 0);
+    snprintf(out, sizeof(out), "gps=%d time=%d spd=%d hdg=%d",
+             acceptedGps ? 1 : 0, acceptedTime ? 1 : 0, acceptedSpd ? 1 : 0, acceptedHdg ? 1 : 0);
     request->send(200, "text/plain", out);
   });
 
@@ -7928,10 +8025,13 @@ void setupServer() {
                       tuningBode[i].freqHz, tuningBode[i].gain, tuningBode[i].phaseDeg);
     }
     pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"done\":%d,\"coh\":%.3f,\"railed\":%d,\"fs\":%.1f,"
+                    "\"aborted\":%d,\"abortWhy\":%d,\"abortV\":%.2f,\"abortD\":%.1f,"
                     "\"rpmAvg\":%.0f,\"rpmMin\":%.0f,\"rpmMax\":%.0f}",
                     tuningSweepActive ? 1 : 0, tuningSweepDone ? 1 : 0,
                     tuningSweepWorstCoh, tuningSweepDutyRailed ? 1 : 0,
                     tuningSweepFsHz > 0.0f ? tuningSweepFsHz : ch1SampleHz(),
+                    tuningSweepAbortReason != 0 ? 1 : 0, (int)tuningSweepAbortReason,
+                    tuningSweepAbortVolts, tuningSweepAbortDuty,
                     tuningSweepRpmN ? (float)(tuningSweepRpmSum / tuningSweepRpmN) : 0.0f,
                     tuningSweepRpmMin, tuningSweepRpmMax);
     request->send(200, "application/json", buf);
@@ -8889,7 +8989,7 @@ void SendWifiData() {
                                SafeInt(g_cvKdFiltV, 100),      // CSV1_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC (V ×100)
                                SafeInt(g_huntDerate, 100),     // CSV1_huntDerate — hunt-governor live Ki derate (×100)
                                SafeInt(g_huntFreqHz, 100),     // CSV1_huntFreqHz — last confirmed wobble frequency (Hz ×100)
-                               (int)g_huntState                // CSV1_huntState — 0 watching, 1 damping, 2 holding/recovering, 3 standing down
+                               (int)g_huntState                // CSV1_huntState — 0 watching, 1 testing, 3 cooldown (2 unused since v2)
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
@@ -9040,7 +9140,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
@@ -9452,6 +9552,7 @@ void SendWifiData() {
                                (int)restartRemainingSec,
                                (int)currentGpsSource,
                                (int)currentTimeSource,
+                               (int)currentSpeedSource,
                                (int)loggingActive,
                                SafeInt(sustainedTWS, 10),
                                SafeInt(currentGaleMinutes, 1),
@@ -9621,7 +9722,8 @@ void SendWifiData() {
                                SafeInt(ft_dvcc.worstWindow),
                                SafeInt(ft_dvcc.worstSession),
                                SafeInt(ft_n2kParse.worstWindow),
-                               SafeInt(ft_n2kParse.worstSession));
+                               SafeInt(ft_n2kParse.worstSession),
+                               (int)lroundf(g_huntKdScale * 100.0f));
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
@@ -9690,7 +9792,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -9945,6 +10048,7 @@ void SendWifiData() {
                                SafeInt(NMEA2KData),
                                SafeInt(timeAxisModeChanging),
                                (int)gpsTimeSourceMode,
+                               (int)speedSourceMode,
                                (int)faEnabled,
                                (int)faAlarmEnable,
                                (int)faAnomPause,
@@ -10072,7 +10176,12 @@ void SendWifiData() {
                                SafeInt(dvccSilenceS),
                                SafeInt(dvccSettleS),
                                SafeInt(dvccCvlMin, 100),
-                               SafeInt(dvccCvlMax, 100));
+                               SafeInt(dvccCvlMax, 100),
+                               (int)HuntCutPct,
+                               (int)HuntVerifyPct,
+                               (int)HuntWingPct,
+                               (int)HuntCooldownMin,
+                               (int)HuntSteadyPct);
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;
