@@ -227,7 +227,7 @@ static float hgDtEmaMs = 50.0f;
 static float hgSpEma = 0.0f;
 
 // Per-control-tick sampler: ONE ring write plus the contamination flags — the analysis never runs
-// here. Self-clocked to ~50 ms so loop cadence and FieldAdjustmentInterval changes don't move the
+// here. Self-clocked to ~50 ms so changes in loop cadence don't move the
 // analysis band; Goertzel coefficients derive from the measured dt EMA at evaluation time.
 void huntGovObserve(float dutyApplied, bool closedLoopOk) {
   uint32_t nowMs = millis();
@@ -600,6 +600,8 @@ void applyNominalVoltageChange(int oldV, int newV) {
     AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)newV / 12.0f);
     OvMeasMarginV             *= ratio;
     OvPredMarginV             *= ratio;
+    dvccCvlMin                *= ratio;  // DVCC plausible-CVL window is volt-domain
+    dvccCvlMax                *= ratio;
     VoltageDisagreeThreshold  *= ratio;
     IExcessArmMarginV         *= ratio;
     FastSetpointRiseHeadroomV *= ratio;
@@ -659,6 +661,8 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
     settingWrite(NK_OvMeasMarginV, String(OvMeasMarginV, 3).c_str());
     settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
+    settingWrite(NK_dvccCvlMin, String(dvccCvlMin, 2).c_str());
+    settingWrite(NK_dvccCvlMax, String(dvccCvlMax, 2).c_str());
     settingWrite(NK_VoltageDisagreeThreshold, String(VoltageDisagreeThreshold, 2).c_str());
     settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
     settingWrite(NK_FastSetpointRiseHeadroomV, String(FastSetpointRiseHeadroomV, 2).c_str());
@@ -1977,6 +1981,15 @@ static inline float cvRecovFlaredCeil(float goalA, float shortfallV) {
   if (band <= 0.001f || shortfallV >= band) return goalA;
   float frac = fmaxf(shortfallV, 0.0f) / band;
   return goalA * (cvRecovFlareFrac + (1.0f - cvRecovFlareFrac) * frac);
+}
+
+// Commissioning-ownership predicate for the DVCC clamp bypass, computed LIVE at the point of
+// use: updateChargingStage() evaluates the same expression but is suppressed in manual/Maintain/
+// TargetVoltage modes — a mirror refreshed there goes stale in exactly the override modes the
+// "clamps every writer, no exemptions" decision must cover.
+static inline bool cxOwnsBatteryNow() {
+  return (commissionState == 1) && (lastCommissionHeartbeatMs != 0)
+         && ((uint32_t)(millis() - lastCommissionHeartbeatMs) < COMMISSION_HEARTBEAT_TIMEOUT_MS);
 }
 
 void AdjustFieldLearnMode() {
@@ -3314,6 +3327,24 @@ void AdjustFieldLearnMode() {
           }
         }
 
+        // ── DVCC follow: external charge-current limit (CCL) ceiling ─────────────────────────
+        // Enters the same min-select as the battery charge limit above. With a battery shunt the
+        // CCL is a BATTERY-current limit, so the house-load offset converts it to an alternator
+        // ceiling exactly like BattCurrentLimitA (battery current stays a LIMIT, never the process
+        // variable). Without a shunt it caps alternator amps directly — conservative by
+        // construction, since battery charge current = alternator output − house loads. CCL 0 is a
+        // legitimate command (cold/full/cell-high battery): the ceiling goes to 0 and recovery
+        // rides the existing rate-governed ramp when the authority raises it again.
+        bool dvccCclBinding = false;
+        if (dvccEn == 1 && dvccState == 3 /*FOLLOWING*/ && !cxOwnsBatteryNow() && !isnan(dvccCclA)) {
+          bool shuntBasis = (BatteryCurrentSource == 0 && ShuntResistanceMicroOhm > 0 && BatteryShuntPresent);
+          float dvccCeil = shuntBasis ? fmaxf(0.0f, dvccCclA + loadOffsetFilt) : fmaxf(0.0f, dvccCclA);
+          if (dvccCeil < uTargetAmps) {
+            uTargetAmps = dvccCeil;
+            dvccCclBinding = true;
+          }
+        }
+
         // Actual RPM/thermal/override ceiling — the true pre-OV current limit for logging.
         // uTargetRaw remains MaxTableValue and is not used for telemetry.
         float i_ceiling_pre_ov = (float)uTargetAmps;
@@ -3843,6 +3874,21 @@ void AdjustFieldLearnMode() {
             ChargingVoltageTargetReq = cvTuningScore.waveHigh ? (cvBaseTarget + cvWaveAmplitudeV)
                                                               : cvBaseTarget;   // slew below applies if vTgtRampEnable (study on/off)
           }
+        }
+
+        // ── DVCC follow: external charge-voltage limit (CVL) clamp ──────────────────────────
+        // Applied at the single choke point AFTER every ChargingVoltageTargetReq writer (stage,
+        // manual target, Maintain, stress test, square-wave), so with follow on NO target of any
+        // kind ever exceeds the authority's CVL (decision 2026-08-19: no exemptions — bench tuning
+        // that needs exact targets runs with follow off). Clamp-only: min() can never raise the
+        // target. Down-steps ride the existing bus-paced slew below; release rides the rate-
+        // governed up-slew — never a step injection. Bypassed while the commissioning wizard owns
+        // the battery (its prerequisite copy also says to switch follow off).
+        bool dvccCvlBinding = false;
+        if (dvccEn == 1 && dvccState == 3 /*FOLLOWING*/ && !cxOwnsBatteryNow()
+            && !isnan(dvccCvlV) && dvccCvlV < ChargingVoltageTargetReq) {
+          ChargingVoltageTargetReq = dvccCvlV;
+          dvccCvlBinding = true;
         }
 
         // ── Voltage-target slew (bidirectional) — outer layer; master switch vTgtRampEnable ──
@@ -4798,7 +4844,8 @@ void AdjustFieldLearnMode() {
           else if (protBinding)                                   rawCode = 6;
           else if (altZeroOutput)                                 rawCode = 7;
           else if (fieldSaturated)                                rawCode = 5;
-          else if (voltageControlActive && Icv < icvCeil - 0.5f)  rawCode = 3;
+          else if (voltageControlActive && Icv < icvCeil - 0.5f)  rawCode = dvccCvlBinding ? 9 : 3;  // held at the BMS's voltage vs our own target
+          else if (dvccCclBinding)                                rawCode = 8;  // BMS charge-current limit is the active ceiling
           else if (battCeilBinding)                               rawCode = 4;
           else if (thermalPenaltyAmps > 0.5f)                     rawCode = 2;
           else                                                    rawCode = 1;
@@ -5638,6 +5685,7 @@ const char *reasonToString(FieldEventReason r) {
     case REASON_BATTERY_TOO_COLD: return "Battery too cold to charge";
     case REASON_COMMISSION_REST: return "Commissioning idle (field resting)";
     case REASON_TACH_IMPLAUSIBLE: return "TACH_IMPLAUSIBLE";
+    case REASON_SOLAR_PAUSE: return "SOLAR_PAUSE";
 
     default: return "UNKNOWN";
   }
@@ -5746,7 +5794,7 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   }
 
   // Priority 1a: Disabled (user control - always show this reason if off)
-  if (!tick.chargingEnabled) return REASON_CHARGING_DISABLED;
+  if (!tick.chargingEnabled) return tick.solarForecastPause ? REASON_SOLAR_PAUSE : REASON_CHARGING_DISABLED;
 
   // Priority 1.5: Fast over-voltage — absolute ceiling, above the manual bypass and ungated.
   // Mirrors selectFieldControlMode PRIORITY 1.5. Live voltage → immediate cut + adaptive lockout.
@@ -6021,11 +6069,6 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // Charging enabled (with BMS and weather mode overrides)
   bool chargingEnabledLocal = (Ignition == 1 && OnOff == 1);
 
-  // Weather mode: disable charging when solar forecast is sufficient
-  if (weatherModeEnabled == 1 && currentWeatherMode == 1) {
-    chargingEnabledLocal = false;
-  }
-
   if (bmsLogic == 1) {
     bool bmsSignalActiveLocal = !digitalRead(36);
     if (bmsLogicLevelOff == 0) {
@@ -6039,6 +6082,12 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // voltage sags or discharge current threshold is hit — chargingEnabled recovers
   // automatically on the next tick.
   if (inIdleStage) chargingEnabledLocal = false;
+
+  // Weather mode: rest the alternator when the solar forecast is strong. Applied LAST so the flag
+  // means "a sunny forecast is the ONLY thing holding charging off" — the banner must not blame
+  // the forecast when the key, the on/off switch, the BMS, or a full battery is the real cause.
+  tick.solarForecastPause = chargingEnabledLocal && weatherModeEnabled == 1 && currentWeatherMode == 1;
+  if (tick.solarForecastPause) chargingEnabledLocal = false;
 
   tick.chargingEnabled = chargingEnabledLocal;
 
@@ -6687,7 +6736,9 @@ void updateRPMBucketHistory(uint32_t nowMs) {
       cumulativeNoOverheatTime[bucket] += dtMs;
       totalSafeMs += (uint64_t)dtMs;
       totalSafeHours = (float)(totalSafeMs / 3600000ULL);
-      timeSinceLastOverheat += dtMs;
+      // Stays pinned at 0 until at least one overheat has ever been recorded, so the display
+      // reads "never overheated" rather than "0.35 hr since an overheat that never happened".
+      if (totalOverheats > 0) timeSinceLastOverheat += dtMs;
     }
   } else {
     if (TempToUse < (TemperatureLimitF - 2.0f)) {

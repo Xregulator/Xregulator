@@ -169,8 +169,14 @@ textarea {
 }
 
 .field-status-inactive {
-  color: #999999 !important;
+  color: #000000 !important;
   animation: none;
+}
+
+/* OFF is a real state the user must read at a glance, not a disabled control — full-contrast
+   in both themes (dark gets the header's own text colour, never black on black). */
+.dark-mode .field-status-inactive {
+  color: #e6e6e6 !important;
 }
 
 .field-status-idle {
@@ -849,6 +855,55 @@ details.diag-section[open] > summary.diag-section-title::after {
   transform: rotate(-180deg);
 }
 
+/* Setup -> Integrations — one collapsible card per external system. Same chevron pattern as
+   diag-section above; header sized to match the bold-16px accent-underline summaries the
+   nested NMEA2000 <details> still carry inline. No max-width: the settings-card is the column. */
+details.integ-section {
+  margin-bottom: 14px;
+}
+details.integ-section > summary.integ-section-title {
+  cursor: pointer;
+  list-style: none;
+  position: relative;
+  font-weight: bold;
+  font-size: 16px;
+  padding: 10px 22px 10px 0;
+  margin-bottom: 10px;
+  border-bottom: 2px solid var(--accent);
+  -webkit-user-select: none;
+  user-select: none;
+}
+details.integ-section > summary.integ-section-title::-webkit-details-marker { display: none; }
+details.integ-section > summary.integ-section-title::marker { display: none; }
+details.integ-section > summary.integ-section-title::after {
+  content: '▾';
+  position: absolute;
+  right: 2px;
+  top: 10px;
+  font-size: 13px;
+  transition: transform 0.2s;
+  opacity: 0.6;
+}
+details.integ-section[open] > summary.integ-section-title::after {
+  transform: rotate(-180deg);
+}
+/* Echo-driven at-a-glance state in the card header. The settings-search breadcrumb harvest
+   strips this span (ssBuildIndex) so card names stay stable in search results. */
+.integ-section-title .integ-state {
+  float: right;
+  margin-right: 8px;
+  font-weight: normal;
+  font-size: 13px;
+  color: var(--text-muted, #777);
+}
+/* Explanatory copy inside an Integrations card */
+.integ-copy {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted, #777);
+  margin: 4px 0 12px;
+}
+
 /* Live Data -> ESP32 Diagnostics — top-level collapsible sections. Values match the inline
    style the sibling Live Data pages still carry on their bare <details>, so the ESP32 page
    headers stay visually identical to those while being one class here. */
@@ -1022,6 +1077,13 @@ input[type="submit"]:hover {
 }
 .btn-secondary:hover {
   background: rgba(0, 0, 0, 0.09);
+}
+/* Anchor rendered as a button — the Capacitor-safe pattern for links that must open a new
+   tab (a real <a target="_blank">, never window.open). Keeps the shared button look. */
+a.btn-secondary {
+  display: inline-block;
+  text-decoration: none;
+  text-align: center;
 }
 
 /* Cross-navigation shortcut link — jumps between the CV Mode voltage setpoint
@@ -1515,14 +1577,15 @@ input[type="submit"]:hover {
 #header-collapsed-strip > span { flex: none; }
 #header-collapsed-strip .hcs-grow { flex: 1 1 auto; min-width: 0; }
 
-/* state word carries the colour: charging teal, idle slate, manual amber, off gray, fault red, test violet.
+/* state word carries the colour: charging teal, idle slate, manual amber, off black, fault red, test violet.
    Sits RIGHT of the numbers (against the grow spacer) and is the ONLY shrinkable element, so when a
    reveal threshold leaves the row tight the word ellipsizes instead of clipping the toggle/chevron. */
 #header-collapsed-strip .hcs-pill { font-weight: 800; letter-spacing: .4px; max-width: 46cqw; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
 #header-collapsed-strip .hcs-pill.st-charging { color: var(--accent); }
 #header-collapsed-strip .hcs-pill.st-idle     { color: #5f7d94; }
 #header-collapsed-strip .hcs-pill.st-manual   { color: #c9791f; }
-#header-collapsed-strip .hcs-pill.st-off      { color: #8a9097; }
+#header-collapsed-strip .hcs-pill.st-off      { color: #000; }
+.dark-mode #header-collapsed-strip .hcs-pill.st-off { color: #e6e6e6; }
 #header-collapsed-strip .hcs-pill.st-fault    { color: #d9534f; }
 #header-collapsed-strip .hcs-pill.st-test     { color: #a78bfa; }
 #header-collapsed-strip .hcs-pill.st-prot     { color: #d9534f; animation: stage-pulse 1.5s ease-in-out infinite; }

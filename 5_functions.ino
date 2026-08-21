@@ -526,6 +526,13 @@ void Attitude(const tN2kMsg &N2kMsg) {
   }
 }
 void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
+  // Victron proprietary fast-packet (VREG carrier): dispatched here, ahead of the receive gate,
+  // because the DVCC follow decode has its own master switch — and ONLY to its own decoder, so
+  // "receive off" still means nothing reaches the verbose print or the handler-table scan.
+  if (N2kMsg.PGN == 126720UL) {
+    if (dvccEn == 1 && dvccSrcType == 0) VictronVreg126720(N2kMsg);
+    return;
+  }
   // Receive toggle off: drop bus data here. ParseMessages may still be running purely to service
   // the transmit node's protocol layer (address claim, heartbeat), which the library handles
   // before this handler — the user's "receive off" must still mean no nav/battery data flows in.
@@ -540,6 +547,393 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
 
   if (NMEA2000Handlers[iHandler].PGN != 0) {
     NMEA2000Handlers[iHandler].Handler(N2kMsg);
+  }
+}
+
+// ===== DVCC-style charge-limit follow (CVL/CCL) — spec: Working Markdown Docs/DVCC_FOLLOW_SPEC.md =====
+// Decode lives here (raw tap + 126720 handler): bounded arithmetic on already-received frames, no
+// allocation, no I/O, no flash. The 1 Hz brain (dvccTick) runs the trust state machine and publishes
+// the clamps the control path reads (dvccCvlV / dvccCclA). Control integration: AdjustFieldLearnMode.
+
+// Trust-machine constants (protection-adjacent numbers approved by Mark 2026-08-19)
+#define DVCC_CCL_MAX_A 1500.0f     // charge-current limit above this (or negative) = implausible → UNTRUSTED
+#define DVCC_FLAP_DELTA_V 1.0f     // per-12V-class CVL jump between consecutive updates that counts as a flap
+#define DVCC_FLAP_COUNT 5          // more than this many flaps inside the window → UNTRUSTED
+#define DVCC_FLAP_WINDOW_MS 60000UL
+#define DVCC_SETTLE_MIN_FRAMES 2   // RV-C broadcasts every 5 s, so settling is time-based plus this frame floor
+#define DVCC_HANDOFF_SILENCE_MS 10000UL  // a rival sender is accepted after the current authority is silent this long
+
+// dvccState values
+#define DVCC_OFF 0
+#define DVCC_WAITING 1
+#define DVCC_SETTLING 2
+#define DVCC_FOLLOWING 3
+#define DVCC_STALE 4
+#define DVCC_UNTRUSTED 5
+
+static float dvccUntrustVal = 0.0f;    // the offending value, for the UI message
+static uint8_t dvccVicLockAddr = 255;  // Victron path: bus address locked as the authority (255 = none)
+
+// Flap detection lives in the INGEST path (per decoded update, per the spec's "between
+// consecutive updates" rule) — a 1 Hz tick sampling the mailbox aliases fast flapping to
+// steady. Ingest and tick both run on the loop task, so no synchronization is needed.
+static float dvccFlapLastCvl = NAN;
+static uint32_t dvccFlapWindowStartMs = 0;
+static uint8_t dvccFlapCount = 0;
+static bool dvccFlapLatch = false;  // set by ingest, converted to UNTRUSTED by dvccTick
+static float dvccFlapVal = 0.0f;
+
+// Victron VREG registers arrive ONE FIELD PER FRAME (0x2001 voltage, 0x2015 current, 0x2108
+// allowed-to-charge), so the last-seen value of each is held here and re-ingested together.
+static float dvccVicCvl = NAN;
+static float dvccVicCcl = NAN;
+static bool dvccVicCut = false;  // 0x2108 said do-not-charge → effective CCL forced to 0
+
+// One clearing point for every piece of decode-side trust state. Called on manual latch reset,
+// master toggle off, and source/instance edits (dvccCfgChanged) — a stale sender lock or flap
+// history must never carry across any of those into judging a fresh authority.
+static void dvccClearDecodeState() {
+  dvccFlapLastCvl = NAN;
+  dvccFlapWindowStartMs = 0;
+  dvccFlapCount = 0;
+  dvccFlapLatch = false;
+  dvccVicLockAddr = 255;
+  dvccVicCvl = dvccVicCcl = NAN;
+  dvccVicCut = false;
+}
+
+void initDvccCapture() {
+  dvccCapRing = (DvccCapEntry *)ps_malloc(sizeof(DvccCapEntry) * DVCC_CAP_N);
+  if (!dvccCapRing) queueConsoleMessage("DVCC: capture ring PSRAM alloc failed (diagnostics only - follow unaffected)");
+}
+
+static void dvccCaptureFrame(unsigned long id, unsigned char len, const unsigned char *buf) {
+  if (!dvccCapRing) return;
+  uint32_t now = millis();
+  static uint32_t bucketMs = 0;
+  static uint8_t bucket = 0;
+  if (now - bucketMs >= 1000UL) {
+    bucketMs = now;
+    bucket = 0;
+  }
+  if (bucket >= 20) return;
+  if (dvccCapPause) return;  // /dvccCapture is serializing the ring; dropping a frame beats tearing one
+  static uint32_t dedupKey[16];
+  static uint32_t dedupMs[16];
+  // Key covers the FULL payload: identical repeats collapse, but a frame whose limit VALUE
+  // changed must never dedup away — a GX limit ramp is exactly what a capture is for.
+  uint32_t key = (uint32_t)id;
+  for (uint8_t b = 0; b < len && b < 8; b++) key = key * 31u + buf[b];
+  uint8_t slot = key & 0x0F;
+  if (dedupKey[slot] == key && (uint32_t)(now - dedupMs[slot]) < 2000UL) return;
+  dedupKey[slot] = key;
+  dedupMs[slot] = now;
+  bucket++;
+  DvccCapEntry &e = dvccCapRing[dvccCapHead];
+  e.ms = now;
+  e.id = (uint32_t)id;
+  e.len = (len > 8) ? 8 : len;
+  memset(e.data, 0, sizeof(e.data));
+  memcpy(e.data, buf, e.len);
+  dvccCapHead = (uint16_t)((dvccCapHead + 1) % DVCC_CAP_N);
+  if (dvccCapCount < DVCC_CAP_N) dvccCapCount++;
+}
+
+// RV-C Table 5.3 uint16 scalings: voltage 0.05 V/bit (>64250 = not available);
+// current 0.05 A/bit offset −1600 A (0x7D00 = 0 A; >64250 = not available).
+static inline float rvcU16ToVolts(uint16_t raw) {
+  return (raw > 64250U) ? NAN : raw * 0.05f;
+}
+static inline float rvcU16ToAmps(uint16_t raw) {
+  return (raw > 64250U) ? NAN : (raw - 32000.0f) * 0.05f;
+}
+
+// Common mailbox write for a decoded limit pair (either dialect). Flap detection happens here,
+// on every real update — the spec's rule is per consecutive UPDATE, and only the ingest path
+// sees them all (the 1 Hz tick would alias a fast flapper to a steady value).
+static void dvccIngest(float cvl, float ccl, uint8_t srcAddr, uint8_t priority, uint8_t chgState) {
+  if (!isnan(cvl)) {
+    if (!isnan(dvccFlapLastCvl) && fabsf(cvl - dvccFlapLastCvl) > DVCC_FLAP_DELTA_V * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f)) {
+      uint32_t nowMs = millis();
+      if (dvccFlapWindowStartMs == 0 || (uint32_t)(nowMs - dvccFlapWindowStartMs) > DVCC_FLAP_WINDOW_MS) {
+        dvccFlapWindowStartMs = nowMs;
+        dvccFlapCount = 1;
+      } else if (++dvccFlapCount > DVCC_FLAP_COUNT) {
+        dvccFlapLatch = true;  // dvccTick converts this to the UNTRUSTED latch within 1 s
+        dvccFlapVal = cvl;
+      }
+    }
+    dvccFlapLastCvl = cvl;
+  }
+  dvccRxCvl = cvl;
+  dvccRxCcl = ccl;
+  dvccRxSrcAddr = srcAddr;
+  dvccRxPriority = priority;
+  dvccRxChgState = chgState;
+  dvccRxLastMs = millis();
+  dvccRxCount++;
+  MARK_FRESH(IDX_DVCC);
+}
+
+// RV-C: one authority at a time. A different sender is accepted only with strictly higher
+// device priority, or after the current authority has gone silent (VSR-style arbitration).
+static bool dvccRvcAcceptSender(uint8_t srcAddr, uint8_t priority) {
+  if (dvccRxSrcAddr == 255 || srcAddr == dvccRxSrcAddr) return true;
+  if (priority > dvccRxPriority) return true;
+  return (uint32_t)(millis() - dvccRxLastMs) > DVCC_HANDOFF_SILENCE_MS;
+}
+
+// Victron: no instance field on the VREG carrier — lock to the first sending bus address.
+static bool dvccVicAcceptSender(uint8_t srcAddr) {
+  if (dvccVicLockAddr == 255 || srcAddr == dvccVicLockAddr) {
+    dvccVicLockAddr = srcAddr;
+    return true;
+  }
+  if ((uint32_t)(millis() - dvccRxLastMs) > DVCC_HANDOFF_SILENCE_MS) {
+    dvccVicLockAddr = srcAddr;
+    dvccVicCvl = dvccVicCcl = NAN;  // never combine a new authority's first field with the old authority's held values
+    dvccVicCut = false;
+    return true;
+  }
+  return false;
+}
+
+// Victron VREG 0x351 payload (PROVISIONAL until §8a capture validation): mirrors the de-facto
+// BMS-Can 0x351 register it is named after — CVL u16 0.1 V/bit, CCL s16 0.1 A/bit, little-endian.
+static bool dvccDecodeVreg351(const unsigned char *p, int len, float &cvl, float &ccl) {
+  if (len < 4) return false;
+  uint16_t rawV = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+  int16_t rawA = (int16_t)((uint16_t)p[2] | ((uint16_t)p[3] << 8));
+  if (rawV == 0xFFFF) return false;
+  cvl = rawV * 0.1f;
+  ccl = (rawA == (int16_t)0x7FFF) ? NAN : rawA * 0.1f;
+  return true;
+}
+
+// One Victron VREG register frame (either carrier), payload p = the bytes after the vreg id.
+// Register identities and scalings CONFIRMED against Victron's official docs (spec §13):
+// 0x2001 VE_REG_LINK_VSET un16 0.01 V/bit, 0x2016 VE_REG_LINK_CHARGE_VOLTAGE_SETPOINT (second
+// official vset register — decoded identically until a capture shows which one Venus sends),
+// 0x2015 VE_REG_LINK_CHARGE_CURRENT_LIMIT un16 0.1 A/bit (0xFFFF = limit not available/removed).
+// Still provisional: 0x2108 (officially VE_REG_BMS_IO) and the 0x351 BMS-Can-mirror guess.
+// A wrong provisional read stays fail-safe by construction: CVL only ever clamps downward and a
+// far-off value trips the plausibility window; CCL only moves a min-selected ceiling.
+// Returns true when the register id was recognized (even if the sender lock rejected it).
+static bool dvccVicHandleReg(uint16_t vreg, const unsigned char *p, int len, uint8_t src) {
+  if (vreg == 0x0351) {
+    float cvl = NAN, ccl = NAN;
+    if (!dvccDecodeVreg351(p, len, cvl, ccl)) return false;
+    if (!dvccVicAcceptSender(src)) return true;
+    dvccVicCvl = cvl;
+    dvccVicCcl = ccl;
+  } else if (vreg == 0x2001 || vreg == 0x2016) {  // target voltage → CVL (either official vset register)
+    if (len < 2) return false;
+    uint16_t raw = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    if (raw == 0xFFFF) return false;
+    if (!dvccVicAcceptSender(src)) return true;
+    dvccVicCvl = raw * 0.01f;
+  } else if (vreg == 0x2015) {  // current limit → CCL (un16; 0xFFFF clears the held limit, it is NOT a value)
+    if (len < 2) return false;
+    uint16_t raw = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    if (!dvccVicAcceptSender(src)) return true;
+    dvccVicCcl = (raw == 0xFFFF) ? NAN : raw * 0.1f;
+  } else if (vreg == 0x2108) {  // officially VE_REG_BMS_IO, un32 IO bitmask (bit map not public);
+    // the Revatek ==2 reading is kept provisionally — really a bit-1 guess, capture-pending
+    if (len < 1 || p[0] == 0xFF) return false;
+    if (!dvccVicAcceptSender(src)) return true;
+    dvccVicCut = (p[0] == 2);
+  } else {
+    return false;
+  }
+  // Registers arrive one field per frame — re-ingest the held pair so the trust machine and
+  // telemetry always see the combined view. A do-not-charge command is the strongest limit:
+  // effective CCL 0 (the same obey-zero semantics Mark approved for a literal CCL=0).
+  dvccIngest(dvccVicCvl, dvccVicCut ? 0.0f : dvccVicCcl, src, 0, 0);
+  return true;
+}
+
+// Victron proprietary fast-packet (126720): 2-byte proprietary header (manufacturer code 358 +
+// industry group), then the VREG id. Both plausible framings are tried — vreg id directly at
+// bytes 2-3, or after a 1-byte command at bytes 3-4 — until the §8a capture pins the real one.
+void VictronVreg126720(const tN2kMsg &N2kMsg) {
+  if (dvccSrcType != 0) return;
+  if (N2kMsg.DataLen < 6) return;
+  // A control vreg is only ours as a broadcast or addressed to our node — an addressed frame to
+  // another charger carries THAT node's per-charger allocation, never the battery limit (§13).
+  if (N2kMsg.Destination != 0xFF && N2kMsg.Destination != NMEA2000.GetN2kSource()) return;
+  uint16_t mfr = ((uint16_t)N2kMsg.Data[0] | ((uint16_t)N2kMsg.Data[1] << 8)) & 0x07FF;
+  if (mfr != 358) return;  // Victron manufacturer code
+  uint16_t reg23 = (uint16_t)N2kMsg.Data[2] | ((uint16_t)N2kMsg.Data[3] << 8);
+  bool got = dvccVicHandleReg(reg23, &N2kMsg.Data[4], N2kMsg.DataLen - 4, N2kMsg.Source);
+  if (!got && N2kMsg.DataLen >= 7) {
+    uint16_t reg34 = (uint16_t)N2kMsg.Data[3] | ((uint16_t)N2kMsg.Data[4] << 8);
+    dvccVicHandleReg(reg34, &N2kMsg.Data[5], N2kMsg.DataLen - 5, N2kMsg.Source);
+  }
+}
+
+// Raw-RX tap, registered on the NMEA2000_esp32_xeng fork. Runs in ParseMessages caller context
+// (loop task, core 1) for EVERY received frame — the non-candidate exit is a few integer compares.
+// Carries the §8a capture feed plus the single-frame decodes the core library can't be trusted to
+// surface: RV-C DGNs (fast-packet-range collisions) and the 0xEF00 proprietary VREG carrier.
+void dvccRawFrameTap(unsigned long id, unsigned char len, const unsigned char *buf) {
+  if (NMEA2KData != 1 && dvccEn != 1) return;
+  uint32_t pgn = (uint32_t)((id >> 8) & 0x1FFFFUL);
+  uint8_t pf = (uint8_t)((id >> 16) & 0xFF);
+  uint8_t dest = 0xFF;  // PDU2 frames are inherently broadcast
+  if (pf < 240) {
+    dest = (uint8_t)((id >> 8) & 0xFF);
+    pgn &= 0x1FF00UL;  // PDU1 (destination-addressed): low byte is the destination, not part of the PGN
+  }
+  uint8_t src = (uint8_t)(id & 0xFF);
+  bool candidate = (pgn == 126720UL) || (pgn == 61184UL) || (pgn >= 130560UL && pgn <= 131071UL)  // RV-C DC/battery families + N2K proprietary fast-packet range
+                   || (pgn >= 65280UL && pgn <= 65535UL);                                         // single-frame proprietary range
+  if (!candidate) return;
+  dvccCaptureFrame(id, len, buf);
+  if (dvccSrcType == 1) {
+    // RV-C battery authority: DC_SOURCE_STATUS_4 (1FEC9h) / BATTERY_STATUS_4 (1FE92h), single frame
+    if ((pgn == 0x1FEC9UL || pgn == 0x1FE92UL) && len >= 7) {
+      uint8_t inst = buf[0];
+      if (dvccInst != 0 && inst != (uint8_t)dvccInst) return;
+      uint8_t prio = (pgn == 0x1FEC9UL) ? buf[1] : 120;  // BATTERY_STATUS_4 has no priority field; treat as BMS-grade
+      if (!dvccRvcAcceptSender(src, prio)) return;
+      float cvl = rvcU16ToVolts((uint16_t)buf[3] | ((uint16_t)buf[4] << 8));
+      float ccl = rvcU16ToAmps((uint16_t)buf[5] | ((uint16_t)buf[6] << 8));
+      if (buf[2] == 1) ccl = 0.0f;  // desired charge state 1 = do not charge (stop immediately) — same obey-zero semantics as a literal CCL=0
+      if (isnan(cvl) && isnan(ccl)) return;
+      dvccIngest(cvl, ccl, src, prio, buf[2]);
+    }
+  } else {
+    // Victron VREG on the 0xEF00 proprietary single-frame carrier: vreg id at bytes 2-3 (LE),
+    // payload after (framing per the Revatek prior art; provisional until capture validation).
+    // Manufacturer code 358 in the 2-byte proprietary header, same as the 126720 carrier.
+    if (pgn == 61184UL && len >= 5) {
+      // Broadcast or addressed-to-us only — an addressed frame to another charger carries THAT
+      // node's per-charger allocation, never the battery limit (§13).
+      if (dest != 0xFF && dest != NMEA2000.GetN2kSource()) return;
+      uint16_t mfr = ((uint16_t)buf[0] | ((uint16_t)buf[1] << 8)) & 0x07FF;
+      if (mfr != 358) return;
+      uint16_t vreg = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+      dvccVicHandleReg(vreg, &buf[4], (int)len - 4, src);
+    }
+  }
+}
+
+// The 1 Hz brain: trust state machine (spec §3). Publishes dvccCvlV / dvccCclA for the control
+// path. Arithmetic only. The clamps are additionally gated at the application sites on
+// dvccEn == 1, so a mid-session disable kills them even before this tick runs again.
+void dvccTick() {
+  static uint32_t lastTickMs = 0;
+  uint32_t now = millis();
+  if ((uint32_t)(now - lastTickMs) < 1000UL) return;
+  lastTickMs = now;
+
+  static uint32_t lastSeenCount = 0;
+  static uint32_t settleStartMs = 0;
+  static uint16_t settleFrames = 0;
+
+  if (dvccResetReq) {
+    dvccResetReq = false;
+    if (dvccState == DVCC_UNTRUSTED) {
+      dvccState = DVCC_WAITING;
+      dvccUntrustReason = 0;
+      settleStartMs = 0;
+      settleFrames = 0;
+      dvccClearDecodeState();
+      queueConsoleMessage("DVCC: trust latch reset - authority must settle again before being followed");
+    }
+  }
+  if (dvccCfgChanged) {
+    // Source/instance edited: judge the new authority with clean decode state (sender lock,
+    // flap history, held Victron registers). An UNTRUSTED latch is deliberately preserved —
+    // it clears only via the reset button, the master toggle, or reboot.
+    dvccCfgChanged = false;
+    settleStartMs = 0;
+    settleFrames = 0;
+    dvccClearDecodeState();
+  }
+
+  if (dvccEn != 1) {
+    dvccState = DVCC_OFF;
+    dvccCvlV = dvccCclA = NAN;
+    dvccUntrustReason = 0;  // master off/on is an approved latch-reset path
+    settleStartMs = 0;
+    settleFrames = 0;
+    dvccClearDecodeState();
+    return;
+  }
+
+  bool newFrame = (dvccRxCount != lastSeenCount);
+  lastSeenCount = dvccRxCount;
+  bool silent = (dvccRxLastMs == 0) || ((uint32_t)(now - dvccRxLastMs) > (uint32_t)dvccSilenceS * 1000UL);
+
+  if (dvccState == DVCC_UNTRUSTED) {
+    dvccCvlV = dvccCclA = NAN;  // latched: local control until manual reset / master toggle / reboot
+    return;
+  }
+
+  // Ingest-side flap detection latched (checked ahead of silence — a lying authority that then
+  // goes quiet must still latch, never quietly re-settle).
+  if (dvccFlapLatch) {
+    dvccFlapLatch = false;
+    dvccState = DVCC_UNTRUSTED;
+    dvccUntrustReason = 3;
+    dvccUntrustVal = dvccFlapVal;
+    dvccCvlV = dvccCclA = NAN;
+    queueConsoleMessage("DVCC: authority CVL flapping - UNTRUSTED (local control; manual reset required)");
+    return;
+  }
+
+  if (silent) {
+    if (dvccState == DVCC_FOLLOWING) {
+      queueConsoleMessageF("DVCC: authority silent >%ds - reverting to local targets", dvccSilenceS);
+      dvccState = DVCC_STALE;
+    } else if (dvccState != DVCC_STALE) {
+      dvccState = DVCC_WAITING;
+    }
+    dvccCvlV = dvccCclA = NAN;
+    settleStartMs = 0;
+    settleFrames = 0;
+    dvccClearDecodeState();  // held registers / sender lock / flap history must not resurface as "fresh" when frames return
+    return;
+  }
+
+  // Frames are arriving — validate the latest values every tick (a lying authority must not
+  // keep steering; one implausible value latches UNTRUSTED, never retried automatically).
+  bool cvlOk = isnan(dvccRxCvl) || (dvccRxCvl >= dvccCvlMin && dvccRxCvl <= dvccCvlMax);
+  bool cclOk = isnan(dvccRxCcl) || (dvccRxCcl >= 0.0f && dvccRxCcl <= DVCC_CCL_MAX_A);
+  if (!cvlOk || !cclOk) {
+    dvccState = DVCC_UNTRUSTED;
+    dvccUntrustReason = !cvlOk ? 1 : 2;
+    dvccUntrustVal = !cvlOk ? dvccRxCvl : dvccRxCcl;
+    dvccCvlV = dvccCclA = NAN;
+    queueConsoleMessageF("DVCC: implausible %s %.2f from authority - UNTRUSTED (local control; manual reset required)",
+                         !cvlOk ? "CVL" : "CCL", dvccUntrustVal);
+    return;
+  }
+  if (isnan(dvccRxCvl) && isnan(dvccRxCcl)) {
+    dvccState = DVCC_WAITING;  // frames but no usable limit fields
+    dvccCvlV = dvccCclA = NAN;
+    return;
+  }
+
+  if (dvccState != DVCC_FOLLOWING) {
+    if (settleStartMs == 0) {
+      settleStartMs = now;
+      settleFrames = 0;
+    }
+    if (newFrame) settleFrames++;
+    dvccState = DVCC_SETTLING;
+    if ((uint32_t)(now - settleStartMs) >= (uint32_t)dvccSettleS * 1000UL && settleFrames >= DVCC_SETTLE_MIN_FRAMES) {
+      dvccState = DVCC_FOLLOWING;
+      queueConsoleMessageF("DVCC: following authority (addr %u) CVL=%.2fV CCL=%.1fA (-1 = not sent)",
+                           (unsigned)dvccRxSrcAddr, isnan(dvccRxCvl) ? -1.0f : dvccRxCvl, isnan(dvccRxCcl) ? -1.0f : dvccRxCcl);
+    }
+  }
+  if (dvccState == DVCC_FOLLOWING) {
+    dvccCvlV = dvccRxCvl;
+    dvccCclA = dvccRxCcl;
+  } else {
+    dvccCvlV = dvccCclA = NAN;
   }
 }
 

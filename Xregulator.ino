@@ -257,7 +257,8 @@ static bool    altHiFieldAlert = false;    // high-field-low-output alert (indep
 // operating-point drift, not raw loop dither / sensor jitter (which the filter strips):
 // Band widths are sized by each axis's measured output sensitivity (Alt_Health_Dev_Summary.md §3):
 // output smear from a band = band × dI/dx, and the four add in quadrature.
-float altDutyTolPct    = 0.3f;   // field-duty band (% points, filtered; raw CV dither ~3 p-p). 1.76 A/pt — dominates the smear budget
+float altDutyTolPct    = 0.4f;   // field-duty band (% points, filtered; raw CV dither ~3 p-p). 1.76 A/pt — dominates the smear budget
+                                 // (back to the July-9 sensitivity-derived 0.4; the July-14 0.3 squeeze starves emits under the 8 s continuity rule)
 float altRpmTol        = 30.0f;  // RPM band (filtered; raw idle jitter ~50 p-p). 0.004 A/RPM at cruise but 0.045 below the ~1200 knee — do NOT widen on the cruise number
 float altVbusTol       = 0.20f;  // bus-voltage band (V, filtered). |dI/dV| < 1.8 and sign-unstable across fits — output cost is near zero
 // Admission floors:
@@ -1344,6 +1345,10 @@ int weatherHttpResponseCode = 0;
 int weatherModeEnabled = 0;            // 0=disabled, 1=enabled
 float UVThresholdHigh = 2.1;           // UV index above this = high solar expected (kWh)
 int WeatherUpdateInterval = 21600000;  // Update every 6 hours (in milliseconds)
+// A forecast this far past its refresh time stops holding the field off (see analyzeWeatherMode).
+// Grace on top of the interval: at exactly the interval the refetch is queued in the same tick, so
+// releasing there blips the field on for the seconds the fetch takes, every interval.
+const unsigned long WeatherStaleGraceMs = 1800000UL;  // 30 min
 int WeatherTimeoutMs = 10000;          // HTTP timeout in milliseconds
 
 int currentWeatherMode = 0;           // 0=normal, 1=high solar, 2=low solar
@@ -1430,7 +1435,10 @@ uint32_t absorptionTailTimer = 0;
 uint32_t bulkVoltageHoldMs = 250;  // time at bulk voltage before entering absorption
 volatile bool restartChargeCycleRequested = false;  // web /get?RestartChargeCycle=1 sets it; consumed at the top of updateChargingStage() (control-loop task) so the stage flags are only mutated from one task
 
-float FieldAdjustmentInterval = 50;  // The regulator field output is updated once every this many milliseconds
+// FieldAdjustmentInterval retired 2026-08-20: it gated nothing. The field loop is free-running —
+// AdjustFieldLearnMode() runs once per loop() pass (~200 Hz) and the inner PID fires on fresh ADS
+// CH1 samples (5-25 ms, assume ~30 ms). The only gate that ever used it is commented out in
+// 99_obsolete.ino. NVS key NK_FieldAdjustmentInterval and CSV3 slot retired with it — never reuse.
 float TemperatureLimitF = 175;       // measured at the case probe; internal/metal temps run roughly +40 to +50 °F above this depending on sensor installation. Strategy rationale: docs Charging Strategy page
 // Cold-charge lockout: board temp (BMP388 ambientTemp, °F) is a proxy for battery temp and reads
 // warmer than ambient, so set MinChargeTempF with margin. Default ON (lithium); lead-acid can opt out.
@@ -1460,7 +1468,7 @@ uint32_t hardOCStartMs = 0;
 const int pwmPin = 14;  // field PWM pin
 //const int pwmChannel = 0;      //0–7 available for high-speed PWM  (ESP32)
 const int pwmResolution = 12;          // Error = +0.010%    PWM Resolution = ±0.024% (1/4096)
-float SwitchingFrequency = 19000;      // Field switching frequency. Inaudible, and REQUIRED-class on P-type wiring: below ~5kHz the LM5109A bootstrap (C4 drained by R108) UVLO-chops during long on-pulses. NOT higher: LEDC 12-bit tops out at 19455Hz (divider must exceed 1.0) — 19500 is rejected by the driver and would kill boot attach (bench-confirmed 2026-08-16). Efficiency measured flat 100Hz-19kHz.
+float SwitchingFrequency = 400;      // Field switching frequency. Reverted from 19000 (bench 2026-08-20): 19kHz field edges coupled into the DS18B20 OneWire line (~5 CRC fails/min). The P-type bootstrap chop below ~5kHz (LM5109A C4 drained by R108, UVLO-chops long on-pulses) is benign — measured, see FIELD_DRIVE_BOOTSTRAP_DROOP.md. Ceiling stays 19455Hz (LEDC 12-bit divider limit; higher kills boot attach). Efficiency measured flat 100Hz-19kHz.
 const int MIN_SAFE_FREQUENCY = 50;     // Above most audible issues // set to 2000 later
 const int MAX_SAFE_FREQUENCY = 25000;  // Below core loss and EMI concerns
 // Max Field % is the REAL per-bus field-duty cap (no hidden scaling). Its default is scaled down at
@@ -2829,6 +2837,8 @@ FuncTiming ft_altHealth;
 FuncTiming ft_altFold;     // 200 Hz alt fold (IDW eval cost) — distinct from ft_altHealth (SSE wrapper)
 FuncTiming ft_boatPerf;
 FuncTiming ft_n2kTx;  // NMEA2000 transmit tick — proof the TX path stays out of the control loop's time budget
+FuncTiming ft_dvcc;   // DVCC follow brain (1 Hz trust state machine) — proof it stays out of the loop's time budget
+FuncTiming ft_n2kParse;  // NMEA2000.ParseMessages() — RX frame drain + fast-packet assembly; the only N2K cost that scales with bus traffic
 FuncTiming ft_huntGov;  // oscillation-damper evaluation — self-gated to one Goertzel pass per 32 control ticks; instrumented because it sits inline in the control loop
 FuncTiming ft_fastAltDrain;     // fast alt-current channel bounded DMA drain (~1 ms cap per loop pass)
 FuncTiming ft_faMatrixFlush;    // fast alt-current disturbance matrix → flash (field-off gated, like the long-term ring)
@@ -2906,7 +2916,8 @@ FuncTiming *const ftBlameReg[] = {
   &ft_ch1_compute_stats, &ft_SendWifiData, &ft_checkWiFiConnection, &ft_checkTimeSync,
   &ft_uploadSensorHistory, &ft_uploadBufferedRecords, &ft_buildConfigPayload,
   &ft_dumpLongTermRing, &ft_faMatrixFlush, &ft_fastAltDrain, &ft_faDetector,
-  &ft_zeroLogService, &ft_bhFlushCapNVS, &ft_kneeLearnService, &ft_n2kTx
+  &ft_zeroLogService, &ft_bhFlushCapNVS, &ft_kneeLearnService, &ft_n2kTx, &ft_dvcc,
+  &ft_n2kParse
 };
 constexpr uint8_t FT_BLAME_N = sizeof(ftBlameReg) / sizeof(ftBlameReg[0]);
 
@@ -3005,7 +3016,7 @@ GovernorMode govMode = GOV_NORMAL_SLEW;
 
 float setpointLimited = 0.0f;
 float setpointCommand = 0.0f;   // pre-slew current command (Icv in CV, uTargetAmps in idle); global so the Control Accuracy score gate can see whether setpointLimited is still slewing toward it
-uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty (machine/RPM limit), 6 protection (cap binding or post-protection recovery window), 7 battery above target (zero-output stand-down, altZeroOutput)
+uint8_t ctrlLimiter = 0;        // banner limiter code (→ CSV4/NavStream): 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty (machine/RPM limit), 6 protection (cap binding or post-protection recovery window), 7 battery above target (zero-output stand-down, altZeroOutput), 8 BMS charge-current limit (DVCC CCL), 9 BMS charge-voltage limit (DVCC CVL)
 bool setpointInitialized = false;
 
 // ===== LEARNING MODE CONTROL PARAMETERS =====
@@ -3852,7 +3863,8 @@ enum FieldEventReason : uint8_t {
   REASON_FAST_OVERVOLTAGE,         // absolute OV ceiling — fires in ALL modes incl. MANUAL (live per-tick, immediate cut)
   REASON_BATTERY_TOO_COLD,         // board temp (battery proxy) below MinChargeTempF — cold-charge lockout (opt-in, lithium protection)
   REASON_COMMISSION_REST,          // commissioning idle-rest hold between guided steps (not a fault)
-  REASON_TACH_IMPLAUSIBLE          // field driven hard, zero alternator output while tach claims running — open field drive (ON/OFF/wiring/gate-drive), dead alternator, or false RPM (tach noise)
+  REASON_TACH_IMPLAUSIBLE,         // field driven hard, zero alternator output while tach claims running — open field drive (ON/OFF/wiring/gate-drive), dead alternator, or false RPM (tach noise)
+  REASON_SOLAR_PAUSE               // weather mode is resting the alternator on a strong solar forecast — deliberate, not a fault
 };
 
 
@@ -3867,6 +3879,7 @@ struct TickSnapshot {
 
   bool chargingEnabled;
   bool manualMode;
+  bool solarForecastPause;   // charging would be on; weather mode alone is holding it off
 
   bool tempDataVeryStale;
   bool ignoreTemperature;
@@ -3933,7 +3946,7 @@ uint8_t cvRecovEnable = 1;   // master switch for the post-protection integrator
 uint8_t loadServeBoostEnable = 1;  // load-serve Ki boost (07-22): while the battery shunt shows sustained discharge in CV, up-integration runs at the refill's boosted rate toward the measured house loads — a stiff plant hides a 35A load behind ~0.25V of error, so plain Ki picks it up in ~30s. Shunt-gated; inert without one. Dev default ON, production TBD
 uint8_t reseedCorrEnable = 1;      // demand-corrected reseed (07-22, the 8-fire train): subtract the measured load drop at the fire from the release reseed + refill goal (shunt-gated), and escalate the ratchet ×0.85 per re-fire <1.5s after release (shunt-independent). OFF = plain ReseedFrac reseed
 // --- Hunt Governor (universal anti-oscillation damper — Hunt_Governor_Spec.md) ---
-uint8_t HuntGovEnable = 1;           // 1 = watch applied duty for a sustained 0.3–3 Hz hunt (idle-knee speed-coupled plant, 07-22 22:16 AGM logs) and derate the inner-loop Ki until it dies; an episode gain cuts cannot quiet is reverted in full (external cyclic source)
+uint8_t HuntGovEnable = 0;           // 1 = watch applied duty for a sustained 0.3–3 Hz hunt (idle-knee speed-coupled plant, 07-22 22:16 AGM logs) and derate the inner-loop Ki until it dies; an episode gain cuts cannot quiet is reverted in full (external cyclic source). Opt-in (operator decision 08-20); NVS-seeded units keep their stored value
 volatile float g_huntDerate = 1.0f;  // live Ki multiplier [0.25..1]; applied inside recomputeCcGains so every SetTunings path preserves it. Session-only — never persisted
 float g_huntFreqHz = 0.0f;           // last confirmed wobble frequency (CSV1/ledger)
 uint8_t g_huntState = 0;  // 0 idle, 1 episode, 2 hold(creep toward session ceiling), 3 standdown — the state machine's own variable, file-global so CSV1 can stream it to the Diag panel (derate alone can't tell "watching at reduced gain" from "actively damping")
@@ -4783,8 +4796,9 @@ enum DataIndex {
   IDX_VICTRON_SOLAR,             // 37 - Victron VE.Direct solar (PPV/VPV) staleness
   IDX_N2K_BATT,                  // 38 - NMEA2k received Battery Status (PGN 127508) V/A/T
   IDX_N2K_SOC,                   // 39 - NMEA2k received DC Detailed Status (PGN 127506) SOC/SOH
+  IDX_DVCC,                      // 40 - DVCC follow: received charge-limit (CVL/CCL) stream
   // Keep this last and increment when new added
-  MAX_DATA_INDICES = 40
+  MAX_DATA_INDICES = 41
 };
 
 unsigned long dataTimestamps[MAX_DATA_INDICES];  // Uses the enum size automatically
@@ -4961,6 +4975,7 @@ void Attitude(const tN2kMsg &N2kMsg);
 void Heading(const tN2kMsg &N2kMsg);
 void GNSSSatsInView(const tN2kMsg &N2kMsg);
 void WindSpeed(const tN2kMsg &N2kMsg);
+void VictronVreg126720(const tN2kMsg &N2kMsg);
 
 //PGN Handler Table
 tNMEA2000Handler NMEA2000Handlers[] = {
@@ -4979,6 +4994,9 @@ tNMEA2000Handler NMEA2000Handlers[] = {
   { 130306L, &WindSpeed },
   { 0, 0 }
 };
+// 126720 (Victron proprietary fast-packet, VREG carrier) is deliberately NOT in this table:
+// HandleNMEA2000Msg dispatches it straight to VictronVreg126720 ahead of the receive gate,
+// so DVCC follow works with receive off WITHOUT admitting other traffic to the table scan.
 
 Stream *OutputStream = &Serial;
 
@@ -5004,8 +5022,9 @@ uint32_t n2kTxDropCount = 0;  // SendMsg failures (TX queue + retry ring full �
 int n2kSrcAddrLive = -1;      // claimed source address; -1 = not claimed / listen-only
 uint8_t n2kAddrPending = 255;    // address-claim result awaiting NVS persist (255 = none) — flushed field-off only, per the no-flash-in-control-path rule
 const unsigned long N2kTransmitMessages[] PROGMEM = { 127488UL, 127489UL, 127506UL, 127507UL, 127508UL, 127513UL, 130312UL, 0 };
-// Mirrors NMEA2000Handlers[] so the library's 126464 RX PGN list is truthful (spec §8)
-const unsigned long N2kReceiveMessages[] PROGMEM = { 126992UL, 127245UL, 127250UL, 127257UL, 127506UL, 127508UL, 127513UL, 128259UL, 128267UL, 129026UL, 129029UL, 129540UL, 130306UL, 0 };
+// Mirrors NMEA2000Handlers[] so the library's 126464 RX PGN list is truthful (spec §8).
+// RV-C DGNs are deliberately absent: they are not N2K PGNs — they arrive via the fork's raw-RX tap.
+const unsigned long N2kReceiveMessages[] PROGMEM = { 126720UL, 126992UL, 127245UL, 127250UL, 127257UL, 127506UL, 127508UL, 127513UL, 128259UL, 128267UL, 129026UL, 129029UL, 129540UL, 130306UL, 0 };
 void nmea2kTransmitTick();
 // ===== NMEA2000 received battery data (127508 + 127506 at n2kRxBattInstance) =====
 // Display/telemetry only — never an input to field control, protections, targets, or SoC.
@@ -5015,6 +5034,52 @@ float n2kRxBattA = NAN;      // received battery current (127508, signed)
 float n2kRxBattTempF = NAN;  // received battery temperature (127508)
 int n2kRxSoc = -1;           // received state of charge % (127506); -1 = not available
 int n2kRxSoh = -1;           // received state of health % (127506); -1 = not available
+
+// ===== DVCC-style charge-limit follow (CVL/CCL) — spec: Working Markdown Docs/DVCC_FOLLOW_SPEC.md =====
+// A received charge limit is a clamp-only REQUEST: it can lower the effective voltage target or
+// current ceiling below local values, never raise anything. Every local protection outranks it.
+// Sources on the 250k bus: RV-C DC_SOURCE_STATUS_4 / BATTERY_STATUS_4 (single-frame, decoded in the
+// fork's raw-RX tap) and Victron VE.Can VREG 0x351 (0xEF00 proprietary single-frame + 126720
+// fast-packet). The Victron register layout is PROVISIONAL until validated against a real GX
+// capture (spec §8a) — the trust machine and observe-before-enable workflow gate it meanwhile.
+int dvccEn = 0;             // master follow switch; decoded limits clamp targets only when 1
+int dvccSrcType = 0;        // authority dialect: 0 = Victron VE.Can (VREG), 1 = RV-C
+int dvccInst = 1;           // RV-C DC instance filter (RV-C is 1-oriented; 0 = accept any). Victron path locks to the first sending bus address instead
+int dvccSilenceS = 30;      // no valid limit frame for this long → drop the clamp, revert to local targets
+int dvccSettleS = 10;       // in-range updates must span this long (and ≥2 frames) before the first clamp applies
+float dvccCvlMin = 9.0f;    // plausible-CVL window, absolute volts (class-seeded/rescaled like other voltage settings);
+float dvccCvlMax = 16.0f;   //   a CVL outside the window latches UNTRUSTED until manual reset
+// Live state — written by the decode tap + dvccTick() (both ParseMessages/loop context, core 1)
+float dvccRxCvl = NAN;      // last decoded charge-voltage limit (displayed even when follow is off)
+float dvccRxCcl = NAN;      // last decoded charge-current limit (NAN = dialect sent not-available)
+uint32_t dvccRxLastMs = 0;  // millis() of last decoded limit frame
+uint32_t dvccRxCount = 0;   // decoded limit frames since boot (dvccTick uses it as a new-frame edge)
+uint8_t dvccRxSrcAddr = 255;    // sender bus address (255 = none yet)
+uint8_t dvccRxPriority = 0;     // RV-C device priority of the sender (BMS = 120)
+uint8_t dvccRxChgState = 0;     // RV-C desired charge state — value 1 (do not charge) forces effective CCL 0; other values displayed only
+uint8_t dvccState = 0;          // 0 off, 1 waiting, 2 settling, 3 following, 4 stale, 5 untrusted
+uint8_t dvccUntrustReason = 0;  // 0 none, 1 CVL out of window, 2 CCL implausible, 3 flapping
+float dvccCvlV = NAN;       // ACTIVE clamps consumed by the control path — non-NAN only while FOLLOWING
+float dvccCclA = NAN;
+bool dvccResetReq = false;    // momentary UNTRUSTED-latch reset request from the web UI; consumed by dvccTick()
+bool dvccCfgChanged = false;  // source/instance edited: dvccTick clears decode/settle state (an UNTRUSTED latch is preserved)
+// Raw-frame capture ring (spec §8a) — PSRAM, filled from the raw-RX tap (5_functions), served as
+// hex text by /dvccCapture (3_functions). Lets a customer boat validate the Victron/RV-C decode
+// with zero special tooling. Storage lives here so both files see it (concatenation order).
+struct DvccCapEntry {
+  uint32_t ms;
+  uint32_t id;
+  uint8_t len;
+  uint8_t data[8];
+};
+#define DVCC_CAP_N 512
+DvccCapEntry *dvccCapRing = nullptr;  // ps_malloc'd in initDvccCapture() (setup)
+uint16_t dvccCapHead = 0;             // next write slot; wraps
+uint16_t dvccCapCount = 0;            // total valid (saturates at DVCC_CAP_N)
+volatile bool dvccCapPause = false;   // /dvccCapture (async_tcp task) sets while serializing so the loop-task tap can't overwrite an entry mid-read
+void initDvccCapture();
+void dvccTick();
+void dvccRawFrameTap(unsigned long id, unsigned char len, const unsigned char *buf);
 
 //ADS1115 more pre-setup crap
 uint32_t adsI2CErrorCount = 0;
@@ -5445,6 +5510,8 @@ void setup() {
   memset(&ft_altFold, 0, sizeof(FuncTiming));
   memset(&ft_boatPerf, 0, sizeof(FuncTiming));
   memset(&ft_n2kTx, 0, sizeof(FuncTiming));
+  memset(&ft_dvcc, 0, sizeof(FuncTiming));
+  memset(&ft_n2kParse, 0, sizeof(FuncTiming));
   memset(&ft_huntGov, 0, sizeof(FuncTiming));
   memset(&ft_fastAltDrain, 0, sizeof(FuncTiming));
   memset(&ft_faMatrixFlush, 0, sizeof(FuncTiming));
@@ -6197,19 +6264,25 @@ void loop() {
         VeTime2 = ft_ReadVEData.worstSession;
       }
       // n2kTxEnable also forces ParseMessages: node mode needs it for address claim + heartbeat
-      // servicing even if the user left the receive toggle off.
-      if ((NMEA2KData == 1 || n2kTxEnable == 1) && hardwarePresent == 1) {
-        NMEA2000.ParseMessages();  // CAN bus (only with real hardware)
+      // servicing even if the user left the receive toggle off. dvccEn forces it too: the follow
+      // feature must keep hearing the authority even with the general receive toggle off.
+      if ((NMEA2KData == 1 || n2kTxEnable == 1 || dvccEn == 1) && hardwarePresent == 1) {
+        TIMED_CALL(ft_n2kParse, NMEA2000.ParseMessages());  // CAN bus (only with real hardware)
         TIMED_CALL(ft_n2kTx, nmea2kTransmitTick());
       }
+      // The DVCC brain runs UNCONDITIONALLY (pure 1 Hz arithmetic, no bus/I2C): if the gate above
+      // stops (e.g. hardwarePresent flipped to 0 mid-FOLLOW), silence timeout still reverts the
+      // clamps instead of the control loop obeying a frozen CVL/CCL forever.
+      TIMED_CALL(ft_dvcc, dvccTick());
       TIMED_CALL(ft_CheckAlarms, CheckAlarms());  // Process alarms (runs with fake or real data)
       calculateThermalStress();                   // alternator lifetime modeling (runs with fake or real data)
       //UpdateDisplay();
       zeroFitService();  // Temp-comp zero correction: daily fit (engine+field off) + live correction (must be before AdjustField)
 
-      if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED) {
-        updateWeatherMode();  // untimed: core-1 cost is local analysis only; fetch is queued to Core 0
-      }
+      // Runs in every mode: the stale-forecast release inside must fire with no internet (AP mode,
+      // WiFi loss) or a solar pause latches on and holds the field off forever. The fetch itself is
+      // still gated on client mode + WiFi inside the call.
+      updateWeatherMode();  // untimed: core-1 cost is local analysis only; fetch is queued to Core 0
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
       // Inner-PID firing + INA228 read interval re-baseline: while the field is down, drop the
       // previous-sample timestamp so the first sample after re-enable measures a fresh interval,
@@ -6516,6 +6589,8 @@ void loop() {
     ft_altFold.worstWindow = 0;
     ft_boatPerf.worstWindow = 0;
     ft_n2kTx.worstWindow = 0;
+    ft_dvcc.worstWindow = 0;
+    ft_n2kParse.worstWindow = 0;
     ft_huntGov.worstWindow = 0;
     loopWorst80Win = 0;  // 80MHz low-power loop worst — rolling 5s window
     loopFieldOnWin = 0;  // field-ON loop worst — rolling 5s window

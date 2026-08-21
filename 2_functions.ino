@@ -159,7 +159,9 @@ bool fsRemove(const char *path) {
 #define NK_FastSetpointRiseHeadroomV "FstStpntRsHdrmV"
 #define NK_FastSetpointRiseRate "FastSetpontRsRt"
 #define NK_FastSetpointRiseWindowMs "FstStpntRsWndwM"
-#define NK_FieldAdjustmentInterval "FldAdjstmntIntr"
+// RETIRED (2026-08-20, unreferenced): kept so the 15-char NVS key is never handed to a new setting.
+// Stale values may still sit in NVS on units flashed before this; nothing reads them.
+// #define NK_FieldAdjustmentInterval "FldAdjstmntIntr"
 #define NK_FieldResistance "FieldResistance"
 #define NK_FloatVoltage "FloatVoltage"
 #define NK_FuelEfficiency "FuelEfficiency"
@@ -547,6 +549,14 @@ bool fsRemove(const char *path) {
 #define NK_n2kEngBitsEn    "n2kEngBitsEn"
 #define NK_n2kSrcAddr      "n2kSrcAddr"
 #define NK_n2kRxBattInst   "n2kRxBattInst"
+// DVCC-style charge-limit follow (CVL/CCL)
+#define NK_dvccEn          "dvccEn"
+#define NK_dvccSrcType     "dvccSrcType"
+#define NK_dvccInst        "dvccInst"
+#define NK_dvccSilenceS    "dvccSilenceS"
+#define NK_dvccSettleS     "dvccSettleS"
+#define NK_dvccCvlMin      "dvccCvlMin"
+#define NK_dvccCvlMax      "dvccCvlMax"
 
 #define SETTINGS_NVS_NAMESPACE "settings"
 

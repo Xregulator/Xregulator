@@ -45,11 +45,12 @@ struct FrontPoint { float x[NAXIS]; float ex[2]; float y; uint32_t nSamp; uint32
 // inside the window, then ages out — it never zeroes accumulated dwell, so a disqualifying sample
 // does NOT discard the prior in-band history. A point emits, at most once per EP_EMIT_PERIOD_MS,
 // while EVERY axis (and the optional output band) is steady AND data has spanned its dwell since the
-// last hard barrier (eligible=false) AND steadiness has held for a full avgWinMs, so the trailing
-// boxcar (width avgWinMs, per instance) contains only continuously-steady data. Steadiness +
-// averaging are fed at a decimated EP_FEED_DT_MS cadence (the fold may run far faster — 200 Hz on
-// alt). Shared by alt-health (4 axes + amps band, avgWinMs = ALT_EMIT_AVG_MS) and
-// vessel-performance (sail/motor, 3 axes, output band disabled, default window).
+// last hard barrier (eligible=false) AND the trailing boxcar (width avgWinMs, per instance) is
+// itself clean: it spans a full window and each axis's TRIMMED range over its samples fits that
+// axis's band (see trimmedRange). Steadiness + averaging are fed at a decimated EP_FEED_DT_MS
+// cadence (the fold may run far faster — 200 Hz on alt). Shared by alt-health (4 axes + amps band,
+// avgWinMs = ALT_EMIT_AVG_MS) and vessel-performance (sail/motor, 3 axes, output band disabled,
+// default window).
 
 #define EP_FEED_DT_MS      100    // steadiness/average update cadence (10 Hz), decimated from the fold
 #define EP_AVG_WIN_MS     2000    // default trailing boxcar width for the emitted average (per-instance avgWinMs overrides)
@@ -93,8 +94,12 @@ struct Episode {
   double    avgSumX[NAXIS], avgSumEx[2], avgSumOut;
   uint32_t  count;                  // boxcar sample count while steady, else 0 (caller reads count>0 as "steady")
   uint32_t  lastFeedMs, lastEmitMs;
-  uint32_t  avgWinMs = EP_AVG_WIN_MS;   // boxcar width; also the continuous-steady dwell an emit requires
-  uint32_t  lastUnqualMs;           // last non-qualified feed — emits wait until the boxcar is past it
+  uint32_t  avgWinMs = EP_AVG_WIN_MS;   // boxcar width; an emit requires the boxcar itself to be clean (span + trimmed ranges)
+  // Emit-starvation triage (boot-cumulative, NOT reset by clearRun): per axis, out-of-band ticks and
+  // excursion starts, counted only once that axis's dwell has filled. Mean excursion length =
+  // axUnqual/axExcur × EP_FEED_DT_MS. Dumped in /altdebug.csv.
+  uint32_t  axUnqual[NAXIS + 1] = {}, axExcur[NAXIS + 1] = {}, feedTicks = 0;
+  bool      axWasUnq[NAXIS + 1] = {};
 
   // ringBuf/ringCap = the caller's PSRAM boxcar ring; maxDwellSec[NAXIS+1] sizes each axis's (and the
   // output band's) deque to its longest expected steady time. Deque storage is ps_malloc'd here.
@@ -125,7 +130,7 @@ struct Episode {
     for (int a = 0; a < NAXIS; a++) avgSumX[a] = 0;
     for (int a = 0; a < NAXIS + 1; a++) axisSteady[a] = false;
     avgSumEx[0] = avgSumEx[1] = 0; avgSumOut = 0;
-    dataStartMs = 0; haveData = false; lastFeedMs = 0; lastEmitMs = 0; lastUnqualMs = 0;
+    dataStartMs = 0; haveData = false; lastFeedMs = 0; lastEmitMs = 0;
   }
 
   // Feed one sample. eligible=false → hard barrier (drop all in-band history; a run can't span the
@@ -142,9 +147,10 @@ struct Episode {
     // so one instantaneous post-gap reading would emit as a full steady run.
     if (haveData && (uint32_t)(s.tMs - lastFeedMs) > 5u * EP_FEED_DT_MS) clearRun();
     lastFeedMs = s.tMs;
-    if (!haveData) { dataStartMs = s.tMs; haveData = true; lastUnqualMs = s.tMs; }
+    if (!haveData) { dataStartMs = s.tMs; haveData = true; }
 
     // Per-axis sliding-window min/max over each axis's own trailing dwell window (clamped to storage).
+    feedTicks++;
     bool qualified = true;
     for (int a = 0; a < NAXIS; a++) {
       uint32_t win = (uint32_t)(cfg[a].steadySec * 1000.0f);
@@ -152,10 +158,14 @@ struct Episode {
       if (win > winMax) win = winMax;
       maxDQ[a].push(s.tMs, s.x[a], win);
       minDQ[a].push(s.tMs, s.x[a], win);
-      bool aok = ((uint32_t)(s.tMs - dataStartMs) >= win)                            // enough dwell …
-                 && (maxDQ[a].front() - minDQ[a].front() <= cfg[a].tol);             // … and window range in band
-      axisSteady[a] = aok;
-      if (!aok) qualified = false;
+      bool dwellOk = ((uint32_t)(s.tMs - dataStartMs) >= win);
+      bool inBand  = (maxDQ[a].front() - minDQ[a].front() <= cfg[a].tol);
+      if (dwellOk) {
+        if (!inBand) { axUnqual[a]++; if (!axWasUnq[a]) axExcur[a]++; }
+        axWasUnq[a] = !inBand;
+      }
+      axisSteady[a] = dwellOk && inBand;
+      if (!axisSteady[a]) qualified = false;
     }
     if (outCfg.tol > 0) {
       uint32_t win = (uint32_t)(outCfg.steadySec * 1000.0f);
@@ -163,10 +173,14 @@ struct Episode {
       if (win > winMax) win = winMax;
       maxDQ[NAXIS].push(s.tMs, s.out, win);
       minDQ[NAXIS].push(s.tMs, s.out, win);
-      bool ook = ((uint32_t)(s.tMs - dataStartMs) >= win)
-                 && (maxDQ[NAXIS].front() - minDQ[NAXIS].front() <= outCfg.tol);
-      axisSteady[NAXIS] = ook;
-      if (!ook) qualified = false;
+      bool dwellOk = ((uint32_t)(s.tMs - dataStartMs) >= win);
+      bool inBand  = (maxDQ[NAXIS].front() - minDQ[NAXIS].front() <= outCfg.tol);
+      if (dwellOk) {
+        if (!inBand) { axUnqual[NAXIS]++; if (!axWasUnq[NAXIS]) axExcur[NAXIS]++; }
+        axWasUnq[NAXIS] = !inBand;
+      }
+      axisSteady[NAXIS] = dwellOk && inBand;
+      if (!axisSteady[NAXIS]) qualified = false;
     } else {
       axisSteady[NAXIS] = true;   // output band disabled (vessel-perf) → never blocks
     }
@@ -185,25 +199,57 @@ struct Episode {
       ringCount--;
     }
     count = qualified ? (uint32_t)ringCount : 0;            // caller reads count>0 as "steady now"
-    if (!qualified) lastUnqualMs = s.tMs;
 
-    // Emit a steady point, rate-limited. Requires steadiness to have HELD for a full avgWinMs so the
-    // boxcar holds only continuously-steady data — an out-of-band blip pushes emits out until it ages
-    // past the window, and a fresh run's first emit lands avgWinMs after qualification, not instantly.
-    if (qualified && (uint32_t)(s.tMs - lastEmitMs) >= EP_EMIT_PERIOD_MS && ringCount > 0
-        && (uint32_t)(s.tMs - lastUnqualMs) >= avgWinMs) {
-      lastEmitMs = s.tMs;
-      if (out) {
-        for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(avgSumX[a] / (double)ringCount);
-        out->ex[0] = (float)(avgSumEx[0] / (double)ringCount);
-        out->ex[1] = (float)(avgSumEx[1] / (double)ringCount);
-        out->y = (float)(avgSumOut / (double)ringCount);
-        out->nSamp = (uint32_t)ringCount;
-        out->tEmit = s.tMs;
-        return true;
+    // Emit a steady point, rate-limited. Beyond instant steadiness (qualified), the BOXCAR itself
+    // must be clean: full avgWinMs span, and each axis's trimmed range over its samples within that
+    // axis's band. This replaced the 2026-08-14 "steady continuously for a full avgWinMs" clock:
+    // one 100 ms blip poisons the 3 s instant windows for 3 s, so with blips every few seconds the
+    // clock never reached 8 s and the record book starved (bench 2026-08-20: 12 min steady run,
+    // ONE record, live % unmoored). Trimming lets isolated blips ride in the average (unbiased,
+    // band-bounded smear) instead of vetoing the emit; a sustained shift still fails the range.
+    if (qualified && (uint32_t)(s.tMs - lastEmitMs) >= EP_EMIT_PERIOD_MS && ringCount > 2) {
+      int tail = (ringHead - ringCount + avgCap) % avgCap;
+      bool clean = ((uint32_t)(s.tMs - avgRing[tail].tMs) + 2u * EP_FEED_DT_MS >= avgWinMs);
+      for (int a = 0; clean && a < NAXIS; a++) clean = (trimmedRange(a) <= cfg[a].tol);
+      if (clean && outCfg.tol > 0) clean = (trimmedRange(NAXIS) <= outCfg.tol);
+      if (clean) {
+        lastEmitMs = s.tMs;
+        if (out) {
+          for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(avgSumX[a] / (double)ringCount);
+          out->ex[0] = (float)(avgSumEx[0] / (double)ringCount);
+          out->ex[1] = (float)(avgSumEx[1] / (double)ringCount);
+          out->y = (float)(avgSumOut / (double)ringCount);
+          out->nSamp = (uint32_t)ringCount;
+          out->tEmit = s.tMs;
+          return true;
+        }
       }
     }
     return false;
+  }
+
+  // Trimmed max−min over the boxcar ring for one axis (axis == NAXIS → the output). Drops the
+  // ~5% most extreme samples per tail (ringCount/20, min 1, cap 8) before ranging, so a few
+  // isolated 100 ms blips can't veto an emit whose core is genuinely steady — the blips stay IN
+  // the emitted average. A sustained excursion (> the trim count) still fails. O(n·trim) once
+  // per candidate emit; also read (unlocked, diagnostic) by altDebugCsvSend.
+  float trimmedRange(int axis) const {
+    int n = ringCount;
+    if (n < 3) return 0.0f;
+    int k = n / 20;
+    if (k < 1) k = 1;
+    if (k > 8) k = 8;
+    float lo[9], hi[9];                       // ascending k+1 smallest / descending k+1 largest
+    int m = k + 1, nlo = 0, nhi = 0;
+    for (int i = 0; i < n; i++) {
+      int idx = (ringHead - 1 - i + avgCap) % avgCap;
+      float v = (axis < NAXIS) ? avgRing[idx].x[axis] : avgRing[idx].out;
+      if (nlo < m) { int j = nlo++; while (j > 0 && lo[j - 1] > v) { lo[j] = lo[j - 1]; j--; } lo[j] = v; }
+      else if (v < lo[m - 1]) { int j = m - 1; while (j > 0 && lo[j - 1] > v) { lo[j] = lo[j - 1]; j--; } lo[j] = v; }
+      if (nhi < m) { int j = nhi++; while (j > 0 && hi[j - 1] < v) { hi[j] = hi[j - 1]; j--; } hi[j] = v; }
+      else if (v > hi[m - 1]) { int j = m - 1; while (j > 0 && hi[j - 1] < v) { hi[j] = hi[j - 1]; j--; } hi[j] = v; }
+    }
+    return hi[k] - lo[k];
   }
 
   // Dwell seconds still needed before this episode can go steady: the largest per-axis shortfall of
@@ -568,7 +614,9 @@ float altRpmSec       = 3.0f;    // RPM steady time (s)
 float altDutySec      = 3.0f;    // field-duty % steady time (s)
 float altVbusSec      = 3.0f;    // bus-voltage steady time (s)
 float altThermDegF    = 4.0f;    // temperature deviation bound (°F) — record only at thermal equilibrium. 0.105 A/°F at cruise; also gates the altThermSec dwell, so it is the biggest yield knob
-float altThermSec     = 80.0f;   // STEADY_TEMP_SEC — FULL-steady temp dwell (s). Feeds the surface + trend + orange ring.
+float altThermSec     = 40.0f;   // STEADY_TEMP_SEC — FULL-steady temp dwell (s). Feeds the surface + trend + orange ring.
+                                 // 80→40 2026-08-20: at 80 the normal warm-up ramp (~1.5-2 °F/min) ate half the 4 °F band
+                                 // and starved records for whole sessions. NVS-held — bench device needs a live set too.
 // SESSION-steady temp dwell is DERIVED as half of altThermSec (see altSessTempDwell()) — no separate
 // knob, so the session gate auto-tracks whenever the full dwell above is changed.
 static inline float altSessTempDwell() { return altThermSec * 0.5f; }
@@ -933,8 +981,9 @@ void altFold_tick(uint32_t nowMs) {
 
   // Detector-input EMA (altEmaSec): strips inner-loop duty dither, RPM jitter, and current ripple
   // so the steadiness bands can be sized purely for real operating-point movement (= transient
-  // rejection). The control loops never see these. A long gap between folds (field off, boot)
-  // reseeds the filters from raw so stale state can't bridge it.
+  // rejection). Temp (DS18B20) is DELIBERATELY raw — slow, quantized, noise-free (user, 2026-08-20),
+  // so filtering it adds only lag. The control loops never see these. A long gap between folds
+  // (field off, boot) reseeds the filters from raw so stale state can't bridge it.
   static float fRpm = 0, fDuty = 0, fVbus = 0, fAmps = 0;
   static uint32_t lastFoldMs = 0;
   static bool fInit = false;
@@ -1244,6 +1293,35 @@ void altDebugCsvSend(AsyncWebServerRequest *request) {
                 st.len = snprintf(st.line, sizeof(st.line), "GATE,sessTempDwellMs_epDataMs,%u,%u\n", (unsigned)sessTempMs, (unsigned)epDataMs);
                 break;
               }
+              case 10:   // per-axis steadiness at this instant — names which axis starves emits
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,axSteady_rpm_duty_vbus_temp_amps,%d,%d,%d,%d,%d\n",
+                                  (int)altEpisode.axisSteady[0], (int)altEpisode.axisSteady[1], (int)altEpisode.axisSteady[2],
+                                  (int)altEpisode.axisSteady[3], (int)altEpisode.axisSteady[ALT_NAXIS]);
+                break;
+              case 11: {  // emit starvation triage: total emits + how long since the last emit
+                uint32_t now = millis();
+                float emitAgo = altEpisode.lastEmitMs ? (float)((uint32_t)(now - altEpisode.lastEmitMs)) / 1000.0f : -1.0f;
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,emitCount_lastEmitAgoS,%d,%.1f\n",
+                                  altFrontEmitCount, emitAgo);
+                break;
+              }
+              case 12:   // boot-cumulative out-of-band ticks per axis (+ total feeds) — which band interrupts
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,axUnqual_rpm_duty_vbus_temp_amps_feeds,%lu,%lu,%lu,%lu,%lu,%lu\n",
+                                  (unsigned long)altEpisode.axUnqual[0], (unsigned long)altEpisode.axUnqual[1],
+                                  (unsigned long)altEpisode.axUnqual[2], (unsigned long)altEpisode.axUnqual[3],
+                                  (unsigned long)altEpisode.axUnqual[ALT_NAXIS], (unsigned long)altEpisode.feedTicks);
+                break;
+              case 13:   // excursion starts per axis — with axUnqual gives mean excursion length (×0.1 s)
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,axExcur_rpm_duty_vbus_temp_amps,%lu,%lu,%lu,%lu,%lu\n",
+                                  (unsigned long)altEpisode.axExcur[0], (unsigned long)altEpisode.axExcur[1],
+                                  (unsigned long)altEpisode.axExcur[2], (unsigned long)altEpisode.axExcur[3],
+                                  (unsigned long)altEpisode.axExcur[ALT_NAXIS]);
+                break;
+              case 14:   // live trimmed boxcar range per axis — compare directly to the PARAM band tols
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,boxTrimRange_rpm_duty_vbus_temp_amps,%.1f,%.3f,%.3f,%.2f,%.2f\n",
+                                  altEpisode.trimmedRange(0), altEpisode.trimmedRange(1), altEpisode.trimmedRange(2),
+                                  altEpisode.trimmedRange(3), altEpisode.trimmedRange(ALT_NAXIS));
+                break;
               default: st.phase = 3; st.idx = 0; break;
             }
             if (st.len > 0) st.idx++;

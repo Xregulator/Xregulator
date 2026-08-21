@@ -666,6 +666,15 @@ enum Csv2Index {
   CSV2_n2kRxBattTempF, // received 127508 battery temperature (F ×10; -2000000000 = not available)
   CSV2_n2kRxSoc,       // received 127506 state of charge (%; -1 = not available)
   CSV2_n2kRxSoh,       // received 127506 state of health (%; -1 = not available)
+  CSV2_dvccState,         // DVCC follow state: 0 off, 1 waiting, 2 settling, 3 following, 4 stale, 5 untrusted
+  CSV2_dvccRxCvl,         // last decoded charge-voltage limit (V ×100; -2000000000 = none)
+  CSV2_dvccRxCcl,         // last decoded charge-current limit (A ×10; -2000000000 = none)
+  CSV2_dvccRxSrcAddr,     // authority bus address (255 = none yet)
+  CSV2_dvccUntrustReason, // 0 none, 1 CVL out of window, 2 CCL implausible, 3 flapping
+  CSV2_ft_dvcc_win,       // DVCC brain tick worst µs (window)
+  CSV2_ft_dvcc_ses,       // DVCC brain tick worst µs (session)
+  CSV2_ft_n2kParse_win,   // NMEA2000.ParseMessages worst µs (window) — RX drain, scales with bus traffic
+  CSV2_ft_n2kParse_ses,   // NMEA2000.ParseMessages worst µs (session)
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -703,7 +712,7 @@ enum Csv3Index {
   CSV3_FloatVoltage,
   CSV3_SwitchingFrequency,
   CSV3_yyMin,
-  CSV3_FieldAdjustmentInterval,
+  CSV3_retired1,  // was FieldAdjustmentInterval — dead slot, sends 0; kept so CSV3 indices never renumber
   CSV3_ManualDutyTarget,
   CSV3_SwitchControlOverride,
   CSV3_waveAmplitude,
@@ -1074,6 +1083,13 @@ enum Csv3Index {
   CSV3_n2kEngDynEnable,        // 127489 engine dynamic (0/1)
   CSV3_n2kEngBitsEnable,       // discrete warning bits inside 127489 (0/1)
   CSV3_n2kRxBattInstance,      // battery instance to ingest (127508/127506 receive)
+  CSV3_dvccEn,                 // DVCC follow master (0/1)
+  CSV3_dvccSrcType,            // authority dialect: 0 Victron VE.Can (VREG), 1 RV-C
+  CSV3_dvccInst,               // RV-C DC instance filter (0 = any)
+  CSV3_dvccSilenceS,           // silence timeout (s)
+  CSV3_dvccSettleS,            // settling time (s)
+  CSV3_dvccCvlMin,             // plausible-CVL window low (V ×100)
+  CSV3_dvccCvlMax,             // plausible-CVL window high (V ×100)
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1112,8 +1128,10 @@ enum TsIndex {
   TS_StwNMEA,       // Speed Through Water (SOW, PGN 128259) staleness
   TS_N2kBatt,       // received Battery Status (PGN 127508) staleness
   TS_N2kSoc,        // received DC Detailed Status (PGN 127506) staleness
+  TS_Dvcc,          // DVCC follow: received charge-limit (CVL/CCL) stream staleness
+  TS_WeatherFetch,  // age of the last successful solar-forecast fetch (Open-Meteo)
 
-  TS_FIELD_COUNT  // = 32
+  TS_FIELD_COUNT  // = 34
 };
 
 
@@ -2518,6 +2536,53 @@ void setupServer() {
     n += hgLedgerPendingCsv(buf + n, pendCap);
     // Streamed straight out of PSRAM — passing a char* to send() would copy the whole ledger into
     // an Arduino String on the internal heap. The shared_ptr deleter frees on any completion path.
+    std::shared_ptr<char> sp(buf, free);
+    AsyncWebServerResponse *response = request->beginResponse("text/plain", n,
+      [sp, n](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= n) return 0;
+        size_t tw = n - index;
+        if (tw > maxLen) tw = maxLen;
+        memcpy(out, sp.get() + index, tw);
+        return tw;
+      });
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
+  // ── DVCC raw-frame capture (spec §8a): candidate CAN frames as hex text, for charge-limit
+  // decoder ground-truth validation from any browser/relay path. Observe-only by construction —
+  // the ring fills from the receive tap; reading it never touches control. Line format:
+  // "ms id_hex len data_hex", oldest first.
+  server.on("/dvccCapture", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!dvccCapRing || dvccCapCount == 0) {
+      request->send(200, "text/plain", "no candidate frames captured yet (needs NMEA2K receive or DVCC follow enabled, and bus traffic)");
+      return;
+    }
+    // Pause the tap while copying out: the oldest entries — serialized first — are exactly the
+    // slots a concurrent write overwrites next, and a torn line (one frame's id, another's data)
+    // would corrupt the decode ground truth this endpoint exists to provide. The tap drops
+    // frames while paused (a few ms; diagnostics-only ring).
+    dvccCapPause = true;
+    uint16_t cnt = dvccCapCount;
+    uint16_t head = dvccCapHead;
+    size_t cap = (size_t)cnt * 44 + 64;
+    char *buf = (char *)ps_malloc(cap);
+    if (!buf) {
+      dvccCapPause = false;
+      request->send(503, "text/plain", "capture unavailable - out of memory");
+      return;
+    }
+    size_t n = 0;
+    for (uint16_t i = 0; i < cnt && n + 44 < cap; i++) {
+      uint16_t idx = (uint16_t)((head + DVCC_CAP_N - cnt + i) % DVCC_CAP_N);
+      DvccCapEntry &e = dvccCapRing[idx];
+      n += (size_t)snprintf(buf + n, cap - n, "%lu %08lX %u ", (unsigned long)e.ms, (unsigned long)e.id, (unsigned)e.len);
+      for (uint8_t b = 0; b < e.len && b < 8; b++) n += (size_t)snprintf(buf + n, cap - n, "%02X", e.data[b]);
+      if (n < cap - 1) buf[n++] = '\n';
+    }
+    dvccCapPause = false;
+    // Streamed straight out of PSRAM, same pattern as /huntledger — a char* send() would copy
+    // the whole dump into an internal-heap String. shared_ptr deleter frees on any completion path.
     std::shared_ptr<char> sp(buf, free);
     AsyncWebServerResponse *response = request->beginResponse("text/plain", n,
       [sp, n](uint8_t *out, size_t maxLen, size_t index) -> size_t {
@@ -4620,12 +4685,6 @@ void setupServer() {
       settingWrite(NK_yyMin, inputMessage.c_str());
       yyMin = inputMessage.toInt();
     }
-    if (request->hasParam("FieldAdjustmentInterval")) {
-      foundParameter = true;
-      inputMessage = request->getParam("FieldAdjustmentInterval")->value();
-      settingWrite(NK_FieldAdjustmentInterval, inputMessage.c_str());
-      FieldAdjustmentInterval = inputMessage.toFloat();
-    }
     if (request->hasParam("ManualFieldToggle")) {
       foundParameter = true;
       inputMessage = request->getParam("ManualFieldToggle")->value();
@@ -4887,6 +4946,84 @@ void setupServer() {
       n2kRxSoc = n2kRxSoh = -1;
       dataTimestamps[IDX_N2K_BATT] = 0;
       dataTimestamps[IDX_N2K_SOC] = 0;
+    }
+    if (request->hasParam("dvccEn")) {
+      foundParameter = true;
+      inputMessage = request->getParam("dvccEn")->value();
+      settingWrite(NK_dvccEn, inputMessage.c_str());
+      dvccEn = inputMessage.toInt();
+      if (dvccEn != 1) {
+        dvccState = 0;  // immediate clamp release — don't wait for the next brain tick
+        dvccCvlV = dvccCclA = NAN;
+      } else {
+        queueConsoleMessage("DVCC follow enabled: authority must settle before limits apply. Verify the shown CVL/CCL match your BMS before relying on it.");
+      }
+    }
+    if (request->hasParam("dvccSrcType")) {
+      foundParameter = true;
+      inputMessage = request->getParam("dvccSrcType")->value();
+      dvccSrcType = constrain(inputMessage.toInt(), 0, 1);
+      settingWrite(NK_dvccSrcType, String(dvccSrcType).c_str());
+      dvccRxCvl = dvccRxCcl = NAN;  // clear the old dialect's values; a new authority must settle fresh
+      dvccRxLastMs = 0;
+      dvccRxSrcAddr = 255;
+      dvccCvlV = dvccCclA = NAN;
+      if (dvccState != 5) dvccState = (dvccEn == 1) ? 1 : 0;  // preserve an UNTRUSTED latch across source edits
+      dvccCfgChanged = true;  // dvccTick also clears its decode-side state (sender lock, flap history)
+      dataTimestamps[IDX_DVCC] = 0;
+    }
+    if (request->hasParam("dvccInst")) {
+      foundParameter = true;
+      inputMessage = request->getParam("dvccInst")->value();
+      dvccInst = constrain(inputMessage.toInt(), 0, 250);  // RV-C DC instance range; 0 = any
+      settingWrite(NK_dvccInst, String(dvccInst).c_str());
+      dvccRxCvl = dvccRxCcl = NAN;
+      dvccRxLastMs = 0;
+      dvccRxSrcAddr = 255;
+      dvccCvlV = dvccCclA = NAN;
+      if (dvccState != 5) dvccState = (dvccEn == 1) ? 1 : 0;
+      dvccCfgChanged = true;
+      dataTimestamps[IDX_DVCC] = 0;
+    }
+    if (request->hasParam("dvccSilenceS")) {
+      foundParameter = true;
+      inputMessage = request->getParam("dvccSilenceS")->value();
+      dvccSilenceS = constrain(inputMessage.toInt(), 5, 600);
+      settingWrite(NK_dvccSilenceS, String(dvccSilenceS).c_str());
+    }
+    if (request->hasParam("dvccSettleS")) {
+      foundParameter = true;
+      inputMessage = request->getParam("dvccSettleS")->value();
+      dvccSettleS = constrain(inputMessage.toInt(), 5, 600);
+      settingWrite(NK_dvccSettleS, String(dvccSettleS).c_str());
+    }
+    if (request->hasParam("dvccCvlMin")) {
+      foundParameter = true;
+      inputMessage = request->getParam("dvccCvlMin")->value();
+      // Constrained + cross-checked: toFloat() of garbage is 0.0, and an empty/inverted window
+      // would latch UNTRUSTED against every healthy authority while blaming the BMS.
+      float vMin = constrain(inputMessage.toFloat(), 1.0f, 70.0f);
+      if (vMin < dvccCvlMax) {
+        dvccCvlMin = vMin;
+        settingWrite(NK_dvccCvlMin, String(dvccCvlMin, 2).c_str());
+      } else {
+        queueConsoleMessage("DVCC: CVL window low must be below the high bound - not applied");
+      }
+    }
+    if (request->hasParam("dvccCvlMax")) {
+      foundParameter = true;
+      inputMessage = request->getParam("dvccCvlMax")->value();
+      float vMax = constrain(inputMessage.toFloat(), 1.0f, 70.0f);
+      if (vMax > dvccCvlMin) {
+        dvccCvlMax = vMax;
+        settingWrite(NK_dvccCvlMax, String(dvccCvlMax, 2).c_str());
+      } else {
+        queueConsoleMessage("DVCC: CVL window high must be above the low bound - not applied");
+      }
+    }
+    if (request->hasParam("DvccResetTrust")) {
+      foundParameter = true;
+      dvccResetReq = true;  // consumed by dvccTick(); momentary action, no NVS
     }
     if (request->hasParam("waveAmplitude")) {
       foundParameter = true;
@@ -5639,10 +5776,9 @@ void setupServer() {
       foundParameter = true;
       // Every rejection path must give user feedback — a silent fall-through (e.g. no GPS) reads as
       // "nothing happened". Check each precondition separately so the message names the actual reason.
-      if (fieldActiveStatus > 0) {
-        queueConsoleMessage("Weather update refused: disable the field first");
-        inputMessage = "field_on";
-      } else if (LatitudeNMEA == 0.0 && LongitudeNMEA == 0.0) {
+      // Deliberately NOT gated on field state: the scheduled fetch waits for fieldOffSettled, but a
+      // user pressing the button has asked for it now and owns the consequences.
+      if (LatitudeNMEA == 0.0 && LongitudeNMEA == 0.0) {
         queueConsoleMessage("Weather update failed: no GPS position yet — wait for a fix or set a manual lat/lon");
         inputMessage = "no_gps";
       } else if (WiFi.RSSI() < -80) {
@@ -7130,6 +7266,8 @@ void setupServer() {
       ft_altFold.worstSession = 0;
       ft_boatPerf.worstSession = 0;
       ft_n2kTx.worstSession = 0;
+      ft_dvcc.worstSession = 0;
+      ft_n2kParse.worstSession = 0;
       n2kTxCount = 0;
       n2kTxDropCount = 0;
       ft_huntGov.worstSession = 0;
@@ -8901,7 +9039,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
@@ -9473,7 +9612,16 @@ void SendWifiData() {
                                isnan(n2kRxBattA) ? ROLL_EMPTY : (int)lroundf(n2kRxBattA * 100.0f),
                                isnan(n2kRxBattTempF) ? ROLL_EMPTY : (int)lroundf(n2kRxBattTempF * 10.0f),
                                n2kRxSoc,
-                               n2kRxSoh);
+                               n2kRxSoh,
+                               (int)dvccState,
+                               isnan(dvccRxCvl) ? ROLL_EMPTY : (int)lroundf(dvccRxCvl * 100.0f),  // NAN -> sentinel, same convention as n2kRx
+                               isnan(dvccRxCcl) ? ROLL_EMPTY : (int)lroundf(dvccRxCcl * 10.0f),
+                               (int)dvccRxSrcAddr,
+                               (int)dvccUntrustReason,
+                               SafeInt(ft_dvcc.worstWindow),
+                               SafeInt(ft_dvcc.worstSession),
+                               SafeInt(ft_n2kParse.worstWindow),
+                               SafeInt(ft_n2kParse.worstSession));
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
@@ -9541,7 +9689,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d\n",
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -9549,7 +9698,7 @@ void SendWifiData() {
                                SafeInt(FloatVoltage, 100),
                                SafeInt(SwitchingFrequency),
                                SafeInt(yyMin),
-                               SafeInt(FieldAdjustmentInterval),
+                               0,  // CSV3_retired1
                                SafeInt(ManualDutyTarget, 100),
                                SafeInt(SwitchControlOverride),
                                SafeInt(waveAmplitude),
@@ -9916,7 +10065,14 @@ void SendWifiData() {
                                SafeInt(n2kEngInstance),
                                SafeInt(n2kEngDynEnable),
                                SafeInt(n2kEngBitsEnable),
-                               SafeInt(n2kRxBattInstance));
+                               SafeInt(n2kRxBattInstance),
+                               SafeInt(dvccEn),
+                               SafeInt(dvccSrcType),
+                               SafeInt(dvccInst),
+                               SafeInt(dvccSilenceS),
+                               SafeInt(dvccSettleS),
+                               SafeInt(dvccCvlMin, 100),
+                               SafeInt(dvccCvlMax, 100));
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;
@@ -9942,7 +10098,7 @@ void SendWifiData() {
       }
     }
     int timestampPayloadLen = snprintf(timestampPayload, TIMESTAMP_PAYLOAD_SIZE,
-                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
                                        (unsigned long)TS_FIELD_COUNT,
                                        (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),
                                        (dataTimestamps[IDX_LATITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LATITUDE_NMEA]),
@@ -9975,7 +10131,12 @@ void SendWifiData() {
                                        (dataTimestamps[IDX_VICTRON_SOLAR] == 0) ? 999999 : (now - dataTimestamps[IDX_VICTRON_SOLAR]),
                                        (dataTimestamps[IDX_STW_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_STW_NMEA]),
                                        (dataTimestamps[IDX_N2K_BATT] == 0) ? 999999 : (now - dataTimestamps[IDX_N2K_BATT]),
-                                       (dataTimestamps[IDX_N2K_SOC] == 0) ? 999999 : (now - dataTimestamps[IDX_N2K_SOC])
+                                       (dataTimestamps[IDX_N2K_SOC] == 0) ? 999999 : (now - dataTimestamps[IDX_N2K_SOC]),
+                                       (dataTimestamps[IDX_DVCC] == 0) ? 999999 : (now - dataTimestamps[IDX_DVCC]),
+                                       // Own "never" sentinel: a forecast age of 999999 ms is only
+                                       // 17 min, well inside the normal 6-hour refresh interval, so
+                                       // the shared sensor sentinel would read as a real age here.
+                                       (weatherLastUpdate == 0) ? 4294967295UL : (unsigned long)(now - weatherLastUpdate)
     );
     if (timestampPayloadLen < 0 || timestampPayloadLen >= TIMESTAMP_PAYLOAD_SIZE) {
       Serial.printf("timestampPayload truncated or format error: %d\n", timestampPayloadLen);

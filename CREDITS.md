@@ -42,4 +42,24 @@ derived image asset is likewise made available under CC BY-SA 3.0.
 - **License:** MIT (Copyright (c) 2024 Svante Karlsson) — notice kept in the library LICENSE file.
 - **Modifications:** transmit is unconditionally non-blocking (stock waited up to 100 ms
   per fast-packet frame when the TWAI queue was full, e.g. with no bus attached); failed
-  frames fall through to the core library's send-frame retry ring.
+  frames fall through to the core library's send-frame retry ring. A raw-RX tap hook
+  (`SetRawRxHook`) surfaces every received frame to the sketch for the RV-C / proprietary
+  decodes the core library's dispatch cannot deliver.
+
+## Design prior art (patterns, not code)
+
+### DVCC-style charge-limit follow (CVL/CCL) — trust state machine and arbitration
+
+- The authority arbitration, settling period, silence revert, and "ignore an authority
+  publishing implausible values" latch follow the Remote Battery Master handling that
+  **Al Thomason** designed and field-proved in the open-source VSR / OSEnergy alternator
+  regulator (`OSEnergy_CAN.cpp`, the ancestor of the Wakespeed WS500) —
+  <https://github.com/OSEnergy/OSEnergy>. Patterns reimplemented, no code copied.
+- The RV-C message layouts come from the published RV-C application layer (RVIA) via the
+  OSEnergy design guide. The Victron VREG carrier framing (VREGs over 0xEF00 proprietary
+  frames) was confirmed against the archived **Revatek** alternator regulator source
+  (Apache 2.0, Copyright 2026 Revatek LLC) —
+  <https://github.com/grevelle/revatek-alternator-regulator>. Protocol facts only, no code
+  copied. (Note: that repository's PATENTS.md reserves patent rights over its *cloud
+  connectivity / dual-alternator / multi-source coordination* features — none of which this
+  decode uses.)

@@ -244,6 +244,16 @@ void analyzeWeatherMode() {
   if (otaInProgress) {
     return;
   }
+  // A forecast the device can no longer refresh must not keep the alternator off. currentWeatherMode
+  // is only written here, so without this release it latches at 1 through AP mode, WiFi loss, or a
+  // run of failed fetches — the field stays down with nothing left to re-evaluate it. Fail toward
+  // charging. weatherLastUpdate == 0 means nothing was fetched this boot (pKwHr* are not persisted).
+  if (weatherDataValid
+      && (weatherLastUpdate == 0
+          || (millis() - weatherLastUpdate) >= (unsigned long)WeatherUpdateInterval + WeatherStaleGraceMs)) {
+    weatherDataValid = 0;
+    queueConsoleMessageF("Weather: forecast too old - solar pause released");
+  }
   //If 2 or more days have a UV index above the configured threshold, it sets the mode to high UV mode (1), which disables the alternator.
   if (!weatherDataValid || !weatherModeEnabled) {
     currentWeatherMode = 0;
@@ -271,15 +281,21 @@ void updateWeatherMode() {
 
   unsigned long now = millis();
 
-  if (weatherDataValid && (now - weatherLastUpdate < WeatherUpdateInterval)) {
-    analyzeWeatherMode();
+  // Analysis (and the stale release inside it) is local arithmetic — it runs in every mode.
+  analyzeWeatherMode();
+
+  if (weatherDataValid && (now - weatherLastUpdate < (unsigned long)WeatherUpdateInterval)) {
+    return;  // forecast still fresh — nothing to fetch
+  }
+
+  // Everything below reaches the internet.
+  if (currentMode != MODE_CLIENT || WiFi.status() != WL_CONNECTED) {
     return;
   }
 
   // Internet fetch requires field off for 75s. Do not advance nextWeatherUpdate
   // while blocked — it fires promptly once the gate opens.
   if (!fieldOffSettled(15000)) {
-    if (weatherDataValid) analyzeWeatherMode();
     return;
   }
 
@@ -291,9 +307,6 @@ void updateWeatherMode() {
     } else {
       nextWeatherUpdate = now + 2000;
     }
-  }
-  if (weatherDataValid) {
-    analyzeWeatherMode();
   }
 }
 
@@ -681,6 +694,10 @@ if (!BMP388Disconnected) {
   // Set false below, if you do not want to see messages parsed to HEX withing library
   NMEA2000.EnableForward(false);
   NMEA2000.SetMsgHandler(HandleNMEA2000Msg);
+  // DVCC follow: raw-RX tap (RV-C single-frame DGNs + 0xEF00 VREG carrier + §8a capture ring).
+  // Registered unconditionally — the tap self-gates on NMEA2KData/dvccEn and costs a few compares.
+  tNMEA2000_esp32::SetRawRxHook(dvccRawFrameTap);
+  initDvccCapture();
   //  NMEA2000.SetN2kCANMsgBufSize(2);
   // Transmit (producer) mode — spec: Working Markdown Docs/NMEA2K_TRANSMIT_SPEC.md. Applied at boot
   // only; the /get handler tells the user a toggle change needs a reboot. n2kTxEnable off keeps the
@@ -1083,11 +1100,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     yyMin = settingRead(NK_yyMin).toInt();
   }
-  if (!settingExists(NK_FieldAdjustmentInterval)) {
-    settingWrite(NK_FieldAdjustmentInterval, String(FieldAdjustmentInterval).c_str());
-  } else {
-    FieldAdjustmentInterval = settingRead(NK_FieldAdjustmentInterval).toFloat();
-  }
   if (!settingExists(NK_ManualFieldToggle)) {
     settingWrite(NK_ManualFieldToggle, String(ManualFieldToggle).c_str());
   } else {
@@ -1258,6 +1270,43 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_n2kRxBattInst, String(n2kRxBattInstance).c_str());
   } else {
     n2kRxBattInstance = settingRead(NK_n2kRxBattInst).toInt();
+  }
+  if (!settingExists(NK_dvccEn)) {
+    settingWrite(NK_dvccEn, String(dvccEn).c_str());
+  } else {
+    dvccEn = settingRead(NK_dvccEn).toInt();
+  }
+  if (!settingExists(NK_dvccSrcType)) {
+    settingWrite(NK_dvccSrcType, String(dvccSrcType).c_str());
+  } else {
+    dvccSrcType = settingRead(NK_dvccSrcType).toInt();
+  }
+  if (!settingExists(NK_dvccInst)) {
+    settingWrite(NK_dvccInst, String(dvccInst).c_str());
+  } else {
+    dvccInst = settingRead(NK_dvccInst).toInt();
+  }
+  if (!settingExists(NK_dvccSilenceS)) {
+    settingWrite(NK_dvccSilenceS, String(dvccSilenceS).c_str());
+  } else {
+    dvccSilenceS = settingRead(NK_dvccSilenceS).toInt();
+  }
+  if (!settingExists(NK_dvccSettleS)) {
+    settingWrite(NK_dvccSettleS, String(dvccSettleS).c_str());
+  } else {
+    dvccSettleS = settingRead(NK_dvccSettleS).toInt();
+  }
+  if (!settingExists(NK_dvccCvlMin)) {
+    dvccCvlMin *= seedVScale;
+    settingWrite(NK_dvccCvlMin, String(dvccCvlMin, 2).c_str());
+  } else {
+    dvccCvlMin = settingRead(NK_dvccCvlMin).toFloat();
+  }
+  if (!settingExists(NK_dvccCvlMax)) {
+    dvccCvlMax *= seedVScale;
+    settingWrite(NK_dvccCvlMax, String(dvccCvlMax, 2).c_str());
+  } else {
+    dvccCvlMax = settingRead(NK_dvccCvlMax).toFloat();
   }
   if (!settingExists(NK_waveAmplitude)) {
     settingWrite(NK_waveAmplitude, String(waveAmplitude).c_str());

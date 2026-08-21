@@ -917,11 +917,18 @@ const CSV2_FIELDS = [
     "n2kRxBattTempF",                 // received 127508 battery temperature (F ×10; -2000000000 = NA)
     "n2kRxSoc",                       // received 127506 state of charge (%; -1 = NA)
     "n2kRxSoh",                       // received 127506 state of health (%; -1 = NA)
+    "dvccState",                      // DVCC follow state: 0 off, 1 waiting, 2 settling, 3 following, 4 stale, 5 untrusted
+    "dvccRxCvl",                      // last decoded charge-voltage limit (V ×100; -2000000000 = none)
+    "dvccRxCcl",                      // last decoded charge-current limit (A ×10; -2000000000 = none)
+    "dvccRxSrcAddr",                  // authority bus address (255 = none yet)
+    "dvccUntrustReason",              // 0 none, 1 CVL out of window, 2 CCL implausible, 3 flapping
+    "ft_dvcc_win", "ft_dvcc_ses",     // DVCC brain tick worst µs
+    "ft_n2kParse_win", "ft_n2kParse_ses",  // NMEA2000.ParseMessages worst µs — RX drain, scales with bus traffic
 ];
 
 // Order MUST match ftBlameReg[] in Xregulator.ino — the blame indices in CSV2 point here.
 // tN2kTempSource display names (index = wire code) — the standard set has no Alternator source,
-// hence the user-selectable source + instance on the NMEA2K tab.
+// hence the user-selectable source + instance on the Integrations tab (NMEA 2000 card).
 const N2K_TEMP_SOURCE_NAMES = ["Sea", "Outside", "Inside", "Engine Room", "Main Cabin", "Live Well",
     "Bait Well", "Refrigeration", "Heating System", "Dew Point", "Apparent Wind Chill",
     "Theoretical Wind Chill", "Heat Index", "Freezer", "Exhaust Gas", "Shaft Seal"];
@@ -933,7 +940,8 @@ const FT_BLAME_NAMES = [
     "CH1 Stats", "WiFi Send", "WiFi Check", "Time Sync",
     "Sensor History", "Upload Buffered", "Config Payload",
     "LT Ring Flush", "Ripple Flush", "Fast Alt Drain", "Fault Detector",
-    "Zero-Drift Log", "Batt Health Save", "Knee Save", "N2K TX",
+    "Zero-Drift Log", "Batt Health Save", "Knee Save", "N2K TX", "DVCC Brain",
+    "N2K RX",
 ];
 
 // Worst field-on pass blame line under "Loop Time when Field is On" — names + ms of the top
@@ -970,7 +978,7 @@ const CSV4_FIELDS = [
     "VictronCurrent",             // Victron battery current (A ×100)
     "currentFuelGPH",             // live fuel flow (gal/hr ×100)
     "currentNMPG",                // live fuel economy (naut mi/gal ×100)
-    "ctrlLimiter",                // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty, 6 protection (cap binding or recovery window), 7 battery above target (zero-output stand-down)
+    "ctrlLimiter",                // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty, 6 protection (cap binding or recovery window), 7 battery above target (zero-output stand-down), 8 BMS charge-current limit (DVCC CCL), 9 BMS charge-voltage limit (DVCC CVL)
     "chargeStage",                // CHARGE_STAGE_* code — feeds gLastChargeStage at 2 Hz for the mode ribbon
 ];
 
@@ -2614,7 +2622,7 @@ const CSV3_FIELDS = [
     "FloatVoltage",
     "SwitchingFrequency",
     "yyMin",
-    "FieldAdjustmentInterval",
+    "retired1",
     "ManualDutyTarget",
     "SwitchControlOverride",
     "waveAmplitude",
@@ -2984,6 +2992,13 @@ const CSV3_FIELDS = [
     "n2kEngDynEnable",
     "n2kEngBitsEnable",
     "n2kRxBattInstance",             // battery instance to ingest (127508/127506 receive)
+    "dvccEn",                        // DVCC follow master (0/1)
+    "dvccSrcType",                   // authority dialect: 0 Victron VE.Can (VREG), 1 RV-C
+    "dvccInst",                      // RV-C DC instance filter (0 = any)
+    "dvccSilenceS",                  // silence timeout (s)
+    "dvccSettleS",                   // settling time (s)
+    "dvccCvlMin",                    // plausible-CVL window low (V ×100)
+    "dvccCvlMax",                    // plausible-CVL window high (V ×100)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3018,6 +3033,8 @@ const TS_FIELDS = [
     "ts_StwNMEA",
     "ts_N2kBatt",
     "ts_N2kSoc",
+    "ts_Dvcc",
+    "ts_WeatherFetch",
 ];
 
 // Detect if running in Capacitor (iOS/Android) vs web browser
@@ -6352,6 +6369,20 @@ function updateWeatherAlerts() {
     }
 }
 
+// Age of the last successful Open-Meteo fetch, printed under the forecast table. Without it a table
+// of numbers from two days ago reads exactly like one fetched a minute ago. TS carries the age in ms
+// with its own never-fetched sentinel: the shared 999999 is a real 17-minute age on a 6-hour feed.
+function updateWeatherForecastAge(ageMs) {
+    const el = document.getElementById('weather-forecast-age');
+    if (!el || ageMs === undefined) return;
+    const ms = Number(ageMs);
+    if (!Number.isFinite(ms) || ms >= 4294967295) { el.textContent = 'Forecast not fetched yet'; return; }
+    const min = Math.floor(ms / 60000);
+    if (min < 2)  { el.textContent = 'Forecast fetched just now'; return; }
+    if (min < 60) { el.textContent = 'Forecast fetched ' + min + ' min ago'; return; }
+    el.textContent = 'Forecast fetched ' + Math.floor(min / 60) + ' h ' + (min % 60) + ' min ago';
+}
+
 
 function updateAllEchosOptimized(data) {
     let updatesCount = 0;
@@ -6368,7 +6399,6 @@ function updateAllEchosOptimized(data) {
         { key: 'FloatVoltage', id: 'FloatVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SwitchingFrequency', id: 'SwitchingFrequency_echo', transform: v => v },
         { key: 'yyMin', id: 'yyMin_echo', transform: v => v },
-        { key: 'FieldAdjustmentInterval', id: 'FieldAdjustmentInterval_echo', transform: v => v },
         { key: 'ManualDutyTarget', id: 'ManualDutyTarget_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SwitchControlOverride', id: 'SwitchControlOverride_echo', transform: v => v == 1 ? 'Override' : 'Normal' },
         { key: 'OnOff', id: 'OnOff_echo', transform: v => v == 1 ? 'On' : 'Off' },
@@ -6394,6 +6424,17 @@ function updateAllEchosOptimized(data) {
         { key: 'n2kEngDynEnable', id: 'n2kEngDynEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'n2kEngBitsEnable', id: 'n2kEngBitsEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'n2kRxBattInstance', id: 'n2kRxBattInstance_echo', transform: v => v },
+        // Integrations card-header at-a-glance states (same keys as the echoes above, second ids)
+        { key: 'NMEA2KData', id: 'integStateN2kRx', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'n2kTxEnable', id: 'integStateN2kTx', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'VeData', id: 'integStateVe', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'dvccEn', id: 'dvccEn_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'dvccSrcType', id: 'dvccSrcType_echo', transform: v => v == 1 ? 'RV-C' : 'Victron VE.Can' },
+        { key: 'dvccInst', id: 'dvccInst_echo', transform: v => v == 0 ? 'Any' : v },
+        { key: 'dvccSilenceS', id: 'dvccSilenceS_echo', transform: v => v },
+        { key: 'dvccSettleS', id: 'dvccSettleS_echo', transform: v => v },
+        { key: 'dvccCvlMin', id: 'dvccCvlMin_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'dvccCvlMax', id: 'dvccCvlMax_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'waveAmplitude', id: 'waveAmplitude_echo', transform: v => v },
         { key: 'tuningWaveFloor', id: 'tuningWaveFloor_echo', transform: v => v },
         { key: 'CurrentThreshold', id: 'CurrentThreshold_echo', transform: v => v / 100 },
@@ -6428,6 +6469,8 @@ function updateAllEchosOptimized(data) {
         { key: 'MaxDuty', id: 'MaxDuty_echo', transform: v => v },
         { key: 'MinDuty', id: 'MinDuty_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'FieldResistance', id: 'FieldResistance_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'FieldResistance', id: 'FieldResistance_echo_fldamps',  transform: v => (v / 100).toFixed(2) },
+        { key: 'FieldResistance', id: 'FieldResistance_echo_fldamps2', transform: v => (v / 100).toFixed(2) },
         { key: 'maxPoints', id: 'maxPoints_echo', transform: v => v },
         { key: 'AlternatorCOffset', id: 'AlternatorCOffset_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'BatteryCOffset', id: 'BatteryCOffset_echo', transform: v => (v / 100).toFixed(2) },
@@ -6690,6 +6733,7 @@ function updateAllEchosOptimized(data) {
         { key: 'gpsTimeSourceMode',     name: 'gpsTimeSourceMode' },
         { key: 'UseFloat',              name: 'UseFloat' },
         { key: 'n2kTempSource',         name: 'n2kTempSource' },
+        { key: 'dvccSrcType',           name: 'dvccSrcType' },
     ]);
     selectSyncs.forEach(({ key, name }) => {
         if (key in data) {
@@ -7648,7 +7692,9 @@ function commPrepRender(cfg) {
         '<div style="' + rowCss + '"><label style="' + lblCss + '">' + label + '</label>' +
         '<input id="' + id + '" type="number" step="' + step + '" min="' + min + '" max="' + max + '" value="' + val + '" style="' + inputCss + '"></div>';
 
-    const intro = '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">A few things to set before commissioning measures your system. These affect how the regulator reads temperature and current. Anything you skip stays editable later under Setup.</p>';
+    const intro = '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;"><strong style="color:#e0e0e0;">Use a laptop or tablet if you can.</strong> Setup and Commissioning works on a phone, but it\'s a worse UX on a small screen.</p>' +
+        '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">A few things to set before commissioning measures your system. These affect how the regulator reads temperature and current. Anything you skip stays editable later under Setup.</p>' +
+        '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">During the wizard, keep house loads steady — avoid switching large loads on or off mid-run. If BMS charge-limit follow is enabled (Setup &gt; Integrations &gt; Charge-Limit Follow), switch it off first: commissioning must own the battery, and external limits are ignored while the wizard runs.</p>';
 
     const seg = '<div style="' + rowCss + '"><label style="' + lblCss + '">Temperature Source</label>' +
         '<div class="cap-mode-toggle" style="background:rgba(255,255,255,0.07); border-color:#444;">' +
@@ -7882,11 +7928,7 @@ function rpmCapRender() {
         '<th>Engine RPM</th><th>Low (' + u + ')</th><th>High (' + u + ')</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table>' +
         '<p style="color:#9aa; font-size:12.5px; margin:14px 0 0; line-height:1.5;">Between the speeds you enter, the limit follows a straight line (linear interpolation); below the first speed and above the last it holds flat.</p>' +
-        '<p style="font-size:13px; margin:14px 0 0; line-height:1.5;">The regulator is now in <strong style="color:' + (currentChargeRateMode === 'low' ? '#2ec4b6' : '#f0a500') + ';">' + (currentChargeRateMode === 'low' ? 'Low' : 'High') + '</strong> charge rate. Commissioning runs in whichever mode you continue with.</p>';
-    const hiBtn = document.getElementById('rpmcap-continue-high-btn');
-    const loBtn = document.getElementById('rpmcap-continue-btn');
-    if (hiBtn) hiBtn.textContent = 'Continue in High' + (currentChargeRateMode === 'high' ? ' (current)' : '');
-    if (loBtn) loBtn.textContent = 'Continue in Low →' + (currentChargeRateMode === 'low' ? ' (current)' : '');
+        '<p style="font-size:13px; margin:14px 0 0; line-height:1.5;">Commissioning runs in whichever mode you continue with \u2014 <strong style="color:#2ec4b6;">Low is recommended</strong>, so the tests stay gentle on the alternator and battery. Switch to High once commissioning is done.</p>';
 }
 
 // Render a stored amp value in the current unit (kW derived at the live battery voltage).
@@ -8681,6 +8723,19 @@ function hgStateWord(state, pct, enabled) {
     }
 }
 
+// The master switch appears twice: the canonical row in Setup > Alternator > Tuning > Current >
+// Controller Parameters (next to the PID Ki it derates) and a mirror in this Diag card, which is the
+// screen a user is actually on when they decide to switch it off. Both post the same HuntGovEnable;
+// this keeps the other checkbox visually in step during the ~1 s before the firmware echo lands,
+// because updateCheckbox() freezes BOTH while the toggle is pending.
+function huntGovToggle(el, checkboxId, hiddenId, mirrorId) {
+    if (!handleUserToggle(checkboxId, hiddenId, 'HuntGovEnable')) return;
+    const mirror = document.getElementById(mirrorId);
+    if (mirror) mirror.checked = el.checked;
+    el.form.submit();
+    submitMessage();
+}
+
 function huntGovLiveOnCsv1(data) {
     const s = document.getElementById('hgStateText');
     if (!s) return;
@@ -8807,8 +8862,9 @@ function hideWaitingForRegulator() {
     setTimeout(() => { el.style.display = 'none'; }, 480);
 }
 
-// Landing tab, applied once on open: field on → Alternator, field off → Boat Performance
-// (Motoring plot if engine running); Vessel Info incomplete overrides to Setup.
+// Landing tab, applied once on open: always Live Data → Alternator (this is an alternator
+// controller — the field state must not decide what the user sees first).
+// Vessel Info incomplete overrides to Setup.
 function applyLandingTab() {
     try {
         if (!vesselInfoComplete) {
@@ -8816,23 +8872,13 @@ function applyLandingTab() {
             showSubTab('settings', 'vessel-info');
             return;
         }
-        const d = window._debugData || {};
-        const fieldOn = Number(d.fieldActiveStatus) !== 0;  // OFF (0) is the only "field off" state
         showMainTab('livedata');
-        if (fieldOn) {
-            showSubTab('livedata', 'alternator');
-        } else {
-            showSubTab('livedata', 'boatperformance');
-            const rpm = Number(d.RPM);
-            if (isFinite(rpm) && rpm > 50 && typeof setPerfView === 'function') {
-                setPerfView(1);  // engine running → Motoring view
-            }
-        }
+        showSubTab('livedata', 'alternator');
     } catch (err) {}
 }
 
-// Decide only when both signals are ready: first telemetry packet (field/engine) and the
-// vessel-info fetch (vesselInfoComplete). Guards the fetch-vs-packet race; runs once.
+// Hold until both signals are ready: first telemetry packet (device is talking, splash gone) and
+// the vessel-info fetch (vesselInfoComplete). Guards the fetch-vs-packet race; runs once.
 window._vesselInfoLoaded = false;
 window._landingApplied = false;
 function maybeApplyLanding() {
@@ -9237,6 +9283,7 @@ function fieldOffReasonText(reasonCode) {
         case 17: return 'too cold to charge';
         case 18: return 'commissioning — field resting';
         case 19: return 'field on but no alternator output — check field wiring, ON/OFF switch, or alternator (may be a false RPM signal)';
+        case 20: return 'resting — solar forecast is strong (Defer to Solar)';
         // 0 NONE (transient), 11 MANUAL (shown as its own status word) — no OFF annotation
         default: return '';
     }
@@ -11549,9 +11596,9 @@ function updateHeaderLimiterColors(sa) {
         else { const c = overTemp ? RED : NORM; if (tnum._limTint !== c) { tnum.style.color = c; tnum._limTint = c; } }
     }
     pill('lbl-alt-temp', sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS, lim === 2 || nearLimit);
-    pill('lbl-voltage', sa.ibv, STALE_THRESHOLD_DEFAULT_MS, lim === 3 || lim === 7);
+    pill('lbl-voltage', sa.ibv, STALE_THRESHOLD_DEFAULT_MS, lim === 3 || lim === 7 || lim === 9);
     pill('lbl-alt-current', sa.measuredAmps, STALE_THRESHOLD_DEFAULT_MS, lim === 1);
-    pill('lbl-batt-current', sa.bcur, STALE_THRESHOLD_DEFAULT_MS, lim === 4);
+    pill('lbl-batt-current', sa.bcur, STALE_THRESHOLD_DEFAULT_MS, lim === 4 || lim === 8);
     pill('duty-pill-wrap', sa.dutyCycle, STALE_THRESHOLD_DEFAULT_MS, lim === 5);
     // Code 6 (protection): red duty pill + red PROTECTION word inline left of the stage word
     const dw = document.getElementById('duty-pill-wrap');
@@ -11561,6 +11608,9 @@ function updateHeaderLimiterColors(sa) {
     if (pn) { const d = (lim === 6) ? '' : 'none'; if (pn.style.display !== d) pn.style.display = d; }
     const bn = document.getElementById('battgt-note');
     if (bn) { const d = (lim === 7) ? '' : 'none'; if (bn.style.display !== d) bn.style.display = d; }
+    // Codes 8/9 (BMS charge limits, DVCC follow): the user must always see WHO is limiting
+    const dn = document.getElementById('bms-note');
+    if (dn) { const d = (lim === 8 || lim === 9) ? '' : 'none'; if (dn.style.display !== d) dn.style.display = d; }
 }
 
 function updateAllStalenessStyles() {
@@ -11910,11 +11960,6 @@ function triggerWeatherUpdate() {
         xAlert("Please unlock settings first");
         return;
     }
-    if (window._debugData && window._debugData.fieldActiveStatus > 0) {
-        xAlert("The field must be disabled before updating weather data.");
-        return;
-    }
-
     const formData = new FormData();
     formData.append("TriggerWeatherUpdate", "1");
 
@@ -12076,6 +12121,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("n2kEngRpmEnable_checkbox", data.n2kEngRpmEnable, "n2kEngRpmEnable");
         updateCheckbox("n2kEngDynEnable_checkbox", data.n2kEngDynEnable, "n2kEngDynEnable");
         updateCheckbox("n2kEngBitsEnable_checkbox", data.n2kEngBitsEnable, "n2kEngBitsEnable");
+        updateCheckbox("dvccEn_checkbox", data.dvccEn, "dvccEn");
         updateCheckbox("IgnoreTemperature_checkbox", data.IgnoreTemperature, "IgnoreTemperature");
         updateCheckbox("IgnoreRPM_checkbox", data.IgnoreRPM, "IgnoreRPM");
         updateCheckbox("bmsLogic_checkbox", data.bmsLogic, "bmsLogic");
@@ -12155,6 +12201,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("loadServeBoostEnable_checkbox", data.loadServeBoostEnable, "loadServeBoostEnable");
         updateCheckbox("reseedCorrEnable_checkbox", data.reseedCorrEnable, "reseedCorrEnable");
         updateCheckbox("HuntGovEnable_checkbox", data.HuntGovEnable, "HuntGovEnable");
+        updateCheckbox("HuntGovEnable_checkbox_diag", data.HuntGovEnable, "HuntGovEnable");   // Diag card mirror of the same switch
         updateCheckbox("cvHelpersEnabled_checkbox", data.cvHelpersEnabled, "cvHelpersEnabled");
         updateCheckbox("CvKdOneSided_checkbox", data.CvKdOneSided, "CvKdOneSided");
         updateCheckbox("CvKdExcessMode_checkbox", data.CvKdExcessMode, "CvKdExcessMode");
@@ -12607,9 +12654,10 @@ const FIELD_FAULT_REASONS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 16, 
 
 // Single OFF-state classifier shared by the minimized pill AND the expanded status word so the two
 // can never disagree. reason 10 while enabled = engine-on-but-not-charging (IDLE); faults = FAULT.
+// 20 (solar-forecast rest) is the same shape as 10: switched on, running, deliberately not charging.
 function classifyFieldOff(reason, enabled) {
     if (FIELD_FAULT_REASONS.has(reason)) return { word: 'FAULT', pillCls: 'st-fault', expClass: 'field-status-fault' };
-    if (reason === 10 && enabled)        return { word: 'IDLE',  pillCls: 'st-idle',  expClass: 'field-status-idle' };
+    if ((reason === 10 || reason === 20) && enabled) return { word: 'IDLE',  pillCls: 'st-idle',  expClass: 'field-status-idle' };
     return { word: 'OFF', pillCls: 'st-off', expClass: 'field-status-inactive' };
 }
 
@@ -12629,6 +12677,8 @@ function computeStripState() {
     // Zero-output stand-down (ctrlLimiter 7): battery/other source holds the bus above target —
     // field parked at floor delivering nothing. Below the test words, above the stage words.
     if (limFresh && Number(window._ctrlLimiter) === 7) return { label: 'BATT > TGT', cls: 'st-idle' };
+    // BMS charge limit binding (ctrlLimiter 8 CCL / 9 CVL): still charging, externally limited
+    if (limFresh && (Number(window._ctrlLimiter) === 8 || Number(window._ctrlLimiter) === 9)) return { label: 'BMS LIMIT', cls: 'st-charging' };
     if (fs === 'ACTIVE')        return { label: cs || 'ACTIVE', cls: 'st-charging' };
     if (fs === 'RAMP DOWN')     return { label: 'RAMP DOWN', cls: 'st-charging' };
     if (fs === 'MANUAL')        return { label: 'MANUAL', cls: 'st-manual' };
@@ -13432,10 +13482,17 @@ window.addEventListener("load", function () {
                         softwareTab.style.display = 'none';
                     }
 
-                    // Visible offline on purpose: config is worth setting; only the forecast needs internet.
-                    const wxNote = document.getElementById('weathersolar-offline-note');
-                    if (wxNote) {
-                        wxNote.style.display = 'block';
+                    // Setup > Solar is internet-only: no forecast can be fetched in AP mode, so the
+                    // whole tab would be dead controls over a frozen table. A pause left over from the
+                    // last fetch releases itself in firmware once the forecast goes stale
+                    // (analyzeWeatherMode), so hiding the toggle cannot strand the field off.
+                    // data-ap-hidden also keeps these rows out of the settings-search index.
+                    const wxTab = document.querySelector('#settings .sub-tab[onclick*="weathersolar"]');
+                    if (wxTab) wxTab.style.display = 'none';
+                    const wxPane = document.getElementById('settings-weathersolar');
+                    if (wxPane) {
+                        wxPane.dataset.apHidden = '1';
+                        if (wxPane.classList.contains('active')) showSubTab('settings', 'alternator');
                     }
                 }
             }
@@ -14256,9 +14313,17 @@ window.addEventListener("load", function () {
                 ["ft_boatPerf_ses_ID", "ft_boatPerf_ses"],
                 ["ft_n2kTx_win_ID", "ft_n2kTx_win"],
                 ["ft_n2kTx_ses_ID", "ft_n2kTx_ses"],
+                ["ft_dvcc_win_ID", "ft_dvcc_win"],
+                ["ft_dvcc_ses_ID", "ft_dvcc_ses"],
+                ["ft_n2kParse_win_ID", "ft_n2kParse_win"],
+                ["ft_n2kParse_ses_ID", "ft_n2kParse_ses"],
                 ["n2kSrcAddr_ID", "n2kSrcAddr"],
                 ["n2kTxCount_ID", "n2kTxCount"],
                 ["n2kTxDrops_ID", "n2kTxDrops"],
+                // Live Data -> Integrations mirrors of the transmit-status trio above
+                ["li_n2kSrcAddr_ID", "n2kSrcAddr"],
+                ["li_n2kTxCount_ID", "n2kTxCount"],
+                ["li_n2kTxDrops_ID", "n2kTxDrops"],
                 ["ft_huntGov_win_ID", "ft_huntGov_win"],
                 ["ft_huntGov_ses_ID", "ft_huntGov_ses"],
                 ["VeTime2_ID", "VeTime2"],
@@ -14431,32 +14496,67 @@ window.addEventListener("load", function () {
                 }
             })();
 
-            // NMEA2000 received battery data (127508 V/A/T + 127506 SOC) — NMEA2K sub-tab status row.
+            // NMEA2000 received battery data (127508 V/A/T + 127506 SOC) — Setup → Integrations
+            // status row plus its Live Data → Integrations mirror (li_ ids; set2 writes both).
             // Staleness comes from the TS stream ages (window.sensorAges); values ride CSV2.
             (function () {
                 const row = document.getElementById('n2kRxBatt_row');
-                if (!row || data.n2kRxBattV === undefined) return;
+                const card = document.getElementById('li_n2kRxBatt_card');
+                if ((!row && !card) || data.n2kRxBattV === undefined) return;
                 const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+                const set2 = (id, txt) => { setText(id, txt); setText('li_' + id, txt); };
+                const setDim = (op) => { if (row) row.style.opacity = op; if (card) card.style.opacity = op; };
                 const ages = window.sensorAges || {};
                 const battAge = Number(ages.n2kBatt ?? 999999);
                 const socAge = Number(ages.n2kSoc ?? 999999);
                 if (battAge >= 999999 && socAge >= 999999) {
-                    setText('n2kRxBattStatus_ID', 'no data');
-                    row.style.opacity = '0.5';
+                    set2('n2kRxBattStatus_ID', 'no data');
+                    setDim('0.5');
                     return;
                 }
                 const STALE_MS = 20000;
                 const stale = Math.min(battAge, socAge) > STALE_MS;
-                setText('n2kRxBattStatus_ID', stale ? 'stale' : 'live');
-                row.style.opacity = stale ? '0.5' : '';
+                set2('n2kRxBattStatus_ID', stale ? 'stale' : 'live');
+                setDim(stale ? '0.5' : '');
                 const NA = -1999999999;  // firmware sends -2000000000 for a missing float field
                 const num = (v, div, fix, unit) => (v === undefined || Number(v) <= NA) ? '—' : (Number(v) / div).toFixed(fix) + unit;
-                setText('n2kRxBattV_ID', num(data.n2kRxBattV, 100, 2, ' V'));
-                setText('n2kRxBattA_ID', num(data.n2kRxBattA, 100, 1, ' A'));
+                set2('n2kRxBattV_ID', num(data.n2kRxBattV, 100, 2, ' V'));
+                set2('n2kRxBattA_ID', num(data.n2kRxBattA, 100, 1, ' A'));
                 const tRaw = Number(data.n2kRxBattTempF);
-                setText('n2kRxBattTempF_ID', (data.n2kRxBattTempF === undefined || tRaw <= NA) ? '—' : toDisplayTemp(tRaw / 10).toFixed(1) + ' ' + tempUnitLabel());
+                set2('n2kRxBattTempF_ID', (data.n2kRxBattTempF === undefined || tRaw <= NA) ? '—' : toDisplayTemp(tRaw / 10).toFixed(1) + ' ' + tempUnitLabel());
                 const soc = Number(data.n2kRxSoc);
-                setText('n2kRxSoc_ID', (data.n2kRxSoc === undefined || soc < 0) ? '—' : soc + ' %');
+                set2('n2kRxSoc_ID', (data.n2kRxSoc === undefined || soc < 0) ? '—' : soc + ' %');
+            })();
+
+            // DVCC follow status — Setup → Integrations (Charge-Limit Follow card) status row plus
+            // its Live Data → Integrations mirror (li_ ids) and the card-header state word.
+            // Values ride CSV2; staleness from TS.
+            (function () {
+                const row = document.getElementById('dvccStatus_row');
+                const card = document.getElementById('li_dvccStatus_card');
+                if ((!row && !card) || data.dvccState === undefined) return;
+                const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+                const set2 = (id, txt) => { setText(id, txt); setText('li_' + id, txt); };
+                const st = Number(data.dvccState);
+                const words = ['off', 'waiting', 'settling', 'following', 'stale', 'UNTRUSTED'];
+                const reasons = ['', ' — voltage limit out of range', ' — current limit implausible', ' — values flapping'];
+                const word = (st === 5) ? (words[5] + (reasons[Number(data.dvccUntrustReason)] || '')) : (words[st] || String(st));
+                set2('dvccStateWord_ID', word);
+                setText('integStateFollow', words[st] || String(st));  // header state: word only, no reason suffix
+                const NA = -1999999999;
+                const num = (v, div, fix, unit) => (v === undefined || Number(v) <= NA) ? '—' : (Number(v) / div).toFixed(fix) + unit;
+                set2('dvccCvl_ID', num(data.dvccRxCvl, 100, 2, ' V'));
+                set2('dvccCcl_ID', num(data.dvccRxCcl, 10, 1, ' A'));
+                const src = Number(data.dvccRxSrcAddr);
+                set2('dvccSrc_ID', (src === 255 || !isFinite(src)) ? '—' : ('addr ' + src));
+                const ages = window.sensorAges || {};
+                const age = Number(ages.dvcc ?? 999999);
+                const op = (age > 20000) ? '0.5' : '';
+                if (row) row.style.opacity = op;
+                if (card) card.style.opacity = op;
+                // Reset control is only meaningful while the untrusted latch is set
+                const rst = document.getElementById('dvccReset_row');
+                if (rst) { const d = (st === 5) ? '' : 'none'; if (rst.style.display !== d) rst.style.display = d; }
             })();
 
             // (live engine fuel flow + economy GPH/NMPG readouts moved to the CSVData4 / NavStream handler)
@@ -15191,8 +15291,11 @@ window.addEventListener("load", function () {
                 victronSolar: data.ts_VictronSolar,
                 stwNMEA: data.ts_StwNMEA,
                 n2kBatt: data.ts_N2kBatt,
-                n2kSoc: data.ts_N2kSoc
+                n2kSoc: data.ts_N2kSoc,
+                dvcc: data.ts_Dvcc
             };
+
+            updateWeatherForecastAge(data.ts_WeatherFetch);
         }, false);
 
 
@@ -15264,6 +15367,7 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("n2kEngRpmEnable_checkbox").checked = (document.getElementById("n2kEngRpmEnable").value === "1");
     document.getElementById("n2kEngDynEnable_checkbox").checked = (document.getElementById("n2kEngDynEnable").value === "1");
     document.getElementById("n2kEngBitsEnable_checkbox").checked = (document.getElementById("n2kEngBitsEnable").value === "1");
+    document.getElementById("dvccEn_checkbox").checked = (document.getElementById("dvccEn").value === "1");
     document.getElementById("IgnoreTemperature_checkbox").checked = (document.getElementById("IgnoreTemperature").value === "1");
     document.getElementById("IgnoreRPM_checkbox").checked = (document.getElementById("IgnoreRPM").value === "1");
     document.getElementById("bmsLogic_checkbox").checked = (document.getElementById("bmsLogic").value === "1");
@@ -16564,7 +16668,7 @@ const SINFO = {
         ['Ignored while', 'open loop, a protection or recovery is acting, any tuning/commissioning routine is running, manual field is on, or the current target has just moved — none of those are the plant hunting'],
         ['Acts on', 'the current loop\'s integral gain (PID Ki), cut ×0.8 per step, at most 4 steps (×0.41), never below 25% of your setting'],
         ['Kept only if', 'the wobble goes quiet for 3 windows, or holds at half its starting size for 3 windows. Otherwise the whole episode is reverted and the damper stands down for 10 minutes'],
-        ['Set', 'the Oscillation Damper toggle on Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters'],
+        ['Set', 'the Oscillation Damper switch in this panel, or the same switch on Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters, next to the PID Ki it acts on'],
     ],
     // ── Protections: Detection ──
     MaxTableValue: () => [
@@ -19485,7 +19589,14 @@ function placeLeftPanel(panel) {
     panel.style.right = 'auto';
     panel.style.left = GAP + 'px';
     const h = panel.offsetHeight;
+    // Vertical centering is re-evaluated on every render, so a step whose body grows and shrinks
+    // between runs (Min% Floor: tables and charts appear, then collapse while a run is active) made
+    // the whole panel hop up and down. Once placed, hold the top while the panel still fits fully
+    // on-screen; _holdTop is cleared on phase entry / open so a new step re-centers normally.
+    const cur = parseFloat(panel.style.top);
+    if (panel._holdTop && isFinite(cur) && cur >= 0 && cur + h <= vh - GAP) return;
     panel.style.top = (h < vh - 2 * GAP ? Math.round((vh - h) / 2) : GAP) + 'px';
+    panel._holdTop = true;
 }
 
 function testPanelInitDrag() {
@@ -21302,15 +21413,28 @@ function cxVerifyParams() {
 //   closed-loop sine-sweep verify                                          → Tuning ▸ Current
 function cxShowTab(main, sub) {
   try {
-    if (main === 'tuning') { goToTuning(sub); }   // #tuning is an alt-panel, not a main tab
-    else { showMainTab(main); showSubTab(main, sub); }
     // The wizard panel floats over the page — the tab's live plot sits below the fold behind it.
     // Scroll the relevant first plot into view so the user can watch the run without hunting for it.
     const firstPlot = { 'plots|displays': 'current-temp-plot', 'tuning|current': 'pid-tuning-plot', 'tuning|voltage': 'cv-tuning-plot' }[main + '|' + sub];
-    if (firstPlot) {
-      const el = document.getElementById(firstPlot);
-      if (el) requestAnimationFrame(() => { try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { } });
+    const el = firstPlot ? document.getElementById(firstPlot) : null;
+    // Laid out => its main tab, sub-tab and (for Tuning) alt-panel are ALL already the active ones.
+    // Re-selecting them anyway costs a window.scrollTo(0,0) inside showSubTab/showTuningPanel — the
+    // page snaps to the top and the scrollIntoView below drags it back down. The Min% Floor step
+    // calls this twice per held speed (onset sweep, then the drain run auto-starts), so that
+    // top-and-back-down lurch happened six times in a row.
+    const showing = !!el && el.offsetParent !== null;
+    if (!showing) {
+      if (main === 'tuning') { goToTuning(sub); }   // #tuning is an alt-panel, not a main tab
+      else { showMainTab(main); showSubTab(main, sub); }
     }
+    if (el) requestAnimationFrame(() => {
+      try {
+        // Already usably on-screen — leave the page where the user put it.
+        const r = el.getBoundingClientRect();
+        if (r.top >= 0 && r.top <= window.innerHeight * 0.6) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch (e) { }
+    });
   } catch (e) { /* tab not present — non-fatal */ }
 }
 
@@ -21408,6 +21532,9 @@ function cxGoto(phase) {
     // Persist the current phase (moves backward on Back) so the checklist survives a page reload /
     // other clients, and so the firmware re-baselines the in-flight step snapshot on each step entry.
     if (settingsUnlocked) cxGet('commissionPhase=' + phase).catch(() => { });
+    // A new step is the one moment the panel SHOULD re-anchor to this phase's height (placeLeftPanel
+    // holds the top across mid-step re-renders otherwise).
+    { const p = document.getElementById('commission-modal-panel'); if (p) p._holdTop = false; }
     commissionRender();
     // Open each phase at the top: the panel is one scroll box and a tall step (Stress Test)
     // would otherwise inherit the prior phase's scroll offset and land mid/bottom.
@@ -21418,6 +21545,11 @@ function cxGoto(phase) {
 
 function commissionRender() {
     if (!cx) return;
+    // Rebuilding the body collapses the panel's scroll box, which drops the reader back to the top
+    // on every re-render (a run finishing, a result landing). Remember where they were and put them
+    // back; cxGoto zeroes it right after this returns, so a new step still opens at the top.
+    const panel = document.getElementById('commission-modal-panel');
+    const keepScroll = panel ? panel.scrollTop : 0;
     const steps = document.getElementById('commission-steps');
     steps.innerHTML = CX_PHASES.map((nm, i) => {
         const notInPlan = !cxPlan[i];   // not in this run's plan — shown dimmed/struck
@@ -21458,7 +21590,8 @@ function commissionRender() {
     // Universal Back / Skip / Mark-done row on every runnable step (Prep drives its own Start button).
     // Hidden while a run is active — navigating away mid-measurement would leave it running unmonitored.
     if (!cxRunActive() && cx.phase >= 1 && cx.phase < CX_PHASES.length) b.insertAdjacentHTML('beforeend', cxNavFooter());
-    positionFloatingPanel(document.getElementById('commission-modal-panel'));   // re-center/-top for this phase's height (skips if dragged)
+    positionFloatingPanel(panel);   // re-center/-top for this phase's height (skips if dragged)
+    if (panel && keepScroll) panel.scrollTop = Math.min(keepScroll, Math.max(0, panel.scrollHeight - panel.clientHeight));
 }
 
 // ── Stage 0 · Prep — preconditions & snapshot ────────────────────────────────
@@ -21785,6 +21918,7 @@ function cxCutCauseText(code) {
         case 16: return 'over-voltage protection';
         case 17: return 'the cold-charge lockout';
         case 19: return 'the field being driven with no alternator output';
+        case 20: return 'Defer to Solar resting the alternator on a strong solar forecast';
         default: return '';
     }
 }
@@ -21795,7 +21929,7 @@ const CX_CUT_NAME_TO_CODE = {
     'VOLT_IMPLAUSIBLE': 5, 'VOLT_DISAGREE_CRIT': 6, 'VOLT_SPIKE': 7, 'VOLT_DISAGREE_WARN': 8,
     'LOCKOUT': 9, 'DISABLED': 10, 'MANUAL': 11, 'INA228 hardware overvoltage': 12,
     'HARD_OVERCURRENT': 13, 'RPM_TOO_LOW': 14, 'CURRENT_STALE': 15, 'FAST_OVERVOLTAGE': 16,
-    'Battery too cold to charge': 17, 'TACH_IMPLAUSIBLE': 19
+    'Battery too cold to charge': 17, 'TACH_IMPLAUSIBLE': 19, 'SOLAR_PAUSE': 20
 };
 function cxCutIsOv(code) { return code === 7 || code === 12 || code === 16; }
 
@@ -22903,7 +23037,9 @@ function cxFdFitChartMarkup(fit) {
         ' &nbsp;·&nbsp; <span style="color:#e8e8e8;">stored line</span>' +
         (!fit.flat && fit.shiftMs > 0.5 ? ' &nbsp;·&nbsp; <span style="color:#9a9a9a;border-bottom:1px dashed #9a9a9a;">raw fit</span>' : '') + '</div>' +
         '<svg id="cx-fdfit-svg" viewBox="0 0 640 380" preserveAspectRatio="xMidYMid meet" style="width:100%;display:block;touch-action:none;cursor:crosshair;"></svg>' +
-        '<div id="cx-fdfit-readout" style="font-size:13px;color:#ccc;margin-top:6px;line-height:1.4;"></div>' +
+        // overflow-anchor:none — this line rewrites off live RPM; letting the browser anchor scroll to it
+        // makes the whole panel creep whenever the sentence re-wraps.
+        '<div id="cx-fdfit-readout" style="font-size:13px;color:#ccc;margin-top:6px;line-height:1.4;min-height:3.6em;overflow-anchor:none;"></div>' +
         '<div style="font-size:11px;color:#777;margin-top:2px;">The marker pins to live engine speed — drag on the chart to explore the lookup.</div></div>';
 }
 function cxFdFitChartDraw() {
@@ -22979,15 +23115,20 @@ function cxFdFitChartDraw() {
     const cDot = mk('circle', { r: 5, fill: 'none', stroke: '#43cf8e', 'stroke-width': 2 }, cg);
     const cTagBg = mk('rect', { rx: 4, height: 20, fill: '#1c1c1c', stroke: '#43cf8e', 'stroke-width': 1 }, cg);
     const cTag = tx(0, 0, '', { fill: '#43cf8e', 'text-anchor': 'middle' }, cg);
-    const st = { exploring: false };
+    const st = { exploring: false, txt: null };
+    // The readout sits inside the panel's scroll box and is rewritten off the live RPM stream (~10 Hz).
+    // Rewriting it every sample re-flowed the text (a digit more or less flips the wrap) and dragged the
+    // scroll position with it, so: live speed is quantised to 10 RPM and the DOM is touched only when the
+    // sentence actually changes.
     const setCursor = (rpm, isLive) => {
         if (!(isFinite(rpm) && rpm > 0)) {
             cg.setAttribute('display', 'none');
-            if (readout) readout.innerHTML = 'Engine speed unknown — the over-voltage response would fall back to the worst-case <strong style="color:#43cf8e;">' + fit.worst + ' ms</strong>.';
+            const t0 = 'Engine speed unknown — the over-voltage response would fall back to the worst-case <strong style="color:#43cf8e;">' + fit.worst + ' ms</strong>.';
+            if (readout && st.txt !== t0) { readout.innerHTML = t0; st.txt = t0; }
             return;
         }
         cg.removeAttribute('display');
-        rpm = Math.max(0, Math.min(xMax, Math.round(rpm)));
+        rpm = Math.max(0, Math.min(xMax, isLive ? Math.round(rpm / 10) * 10 : Math.round(rpm)));
         const d = Math.round(drainAt(rpm)), x = X(rpm);
         cLine.setAttribute('x1', x); cLine.setAttribute('x2', x);
         cDot.setAttribute('cx', x); cDot.setAttribute('cy', Y(d));
@@ -22997,8 +23138,9 @@ function cxFdFitChartDraw() {
         const tcx = Math.max(ml + tw / 2, Math.min(W - mr - tw / 2, x));
         cTagBg.setAttribute('x', tcx - tw / 2); cTagBg.setAttribute('width', tw);
         cTagBg.setAttribute('y', mt); cTag.setAttribute('x', tcx); cTag.setAttribute('y', mt + 14);
-        if (readout) readout.innerHTML = 'At <strong style="color:#43cf8e;">' + rpm + ' RPM</strong>, an over-voltage cut is held for <strong style="color:#43cf8e;">' + d +
+        const t = 'At <strong style="color:#43cf8e;">' + rpm + ' RPM</strong>, an over-voltage cut is held for <strong style="color:#43cf8e;">' + d +
             ' ms</strong> — the time this line says the field needs to drain — before the hold can release early.';
+        if (readout && st.txt !== t) { readout.innerHTML = t; st.txt = t; }
     };
     const ptrRpm = e => { const r = svg.getBoundingClientRect(); return ((e.clientX - r.left) / r.width * W - ml) / (W - ml - mr) * xMax; };
     svg.addEventListener('pointermove', e => { st.exploring = true; setCursor(ptrRpm(e), false); });
@@ -23110,7 +23252,10 @@ function cxRenderMatrix(b) {
     // before it commits (agree-twice), so ~6 s per pause. The wizard holds a fixed test current
     // (25% of the cap-table max ≤2000 RPM) through resTest for the whole sweep — ripple scales with
     // current, so the table is only comparable across RPM at one amperage.
-    const sweepDesc = '<p style="font-size:15px;line-height:1.5;">This step uses a Space-Invaders-style game to map current ripple from idle to 2000 RPM. Once the alternator is holding the test current, press <strong>Start Shooting</strong>, then use the throttle to kill the invaders, orange ones first, observing the shape of the Ripple Map (below the game) as you go. Once you\'re confident you\'ve captured the peaks, end the game and move on.</p>';
+    // Deliberately silent on Start Shooting: this description renders on BOTH the pre-start screen and
+    // the running game, so naming the button here would prompt for it a screen early. The arm overlay
+    // (cxGameArmUpdate) is the only place that asks, at the moment the button actually appears.
+    const sweepDesc = '<p style="font-size:15px;line-height:1.5;">This step uses a Space-Invaders-style game to map current ripple from idle to 2000 RPM. Use the throttle to kill the invaders, orange ones first, observing the shape of the Ripple Map (below the game) as you go. Once you\'re confident you\'ve captured the peaks, end the game and move on.</p>';
     const sweepStartCta = '<p style="font-size:15px;line-height:1.5;">To begin, <strong>bring the engine to idle and hit "Start Game"</strong>.</p>';
     if (cx.matrixOn) {
         // Sweep-in-progress view is the "RPM Invaders" game (cxGame* below): y-axis = RPM, one
@@ -24889,7 +25034,8 @@ const CX_HELPFUL_HINTS_HTML =
     '<li style="margin-bottom:12px;">Leave <strong>Alternator Enable</strong> (in top right corner) toggled &ldquo;On&rdquo; permanently. The regulator only drives the field and produces charging current when the Ignition is On and Engine Speed is &gt; Min RPM (default 125).</li>' +
     '<li style="margin-bottom:12px;">This regulator stays alive 24-7 in a low-power state to track battery SOC, comfort metrics, etc. To view this interface with the Ignition Off:</li>' +
     '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Client Mode:</strong> low-power doze is automatically woken when you open the App interface.</li>' +
-    '<li style="margin-bottom:0;"><strong style="color:#2ec4b6;">AP (Hotspot) Mode:</strong> WiFi shuts down 30 minutes after last use. Wake up with the WiFi Wake button (5 minute increments) or Ignition On.</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">AP (Hotspot) Mode:</strong> WiFi shuts down 30 minutes after last use. Wake up with the WiFi Wake button (5 minute increments) or Ignition On.</li>' +
+    '<li style="margin-bottom:0;">Take a few minutes to explore the interface <strong>tab by tab</strong>. Commissioning only sets what it measures &mdash; there are many non-critical settings it never touched, and now is a good time to look through them and fill in the ones that apply to your boat.</li>' +
     '</ul>';
 // Terminal Helpful Hints page, drawn into the commissioning modal body after Finish. No per-phase
 // poll or RPM strip (the run is over); the abort row is hidden so it can't revert the saved tune.
@@ -28256,6 +28402,7 @@ function ssBuildIndex() {
     const names = ssBuildPanelNames();
     const list = [];
     document.querySelectorAll('#settings .form-row').forEach(row => {
+        if (row.closest('[data-ap-hidden]')) return;  // pane with no reachable tab button (AP mode)
         const labEl = row.querySelector('.form-label');
         if (!labEl) return;
         const clone = labEl.cloneNode(true);
@@ -28267,7 +28414,13 @@ function ssBuildIndex() {
         for (let el = row.parentElement; el && el.id !== 'settings'; el = el.parentElement) {
             if (el.tagName === 'DETAILS') {
                 const sum = el.querySelector(':scope > summary');
-                if (sum) crumbs.push(ssTidy(sum.textContent));
+                if (sum) {
+                    // Strip the live at-a-glance state from Integrations card headers so the
+                    // breadcrumb is the stable card name, not "NMEA 2000 Rx On · Tx Off".
+                    const sc = sum.cloneNode(true);
+                    sc.querySelectorAll('.integ-state, .tooltip').forEach(n => n.remove());
+                    crumbs.push(ssTidy(sc.textContent));
+                }
             } else if (el.id && (el.classList.contains('sub-tab-content') ||
                 el.classList.contains('alt-panel') ||
                 el.classList.contains('tuning-panel') ||
