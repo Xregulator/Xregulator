@@ -16,7 +16,7 @@
 
 // Must be strict semver ^\d+\.\d+\.\d+$ — no suffixes, no leading v. Compared as an integer
 // major*10000 + minor*100 + patch, so the ceiling is 999.99.99 (minor/patch cannot exceed 99).
-const char *FIRMWARE_VERSION = "0.0.3";
+const char *FIRMWARE_VERSION = "0.0.4";
 
 // OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
 // proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
@@ -3994,6 +3994,7 @@ uint8_t HuntWingPct = 15;      // pocket edge taper width, % of speed beyond eac
 uint8_t HuntCooldownMin = 10;  // minutes after a failed test before another test may open. Clamp [1,60]
 uint8_t HuntSteadyPct = 3;     // engine-speed steadiness tolerance (%): scan-mean RPM must stay within this of the episode reference through qualify+verify, else the episode aborts with nothing kept. Clamp [1,10]
 uint8_t HuntQualifyScans = 3;  // consecutive hunt+steady scans (1.6 s each) required to confirm a wobble and open a test; their average is the verify baseline. More scans = slower but surer detection. Clamp [2,6]
+float HuntTrigPct = 0.5f;      // detection bar: peak-bin field-duty swing (%) a scan must beat to count as a wobble. Deliberately UNCAPPED above - the duty amplitude of a given wobble scales with 12/SYSTEM_VOLTAGE_CLASS (same field watts, quarter the duty at 48 V), and real 12 V bench episodes land at 0.39-0.62% against the old fixed 0.5. Floored at 0.01 only because <= 0 would make every scan a detection. The D-attributed relaxed bar tracks this at 0.3x
 float cvRecovSec = 2.5f;     // retired timed-window ramp span, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovEmaxV = 0.25f;  // retired timed-window error cap, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovKiMax = 5.0f;   // refill Ki multiplier at the moment of release (M tapers linearly to 1× as the deficit heals). Clamp [1,10]

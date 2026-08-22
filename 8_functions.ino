@@ -736,6 +736,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "HuntCooldownMin", NK_HuntCooldownMin, 1 },
   { "HuntSteadyPct", NK_HuntSteadyPct, 1 },
   { "HuntQualifyScans", NK_HuntQualifyScans, 1 },
+  { "HuntTrigPct", NK_HuntTrigPct, 1 },
   { "cvRecovSec", NK_cvRecovSec, 1 },      // retired, inert — kept so shared configs stay complete
   { "cvRecovEmaxV", NK_cvRecovEmaxV, 1 },  // retired, inert — kept so shared configs stay complete
   { "cvRecovKiMax", NK_cvRecovKiMax, 1 },

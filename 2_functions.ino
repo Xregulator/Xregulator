@@ -300,6 +300,7 @@ bool fsRemove(const char *path) {
 #define NK_HuntCooldownMin "HuntCooldwnMin"
 #define NK_HuntSteadyPct "HuntSteadyPct"
 #define NK_HuntQualifyScans "HuntQualScans"
+#define NK_HuntTrigPct "HuntTrigPct"
 // Accepted ranges for the oscillation-damper (hunt-governor) knobs. Single source of truth for the
 // /settings handlers AND the NVS load path — they used to carry the same numbers separately, and the
 // load path silently lost them (HuntCutPct = 0 from a garbage NVS string zeroes inner Ki in every
@@ -318,6 +319,10 @@ bool fsRemove(const char *path) {
 #define HUNT_STEADY_PCT_MAX    10
 #define HUNT_QUALIFY_SCANS_MIN  2
 #define HUNT_QUALIFY_SCANS_MAX  6
+// No upper bound: a 48 V install sees a quarter the duty swing for the same wobble, so the useful
+// bar is a property of the install, not a range we can pick. The floor only keeps 0 (= every scan
+// detects) out of the detector.
+#define HUNT_TRIG_PCT_MIN   0.01f
 #define NK_reseedCorrEnable "reseedCorrEn"
 #define NK_dutySlewEnable "dutySlewEn"
 #define NK_testSlewMode "testSlewMode"

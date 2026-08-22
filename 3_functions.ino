@@ -1105,6 +1105,7 @@ enum Csv3Index {
   CSV3_HuntCooldownMin,        // damper retest cooldown after a failed test (min)
   CSV3_HuntSteadyPct,          // damper engine-speed steadiness tolerance (%)
   CSV3_HuntQualifyScans,       // damper wobble-confirm scan count (1.6 s each)
+  CSV3_HuntTrigPct,            // damper detection bar: peak-bin duty swing % (x100)
   CSV3_NMEA0183Baud,           // NMEA 0183 serial baud (4800 / 9600 / 19200 / 38400)
   CSV3_NMEA0183Invert,         // NMEA 0183 UART polarity: 0 RS-232-level talker, 1 TTL-level talker
 
@@ -3104,7 +3105,12 @@ void setupServer() {
   server.on("/altdebug.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     altDebugCsvSend(request);
   });
-  // Emit-window sizing probe (temporary diagnostic, RAM only — see the probe block in 7_functions).
+  // Session-% series so a page opened mid-session (or reconnecting after a WiFi gap) recovers the
+  // whole run — the live stream never backfills. RAM-only ring, streamed.
+  server.on("/altsess.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    altSessCsvSend(request);
+  });
+  // Emit-window sizing probe — TEMPORARY, REMOVE AFTER AUGUST 2026 (see the probe block in 7_functions).
   server.on("/altwinstats.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     altWinStatsCsvSend(request);
   });
@@ -4878,7 +4884,7 @@ void setupServer() {
       settingWrite(NK_MaxDuty, inputMessage.c_str());
       MaxDuty = inputMessage.toInt();
       if (pidInitialized) {
-        currentPID.SetOutputLimits(MinDuty, MaxDuty);
+        applyCcOutputLimits();  // one owner for the ceiling expression — a raw SetOutputLimits here silently diverges the moment ccDutyCeiling() stops being plain MaxDuty
       }
       queueConsoleMessageF("Max Duty updated to: %d%%", MaxDuty);
     }
@@ -4888,7 +4894,7 @@ void setupServer() {
       settingWrite(NK_MinDuty, inputMessage.c_str());
       MinDuty = inputMessage.toFloat();
       if (pidInitialized) {
-        currentPID.SetOutputLimits(MinDuty, MaxDuty);
+        applyCcOutputLimits();
       }
       queueConsoleMessageF("Min Duty updated to: %.2f%%", MinDuty);
     }
@@ -6326,6 +6332,7 @@ void setupServer() {
       float temp = inputMessage.toFloat();
       settingWrite(NK_PIDTrackingGain, String(temp).c_str());
       PIDTrackingGain = temp;
+      if (pidInitialized) currentPID.SetTrackingGain(PIDTrackingGain);  // enter_sys_auto() is the only other caller, so without this a live edit did nothing until the next AUTO entry
       if (TuningMode) tuningParamChanged = true;
     }
     if (request->hasParam("SafeOperationThreshold")) {
@@ -6510,6 +6517,11 @@ void setupServer() {
       foundParameter = true;
       HuntQualifyScans = (uint8_t)constrain(request->getParam("HuntQualifyScans")->value().toInt(), HUNT_QUALIFY_SCANS_MIN, HUNT_QUALIFY_SCANS_MAX);
       settingWrite(NK_HuntQualifyScans, String((int)HuntQualifyScans).c_str());
+    }
+    if (request->hasParam("HuntTrigPct")) {
+      foundParameter = true;
+      HuntTrigPct = fmaxf(request->getParam("HuntTrigPct")->value().toFloat(), HUNT_TRIG_PCT_MIN);
+      settingWrite(NK_HuntTrigPct, String(HuntTrigPct, 2).c_str());
     }
     if (request->hasParam("HuntSteadyPct")) {
       foundParameter = true;
@@ -9880,7 +9892,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,"
-                               "%d,%d\n",   // +2 NMEA 0183: baud, polarity
+                               "%d,%d,%d\n",   // damper detection bar (x100) + 2 NMEA 0183: baud, polarity
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -10270,6 +10282,7 @@ void SendWifiData() {
                                (int)HuntCooldownMin,
                                (int)HuntSteadyPct,
                                (int)HuntQualifyScans,
+                               SafeInt(HuntTrigPct, 100),
                                (int)NMEA0183Baud,
                                (int)NMEA0183Invert);
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {

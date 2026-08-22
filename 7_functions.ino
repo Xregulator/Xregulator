@@ -100,15 +100,13 @@ struct Episode {
   // axUnqual/axExcur × EP_FEED_DT_MS. Dumped in /altdebug.csv.
   uint32_t  axUnqual[NAXIS + 1] = {}, axExcur[NAXIS + 1] = {}, feedTicks = 0;
   bool      axWasUnq[NAXIS + 1] = {};
-  // Gate-blame attribution (boot-cumulative), banked by caller-set statBank (alt: 0 = idle,
-  // 1 = cruise rpm; sail/motor never set it → bank 0). soleBlock = ticks where exactly ONE
+  // Gate-blame attribution (boot-cumulative). soleBlock = ticks where exactly ONE
   // axis was out-of-band with its dwell filled while every other axis was steady — during real
   // transients several axes fail together, so the sole blocker is the gate that alone cost a run.
   // emitDirty = candidate emits vetoed by that axis's trimmed boxcar range; emitSpanShort =
   // vetoed because the boxcar hadn't yet spanned avgWinMs. All dumped in /altdebug.csv.
-  uint8_t   statBank = 0;
-  uint32_t  bankTicks[2] = {}, soleBlock[2][NAXIS + 1] = {};
-  uint32_t  emitDirty[2][NAXIS + 1] = {}, emitSpanShort[2] = {};
+  uint32_t  blameTicks = 0, soleBlock[NAXIS + 1] = {};
+  uint32_t  emitDirty[NAXIS + 1] = {}, emitSpanShort = 0;
 
   // ringBuf/ringCap = the caller's PSRAM boxcar ring; maxDwellSec[NAXIS+1] sizes each axis's (and the
   // output band's) deque to its longest expected steady time. Deque storage is ps_malloc'd here.
@@ -160,7 +158,6 @@ struct Episode {
 
     // Per-axis sliding-window min/max over each axis's own trailing dwell window (clamped to storage).
     feedTicks++;
-    const uint8_t bk = statBank & 1;
     int nBad = 0, badAxis = -1; bool badDwellOk = false;
     bool qualified = true;
     for (int a = 0; a < NAXIS; a++) {
@@ -195,8 +192,8 @@ struct Episode {
     } else {
       axisSteady[NAXIS] = true;   // output band disabled (vessel-perf) → never blocks
     }
-    bankTicks[bk]++;
-    if (nBad == 1 && badDwellOk) soleBlock[bk][badAxis]++;   // dwell-fill misses aren't band violations — skip
+    blameTicks++;
+    if (nBad == 1 && badDwellOk) soleBlock[badAxis]++;   // dwell-fill misses aren't band violations — skip
 
     // Trailing boxcar average (the emitted value): push, then evict samples older than avgWinMs.
     avgRing[ringHead] = s;
@@ -223,10 +220,10 @@ struct Episode {
     if (qualified && (uint32_t)(s.tMs - lastEmitMs) >= EP_EMIT_PERIOD_MS && ringCount > 2) {
       int tail = (ringHead - ringCount + avgCap) % avgCap;
       bool clean = ((uint32_t)(s.tMs - avgRing[tail].tMs) + 2u * EP_FEED_DT_MS >= avgWinMs);
-      if (!clean) emitSpanShort[bk]++;
+      if (!clean) emitSpanShort++;
       for (int a = 0; clean && a < NAXIS; a++)
-        if (trimmedRange(a) > cfg[a].tol) { clean = false; emitDirty[bk][a]++; }
-      if (clean && outCfg.tol > 0 && trimmedRange(NAXIS) > outCfg.tol) { clean = false; emitDirty[bk][NAXIS]++; }
+        if (trimmedRange(a) > cfg[a].tol) { clean = false; emitDirty[a]++; }
+      if (clean && outCfg.tol > 0 && trimmedRange(NAXIS) > outCfg.tol) { clean = false; emitDirty[NAXIS]++; }
       if (clean) {
         lastEmitMs = s.tMs;
         if (out) {
@@ -568,7 +565,6 @@ static inline float altExcitation(float duty, float vbus, float tF) {
                                   // idle hour (2026-08-21): luckiest-2s-window inflation 0.25% vs 0.13%
                                   // at 8 s, but 8 s passed only 11 of 53 ≥2 s steady runs — the old 8 s
                                   // guess starved harvest (and all transient capture) for ~0.1% inflation
-#define ALT_STAT_CRUISE_RPM 1200.0f  // Episode statBank split for gate-blame counters: ≥ this rpm = cruise bank
 #define ALT_FRONT_CAP    4096     // sparse support points (PSRAM); sized to be unreachable even AP-mode/no-prune — cost scales with count, not cap (see ALT_HEALTH_LWLR_ENGINE_SPEC.md)
 #define ALT_EP_RING_CAP  1024     // Episode trailing-boxcar buffer (PSRAM). Only ~ALT_EMIT_AVG_MS of
                                   // decimated samples are ever live in it (~80 at 10 Hz); generously
@@ -585,6 +581,47 @@ static FrontPoint<ALT_NAXIS> *altFrontUpBuf = nullptr;  // backing store for the
 static bool altHaveUpload     = false;                  // true once a file has been uploaded (Uploaded surface populated)
 static FrontPoint<ALT_NAXIS> *altPending  = nullptr;   // accepted-since-last-upload (raw points out)
 static int altPendingCount   = 0;
+
+// ---- session-plot series (PSRAM ring, RAM-only) ----------------------------------------------
+// The session % plot used to exist ONLY in the browser tab: a page opened mid-session drew an empty
+// chart, and a WiFi drop left a permanent hole (the live stream never backfills). The device now
+// keeps the same 5 s series itself and serves it at /altsess.csv, so any page — fresh, reloaded, or
+// reconnecting — recovers the whole run. Deliberately never persisted: a session ends at field-off,
+// and writing it would put flash in the control path.
+#define ALT_SESS_DT_MS    5000u   // MUST match the dashboard's dot cadence (altSessionPush in script.js)
+#define ALT_SESS_RING_N   1440    // 2 h at ALT_SESS_DT_MS, ~32 KB PSRAM. Oldest rolls off. This only
+                                  // has to cover "how long was I away / disconnected" — an open page
+                                  // keeps ~40 h of its own. Uniform cadence on purpose: the plot's
+                                  // information IS dot density, so decimating old data would read as
+                                  // a change in the machine rather than a change in sampling.
+struct __attribute__((packed)) AltSessPt {   // 21 B — packed + fixed-point; 2 h = 30 KB, not 200 KB
+  uint32_t tMs;                   // device millis() at capture — client maps to wall clock via the header's nowMs
+  uint16_t gAmps;                 // graded (boxcar) output A ×100 — the % numerator
+  uint16_t pred;                  // expected A ×100 — pct is gAmps/pred, so it is NOT stored
+  uint16_t measA;                 // fast live output A ×100
+  uint16_t rpm;
+  uint16_t duty;                  // field % ×100
+  uint16_t vbus;                  // V ×100
+  int16_t  tF;                    // alternator case °F ×10
+  int16_t  tSlope;                // case-temp slope °F/min ×100 — full resolution: near-zero vs a few
+                                  // °F/min is the settled-vs-warm-up discriminator, so it can't be coarsened
+  uint8_t  flags;                 // bits 0-1 state (0 measured, 1 estimated, 2 ungraded), bit 2 full steady run
+};
+static_assert(sizeof(AltSessPt) == 21, "AltSessPt lost its packing — the PSRAM budget assumes 21 B");
+static AltSessPt *altSessRing      = nullptr;
+static uint32_t   altSessRingHead  = 0, altSessRingCount = 0, altSessRingLastMs = 0;
+static inline uint16_t altQU16(float v, float scale) {          // saturating, NaN→0
+  if (!(v > 0.0f)) return 0;
+  float q = v * scale;
+  return (q >= 65535.0f) ? 65535u : (uint16_t)(q + 0.5f);
+}
+static inline int16_t altQI16(float v, float scale) {
+  if (isnan(v)) return 0;
+  float q = v * scale;
+  if (q >  32767.0f) return  32767;
+  if (q < -32768.0f) return -32768;
+  return (int16_t)(q + (q >= 0.0f ? 0.5f : -0.5f));
+}
 
 // Active grading surface = the one altRefSource selects. Learning ALWAYS writes altFront2 (My History);
 // grading (session % + trend) reads whichever this returns. Uploaded falls back to My History if empty.
@@ -849,12 +886,20 @@ static int altEmitQCount = 0;
 static bool altCapWarned = false;   // once per boot OR per Start Over (cleared in resetAlternatorHealth)
 
 // ---- per-control-tick fold (THE canonical cadence) ----
-// ---- emit-window sizing probe (temporary diagnostic; RAM only, cleared at boot) ----
+// ---- emit-window sizing probe — TEMPORARY DIAGNOSTIC, REMOVE AFTER AUGUST 2026 ----
+// Not a feature. It exists to pick ONE constant (ALT_EMIT_AVG_MS) and is user-facing only via a raw
+// CSV. To remove: this block, the /altwinstats.csv route in 3_functions.ino, and the altWinProbeFeed
+// call in altFold_tick. Costs ~4.8 KB PSRAM and one ring push per 10 Hz probe tick; nothing else
+// reads it, so deleting it cannot affect grading, records, or the trend.
+//
 // Measures, during FULL-steady runs, how far a trailing W-second average of the graded amps signal
 // rides above the run's overall mean — exactly the inflation a max-per-cell record book harvests at
 // that window width. One steady run = one committed sample per window it spans ≥2×. Serves
-// /altwinstats.csv. 2026-08-21: an idle hour set ALT_EMIT_AVG_MS = 2 s (0.25% inflation); probe kept
-// for one cruise-condition confirmation, then delete it (+ the 3_functions.ino route + the feed hook).
+// /altwinstats.csv. Answer so far, from two independent sessions (idle hour 2026-08-21, driveway idle
+// 2026-08-21 pm): inflation is 0.12-0.31% at EVERY width from 1 s to 60 s — immaterial against the
+// 2.5% amps band — while harvest collapses at the long end (2 s caught 47 of 149 runs, 8 s caught 3).
+// ALT_EMIT_AVG_MS is hard-set to 2000 on that basis. Kept installed only because the user is still
+// running it; it has no remaining question to answer.
 #define AWP_NWIN 7
 static const float AWP_WIN_S[AWP_NWIN] = { 1, 2, 4, 8, 15, 30, 60 };
 #define AWP_RING_N 620                     // 62 s @ the 10 Hz probe cadence — covers the 60 s window
@@ -1065,7 +1110,6 @@ void altFold_tick(uint32_t nowMs) {
   s.ex[0] = fDuty; s.ex[1] = altTempSlopeFMin;   // retain run duty + case-temp slope (F/min) for diagnosis;
                                                  // the emit averages both, so ex[1] = the run's mean thermal transient
   FrontPoint<ALT_NAXIS> ep;
-  altEpisode.statBank = (fRpm >= ALT_STAT_CRUISE_RPM) ? 1 : 0;   // gate-blame counters split idle vs cruise
   bool emitted = altEpisode.feed(eligible, s, &ep);
   altSteady = (altEpisode.count > 0);                              // FULL steady (temp held altThermSec) → ring + surface + trend
   altWinProbeFeed(nowMs, fAmps, altSteady);                        // emit-window sizing probe (10 Hz internal decimation)
@@ -1292,6 +1336,55 @@ void altFrontRecordsCsvSend(AsyncWebServerRequest *request) {
   response->addHeader("Cache-Control", "no-cache");
   request->send(response);
 }
+// Session series for the dashboard's session-% plot (/altsess.csv). Streamed oldest-first, constant
+// RAM. The header carries the device's current millis so the client can map tMs onto its own wall
+// clock. A push can land mid-stream and overwrite the oldest slot we have not reached yet, so tMs is
+// self-describing and the client drops any row whose tMs goes backwards.
+void altSessCsvSend(AsyncWebServerRequest *request) {
+  struct St { uint32_t total, base, idx, nowMs; bool done; char line[144]; int len, pos; };
+  St st;
+  st.total = altSessRing ? altSessRingCount : 0;
+  st.base  = (altSessRingHead + ALT_SESS_RING_N - st.total) % ALT_SESS_RING_N;   // oldest live slot
+  st.nowMs = millis();
+  st.idx = 0; st.done = false; st.len = 0; st.pos = 0;
+  AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
+    [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+      size_t written = 0;
+      while (written < maxLen) {
+        if (st.pos >= st.len) {
+          if (st.done) return written;
+          if (st.idx == 0) {
+            st.len = snprintf(st.line, sizeof(st.line), "# altsess v1 nowMs=%lu dtMs=%lu n=%lu\n",
+                              (unsigned long)st.nowMs, (unsigned long)ALT_SESS_DT_MS, (unsigned long)st.total);
+          } else if (st.idx == 1) {
+            st.len = snprintf(st.line, sizeof(st.line),
+                              "tMs,pct,gAmps,measAmps,expected,rpm,fieldPct,tempF,vbus,tSlopeFmin,state,ring\n");
+          } else {
+            uint32_t i = st.idx - 2;
+            if (i >= st.total) { st.done = true; return written; }
+            const AltSessPt &q = altSessRing[(st.base + i) % ALT_SESS_RING_N];
+            uint8_t state = q.flags & 0x03;
+            // pct is reconstructed, not stored: altLive_pct IS gAmps/pred×100, so the only loss is the
+            // 0.01 A quantisation of the two operands (~0.08% at 18 A).
+            float pct = (state <= 1 && q.pred > 0) ? ((float)q.gAmps * 100.0f / (float)q.pred) : 0.0f;
+            st.len = snprintf(st.line, sizeof(st.line), "%lu,%.2f,%.2f,%.2f,%.2f,%u,%.2f,%.1f,%.2f,%.2f,%u,%u\n",
+                              (unsigned long)q.tMs, pct, q.gAmps / 100.0f, q.measA / 100.0f,
+                              q.pred / 100.0f, (unsigned)q.rpm, q.duty / 100.0f, q.tF / 10.0f,
+                              q.vbus / 100.0f, q.tSlope / 100.0f, (unsigned)state,
+                              (unsigned)((q.flags >> 2) & 0x01));
+          }
+          if (st.len > (int)sizeof(st.line) - 1) st.len = sizeof(st.line) - 1;
+          st.idx++; st.pos = 0;
+        }
+        size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+        memcpy(buf + written, st.line + st.pos, tw);
+        written += tw; st.pos += (int)tw;
+      }
+      return written;
+    });
+  response->addHeader("Cache-Control", "no-cache");
+  request->send(response);
+}
 // Full alt-health state dump for offline / AI debugging (spec §4.5 "Download Debug CSV"). Streamed
 // row-by-row (constant internal RAM at any front size). Self-describing "section,key,v0…" rows, in
 // phases: PARAM (every registry knob), LIVE/GATE/BUCKET/SESSION scalars, then MYHIST + UPLOAD front
@@ -1364,29 +1457,17 @@ void altDebugCsvSend(AsyncWebServerRequest *request) {
                                   altEpisode.trimmedRange(0), altEpisode.trimmedRange(1), altEpisode.trimmedRange(2),
                                   altEpisode.trimmedRange(3), altEpisode.trimmedRange(ALT_NAXIS));
                 break;
-              case 15:   // sole-blocker ticks below ALT_STAT_CRUISE_RPM — the one axis out-of-band while all others steady
-                st.len = snprintf(st.line, sizeof(st.line), "GATE,soleBlkIdle_rpm_duty_vbus_temp_amps_ticks,%lu,%lu,%lu,%lu,%lu,%lu\n",
-                                  (unsigned long)altEpisode.soleBlock[0][0], (unsigned long)altEpisode.soleBlock[0][1],
-                                  (unsigned long)altEpisode.soleBlock[0][2], (unsigned long)altEpisode.soleBlock[0][3],
-                                  (unsigned long)altEpisode.soleBlock[0][ALT_NAXIS], (unsigned long)altEpisode.bankTicks[0]);
+              case 15:   // sole-blocker ticks — the one axis out-of-band while every other axis was steady
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,soleBlk_rpm_duty_vbus_temp_amps_ticks,%lu,%lu,%lu,%lu,%lu,%lu\n",
+                                  (unsigned long)altEpisode.soleBlock[0], (unsigned long)altEpisode.soleBlock[1],
+                                  (unsigned long)altEpisode.soleBlock[2], (unsigned long)altEpisode.soleBlock[3],
+                                  (unsigned long)altEpisode.soleBlock[ALT_NAXIS], (unsigned long)altEpisode.blameTicks);
                 break;
-              case 16:   // sole-blocker ticks at/above ALT_STAT_CRUISE_RPM
-                st.len = snprintf(st.line, sizeof(st.line), "GATE,soleBlkCruise_rpm_duty_vbus_temp_amps_ticks,%lu,%lu,%lu,%lu,%lu,%lu\n",
-                                  (unsigned long)altEpisode.soleBlock[1][0], (unsigned long)altEpisode.soleBlock[1][1],
-                                  (unsigned long)altEpisode.soleBlock[1][2], (unsigned long)altEpisode.soleBlock[1][3],
-                                  (unsigned long)altEpisode.soleBlock[1][ALT_NAXIS], (unsigned long)altEpisode.bankTicks[1]);
-                break;
-              case 17:   // candidate emits vetoed per axis by the trimmed boxcar range (+ span-short), idle bank
-                st.len = snprintf(st.line, sizeof(st.line), "GATE,emitDirtyIdle_rpm_duty_vbus_temp_amps_span,%lu,%lu,%lu,%lu,%lu,%lu\n",
-                                  (unsigned long)altEpisode.emitDirty[0][0], (unsigned long)altEpisode.emitDirty[0][1],
-                                  (unsigned long)altEpisode.emitDirty[0][2], (unsigned long)altEpisode.emitDirty[0][3],
-                                  (unsigned long)altEpisode.emitDirty[0][ALT_NAXIS], (unsigned long)altEpisode.emitSpanShort[0]);
-                break;
-              case 18:   // emit vetoes, cruise bank
-                st.len = snprintf(st.line, sizeof(st.line), "GATE,emitDirtyCruise_rpm_duty_vbus_temp_amps_span,%lu,%lu,%lu,%lu,%lu,%lu\n",
-                                  (unsigned long)altEpisode.emitDirty[1][0], (unsigned long)altEpisode.emitDirty[1][1],
-                                  (unsigned long)altEpisode.emitDirty[1][2], (unsigned long)altEpisode.emitDirty[1][3],
-                                  (unsigned long)altEpisode.emitDirty[1][ALT_NAXIS], (unsigned long)altEpisode.emitSpanShort[1]);
+              case 16:   // candidate emits vetoed per axis by the trimmed boxcar range (+ span-short)
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,emitDirty_rpm_duty_vbus_temp_amps_span,%lu,%lu,%lu,%lu,%lu,%lu\n",
+                                  (unsigned long)altEpisode.emitDirty[0], (unsigned long)altEpisode.emitDirty[1],
+                                  (unsigned long)altEpisode.emitDirty[2], (unsigned long)altEpisode.emitDirty[3],
+                                  (unsigned long)altEpisode.emitDirty[ALT_NAXIS], (unsigned long)altEpisode.emitSpanShort);
                 break;
               default: st.phase = 3; st.idx = 0; break;
             }
@@ -1648,6 +1729,7 @@ void resetAlternatorHealth() {
   altSteady = false; altSessSteady = false; altSessTempGate.clear();
   altRefSource = 0;                              // revert active reference to My History (Uploaded surface kept, just inactive)
   memset(altSessHist, 0, sizeof(altSessHist)); altSessN = 0; altSessSum = 0;   // session stats restart with the data
+  altSessRingHead = 0; altSessRingCount = 0; altSessRingLastMs = 0;              // and the served session series
   altTrendBaselineSec = EngineRunTime_AllTime;   // new baseline → trend X-axis restarts at 0
   fsTakeLock();
   LittleFS.remove("/altfront.bin");
@@ -1664,7 +1746,10 @@ void altFrontInit() {
   altFrontBuf   = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
   altFrontUpBuf = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
   altPending  = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_PENDING_CAP * sizeof(FrontPoint<ALT_NAXIS>));
-  awpAmps = (float *)ps_malloc((size_t)AWP_RING_N * sizeof(float));         // window-sizing probe rings (~5 KB)
+  altSessRing = (AltSessPt *)ps_malloc((size_t)ALT_SESS_RING_N * sizeof(AltSessPt));   // session series (~32 KB)
+  if (altSessRing) memset(altSessRing, 0, (size_t)ALT_SESS_RING_N * sizeof(AltSessPt));
+  else queueConsoleMessage("AltHealth: session-series ps_malloc failed — /altsess.csv empty, plots stay browser-only");
+  awpAmps = (float *)ps_malloc((size_t)AWP_RING_N * sizeof(float));         // TEMPORARY probe rings (~4.8 KB) — REMOVE AFTER AUGUST 2026
   awpT    = (uint32_t *)ps_malloc((size_t)AWP_RING_N * sizeof(uint32_t));
   if (!altEpRing || !altFrontBuf || !altFrontUpBuf || !altPending) { queueConsoleMessage("ERROR: AltFront ps_malloc failed"); return; }
   memset(altEpRing,     0, (size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>));
@@ -1707,6 +1792,30 @@ void altFrontInit() {
 void altApplyClassScales() {
   altFront2.axisScale[2] = 0.1f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
   altFrontUp.axisScale[2] = altFront2.axisScale[2];
+}
+
+// One entry per ALT_SESS_DT_MS while the alternator is live, graded or not — an ungraded entry
+// (state 2) is the dashboard's grey gap. Nothing is pushed while the field is down, so an overnight
+// stop is a time jump in the series rather than thousands of gap rows evicting the real data.
+// Cost: one 28-byte PSRAM store every 5 s inside the existing 1 Hz evaluator — never in the fold.
+static void altSessSeriesPush(uint32_t nowMs, bool graded) {
+  if (!altSessRing) return;
+  if (altSessRingLastMs && (uint32_t)(nowMs - altSessRingLastMs) < ALT_SESS_DT_MS) return;
+  altSessRingLastMs = nowMs;
+  AltSessPt &p = altSessRing[altSessRingHead];
+  p.tMs    = nowMs;
+  p.flags  = graded ? (uint8_t)((altState == FRONT_ESTIMATED) ? 1 : 0) : 2;
+  if (graded && altSteady) p.flags |= 0x04;
+  p.gAmps  = altQU16(altLive_gAmps, 100.0f);
+  p.measA  = altQU16(altLive_amps,  100.0f);
+  p.pred   = altQU16(altLive_pred,  100.0f);
+  p.rpm    = altQU16(altLive_rpm,     1.0f);
+  p.duty   = altQU16(altLive_duty,  100.0f);
+  p.vbus   = altQU16(altLive_vbus,  100.0f);
+  p.tF     = altQI16(altLive_tF,     10.0f);
+  p.tSlope = altQI16(altTempSlopeFMin, 100.0f);
+  altSessRingHead = (altSessRingHead + 1) % ALT_SESS_RING_N;
+  if (altSessRingCount < ALT_SESS_RING_N) altSessRingCount++;
 }
 
 // ---- 1 Hz tick (NOT the fold) — THE evaluator/classifier cadence, plus live telemetry + settings
@@ -1761,6 +1870,7 @@ void altHealth_tick(uint32_t nowMs) {
       if (bin > 59) bin = 59;
       if (altSessHist[bin] < 65535) altSessHist[bin]++;
     }
+    altSessSeriesPush(nowMs, altSessSteady && altRefOk && altLive_pct > 0.0f);
   } else {
     altRefOk = false; altLive_pct = 0;        // nothing running → no grade (state holds its last value)
   }

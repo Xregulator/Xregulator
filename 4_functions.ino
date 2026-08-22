@@ -2037,6 +2037,13 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
                                                    settingRead(NK_HuntQualifyScans).toInt(),
                                                    HUNT_QUALIFY_SCANS_MIN, HUNT_QUALIFY_SCANS_MAX);
   }
+  if (!settingExists(NK_HuntTrigPct)) {
+    settingWrite(NK_HuntTrigPct, String(HuntTrigPct, 2).c_str());
+  } else {
+    // Floor only, no ceiling — see HUNT_TRIG_PCT_MIN. A garbage NVS string parses to 0.0, which would
+    // make aPk > bar true on every scan, so the floor is the one thing the load path must enforce.
+    HuntTrigPct = fmaxf(settingRead(NK_HuntTrigPct).toFloat(), HUNT_TRIG_PCT_MIN);
+  }
   if (!settingExists(NK_reseedCorrEnable)) {
     settingWrite(NK_reseedCorrEnable, String((int)reseedCorrEnable).c_str());
   } else {

@@ -4189,6 +4189,20 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Detection Amplitude (<span id="HuntTrigPct_echo">?</span>%):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How big the rhythmic swing in field drive has to be before a scan counts it as a wobble, measured as the percent of field duty moving at the wobble's own frequency. Below this the scan is ignored no matter how rhythmic it looks. Lower it if the regulator is visibly surging but the damper never reacts; raise it if tests keep opening on disturbances that are not hunting. There is no upper limit, and no lower limit worth naming — the same physical wobble moves roughly a quarter as much duty on a 48-volt bank as on a 12-volt one, so the useful value belongs to the installation. The separate requirement that the wobble stand well above the other frequency slots is what keeps broadband noise out, and it applies whatever this is set to.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="HuntTrigPct" type="number" step="0.01" min="0.01" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>PID Sample Divisor (<span id="PidSampleDivisor_echo">?</span>):</span>
                     <span class="tooltip">ℹ️<span class="tooltip-box">The output current PID normally updates on every fresh current sample (~200 Hz). A 2
                         makes it update every other sample (~100 Hz), etc. Don't adjust.</span></span>

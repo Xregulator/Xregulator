@@ -1498,7 +1498,7 @@ function altExportHealthDataset(){
 function altSessSectionCsv(){
   const num = (v,dp) => (v==null || !isFinite(v)) ? '' : (dp==null ? v : (+v).toFixed(dp));
   const rows = ['# This Session graded points. state 0=MEASURED 1=ESTIMATED; ring 1=full steady run',
-                'SESSPT,idx,t_s,rpm,fieldPct,tempF,measAmps,gradedAmps,expectedAmps,pct,state,source,ring,vbus,tSlopeFmin,sogKts'];
+                'SESSPT,idx,t_s,rpm,fieldPct,tempF,measAmps,gradedAmps,expectedAmps,pct,state,source,ring,vbus,tSlopeFmin'];
   let t0 = null;
   for(let i=0;i<altSessInfo.length;i++){
     const d = altSessInfo[i]; if(!d) continue;
@@ -1506,7 +1506,7 @@ function altSessSectionCsv(){
     rows.push(['SESSPT', i, num(altSessT[i]-t0,1), num(d.rpm,0), num(d.fieldPct,2), num(d.tempF,1),
                num(d.measAmps,1), num(d.amps,1), num(d.pred,1), num(d.pct,1),
                num(d.state,0), num(d.source,0), num(d.ring,0), num(d.vbus,2),
-               num(d.tSlope,2), num(d.sog,1)].join(','));
+               num(d.tSlope,2)].join(','));
   }
   return rows.join('\n');
 }
@@ -2015,7 +2015,8 @@ function drawAltTrend() {
 //    gets an orange ring overlay. Below the gate / LEARNING / NO-REFERENCE periods carry NO value —
 //    they render as gaps with a light background tint (the suppressed number is never plotted). ──
 let altSessPlot = null;
-const ALT_SESS_MAX = 28800;   // 8 h of 1 Hz samples, then the oldest roll off
+const ALT_SESS_MAX = 28800;   // dots are 5 s-cadenced (altSessionPush), so ~40 h before the oldest roll off
+const ALT_SESS_DT_S = 5;      // must match ALT_SESS_DT_MS in 7_functions.ino
 const ALT_SESS_WINDOW_S = 1800;  // X axis shows a fixed last-30-minutes window, labelled "minutes ago"
 let altSessT = [], altSessMeas = [], altSessEst = [], altSessGap = [], altSessRing = [];
 // Per-dot condition snapshot, parallel to the arrays above, so a click can show the operating
@@ -2234,10 +2235,92 @@ function altSessionPush(){
     tempF: window._lastAltTempF, fieldPct: window._lastFieldPct, measAmps: window._lastMeasAmps,
     vbus: window._lastBatteryV,
     tSlope: altLive.tSlope,   // case-temp slope F/min (undefined on pre-tSlope firmware -> blank column)
-    sog: (window._lastSogMs && Date.now() - window._lastSogMs < 10000) ? window._lastSogKts : null,
     state: st, source: altLive.source|0, ring: altLive.steady>=1 ? 1 : 0
   } : null);
   if (altSessT.length > ALT_SESS_MAX){ altSessT.shift(); altSessMeas.shift(); altSessEst.shift(); altSessGap.shift(); altSessRing.shift(); altSessInfo.shift(); }
+  if (!altSessPlot) buildAltSessPlot();
+  if (altSessPlot) altSessPlot.setData([altSessT, altSessMeas, altSessEst]);
+}
+
+// ── Session-series recovery ────────────────────────────────────────────────────────────────────
+// The dots above are collected live, so a page opened mid-session starts blank and a WiFi drop
+// leaves a hole the stream never backfills. The device keeps the same 5 s series in PSRAM and
+// serves it at /altsess.csv; pull it on first connect and after any feed gap, then keep appending
+// live on top. Firmware without the route returns 404 -> the old browser-only behaviour.
+let altSessHistState = 0;      // 0 = never fetched, 1 = in flight, 2 = have it
+function altSessMaybeRecover(){
+  if (altSessHistState === 1) return;                       // already fetching
+  if (altSessHistState === 0){ altSessFetchHistory(); return; }   // fresh page / reload
+  // Refetch whenever OUR newest dot is stale. Dots are pushed every ALT_SESS_DT_S for as long as
+  // events arrive, so this measures the actual hole in the series rather than guessing from event
+  // timing — any interruption that cost us a dot trips it, and filling the hole clears it.
+  const newest = altSessT.length ? altSessT[altSessT.length - 1] * 1000 : 0;
+  if (newest && (Date.now() - newest) > ALT_SESS_DT_S * 2500) altSessFetchHistory();
+}
+function altSessFetchHistory(){
+  altSessHistState = 1;
+  fetch(buildURL('/altsess.csv')).then(r => r.ok ? r.text() : '').then(txt => {
+    let nowMs = null; const rows = [];
+    for (const ln of txt.split('\n')){
+      if (!ln) continue;
+      if (ln[0] === '#'){ const m = ln.match(/nowMs=(\d+)/); if (m) nowMs = +m[1]; continue; }
+      if (ln[0] === 't') continue;                       // column header
+      const c = ln.split(',');
+      if (c.length < 12) continue;
+      rows.push({ tMs:+c[0], pct:+c[1], amps:+c[2], measAmps:+c[3], pred:+c[4], rpm:+c[5],
+                  fieldPct:+c[6], tempF:+c[7], vbus:+c[8], tSlope:+c[9],
+                  state:+c[10], ring:+c[11] });
+    }
+    if (nowMs !== null && rows.length) altSessAdoptHistory(rows, Date.now() - nowMs);
+    altSessHistState = 2;
+  }).catch(() => { altSessHistState = 2; });
+}
+function altSessAdoptHistory(rows, offMs){
+  const src = altLive.source|0;                          // active reference surface, effectively per-session
+  const D = [];
+  let prevTMs = -1;
+  for (const r of rows){
+    if (r.tMs <= prevTMs) continue;                      // a push overwrote the oldest slot mid-stream
+    prevTMs = r.tMs;
+    const graded = (r.state === 0 || r.state === 1);
+    D.push({ t: (r.tMs + offMs) / 1000,
+             m: graded && r.state === 0 ? r.pct : null,
+             e: graded && r.state === 1 ? r.pct : null,
+             g: graded ? 0 : 1,
+             rg: graded && r.ring ? 1 : 0,
+             inf: graded ? { rpm:r.rpm, amps:r.amps, pred:r.pred, pct:r.pct, tempF:r.tempF,
+                             fieldPct:r.fieldPct, measAmps:r.measAmps, vbus:r.vbus,
+                             tSlope:r.tSlope, state:r.state, source:src, ring:r.ring } : null });
+  }
+  if (!D.length) return;
+  // The device is authoritative ONLY inside its own window. The tab holds ALT_SESS_MAX (~40 h)
+  // against the ring's 2 h, so our own dots are kept on BOTH sides — replacing the whole array with
+  // the device copy would truncate a long session to the ring length on every reconnect.
+  const dFirst = D[0].t, dLast = D[D.length - 1].t;
+  const mine = i => ({ t:altSessT[i], m:altSessMeas[i], e:altSessEst[i],
+                       g:altSessGap[i], rg:altSessRing[i], inf:altSessInfo[i] });
+  const brk  = t => ({ t:t, m:null, e:null, g:1, rg:0, inf:null });
+  const out = [];
+  for (let i = 0; i < altSessT.length; i++) if (altSessT[i] < dFirst) out.push(mine(i));
+  if (out.length && (dFirst - out[out.length - 1].t) > ALT_SESS_DT_S * 2)
+    out.push(brk(out[out.length - 1].t + ALT_SESS_DT_S));
+  let prevT = null;
+  for (const d of D){
+    if (prevT !== null && (d.t - prevT) > ALT_SESS_DT_S * 2) out.push(brk(prevT + ALT_SESS_DT_S));
+    prevT = d.t; out.push(d);
+  }
+  const tail = [];
+  for (let i = 0; i < altSessT.length; i++) if (altSessT[i] > dLast) tail.push(mine(i));
+  if (tail.length && (tail[0].t - dLast) > ALT_SESS_DT_S * 2) out.push(brk(dLast + ALT_SESS_DT_S));
+  for (const x of tail) out.push(x);
+
+  altSessT   = out.map(o => o.t);   altSessMeas = out.map(o => o.m);
+  altSessEst = out.map(o => o.e);   altSessGap  = out.map(o => o.g);
+  altSessRing= out.map(o => o.rg);  altSessInfo = out.map(o => o.inf);
+  const over = altSessT.length - ALT_SESS_MAX;
+  if (over > 0){ altSessT.splice(0,over); altSessMeas.splice(0,over); altSessEst.splice(0,over);
+                 altSessGap.splice(0,over); altSessRing.splice(0,over); altSessInfo.splice(0,over); }
+  altSessHoverIdx = -1;                                  // indices just moved
   if (!altSessPlot) buildAltSessPlot();
   if (altSessPlot) altSessPlot.setData([altSessT, altSessMeas, altSessEst]);
 }
@@ -2264,7 +2347,6 @@ function renderAltSessPoint(i){
     + ' · expected ' + n(d.pred, 1, ' A')
     + ' · ' + n(d.vbus, 2, ' V')
     + (d.tSlope != null && isFinite(d.tSlope) ? ' · temp ' + (d.tSlope >= 0 ? '+' : '') + d.tSlope.toFixed(1) + '°/min' : '')
-    + (d.sog != null && isFinite(d.sog) ? ' · ' + d.sog.toFixed(1) + ' kt' : '')
     + '</span>';
 }
 
@@ -3036,6 +3118,7 @@ const CSV3_FIELDS = [
     "HuntCooldownMin",               // damper retest cooldown after a failed test (min)
     "HuntSteadyPct",                 // damper engine-speed steadiness tolerance (%)
     "HuntQualifyScans",              // damper wobble-confirm scan count (1.6 s each)
+    "HuntTrigPct",                   // damper detection bar: peak-bin duty swing % (x100)
     "NMEA0183Baud",                  // NMEA 0183 serial baud (4800 / 9600 / 19200 / 38400)
     "NMEA0183Invert",                // NMEA 0183 polarity: 0 RS-232-level talker, 1 TTL-level talker
 ];
@@ -3912,6 +3995,7 @@ function initializeEventSource() {
             altLive.valid = altLive.valid === 1;
             altLive.steady = altLive.steady === 1;
             updateAltHealth();
+            try { altSessMaybeRecover(); } catch (err) {}   // pull the device series on connect / after a gap
             try { altSessionPush(); } catch (err) {}   // 1 Hz session plot feed
             queueAltTrendUpdate();
             updateCloudStatus();
@@ -6831,6 +6915,7 @@ function updateAllEchosOptimized(data) {
         { key: 'HuntCooldownMin',   id: 'HuntCooldownMin_echo',   transform: v => v },
         { key: 'HuntSteadyPct',     id: 'HuntSteadyPct_echo',     transform: v => v },
         { key: 'HuntQualifyScans',  id: 'HuntQualifyScans_echo',  transform: v => v },
+        { key: 'HuntTrigPct',       id: 'HuntTrigPct_echo',       transform: v => (v / 100).toFixed(2) },
         { key: 'cvHelpersEnabled',  id: 'cvHelpersEnabled_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'coldChargeLockoutEnable', id: 'coldChargeLockoutEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'MinChargeTempF',    id: 'MinChargeTempF_echo',    transform: v => Math.round(toDisplayTemp(v)) },
@@ -15413,9 +15498,6 @@ window.addEventListener("load", function () {
             // GPS moving state for IMU mode graying (SOGNMEA is ×100)
             if (data.SOGNMEA !== undefined) {
                 try { updateIMUMovingState(data.SOGNMEA); updateIMUModeStyles(); } catch (err) { }
-                // Freshness-stamped latch for the alt-health session dots (motion ground truth per dot);
-                // _navLast alone would serve a stale value forever after GPS loss.
-                window._lastSogKts = parseFloat(data.SOGNMEA) / 100; window._lastSogMs = Date.now();
             }
 
             // NavStream numeric readouts. Compact renderer sharing the module-level DOM-diff cache
@@ -17324,11 +17406,11 @@ const SINFO = {
     // ── Diag: Oscillation Damper ──
     huntGov: () => [
         ['Signal', S_DUTY + ' — the applied duty actually written to the field, sampled at a fixed 20&nbsp;samples/s so the analysis band never moves when the control loop cadence changes'],
-        ['Detects', 'a sustained tone in one of six fixed frequency slots from 0.31 to 2.34&nbsp;Hz, measured over a 6.4&nbsp;s window (Goertzel, Hann-weighted). It must beat 0.5% duty swing AND stand 3× above the other slots, on ' + svv('HuntQualifyScans_echo', '') + ' scans in a row with engine speed steady (within ' + svv('HuntSteadyPct_echo', '%') + ' of where it started), before a test opens. A wobble that keeps the voltage damper (D-term) rhythmically reversing qualifies at a lower duty bar — its rhythm is the evidence'],
+        ['Detects', 'a sustained tone in one of six fixed frequency slots from 0.31 to 2.34&nbsp;Hz, measured over a 6.4&nbsp;s window (Goertzel, Hann-weighted). It must beat ' + svv('HuntTrigPct_echo', '%') + ' duty swing AND stand 3× above the other slots, on ' + svv('HuntQualifyScans_echo', '') + ' scans in a row with engine speed steady (within ' + svv('HuntSteadyPct_echo', '%') + ' of where it started), before a test opens. A wobble that keeps the voltage damper (D-term) rhythmically reversing qualifies at a lower duty bar — its rhythm is the evidence'],
         ['Ignored while', 'open loop, a protection or recovery is acting, any tuning/commissioning routine is running, manual field is on, the current target has just moved, or engine speed is drifting — none of those are the plant hunting'],
         ['Acts on', 'one lever per test. Usually the current loop\'s integral gain (PID Ki): one cut to ' + svv('HuntCutPct_echo', '%') + ' of your setting, then a re-measure. When the D-term is the part swinging, it is paused instead — and switched off entirely across a verified trouble spot, never reduced partway. Verified fixes are mapped by engine speed and applied proactively at that speed from then on, tapering to full gain over ' + svv('HuntWingPct_echo', '%') + ' of speed beyond the trouble spot'],
         ['Kept only if', 'the wobble shrinks at least ' + svv('HuntVerifyPct_echo', '%') + ', averaged scans before vs after. A failed D-term test rolls straight into the Ki test; only when every lever fails is full strength restored, with no new test for ' + svv('HuntCooldownMin_echo', ' min') + '. The map survives restarts; Clear System erases it'],
-        ['Set', 'the Oscillation Damper switch and its six settings on Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters, next to the PID Ki it acts on'],
+        ['Set', 'the Oscillation Damper switch and its seven settings on Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters, next to the PID Ki it acts on'],
     ],
     // ── Protections: Detection ──
     MaxTableValue: () => [

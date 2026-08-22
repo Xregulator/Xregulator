@@ -207,9 +207,13 @@ void recomputeCcGains() {
 #define HG_RING_N 128            // 6.4 s at 50 ms — two periods of the lowest bin (hard floor for 0.31 Hz selectivity)
 #define HG_EVAL_EVERY 32         // evaluate every 1.6 s (window/4)
 #define HG_NBINS 6
-#define HG_TRIG_AMP 0.5f         // % duty — hunt logs measured 1.17–1.48, quiet-log median ~0.4
+// Detection amplitude bar is the HuntTrigPct setting (default 0.5% duty). It has no upper clamp:
+// the duty swing a given wobble produces scales with 12/SYSTEM_VOLTAGE_CLASS, so a 48 V install
+// needs a lower bar for the same physical hunt. Bench measurement 08-21 (pidlog_20260821_212919):
+// a real 0.70 Hz idle hunt read 0.39–0.62% peak-bin duty against the old fixed 0.5, so only 2 of 6
+// scans qualified and HuntQualifyScans in a row never happened — the miss this setting exists for.
 #define HG_TRIG_RATIO 3.0f       // peak vs median of other bins — rejected a 2.22% broadband load transient amplitude alone would have flagged
-#define HG_TRIG_AMP_D 0.15f      // relaxed duty bar for a D-attributed scan: the D-driven mode lives in VOLTS and its duty amplitude can sit below the quiet-log floor (08-21: 0.27% duty, 0.33 V p-p). Safe below the 0.4 quiet median ONLY because the kdTrim alternation requirement is the real gate — a quiet log has no alternations
+#define HG_TRIG_D_FRAC 0.3f      // relaxed duty bar for a D-attributed scan, as a FRACTION of HuntTrigPct (0.3 x 0.5 = the 0.15 the D lever was built against): the D-driven mode lives in VOLTS and its duty amplitude can sit below the quiet-log floor (08-21: 0.27% duty, 0.33 V p-p). Safe below the 0.4 quiet median ONLY because the kdTrim alternation requirement is the real gate — a quiet log has no alternations. Proportional, not fixed: a fixed 0.15 would become STRICTER than the standard bar the moment HuntTrigPct is set below it
 // Qualify-scan count is the HuntQualifyScans setting (default 3): consecutive hunt+steady scans to
 // open a test; baseline = their average (the HuntVerifyPct bar needs an averaged reference —
 // single windows jitter more than 15% on their own)
@@ -417,7 +421,7 @@ static float hgRpmMapEma = 0.0f;
 static float hgSlope0 = 0.0f, hgQualSlopeSum = 0.0f, hgReadSlopeSum = 0.0f;
 static uint16_t hgQualFlips = 0;
 static bool hgQualCvOk = false;  // every accumulated qualify scan met HG_CV_COVER_MIN — a slope-judged episode must not OPEN without it, because hgSlope0 comes from those same scans
-static bool hgEpVoltsMode = false;  // qualify duty average was below HG_TRIG_AMP (volts-mode wobble) — EVERY stage of this episode verifies on the slope metric; a sub-noise-floor duty comparison would be a coin flip
+static bool hgEpVoltsMode = false;  // qualify duty average was below HuntTrigPct (volts-mode wobble) — EVERY stage of this episode verifies on the slope metric; a sub-noise-floor duty comparison would be a coin flip
 
 // Applied gain at speed r for one lever: min across that lever's pockets of (the lever's cut
 // inside the core, linear ramp across the wings, full gain outside). Continuous in r, so there
@@ -829,11 +833,11 @@ void runHuntGovernor() {
   // Watching: qualification. HG_QUALIFY_SCANS consecutive scans of hunt signature at a steady
   // speed open a test; speed reference is the first confirming scan's mean. A scan qualifies on
   // the duty signature OR on the D-attributed form: when the D-term is sign-alternating, the duty
-  // amplitude bar drops to HG_TRIG_AMP_D and the peakiness ratio relaxes to 2x — the alternation
+  // amplitude bar drops to HuntTrigPct x HG_TRIG_D_FRAC and the peakiness ratio relaxes to 2x — the alternation
   // itself is the periodicity evidence (broadband load noise never alternates the trim).
-  bool kiHunt = (aPk > HG_TRIG_AMP) && (aPk > HG_TRIG_RATIO * aMed);
+  bool kiHunt = (aPk > HuntTrigPct) && (aPk > HG_TRIG_RATIO * aMed);
   bool dHunt = (scanFlips >= 1) && (g_huntKdScale > 0.05f)
-               && (aPk > HG_TRIG_AMP_D) && (aPk > 2.0f * aMed);
+               && (aPk > HuntTrigPct * HG_TRIG_D_FRAC) && (aPk > 2.0f * aMed);
   if ((kiHunt || dHunt) && scanRpm >= HG_RPM_MIN
       && (hgConfirmCnt == 0 || fabsf(scanRpm - hgQualRpm0) <= hgQualRpm0 * (float)HuntSteadyPct / 100.0f)) {
     if (hgConfirmCnt == 0) {
@@ -862,7 +866,7 @@ void runHuntGovernor() {
       // inner-Ki lever is three-for-three falsified on outer-loop-driven variants (idle-hunt
       // memory 07-24/08-21). D inside a D-pocket (scale already ~0) can't attribute: no trim, no flips.
       uint16_t flipBar = (uint16_t)fmaxf(3.0f, HG_BIN_HZ[pk] * nq * 1.6f);
-      hgEpVoltsMode = (a0 < HG_TRIG_AMP);
+      hgEpVoltsMode = (a0 < HuntTrigPct);
       bool dAttributed = (hgQualFlips >= flipBar) && (g_huntKdScale > 0.05f);
       if (!hgQualCvOk && (dAttributed || hgEpVoltsMode)) {
         // Both slope-judged rungs verify against hgSlope0, which is these qualify scans' average —
