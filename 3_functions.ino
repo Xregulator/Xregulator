@@ -65,7 +65,7 @@ enum Csv1Index {
   CSV1_cvKdFiltV,        // IBV smoothed by CvKdVoltFiltTC (V ×100) — the D term's slope input; "Voltage for D term" trace
   CSV1_huntDerate,       // hunt-governor live Ki derate (×100; 100 = full gain)
   CSV1_huntFreqHz,       // hunt-governor last confirmed wobble frequency (Hz ×100; 0 = none seen this session). Rides CSV1 rather than CSV4 so the Diag live row can never show a fresh derate beside a stale frequency
-  CSV1_huntState,        // hunt-governor state: 0 watching (gain follows the pocket map), 1 testing a cut, 3 cooldown after a failed test (2 unused since v2)
+  CSV1_huntState,        // hunt-governor state: 0 watching (gain follows the pocket map), 1 testing a current-loop gain (Ki) cut, 3 cooldown after a failed test, 4 testing with the voltage damper (D-term) paused (2 unused since v2)
 
   CSV1_FIELD_COUNT  // = 49
 };
@@ -677,6 +677,10 @@ enum Csv2Index {
   CSV2_ft_n2kParse_win,   // NMEA2000.ParseMessages worst µs (window) — RX drain, scales with bus traffic
   CSV2_ft_n2kParse_ses,   // NMEA2000.ParseMessages worst µs (session)
   CSV2_huntKdScale,       // damper D-lever multiplier ×100 (100 = D-term running, 0 = paused for a test / mapped off at this speed)
+  CSV2_n183Sentences,     // NMEA 0183 checksum-valid sentences received since boot (any type)
+  CSV2_n183ChecksumErrs,  // NMEA 0183 sentences that failed checksum — climbs on wrong polarity or a noisy line
+  CSV2_ft_ReadNMEA0183_win,  // NMEA 0183 drain worst us (window) — the 0.5 ms control-loop budget check
+  CSV2_ft_ReadNMEA0183_ses,  // NMEA 0183 drain worst us (session)
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -703,7 +707,9 @@ enum Csv4Index {
   CSV4_currentNMPG,             // live fuel economy (naut mi/gal ×100)
   CSV4_ctrlLimiter,             // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty, 6 protection (cap binding or recovery window) — rides NavStream so the banner tint updates at ~500ms
   CSV4_chargeStage,             // CHARGE_STAGE_* code — rides NavStream so the Plots-tab mode ribbon tracks stage changes at ~500ms (CSV2 still carries it for the thermal ring)
-  CSV4_FIELD_COUNT  // = 19
+  CSV4_n183Heading,             // NMEA 0183 decoded heading (deg ×10; -10 = nothing decoded). Separate from CSV4_HeadingNMEA, which is the NMEA2000 source.
+  CSV4_n183HdgRef,              // reference frame of the above: 0 none, 1 magnetic, 2 true
+  CSV4_FIELD_COUNT  // = 21
 };
 
 enum Csv3Index {
@@ -1098,6 +1104,9 @@ enum Csv3Index {
   CSV3_HuntWingPct,            // damper pocket taper width, % of speed per side
   CSV3_HuntCooldownMin,        // damper retest cooldown after a failed test (min)
   CSV3_HuntSteadyPct,          // damper engine-speed steadiness tolerance (%)
+  CSV3_HuntQualifyScans,       // damper wobble-confirm scan count (1.6 s each)
+  CSV3_NMEA0183Baud,           // NMEA 0183 serial baud (4800 / 9600 / 19200 / 38400)
+  CSV3_NMEA0183Invert,         // NMEA 0183 UART polarity: 0 RS-232-level talker, 1 TTL-level talker
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1138,8 +1147,9 @@ enum TsIndex {
   TS_N2kSoc,        // received DC Detailed Status (PGN 127506) staleness
   TS_Dvcc,          // DVCC follow: received charge-limit (CVL/CCL) stream staleness
   TS_WeatherFetch,  // age of the last successful solar-forecast fetch (Open-Meteo)
+  TS_N183,          // NMEA 0183 serial receive staleness (any checksum-valid sentence)
 
-  TS_FIELD_COUNT  // = 34
+  TS_FIELD_COUNT  // = 35
 };
 
 
@@ -2109,6 +2119,18 @@ static String perfUploadBuf;
 static String altUploadBuf;   // same, for /altUploadFront (alternator-health Load CSV)
 static String importConfigBuf;   // body accumulator for POST /importConfig (config sharing)
 
+// Editing the DVCC source dialect or the instance filter points the follower at a different
+// authority, so everything decoded from the old one has to go and the new one must settle fresh.
+static void dvccResetAuthority() {
+  dvccRxCvl = dvccRxCcl = NAN;  // clear the old dialect's values; a new authority must settle fresh
+  dvccRxLastMs = 0;
+  dvccRxSrcAddr = 255;
+  dvccCvlV = dvccCclA = NAN;
+  if (dvccState != 5) dvccState = (dvccEn == 1) ? 1 : 0;  // preserve an UNTRUSTED latch across source edits
+  dvccCfgChanged = true;  // dvccTick also clears its decode-side state (sender lock, flap history)
+  dataTimestamps[IDX_DVCC] = 0;
+}
+
 void setupServer() {
 
   static bool serverInitialized = false;
@@ -2430,6 +2452,17 @@ void setupServer() {
               PidLogEntry e;
               memcpy(&e, &pidLog[idx], sizeof(PidLogEntry));
 
+              // No battery shunt -> battI is INA input noise and dBcur_dt its slope. Empty cells,
+              // not numbers: this file gets loaded into pandas and read as ground truth.
+              char dBcurS[16], battIS[16];
+              if (HAS_BATT_SHUNT) {
+                snprintf(dBcurS, sizeof(dBcurS), "%.2f", e.dBcur_dt);
+                snprintf(battIS, sizeof(battIS), "%.3f", e.battI);
+              } else {
+                dBcurS[0] = '\0';
+                battIS[0] = '\0';
+              }
+
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
                 "%lu,"
@@ -2446,7 +2479,7 @@ void setupServer() {
                 "%.4f,%.4f,"   // voltageKp, voltageKi
                 "%.3f,"  // battV_filt
                 "%u,%u,"          // flags, ovFlags
-                "%.2f,%.3f,"      // dBcur_dt, battI
+                "%s,%s,"          // dBcur_dt, battI (empty when no battery shunt)
                 "%d,%d,%d,"       // ch1IntervalMs, voltLoopIntervalMs, inaIntervalMs
                 "%.3f,%.3f\n",     // mExcessEma, iExcessThreshold (A)
                 (unsigned long)e.ts,
@@ -2481,8 +2514,8 @@ void setupServer() {
                 e.battV_filt,
                 (unsigned)e.flags,
                 (unsigned)e.ovFlags,
-                e.dBcur_dt,
-                e.battI,
+                dBcurS,
+                battIS,
                 (int)e.ch1IntervalMs,
                 (int)e.voltLoopIntervalMs,
                 (int)e.inaIntervalMs,
@@ -2590,26 +2623,42 @@ void setupServer() {
     // Pause the tap while copying out: the oldest entries — serialized first — are exactly the
     // slots a concurrent write overwrites next, and a torn line (one frame's id, another's data)
     // would corrupt the decode ground truth this endpoint exists to provide. The tap drops
-    // frames while paused (a few ms; diagnostics-only ring).
+    // frames only for the raw memcpy below, not for the ~4600 snprintf calls that format it —
+    // those run with the tap live, off a private copy.
+    // Setting the pause and reading the head/count pair under dvccCapMux is what closes the
+    // handshake: the tap takes the same lock around its whole slot write, so once this critical
+    // section exits with the pause set, no write can be in flight and the ring is frozen.
+    portENTER_CRITICAL(&dvccCapMux);
     dvccCapPause = true;
     uint16_t cnt = dvccCapCount;
     uint16_t head = dvccCapHead;
+    portEXIT_CRITICAL(&dvccCapMux);
+    DvccCapEntry *snap = (DvccCapEntry *)ps_malloc((size_t)cnt * sizeof(DvccCapEntry));
+    if (!snap) {
+      dvccCapPause = false;
+      request->send(503, "text/plain", "capture unavailable - out of memory");
+      return;
+    }
+    uint16_t start = (uint16_t)((head + DVCC_CAP_N - cnt) % DVCC_CAP_N);
+    uint16_t run = (uint16_t)((start + cnt > DVCC_CAP_N) ? (DVCC_CAP_N - start) : cnt);  // entries before the ring wraps
+    memcpy(snap, dvccCapRing + start, (size_t)run * sizeof(DvccCapEntry));
+    if (run < cnt) memcpy(snap + run, dvccCapRing, (size_t)(cnt - run) * sizeof(DvccCapEntry));
+    dvccCapPause = false;
     size_t cap = (size_t)cnt * 44 + 64;
     char *buf = (char *)ps_malloc(cap);
     if (!buf) {
-      dvccCapPause = false;
+      free(snap);
       request->send(503, "text/plain", "capture unavailable - out of memory");
       return;
     }
     size_t n = 0;
     for (uint16_t i = 0; i < cnt && n + 44 < cap; i++) {
-      uint16_t idx = (uint16_t)((head + DVCC_CAP_N - cnt + i) % DVCC_CAP_N);
-      DvccCapEntry &e = dvccCapRing[idx];
+      const DvccCapEntry &e = snap[i];
       n += (size_t)snprintf(buf + n, cap - n, "%lu %08lX %u ", (unsigned long)e.ms, (unsigned long)e.id, (unsigned)e.len);
       for (uint8_t b = 0; b < e.len && b < 8; b++) n += (size_t)snprintf(buf + n, cap - n, "%02X", e.data[b]);
       if (n < cap - 1) buf[n++] = '\n';
     }
-    dvccCapPause = false;
+    free(snap);  // both buffers are PSRAM; hand the ~10 KB copy back before the response holds the text
     // Streamed straight out of PSRAM, same pattern as /huntledger — a char* send() would copy
     // the whole dump into an internal-heap String. shared_ptr deleter frees on any completion path.
     std::shared_ptr<char> sp(buf, free);
@@ -4860,6 +4909,28 @@ void setupServer() {
       inputMessage = request->getParam("NMEA0183Data")->value();
       settingWrite(NK_NMEA0183Data, inputMessage.c_str());
       NMEA0183Data = inputMessage.toInt();
+      if (NMEA0183Data != 1) n183ClearHeading();  // receiver stopped: nothing will ever age this value out again
+    }
+    if (request->hasParam("NMEA0183Baud")) {
+      foundParameter = true;
+      inputMessage = request->getParam("NMEA0183Baud")->value();
+      int b = inputMessage.toInt();
+      if (b == 4800 || b == 9600 || b == 19200 || b == 38400) {  // reject anything the front end isn't specified for rather than bricking the port
+        NMEA0183Baud = b;
+        settingWrite(NK_NMEA0183Baud, String(NMEA0183Baud).c_str());
+        applyNMEA0183Serial();
+        queueConsoleMessageF("NMEA 0183 baud set to %d", NMEA0183Baud);
+      } else {
+        queueConsoleMessageF("NMEA 0183 baud must be 4800/9600/19200/38400 - %d rejected, keeping %d", b, NMEA0183Baud);
+      }
+    }
+    if (request->hasParam("NMEA0183Invert")) {
+      foundParameter = true;
+      inputMessage = request->getParam("NMEA0183Invert")->value();
+      NMEA0183Invert = (inputMessage.toInt() == 1) ? 1 : 0;
+      settingWrite(NK_NMEA0183Invert, String(NMEA0183Invert).c_str());
+      applyNMEA0183Serial();
+      queueConsoleMessageF("NMEA 0183 polarity set to %s", NMEA0183Invert ? "inverted (TTL talker)" : "normal (RS-232 talker)");
     }
     if (request->hasParam("NMEA2KData")) {
       foundParameter = true;
@@ -4980,7 +5051,14 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("dvccEn")->value();
       settingWrite(NK_dvccEn, inputMessage.c_str());
-      dvccEn = inputMessage.toInt();
+      int newDvccEn = inputMessage.toInt();
+      if (newDvccEn == 1 && dvccEn != 1) {
+        // Observe mode keeps decoding while off, so a flap latch from hours ago (e.g. a GX
+        // reboot) would convert to UNTRUSTED on the first enabled tick. dvccTick consumes this
+        // flag ahead of that check; set it BEFORE the enable lands so a tick can't interleave.
+        dvccCfgChanged = true;
+      }
+      dvccEn = newDvccEn;
       if (dvccEn != 1) {
         dvccState = 0;  // immediate clamp release — don't wait for the next brain tick
         dvccCvlV = dvccCclA = NAN;
@@ -4993,26 +5071,14 @@ void setupServer() {
       inputMessage = request->getParam("dvccSrcType")->value();
       dvccSrcType = constrain(inputMessage.toInt(), 0, 1);
       settingWrite(NK_dvccSrcType, String(dvccSrcType).c_str());
-      dvccRxCvl = dvccRxCcl = NAN;  // clear the old dialect's values; a new authority must settle fresh
-      dvccRxLastMs = 0;
-      dvccRxSrcAddr = 255;
-      dvccCvlV = dvccCclA = NAN;
-      if (dvccState != 5) dvccState = (dvccEn == 1) ? 1 : 0;  // preserve an UNTRUSTED latch across source edits
-      dvccCfgChanged = true;  // dvccTick also clears its decode-side state (sender lock, flap history)
-      dataTimestamps[IDX_DVCC] = 0;
+      dvccResetAuthority();
     }
     if (request->hasParam("dvccInst")) {
       foundParameter = true;
       inputMessage = request->getParam("dvccInst")->value();
       dvccInst = constrain(inputMessage.toInt(), 0, 250);  // RV-C DC instance range; 0 = any
       settingWrite(NK_dvccInst, String(dvccInst).c_str());
-      dvccRxCvl = dvccRxCcl = NAN;
-      dvccRxLastMs = 0;
-      dvccRxSrcAddr = 255;
-      dvccCvlV = dvccCclA = NAN;
-      if (dvccState != 5) dvccState = (dvccEn == 1) ? 1 : 0;
-      dvccCfgChanged = true;
-      dataTimestamps[IDX_DVCC] = 0;
+      dvccResetAuthority();
     }
     if (request->hasParam("dvccSilenceS")) {
       foundParameter = true;
@@ -5031,7 +5097,7 @@ void setupServer() {
       inputMessage = request->getParam("dvccCvlMin")->value();
       // Constrained + cross-checked: toFloat() of garbage is 0.0, and an empty/inverted window
       // would latch UNTRUSTED against every healthy authority while blaming the BMS.
-      float vMin = constrain(inputMessage.toFloat(), 1.0f, 70.0f);
+      float vMin = constrain(inputMessage.toFloat(), DVCC_CVL_ABS_MIN, DVCC_CVL_ABS_MAX);
       if (vMin < dvccCvlMax) {
         dvccCvlMin = vMin;
         settingWrite(NK_dvccCvlMin, String(dvccCvlMin, 2).c_str());
@@ -5042,7 +5108,7 @@ void setupServer() {
     if (request->hasParam("dvccCvlMax")) {
       foundParameter = true;
       inputMessage = request->getParam("dvccCvlMax")->value();
-      float vMax = constrain(inputMessage.toFloat(), 1.0f, 70.0f);
+      float vMax = constrain(inputMessage.toFloat(), DVCC_CVL_ABS_MIN, DVCC_CVL_ABS_MAX);
       if (vMax > dvccCvlMin) {
         dvccCvlMax = vMax;
         settingWrite(NK_dvccCvlMax, String(dvccCvlMax, 2).c_str());
@@ -6422,27 +6488,32 @@ void setupServer() {
     }
     if (request->hasParam("HuntCutPct")) {
       foundParameter = true;
-      HuntCutPct = (uint8_t)constrain(request->getParam("HuntCutPct")->value().toInt(), 25, 80);
+      HuntCutPct = (uint8_t)constrain(request->getParam("HuntCutPct")->value().toInt(), HUNT_CUT_PCT_MIN, HUNT_CUT_PCT_MAX);
       settingWrite(NK_HuntCutPct, String((int)HuntCutPct).c_str());
     }
     if (request->hasParam("HuntVerifyPct")) {
       foundParameter = true;
-      HuntVerifyPct = (uint8_t)constrain(request->getParam("HuntVerifyPct")->value().toInt(), 5, 60);
+      HuntVerifyPct = (uint8_t)constrain(request->getParam("HuntVerifyPct")->value().toInt(), HUNT_VERIFY_PCT_MIN, HUNT_VERIFY_PCT_MAX);
       settingWrite(NK_HuntVerifyPct, String((int)HuntVerifyPct).c_str());
     }
     if (request->hasParam("HuntWingPct")) {
       foundParameter = true;
-      HuntWingPct = (uint8_t)constrain(request->getParam("HuntWingPct")->value().toInt(), 5, 40);
+      HuntWingPct = (uint8_t)constrain(request->getParam("HuntWingPct")->value().toInt(), HUNT_WING_PCT_MIN, HUNT_WING_PCT_MAX);
       settingWrite(NK_HuntWingPct, String((int)HuntWingPct).c_str());
     }
     if (request->hasParam("HuntCooldownMin")) {
       foundParameter = true;
-      HuntCooldownMin = (uint8_t)constrain(request->getParam("HuntCooldownMin")->value().toInt(), 1, 60);
+      HuntCooldownMin = (uint8_t)constrain(request->getParam("HuntCooldownMin")->value().toInt(), HUNT_COOLDOWN_MIN_MIN, HUNT_COOLDOWN_MIN_MAX);
       settingWrite(NK_HuntCooldownMin, String((int)HuntCooldownMin).c_str());
+    }
+    if (request->hasParam("HuntQualifyScans")) {
+      foundParameter = true;
+      HuntQualifyScans = (uint8_t)constrain(request->getParam("HuntQualifyScans")->value().toInt(), HUNT_QUALIFY_SCANS_MIN, HUNT_QUALIFY_SCANS_MAX);
+      settingWrite(NK_HuntQualifyScans, String((int)HuntQualifyScans).c_str());
     }
     if (request->hasParam("HuntSteadyPct")) {
       foundParameter = true;
-      HuntSteadyPct = (uint8_t)constrain(request->getParam("HuntSteadyPct")->value().toInt(), 1, 10);
+      HuntSteadyPct = (uint8_t)constrain(request->getParam("HuntSteadyPct")->value().toInt(), HUNT_STEADY_PCT_MIN, HUNT_STEADY_PCT_MAX);
       settingWrite(NK_HuntSteadyPct, String((int)HuntSteadyPct).c_str());
     }
     if (request->hasParam("cvRecovSec")) {  // retired timed-window knob — writes the inert global (UI field removed)
@@ -7326,6 +7397,7 @@ void setupServer() {
       ft_rai_imu.worstSession = 0;
       ft_updateAccelMetrics.worstSession = 0;
       ft_ReadVEData.worstSession = 0;
+      ft_ReadNMEA0183.worstSession = 0;
       ft_altHealth.worstSession = 0;
       ft_altFold.worstSession = 0;
       ft_boatPerf.worstSession = 0;
@@ -7334,6 +7406,8 @@ void setupServer() {
       ft_n2kParse.worstSession = 0;
       n2kTxCount = 0;
       n2kTxDropCount = 0;
+      n183SentenceCount = 0;
+      n183ChecksumErrCount = 0;
       ft_huntGov.worstSession = 0;
       VeTime2 = 0;
       cpuLoadCore0Max = 0;
@@ -8184,8 +8258,13 @@ void setupServer() {
           if (st->lpos >= st->llen) {
             if (st->idx >= cvpfBufCount) break;   // fully drained → return w (0 on the final call)
             CvPlantFitSample &s = cvpfBuf[st->idx++];
-            st->llen = snprintf(st->line, sizeof(st->line), "%.3f,%.4f,%.3f,%.3f\n",
-                                (s.tMs - st->t0) / 1000.0f, s.v, s.iBat, s.iAlt);
+            // No battery shunt -> iBat is INA input noise. Empty cell; the fit itself already runs
+            // off ΔI_alt in that mode (cvFitSinglePulse noShunt path), so nothing here needs it.
+            char iBatS[16];
+            if (HAS_BATT_SHUNT) snprintf(iBatS, sizeof(iBatS), "%.3f", s.iBat);
+            else                iBatS[0] = '\0';
+            st->llen = snprintf(st->line, sizeof(st->line), "%.3f,%.4f,%s,%.3f\n",
+                                (s.tMs - st->t0) / 1000.0f, s.v, iBatS, s.iAlt);
             st->lpos = 0;
           }
           while (st->lpos < st->llen && w < maxLen) out[w++] = (uint8_t)st->line[st->lpos++];
@@ -8947,7 +9026,7 @@ void SendWifiData() {
                                SafeInt(rpmOut),
                                SafeInt(ch3Out, 100),
                                SafeInt(ibvOut, 100),
-                               SafeInt(bcurOut, 100),
+                               HAS_BATT_SHUNT ? SafeInt(bcurOut, 100) : ROLL_EMPTY,   // no shunt -> "not available", never INA input noise
                                SafeInt(VictronVoltage, 100),
                                SafeInt(LoopTime),
                                SafeInt(WifiHeartBeat),
@@ -8989,7 +9068,7 @@ void SendWifiData() {
                                SafeInt(g_cvKdFiltV, 100),      // CSV1_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC (V ×100)
                                SafeInt(g_huntDerate, 100),     // CSV1_huntDerate — hunt-governor live Ki derate (×100)
                                SafeInt(g_huntFreqHz, 100),     // CSV1_huntFreqHz — last confirmed wobble frequency (Hz ×100)
-                               (int)g_huntState                // CSV1_huntState — 0 watching, 1 testing, 3 cooldown (2 unused since v2)
+                               (int)g_huntState                // CSV1_huntState — 0 watching, 1 testing a current-loop gain (Ki) cut, 3 cooldown, 4 testing with the voltage damper (D-term) paused (2 unused since v2)
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
@@ -9029,7 +9108,7 @@ void SendWifiData() {
     int payload4Len = snprintf(payload4, PAYLOAD4_SIZE,
                                "%d,"  // CSV4_FIELD_COUNT
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV4_FIELD_COUNT,
                                SafeInt(HeadingNMEA),                     // CSV4_HeadingNMEA
@@ -9050,7 +9129,9 @@ void SendWifiData() {
                                SafeInt(currentFuelGPH, 100),             // CSV4_currentFuelGPH
                                SafeInt(currentNMPG, 100),                // CSV4_currentNMPG
                                (int)ctrlLimiter,                         // CSV4_ctrlLimiter -> banner limiter code
-                               SafeInt(chargeStageDisplay)               // CSV4_chargeStage -> Plots-tab mode ribbon
+                               SafeInt(chargeStageDisplay),              // CSV4_chargeStage -> Plots-tab mode ribbon
+                               SafeInt(n183HeadingDeg, 10),              // CSV4_n183Heading (deg ×10; -1 stays -10)
+                               (int)n183HdgRef                           // CSV4_n183HdgRef
     );
     if (payload4Len < 0 || payload4Len >= PAYLOAD4_SIZE) {
       Serial.printf("payload4 truncated or format error: %d\n", payload4Len);
@@ -9140,12 +9221,13 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d\n",   // +4 NMEA 0183: sentences, checksum errors, drain worst us window/session
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
                                SafeInt(RPMMax),
-                               SafeInt(SOC_percent),
+                               HAS_BATT_SHUNT ? SafeInt(SOC_percent) : ROLL_EMPTY,   // no shunt -> coulomb counting is off, the value is a frozen NVS leftover
                                SafeInt((double)EngineRunTime * 100.0 / 3600.0, 1),    // double: int math overflows (UB) at 5,965 engine-hours
                                SafeInt((double)AlternatorOnTime * 100.0 / 3600.0, 1),
                                SafeInt(AlternatorFuelUsed, 100),
@@ -9341,7 +9423,7 @@ void SendWifiData() {
                                SafeInt(imu_heel_deviation_120s, 100),
                                SafeInt(imu_pitch_deviation_120s, 100),
                                SafeInt(imu_heading_swing_120s, 10),
-                               SafeInt(g_dBcur_dt, 10),
+                               HAS_BATT_SHUNT ? SafeInt(g_dBcur_dt, 10) : ROLL_EMPTY,
                                (int)g_loadDumpActive,
                                SafeInt(ft_updateAccelMetrics.worstWindow),
                                SafeInt(ft_updateAccelMetrics.worstSession),
@@ -9723,7 +9805,11 @@ void SendWifiData() {
                                SafeInt(ft_dvcc.worstSession),
                                SafeInt(ft_n2kParse.worstWindow),
                                SafeInt(ft_n2kParse.worstSession),
-                               (int)lroundf(g_huntKdScale * 100.0f));
+                               (int)lroundf(g_huntKdScale * 100.0f),
+                               (int)n183SentenceCount,
+                               (int)n183ChecksumErrCount,
+                               SafeInt(ft_ReadNMEA0183.worstWindow),
+                               SafeInt(ft_ReadNMEA0183.worstSession));
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
@@ -9793,7 +9879,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d\n",
+                               "%d,%d,%d,%d,%d,%d,"
+                               "%d,%d\n",   // +2 NMEA 0183: baud, polarity
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -10181,7 +10268,10 @@ void SendWifiData() {
                                (int)HuntVerifyPct,
                                (int)HuntWingPct,
                                (int)HuntCooldownMin,
-                               (int)HuntSteadyPct);
+                               (int)HuntSteadyPct,
+                               (int)HuntQualifyScans,
+                               (int)NMEA0183Baud,
+                               (int)NMEA0183Invert);
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;
@@ -10198,7 +10288,7 @@ void SendWifiData() {
   if (!sentSomething && now - lastTimestampSend >= 3000 && events.count() > 0) {
 
     static char *timestampPayload = nullptr;
-    static const size_t TIMESTAMP_PAYLOAD_SIZE = 400;
+    static const size_t TIMESTAMP_PAYLOAD_SIZE = 512;  // 36 fields; the weather field alone can be 10 digits, and an overflow kills TS until reboot
     if (!timestampPayload) {
       timestampPayload = (char *)ps_malloc(TIMESTAMP_PAYLOAD_SIZE);  // allocated to PSRAM
       if (!timestampPayload) {
@@ -10207,7 +10297,7 @@ void SendWifiData() {
       }
     }
     int timestampPayloadLen = snprintf(timestampPayload, TIMESTAMP_PAYLOAD_SIZE,
-                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
                                        (unsigned long)TS_FIELD_COUNT,
                                        (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),
                                        (dataTimestamps[IDX_LATITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LATITUDE_NMEA]),
@@ -10245,7 +10335,8 @@ void SendWifiData() {
                                        // Own "never" sentinel: a forecast age of 999999 ms is only
                                        // 17 min, well inside the normal 6-hour refresh interval, so
                                        // the shared sensor sentinel would read as a real age here.
-                                       (weatherLastUpdate == 0) ? 4294967295UL : (unsigned long)(now - weatherLastUpdate)
+                                       (weatherLastUpdate == 0) ? 4294967295UL : (unsigned long)(now - weatherLastUpdate),
+                                       (dataTimestamps[IDX_N183] == 0) ? 999999 : (now - dataTimestamps[IDX_N183])
     );
     if (timestampPayloadLen < 0 || timestampPayloadLen >= TIMESTAMP_PAYLOAD_SIZE) {
       Serial.printf("timestampPayload truncated or format error: %d\n", timestampPayloadLen);

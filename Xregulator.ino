@@ -232,6 +232,7 @@ double altTrendBaselineSec = 0.0;   // EngineRunTime_AllTime at last "Start Over
 static float   altLive_rpm = 0, altLive_exc = 0, altLive_amps = 0, altLive_pred = 0;
 static float   altLive_vbus = 0, altLive_tF = 0, altLive_duty = 0;   // filtered fold outputs for the 1 Hz evaluator
 static float   altLive_gAmps = 0;          // graded amps: episode boxcar average (same statistic the records store)
+static float   altTempSlopeFMin = 0;       // case-temp slope (F/min, fast-slow EMA pair in the fold) — thermal-transient tag
 static float   altLive_pct = 0;            // live output-% = graded amps ÷ LWLR prediction (NO clamp; may exceed 100)
 static bool    altRefOk = false;           // state is MEASURED/ESTIMATED → the % is trustworthy
 static float   altRefDist = 999.0f;        // normalized distance to nearest support point (diagnostics)
@@ -1458,7 +1459,17 @@ int AmpSensorRange = 1;    // 0=±200A, 1=±300A (default), 2=±500A — hall ef
 int LimpHome = 0;          // 1 will set to limp home mode, whatever that gets set up to be
 int resolution = 12;       // for OneWire temp sensor measurement
 int VeData = 0;            // Set to 1 if VE serial data exists
-int NMEA0183Data = 0;      // Set to 1 if NMEA serial data exists doesn't do anything yet
+int NMEA0183Data = 0;      // Master switch for the NMEA 0183 serial receiver: only 1 lets the timed loop call ReadNMEA0183Data (which also self-checks it); turning it off clears any held 0183 heading, since nothing would ever age that value out again
+// ── NMEA 0183 receive (Serial2 / GPIO6, its own opto channel — nothing else on the board touches that pin) ──
+int NMEA0183Baud = 19200;         // 4800 = standard 0183 talker, 9600, 19200 = YachtDevices combined out, 38400 = AIS/HS
+int NMEA0183Invert = 0;           // UART invert flag. 0 suits an RS-232-level talker: its mark idles negative, the opto LED
+                                  // stays dark and the 13k pull-up holds the line high. 1 suits a TTL-level talker, which
+                                  // idles high, lights the LED and pulls the open collector low — same case as VE.Direct.
+float n183HeadingDeg = -1.0f;     // last heading decoded from HDT/THS/HDG/HDM; -1 = nothing decoded yet
+uint8_t n183HdgRef = 0;           // reference frame of n183HeadingDeg: 0 none, 1 magnetic, 2 true. Never conflate the two.
+uint32_t n183SentenceCount = 0;   // checksum-valid sentences of ANY type — proves the wiring even for talkers we don't decode
+uint32_t n183ChecksumErrCount = 0;  // failed checksum: right baud but wrong polarity/noise usually shows up here first
+void n183ClearHeading();          // defined in 5_functions; the master-switch handler in 3_functions calls it
 // ── HARD OVER-CURRENT PROTECTION ─────────────────────────────
 // "Group 0" in UI = hardware overcurrent trip; HardOCEnable is its group toggle (ignores the global protections flag)
 float HardOCTripAmps = 160.0f;   // derived: MaxTableValue + 10A — recomputed at boot and on MaxTableValue change, not persisted
@@ -2851,6 +2862,7 @@ FuncTiming ft_rai_bmp_state;       // BMP388 state machine — cost per state st
 FuncTiming ft_rai_imu;             // IMU FIFO drain block
 FuncTiming ft_updateAccelMetrics;  // accel ring-buffer processing (updateAccelMetrics)
 FuncTiming ft_ReadVEData;
+FuncTiming ft_ReadNMEA0183;  // NMEA 0183 drain — the number that proves the 0.5 ms control-loop budget is held
 FuncTiming ft_altHealth;
 FuncTiming ft_altFold;     // 200 Hz alt fold (IDW eval cost) — distinct from ft_altHealth (SSE wrapper)
 FuncTiming ft_boatPerf;
@@ -2935,7 +2947,7 @@ FuncTiming *const ftBlameReg[] = {
   &ft_uploadSensorHistory, &ft_uploadBufferedRecords, &ft_buildConfigPayload,
   &ft_dumpLongTermRing, &ft_faMatrixFlush, &ft_fastAltDrain, &ft_faDetector,
   &ft_zeroLogService, &ft_bhFlushCapNVS, &ft_kneeLearnService, &ft_n2kTx, &ft_dvcc,
-  &ft_n2kParse
+  &ft_n2kParse, &ft_ReadNMEA0183
 };
 constexpr uint8_t FT_BLAME_N = sizeof(ftBlameReg) / sizeof(ftBlameReg[0]);
 
@@ -3981,6 +3993,7 @@ uint8_t HuntVerifyPct = 15;    // required ripple reduction (%) for a test to pa
 uint8_t HuntWingPct = 15;      // pocket edge taper width, % of speed beyond each core end over which gain ramps linearly back to full. Clamp [5,40]
 uint8_t HuntCooldownMin = 10;  // minutes after a failed test before another test may open. Clamp [1,60]
 uint8_t HuntSteadyPct = 3;     // engine-speed steadiness tolerance (%): scan-mean RPM must stay within this of the episode reference through qualify+verify, else the episode aborts with nothing kept. Clamp [1,10]
+uint8_t HuntQualifyScans = 3;  // consecutive hunt+steady scans (1.6 s each) required to confirm a wobble and open a test; their average is the verify baseline. More scans = slower but surer detection. Clamp [2,6]
 float cvRecovSec = 2.5f;     // retired timed-window ramp span, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovEmaxV = 0.25f;  // retired timed-window error cap, inert; NVS key + CSV3 slot kept (never repurpose)
 float cvRecovKiMax = 5.0f;   // refill Ki multiplier at the moment of release (M tapers linearly to 1× as the deficit heals). Clamp [1,10]
@@ -4828,8 +4841,10 @@ enum DataIndex {
   IDX_N2K_BATT,                  // 38 - NMEA2k received Battery Status (PGN 127508) V/A/T
   IDX_N2K_SOC,                   // 39 - NMEA2k received DC Detailed Status (PGN 127506) SOC/SOH
   IDX_DVCC,                      // 40 - DVCC follow: received charge-limit (CVL/CCL) stream
+  IDX_N183,                      // 41 - NMEA 0183 serial receive (any checksum-valid sentence)
+  IDX_N183_HDG,                  // 42 - NMEA 0183 heading only: IDX_N183 stays fresh on a GPS-only talker
   // Keep this last and increment when new added
-  MAX_DATA_INDICES = 41
+  MAX_DATA_INDICES = 43
 };
 
 unsigned long dataTimestamps[MAX_DATA_INDICES];  // Uses the enum size automatically
@@ -5107,7 +5122,10 @@ struct DvccCapEntry {
 DvccCapEntry *dvccCapRing = nullptr;  // ps_malloc'd in initDvccCapture() (setup)
 uint16_t dvccCapHead = 0;             // next write slot; wraps
 uint16_t dvccCapCount = 0;            // total valid (saturates at DVCC_CAP_N)
-volatile bool dvccCapPause = false;   // /dvccCapture (async_tcp task) sets while serializing so the loop-task tap can't overwrite an entry mid-read
+volatile bool dvccCapPause = false;   // /dvccCapture (async_tcp task) sets while snapshotting so the loop-task tap can't overwrite an entry mid-read
+// Set/read of dvccCapPause and of the head/count pair happens under this spinlock, and so does
+// the tap's slot write - that is what makes the pause handshake safe across the two cores.
+static portMUX_TYPE dvccCapMux = portMUX_INITIALIZER_UNLOCKED;
 void initDvccCapture();
 void dvccTick();
 void dvccRawFrameTap(unsigned long id, unsigned char len, const unsigned char *buf);
@@ -5537,6 +5555,7 @@ void setup() {
   memset(&ft_checkTimeSync, 0, sizeof(FuncTiming));
   memset(&ft_updateAccelMetrics, 0, sizeof(FuncTiming));
   memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
+  memset(&ft_ReadNMEA0183, 0, sizeof(FuncTiming));
   memset(&ft_altHealth, 0, sizeof(FuncTiming));
   memset(&ft_altFold, 0, sizeof(FuncTiming));
   memset(&ft_boatPerf, 0, sizeof(FuncTiming));
@@ -6295,6 +6314,7 @@ void loop() {
         VeTime = ft_ReadVEData.worstWindow;
         VeTime2 = ft_ReadVEData.worstSession;
       }
+      if (NMEA0183Data == 1 && hardwarePresent == 1) TIMED_CALL(ft_ReadNMEA0183, ReadNMEA0183Data());  // deadline-capped inside; see the HARD REAL-TIME CONTRACT note on the function
       // n2kTxEnable also forces ParseMessages: node mode needs it for address claim + heartbeat
       // servicing even if the user left the receive toggle off. dvccEn forces it too: the follow
       // feature must keep hearing the authority even with the general receive toggle off.
@@ -6618,6 +6638,7 @@ void loop() {
     ft_rai_imu.worstWindow = 0;
     ft_updateAccelMetrics.worstWindow = 0;
     ft_ReadVEData.worstWindow = 0;
+    ft_ReadNMEA0183.worstWindow = 0;
     ft_altHealth.worstWindow = 0;
     ft_altFold.worstWindow = 0;
     ft_boatPerf.worstWindow = 0;

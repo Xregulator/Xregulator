@@ -210,11 +210,14 @@ void recomputeCcGains() {
 #define HG_TRIG_AMP 0.5f         // % duty — hunt logs measured 1.17–1.48, quiet-log median ~0.4
 #define HG_TRIG_RATIO 3.0f       // peak vs median of other bins — rejected a 2.22% broadband load transient amplitude alone would have flagged
 #define HG_TRIG_AMP_D 0.15f      // relaxed duty bar for a D-attributed scan: the D-driven mode lives in VOLTS and its duty amplitude can sit below the quiet-log floor (08-21: 0.27% duty, 0.33 V p-p). Safe below the 0.4 quiet median ONLY because the kdTrim alternation requirement is the real gate — a quiet log has no alternations
-#define HG_QUALIFY_SCANS 3       // consecutive hunt+steady scans to open a test; baseline = their average (the HuntVerifyPct bar needs an averaged reference — single windows jitter more than 15% on their own)
+// Qualify-scan count is the HuntQualifyScans setting (default 3): consecutive hunt+steady scans to
+// open a test; baseline = their average (the HuntVerifyPct bar needs an averaged reference —
+// single windows jitter more than 15% on their own)
 #define HG_BLIND_SCANS 4         // clean scans discarded after the cut while the 6.4 s window refills with post-cut data
 #define HG_READ_SCANS 3          // clean scans averaged for the verify reading
 #define HG_EP_TIMEOUT_SCANS 25   // ~40 s — contamination can freeze clean-scan progress; bail with nothing kept
 #define HG_RPM_MIN 100.0f        // below this there is no usable speed axis (no tach signal) — the damper stays inert
+#define HG_CV_COVER_MIN 0.75f    // share of a scan's ticks that must be in voltage-regulated mode (CV) before that scan's |cvDSlope| mean counts as evidence. The metric only accumulates in CV, so an uncovered scan averages to 0.0 and would clear ANY improvement bar on no data at all. 0.75 of a 1.6 s scan over HG_READ_SCANS gives >= 3.6 s of CV — longer than one period of the slowest bin (0.31 Hz), so the average cannot sit entirely inside a quiet phase of the cycle
 #define HG_MAX_POCKETS 4         // merging keeps the real count low; least-recently-confirmed evicted if ever exceeded
 static const float HG_BIN_HZ[HG_NBINS] = { 0.31f, 0.47f, 0.70f, 1.05f, 1.56f, 2.34f };
 static float hgRing[HG_RING_N];  // 512 B, deliberately internal: control-adjacent and far below the PSRAM-rule size
@@ -413,6 +416,7 @@ static float hgRpmMapEma = 0.0f;
 // and the qualify-span alternation count that attributes the episode to the D-term
 static float hgSlope0 = 0.0f, hgQualSlopeSum = 0.0f, hgReadSlopeSum = 0.0f;
 static uint16_t hgQualFlips = 0;
+static bool hgQualCvOk = false;  // every accumulated qualify scan met HG_CV_COVER_MIN — a slope-judged episode must not OPEN without it, because hgSlope0 comes from those same scans
 static bool hgEpVoltsMode = false;  // qualify duty average was below HG_TRIG_AMP (volts-mode wobble) — EVERY stage of this episode verifies on the slope metric; a sub-noise-floor duty comparison would be a coin flip
 
 // Applied gain at speed r for one lever: min across that lever's pockets of (the lever's cut
@@ -575,6 +579,44 @@ void huntMapClearAll(const char *why) {
   queueConsoleMessageF("Oscillation damper: learned speed map and episode record cleared (%s)", why);
 }
 
+// Abort an episode in flight: restore BOTH levers to the map BEFORE queuing so the record's
+// derateExit is the true exit gain, then queue a lever-aware record. A D-rung abort carries the
+// V/s movement baseline and its own verdict token, matching damped-dterm / dterm-no-resp — the
+// plain "aborted" shape is a duty swing and the web list renders it as a gain cut. aEnd 0.0 means
+// "no post reading exists", never a measured zero.
+static void hgEpisodeAbort() {
+  bool dRung = (g_huntState == 4);
+  g_huntDerate = huntMapGain(hgRpmMapEma);
+  recomputeCcGains();
+  g_huntKdScale = huntMapGainD(hgRpmMapEma);
+  hgLedgerQueue(dRung ? "aborted-dterm" : "aborted", g_huntFreqHz, dRung ? hgSlope0 : hgEpA0, 0.0f, 1);
+  g_huntState = 0;
+}
+
+// Arm a test: zero the episode accumulators, take the baselines the verdict is measured against,
+// pin ONE lever at its cut, and enter that rung. state 4 pins the CV D-term and ignores kiCut;
+// state 1 pins the inner Ki gain, which is what the recompute is for. refRpm is the episode's
+// steadiness reference — the chain out of a failed D test passes the D stage's own reference back
+// in, so one reference spans both rungs. hgEpVoltsMode / hgQualCvOk describe the qualify span, not
+// the rung, and must stay untouched here.
+static void hgEpisodeOpen(uint8_t state, float a0, float slope0, float refRpm, float kiCut) {
+  hgEpA0 = a0;
+  hgSlope0 = slope0;
+  hgEpRefRpm = refRpm;
+  hgEpScans = 0;
+  hgEpCleanScans = 0;
+  hgReadSum = 0.0f;
+  hgReadSlopeSum = 0.0f;
+  hgReadN = 0;
+  if (state == 4) {
+    g_huntKdScale = 0.0f;  // Ki untouched — it keeps following its map during the D stage
+  } else {
+    g_huntDerate = kiCut;
+    recomputeCcGains();
+  }
+  g_huntState = state;
+}
+
 // Evaluation + state machine. Called every loop() pass from Xregulator.ino; self-gates to one
 // Goertzel pass (6 bins × 128 samples, tens of µs) per HG_EVAL_EVERY control ticks. v2 flow
 // (HUNT_GOVERNOR_V2_SPEC.md): qualify (HG_QUALIFY_SCANS hunt+steady scans) → one cut to
@@ -611,12 +653,17 @@ void runHuntGovernor() {
   }
 
   // Scan-mean engine speed — the working RPM for steadiness and pocket lookup
+  uint16_t scanTicks = hgRpmCnt;  // ticks this scan — read BEFORE the drains below
   float scanRpm = hgRpmCnt ? (hgRpmSum / (float)hgRpmCnt) : 0.0f;
   hgRpmSum = 0.0f;
   hgRpmCnt = 0;
+  uint16_t scanCvTicks = hgSlopeCnt;
   float scanSlope = hgSlopeCnt ? (hgSlopeSum / (float)hgSlopeCnt) : 0.0f;  // scan-mean |cvDSlope| — D-test verify metric
   hgSlopeSum = 0.0f;
   hgSlopeCnt = 0;
+  // No verdict may ever be read off a scan set with no CV evidence: leaving voltage control stops
+  // the slope accumulator, so an uncovered scan reads 0.0 and beats any baseline by 100%.
+  bool scanCvOk = scanTicks && ((float)scanCvTicks >= HG_CV_COVER_MIN * (float)scanTicks);
   uint16_t scanFlips = hgKdFlips;  // kdTrim sign alternations this scan — D-lever attribution
   hgKdFlips = 0;
   // τ ≈ 2 scans for the map lookup — fast pocket entry; a long EMA would lag the reduction in by tens of seconds
@@ -699,11 +746,7 @@ void runHuntGovernor() {
   if (dirtyScan) {
     hgConfirmCnt = 0;
     if ((g_huntState == 1 || g_huntState == 4) && ++hgEpScans > HG_EP_TIMEOUT_SCANS) {  // contamination froze the test — bail, keep nothing
-      g_huntDerate = huntMapGain(hgRpmMapEma);  // restore BEFORE queuing — the record's derateExit must be the true exit gain
-      recomputeCcGains();
-      g_huntKdScale = huntMapGainD(hgRpmMapEma);
-      hgLedgerQueue("aborted", g_huntFreqHz, hgEpA0, 0.0f, 1);
-      g_huntState = 0;
+      hgEpisodeAbort();
     }
     return;
   }
@@ -713,11 +756,15 @@ void runHuntGovernor() {
     bool steady = (scanRpm >= HG_RPM_MIN) && (fabsf(scanRpm - hgEpRefRpm) <= hgEpRefRpm * (float)HuntSteadyPct / 100.0f);
     if (!steady || hgEpScans > HG_EP_TIMEOUT_SCANS) {
       // Couldn't verify on steady data — revert BOTH levers, keep nothing (transients never leave residue)
-      g_huntDerate = huntMapGain(hgRpmMapEma);  // restore BEFORE queuing — the record's derateExit must be the true exit gain
-      recomputeCcGains();
-      g_huntKdScale = huntMapGainD(hgRpmMapEma);
-      hgLedgerQueue("aborted", g_huntFreqHz, hgEpA0, 0.0f, 1);
-      g_huntState = 0;
+      hgEpisodeAbort();
+      return;
+    }
+    // Same treatment for a voltage-control dropout on a rung judged by the movement metric: the
+    // measurement's own regime is gone, so there is nothing to compare and nothing may be kept.
+    bool slopeJudged = (g_huntState == 4) || hgEpVoltsMode;
+    if (slopeJudged && !scanCvOk) {
+      queueConsoleMessageF("Oscillation damper: %.2f Hz wobble test abandoned — voltage regulation (CV) dropped out mid-test, so the before/after movement reading would prove nothing", g_huntFreqHz);
+      hgEpisodeAbort();
       return;
     }
     hgEpCleanScans++;
@@ -744,17 +791,8 @@ void runHuntGovernor() {
         if (g_huntDerate > cut + 0.02f) {
           // Chain to the Ki rung: the D-stage read scans are themselves a clean 3-scan average of
           // the still-present wobble, so they become the Ki test's baselines — no extra wait
-          hgEpA0 = aPost;
-          hgSlope0 = slopePost;
-          hgEpScans = 0;
-          hgEpCleanScans = 0;
-          hgReadSum = 0.0f;
-          hgReadSlopeSum = 0.0f;
-          hgReadN = 0;
-          g_huntDerate = cut;
-          recomputeCcGains();
+          hgEpisodeOpen(1, aPost, slopePost, hgEpRefRpm, cut);  // refRpm fed back in: same episode, same speed reference
           queueConsoleMessageF("Oscillation damper: pausing the voltage damper did not stop the %.2f Hz wobble — testing at %d%% current-loop gain", g_huntFreqHz, (int)HuntCutPct);
-          g_huntState = 1;
         } else {
           // Both levers exhausted at this speed — only now may the blame leave the regulator
           queueConsoleMessageF("Oscillation damper: the %.2f Hz wobble responded to neither damper lever — external cyclic load or engine issue suspected", g_huntFreqHz);
@@ -804,36 +842,43 @@ void runHuntGovernor() {
       hgQualRpmSum = 0.0f;
       hgQualSlopeSum = 0.0f;
       hgQualFlips = 0;
+      hgQualCvOk = true;
     }
     hgConfirmCnt++;
     hgA0Sum += aPk;
     hgQualRpmSum += scanRpm;
     hgQualSlopeSum += scanSlope;
+    if (!scanCvOk) hgQualCvOk = false;
     hgQualFlips = (uint16_t)fminf(65535.0f, (float)hgQualFlips + (float)scanFlips);
-    if (hgConfirmCnt >= HG_QUALIFY_SCANS) {
+    if (hgConfirmCnt >= HuntQualifyScans) {
+      float nq = (float)hgConfirmCnt;  // divisor = scans actually accumulated, so a live setting change mid-qualify can't skew the averages
       hgConfirmCnt = 0;
-      float a0 = hgA0Sum / (float)HG_QUALIFY_SCANS;
-      float refRpm = hgQualRpmSum / (float)HG_QUALIFY_SCANS;
+      float a0 = hgA0Sum / nq;
+      float refRpm = hgQualRpmSum / nq;
       g_huntFreqHz = HG_BIN_HZ[pk];
       // Lever choice by attribution: the qualify span must show at least ~half the sign
       // alternations the detected frequency would produce (2 per period; floor 3). An attributed
       // episode tests the D lever FIRST — pausing the participant is directly causal, and the
       // inner-Ki lever is three-for-three falsified on outer-loop-driven variants (idle-hunt
       // memory 07-24/08-21). D inside a D-pocket (scale already ~0) can't attribute: no trim, no flips.
-      uint16_t flipBar = (uint16_t)fmaxf(3.0f, HG_BIN_HZ[pk] * (float)HG_QUALIFY_SCANS * 1.6f);
+      uint16_t flipBar = (uint16_t)fmaxf(3.0f, HG_BIN_HZ[pk] * nq * 1.6f);
       hgEpVoltsMode = (a0 < HG_TRIG_AMP);
-      if (hgQualFlips >= flipBar && g_huntKdScale > 0.05f) {
-        hgEpA0 = a0;
-        hgSlope0 = hgQualSlopeSum / (float)HG_QUALIFY_SCANS;
-        hgEpRefRpm = refRpm;
-        hgEpScans = 0;
-        hgEpCleanScans = 0;
-        hgReadSum = 0.0f;
-        hgReadSlopeSum = 0.0f;
-        hgReadN = 0;
-        g_huntKdScale = 0.0f;  // Ki untouched — it keeps following its map during the D stage
+      bool dAttributed = (hgQualFlips >= flipBar) && (g_huntKdScale > 0.05f);
+      if (!hgQualCvOk && (dAttributed || hgEpVoltsMode)) {
+        // Both slope-judged rungs verify against hgSlope0, which is these qualify scans' average —
+        // without CV coverage it is junk, so the episode could only ever produce a garbage verdict.
+        // Refuse to open rather than open one that cannot be judged; no cooldown, so a later pass
+        // with real CV coverage still gets tested.
+        static uint32_t hgNoCvNoteMs = 0;
+        if (hgNoCvNoteMs == 0 || (int32_t)(millis() - hgNoCvNoteMs) >= 0) {
+          queueConsoleMessageF("Oscillation damper: %.2f Hz wobble at %d rpm not tested — the regulator was not holding voltage (voltage-regulated mode, CV) enough of the time to measure the voltage movement this test is judged on", g_huntFreqHz, (int)refRpm);
+          hgNoCvNoteMs = millis() + (uint32_t)HuntCooldownMin * 60000UL;
+        }
+        return;
+      }
+      if (dAttributed) {
+        hgEpisodeOpen(4, a0, hgQualSlopeSum / nq, refRpm, cut);
         queueConsoleMessageF("Oscillation damper: %.2f Hz wobble at %d rpm with the voltage damper (D-term) cycling — testing with it paused", g_huntFreqHz, (int)refRpm);
-        g_huntState = 4;
         return;
       }
       if (g_huntDerate <= cut + 0.02f) {
@@ -845,18 +890,8 @@ void runHuntGovernor() {
         g_huntState = 3;
         return;
       }
-      hgEpA0 = a0;
-      hgSlope0 = hgQualSlopeSum / (float)HG_QUALIFY_SCANS;
-      hgEpRefRpm = refRpm;
-      hgEpScans = 0;
-      hgEpCleanScans = 0;
-      hgReadSum = 0.0f;
-      hgReadSlopeSum = 0.0f;
-      hgReadN = 0;
-      g_huntDerate = cut;
-      recomputeCcGains();
+      hgEpisodeOpen(1, a0, hgQualSlopeSum / nq, refRpm, cut);
       queueConsoleMessageF("Oscillation damper: %.2f Hz wobble at %d rpm (%.1f%% field swing) — testing at %d%% current-loop gain", g_huntFreqHz, (int)refRpm, a0, (int)HuntCutPct);
-      g_huntState = 1;
     }
   } else {
     hgConfirmCnt = 0;
@@ -5642,22 +5677,34 @@ void updateChargingStage() {
     // absorption only proves the bank hit the voltage once — it says nothing about who put it there, so a
     // second charge source (or one idle-RPM sag) could otherwise burn the whole budget down and dump a
     // half-charged bank into Float. absorbWallCeiling bounds the pause so a bank that can never reach
-    // target still leaves absorption. Epoch-keyed to absorptionStartTime so every reset path
+    // target still leaves absorption (except while a followed CVL is what holds it below target — see
+    // dvccCvlHolding below). Epoch-keyed to absorptionStartTime so every reset path
     // (enter_sys_auto, Restart button, bulk entry) re-arms this without knowing it exists.
     static bool absorbClockArmed = false;
-    static uint32_t absorbClockEpoch = 0, absorbClockPrevMs = 0, absorbHeldMs = 0;
+    static uint32_t absorbClockEpoch = 0, absorbClockPrevMs = 0, absorbHeldMs = 0, absorbWallMs = 0;
     if (!absorbClockArmed || absorbClockEpoch != absorptionStartTime) {
       absorbClockArmed = true;
       absorbClockEpoch = absorptionStartTime;
       absorbHeldMs = 0;
+      absorbWallMs = 0;
       absorbClockPrevMs = now;
     }
+    // A followed charge-voltage limit (DVCC CVL) below our absorption target means the battery
+    // authority is deliberately holding the bus down (cell balancing, a cell-high event, cold-charge
+    // limiting), so the wall ceiling pauses with it — DVCC_FOLLOW_SPEC.md's "stage exits freeze
+    // naturally" rule. Without it a long clamp force-exits absorption and, with UseFloat=0, parks in
+    // IDLE with the field off while the battery is still asking for charge. Deliberately the exact
+    // predicate that applies the clamp, so a bank merely hovering below target with no clamp stays
+    // bounded. Wall time is accumulated rather than derived from absorptionStartTime so the pause
+    // cannot outlive its stage (the epoch re-arm zeroes it) or a reboot (statics come up unarmed).
+    const bool dvccCvlHolding = (dvccEn == 1) && (dvccState == 3 /*FOLLOWING*/) && !cxOwnsBatteryNow()
+                                && !isnan(dvccCvlV) && (dvccCvlV < AbsorptionVoltage);
     if (atAbsorbV) absorbHeldMs += (uint32_t)(now - absorbClockPrevMs);
+    if (!dvccCvlHolding) absorbWallMs += (uint32_t)(now - absorbClockPrevMs);
     absorbClockPrevMs = now;
     const uint32_t absorbWallCeiling = (AbsorptionTimeoutMs > (UINT32_MAX / 2)) ? UINT32_MAX
                                                                                 : (AbsorptionTimeoutMs * 2);
-    const bool timedOut = (absorbHeldMs >= AbsorptionTimeoutMs) ||
-                          ((uint32_t)(now - absorptionStartTime) >= absorbWallCeiling);
+    const bool timedOut = (absorbHeldMs >= AbsorptionTimeoutMs) || (absorbWallMs >= absorbWallCeiling);
 
     const bool tailSuppressed = HAS_BATT_SHUNT && (thermallyConstrained || !atAbsorbV);
     static bool lastTailSuppressed = false;
@@ -5685,7 +5732,8 @@ void updateChargingStage() {
         "Absorption status | battV=%.2fV absTarget=%.2fV Bcur=%s tailThresh=%.1fA | atVoltage=%.0fmin of %.0fmin%s",
         v, AbsorptionVoltage, bcurForLog(), TailCurrent_A,
         (float)absorbHeldMs / 60000.0f, (float)AbsorptionTimeoutMs / 60000.0f,
-        atAbsorbV ? "" : " (paused - below target voltage)");
+        atAbsorbV ? "" : (dvccCvlHolding ? " (paused - the battery's charge voltage limit (CVL) is holding the bus below target)"
+                                         : " (paused - below target voltage)"));
     }
 
     if (tailReached) {

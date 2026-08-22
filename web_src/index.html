@@ -341,6 +341,7 @@
     <!-- Settings Sub-tabs -->
     <div class="sub-tabs">
       <button class="sub-tab active" onclick="showSubTab('settings', 'alternator', event)">Alternator</button>
+      <button class="sub-tab" onclick="showSubTab('settings', 'engine', event)">Engine</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'battery', event)">Battery</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'boatperformance', event)">Boat</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'weathersolar', event)">Solar</button>
@@ -4174,6 +4175,20 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Detection Confirm Scans (<span id="HuntQualifyScans_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How many consecutive detector scans — one every 1.6 seconds — must agree that a wobble is present, at a steady engine speed, before a test opens. Their average becomes the before-measurement the verdict is judged against. More scans means slower but surer detection; fewer means faster response with more risk of testing a passing disturbance. The 6.4-second analysis window each scan measures over is fixed — it is the minimum length that can resolve the slowest wobble frequency.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="HuntQualifyScans" type="number" step="1" min="2" max="6" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>PID Sample Divisor (<span id="PidSampleDivisor_echo">?</span>):</span>
                     <span class="tooltip">ℹ️<span class="tooltip-box">The output current PID normally updates on every fresh current sample (~200 Hz). A 2
                         makes it update every other sample (~100 Hz), etc. Don't adjust.</span></span>
@@ -6417,6 +6432,61 @@
         // expands to include them, the wiring is already in place. -->
 
 
+        <!-- Engine Sub-tab — tach alignment and the drive ratio to the alternator. Two-way
+             linked to the pre-wizard RPM-alignment modal (script.js openRpmAlign) through the
+             CSV3 echo, so both edit the same stored values. -->
+        <div id="settings-engine" class="sub-tab-content">
+          <div class="settings-card">
+
+            <details open>
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Engine & Alternator Parameters</summary>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>RPM Scaling Factor (<span id="RPMScalingFactor_echo">?</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">Scales the tachometer signal into engine RPM. Adjust until the RPM shown
+                      here matches your engine's tachometer. Changing it erases every table and record measured against
+                      the old RPM axis, on the device and in the cloud, and requires re-commissioning. The alternator
+                      must be off.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="rpmScaleFormSubmit(this); return false;">
+                    <input name="RPMScalingFactor" type="number" step="1" min="1" max="1000000" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Pulley Ratio, Alt to Engine (<span id="PulleyRatio_echo">?</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">*** Only used for Alternator Lifetime Calcs *** Alternator RPM = Engine
+                      RPM
+                      × this ratio. Common: 2.0-3.0 </span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="PulleyRatio" type="number" step="0.01" min="1.0" max="10.0" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+            </details>
+
+          </div>
+        </div>
+
+
         <!-- Battery Settings Sub-tab -->
         <div id="settings-battery" class="sub-tab-content">
           <div class="diag-panel-tabs">
@@ -7439,7 +7509,19 @@
               </div>
             </div>
 
-            <!-- Solar Forecast Section -->
+            <!-- Shown ONLY in Access Point mode (.ap-only-row, script.js): the forecast is the one
+                 part of this tab that needs the internet. Everything else here works offline and
+                 stays reachable — the manual position, its clear button, and the array settings. -->
+            <div id="solar-forecast-offline-note" class="ap-only-row"
+              style="display: none; padding: 12px 15px; border-radius: var(--radius); margin: 20px 0; border-left: 4px solid var(--accent); background: var(--card-light); color: var(--text-dark); font-size: 14px; line-height: 1.5;">
+              <strong>The solar forecast needs an internet connection.</strong><br>
+              The regulator is running its own WiFi network (Access Point mode), so it cannot download
+              one. The position and array settings on this page still save, and the forecast picks up
+              again on its own once the regulator is back on a WiFi network with internet.
+            </div>
+
+            <!-- Solar Forecast Section — hidden in AP mode (.ap-hide-row), replaced by the note above -->
+            <div id="solar-forecast-block" class="ap-hide-row">
             <div
               style="font-weight: bold; font-size: 18px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin: 20px 0 15px 0;">
               Solar Forecast
@@ -7494,6 +7576,7 @@
               <div id="weather-forecast-age"
                 style="text-align: right; font-size: 12px; color: #888; font-style: italic;"></div>
             </div>
+            </div><!-- closes #solar-forecast-block -->
 
             <!-- Configuration Section -->
             <div style="margin-top: 30px;">
@@ -7815,6 +7898,8 @@
 
             <details class="integ-section">
               <summary class="integ-section-title">NMEA 2000<span class="integ-state">Rx <span id="integStateN2kRx">?</span> &middot; Tx <span id="integStateN2kTx">?</span></span></summary>
+
+              <p class="integ-copy">Nav, engine and battery data in and out over the 250 kbps CAN backbone. That one port is shared: the Victron VE.Can and RV-C charge limits under Battery Charge Limits over CAN below arrive on the same wire, and they are decoded whenever the receive switch here is on or the follow switch there is.</p>
 
               <div class="form-row">
                 <div class="form-label">Receive NMEA2K Data (<span id="NMEA2KData_echo">?</span>):
@@ -8173,6 +8258,65 @@
             </details>
 
             <details class="integ-section">
+              <summary class="integ-section-title">NMEA 0183<span class="integ-state"><span id="integStateN183">?</span></span></summary>
+
+              <p class="integ-copy">NMEA 0183 has its own protected serial input and its own wires, independent of VE.Direct, so both can be connected at once. Set the speed and signal type to match your talker, then watch the sentence count under Live Data &rarr; Integrations to confirm the link before trusting anything it carries.</p>
+
+              <div class="form-row">
+                <div class="form-label">NMEA 0183 Data (<span id="NMEA0183Data_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Master switch for the NMEA 0183 serial input. Off leaves the port closed and costs nothing.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="NMEA0183Data_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('NMEA0183Data_checkbox', 'NMEA0183Data', 'NMEA0183Data')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="NMEA0183Data" name="NMEA0183Data" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Serial Speed, baud (<span id="NMEA0183Baud_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Must match the talker exactly or every sentence fails its checksum. 4800 is the standard NMEA 0183 rate used by most instruments wired direct. 38400 is the high-speed rate AIS receivers and multiplexers use. 19200 is what a YachtDevices gateway sends on its combined output. If the sentence count stays at zero, this is the first thing to change.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <div class="cap-mode-toggle ab-seg-select" data-seg-name="NMEA0183Baud">
+                      <button type="button" class="cap-mode-btn" data-val="4800" onclick="abSegSelectClick(this)">4800</button>
+                      <button type="button" class="cap-mode-btn" data-val="9600" onclick="abSegSelectClick(this)">9600</button>
+                      <button type="button" class="cap-mode-btn" data-val="19200" onclick="abSegSelectClick(this)">19200</button>
+                      <button type="button" class="cap-mode-btn" data-val="38400" onclick="abSegSelectClick(this)">38400</button>
+                    </div>
+                    <input id="NMEA0183Baud_val" name="NMEA0183Baud" type="hidden" value="19200" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Signal Type (<span id="NMEA0183Invert_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Which way round the talker drives the line. Normal suits a proper NMEA 0183 / RS-232 output, where the idle state sits negative — that is what a gateway or a marine instrument sends. Inverted suits a bare 3.3 V or 5 V logic output, which idles high instead. Wrong choice looks exactly like the wrong speed: the sentence count stays at zero or the checksum error count climbs. Try the other setting before rechecking the wiring.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <div class="cap-mode-toggle ab-seg-select" data-seg-name="NMEA0183Invert">
+                      <button type="button" class="cap-mode-btn" data-val="0" onclick="abSegSelectClick(this)">Normal</button>
+                      <button type="button" class="cap-mode-btn" data-val="1" onclick="abSegSelectClick(this)">Inverted</button>
+                    </div>
+                    <input id="NMEA0183Invert_val" name="NMEA0183Invert" type="hidden" value="0" />
+                  </form>
+                </div>
+              </div>
+
+            </details>
+
+            <details class="integ-section">
               <summary class="integ-section-title">Victron VE.Direct<span class="integ-state"><span id="integStateVe">?</span></span></summary>
 
               <p class="integ-copy">Reads a Victron battery monitor or MPPT solar charger over the VE.Direct serial port. Live values appear under Live Data &rarr; Integrations.</p>
@@ -8195,18 +8339,63 @@
 
             </details>
 
-            <details class="integ-section">
-              <summary class="integ-section-title">Victron CAN (DVCC)</summary>
+            <!-- The three cards below are ONE feature: two dialect cards (what to listen for, and
+                 nothing else) plus the shared card holding how limits are vetted and applied for
+                 whichever dialect is selected. The .integ-group rail is the only cue that ties them
+                 together, so a card must never silently grow a setting that is actually shared. -->
+            <div class="integ-group">
+              <div class="integ-group-title">Battery Charge Limits over CAN</div>
+              <p class="integ-group-copy">Obeying the charge limits a managed battery, BMS or Victron GX publishes takes two parts. Pick the dialect your battery authority speaks &mdash; <strong>Victron VE.Can</strong> or <strong>RV-C</strong> &mdash; in its own card; a dialect card holds only what belongs to that dialect. Everything else is <strong>shared</strong> and lives in the Charge-Limit Follow card at the bottom of this group. Only one dialect is decoded and followed at a time.</p>
 
-              <p class="integ-copy">Victron VE.Can support listens for the charge voltage and current limits (CVL/CCL) Victron equipment exchanges over its proprietary CAN messages &mdash; the coordination Victron calls DVCC. The GX device or managed battery must share this regulator's 250 kbps NMEA2000/VE.Can port. To follow these limits, choose Victron VE.Can as the limit source under Charge-Limit Follow below, and watch the status row there to confirm the decoded numbers match what the GX itself displays before enabling follow.</p>
+            <details class="integ-section">
+              <summary class="integ-section-title">Victron CAN (DVCC)<span class="integ-state"><span id="integStateVic">?</span></span></summary>
+
+              <p class="integ-copy">Listens for the charge voltage and current limits (CVL/CCL) Victron equipment exchanges over its proprietary VE.Can messages &mdash; the coordination Victron calls DVCC. The GX device or managed battery must share this regulator's 250 kbps NMEA2000/VE.Can port, and that port has to be listening: turn on Receive NMEA2K Data in the NMEA 2000 card above, or the follow switch below. Victron messages carry no bank number, so there is nothing to filter here &mdash; the first device heard becomes the authority, and its address shows in the status row below.</p>
+
+              <div class="form-row">
+                <div class="form-label">Use as Limit Source (<span id="vicSel_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Makes Victron VE.Can the dialect this regulator decodes and follows. Same setting as Limit Source in the shared Charge-Limit Follow card &mdash; changing it here changes it there. Only one dialect is decoded at a time, and switching starts a fresh settling period.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="dvccSrcType" value="0">
+                    <button type="submit" id="vicUseBtn" class="btn-primary" onclick="submitMessage()">Use Victron VE.Can</button>
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Victron Messages (<span id="vicHeardWord_ID">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Whether Victron limit messages are actually arriving. heard = decoded within the last 20 seconds; silent = decoded earlier but nothing recently; none heard = nothing has ever decoded, so check the GX is on this same CAN backbone and that DVCC is enabled there. Only the selected dialect is decoded, so this reads "idle" while RV-C is the chosen source. The decoded numbers themselves are in the shared status row below.</span></span>
+                </div>
+                <div class="form-input">
+                  <span class="integ-live" id="vicHeardDetail_ID">&mdash;</span>
+                </div>
+              </div>
+
+              <p class="integ-note">Everything else this dialect uses is shared with RV-C and lives in the Charge-Limit Follow card below: the follow switch, decoded CVL/CCL and follow state, settling and silence times, the plausibility window, trust reset and raw frame capture.</p>
 
             </details>
 
             <details class="integ-section">
-              <summary class="integ-section-title">RV-C</summary>
+              <summary class="integ-section-title">RV-C<span class="integ-state"><span id="integStateRvc">?</span></span></summary>
 
-              <p class="integ-copy">RV-C support listens for the DC Source Status messages an RV-C battery management system broadcasts on the CAN port. To follow its charge limits, choose RV-C as the limit source under Charge-Limit Follow below. The instance filter here selects which battery bank is obeyed.</p>
+              <p class="integ-copy">Listens for the DC Source Status messages an RV-C battery management system broadcasts on the same CAN port, and that port has to be listening: turn on Receive NMEA2K Data in the NMEA 2000 card above, or the follow switch below. RV-C messages carry a bank number, so the instance filter here selects which battery bank is obeyed &mdash; the one setting that belongs to this dialect alone.</p>
 
+              <div class="form-row">
+                <div class="form-label">Use as Limit Source (<span id="rvcSel_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Makes RV-C the dialect this regulator decodes and follows. Same setting as Limit Source in the shared Charge-Limit Follow card &mdash; changing it here changes it there. Only one dialect is decoded at a time, and switching starts a fresh settling period.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="dvccSrcType" value="1">
+                    <button type="submit" id="rvcUseBtn" class="btn-primary" onclick="submitMessage()">Use RV-C</button>
+                  </form>
+                </div>
+              </div>
+
+              <hr />
               <div class="form-row">
                 <div class="form-label">RV-C Battery Instance (<span id="dvccInst_echo">?</span>):
                   <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">For the RV-C source: the battery bank number to obey. 1 is the main house bank by RV-C convention; 0 obeys whichever bank is heard. Victron messages carry no bank number, so with the Victron source this is ignored — the first device heard becomes the authority and is shown in the status row.</span></span>
@@ -8219,11 +8408,25 @@
                 </div>
               </div>
 
+              <hr />
+              <div class="form-row">
+                <div class="form-label">RV-C Messages (<span id="rvcHeardWord_ID">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Whether RV-C limit messages are actually arriving. heard = decoded within the last 20 seconds; silent = decoded earlier but nothing recently; none heard = nothing has ever decoded, so check the BMS is on this CAN backbone and that the battery instance above matches the bank it broadcasts. Only the selected dialect is decoded, so this reads "idle" while Victron VE.Can is the chosen source. The decoded numbers themselves are in the shared status row below.</span></span>
+                </div>
+                <div class="form-input">
+                  <span class="integ-live" id="rvcHeardDetail_ID">&mdash;</span>
+                </div>
+              </div>
+
+              <p class="integ-note">Everything else this dialect uses is shared with Victron VE.Can and lives in the Charge-Limit Follow card below: the follow switch, decoded CVL/CCL and follow state, settling and silence times, the plausibility window, trust reset and raw frame capture.</p>
+
             </details>
 
             <!-- Charge Coordination (DVCC-style BMS charge-limit follow) — shared across dialects -->
             <details class="integ-section">
-              <summary class="integ-section-title">Charge-Limit Follow<span class="integ-state"><span id="integStateFollow">off</span></span></summary>
+              <summary class="integ-section-title">Charge-Limit Follow<span class="integ-badge">shared</span><span class="integ-state"><span id="integStateFollow">off</span></span></summary>
+
+              <p class="integ-copy">Everything here applies to whichever dialect is selected above — Victron VE.Can or RV-C — and the status row shows what that dialect has decoded. Received limits are requests: they can only lower this regulator's own targets, never raise them, and every local protection stays fully in charge.</p>
 
               <div class="form-row">
                 <div class="form-label">Follow BMS Charge Limits (<span id="dvccEn_echo">?</span>):
@@ -8351,6 +8554,8 @@
 
             </details>
 
+            </div><!-- /integ-group: Battery Charge-Limit Follow -->
+
           </div>
         </div>
         <div id="settings-system" class="sub-tab-content">
@@ -8374,23 +8579,6 @@
                     </label>
                     <span class="toggle-label">On</span>
                     <input id="CloudFeatures" name="CloudFeatures" type="number" value="0" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">NMEA 0183 Data (<span id="NMEA0183Data_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="NMEA0183Data_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('NMEA0183Data_checkbox', 'NMEA0183Data', 'NMEA0183Data')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="NMEA0183Data" name="NMEA0183Data" type="number" value="" style="display:none;" />
                   </form>
                 </div>
               </div>
@@ -8443,54 +8631,6 @@
                 </div>
               </div>
             </details>
-
-            <!-- Engine & Alternator Parameters Section -->
-            <details open style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Engine & Alternator Parameters</summary>
-
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>RPM Scaling Factor (<span id="RPMScalingFactor_echo">?</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box">Scales the tachometer signal into engine RPM. Adjust until the RPM shown
-                      here matches your engine's tachometer. Changing it erases every table and record measured against
-                      the old RPM axis, on the device and in the cloud, and requires re-commissioning. The alternator
-                      must be off.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form"
-                    onsubmit="rpmScaleFormSubmit(this); return false;">
-                    <input name="RPMScalingFactor" type="number" step="1" min="1" max="1000000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Pulley Ratio, Alt to Engine (<span id="PulleyRatio_echo">?</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box">*** Only used for Alternator Lifetime Calcs *** Alternator RPM = Engine
-                      RPM
-                      × this ratio. Common: 2.0-3.0 </span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="PulleyRatio" type="number" step="0.01" min="1.0" max="10.0" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-            </details>
-
-
 
             <!-- Emergency & Troubleshooting Section -->
             <details open style="margin-top: 20px;">
@@ -10050,6 +10190,40 @@
           </div>
         </div>
 
+        <div class="section-title" style="margin-top:16px;">NMEA 0183</div>
+        <div class="grid">
+          <div class="card-group">
+            <p class="card-group-title"><span>Serial Link (<span id="li_n183Status_ID">no data</span>)</span>
+              <span class="tooltip">ℹ️<span class="tooltip-box">Proof the wiring and the port settings are right, independent of what any sentence carries. Sentences counts every message that arrived complete and passed its checksum, whatever its type - if this climbs, the link works. Checksum errors climbing while sentences stays at zero means the speed or the signal type is wrong; both are set under Setup &rarr; Integrations &rarr; NMEA 0183. Both counts reset with Reset Peak Values.</span></span>
+            </p>
+            <div class="metric-row">
+              <span class="metric-label">Sentences Received</span>
+              <span class="metric-value"><span id="li_n183Sentences_ID">&mdash;</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Checksum Errors</span>
+              <span class="metric-value"><span id="li_n183ChecksumErrs_ID">&mdash;</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Drain Time, Worst</span>
+              <span class="metric-value"><span id="li_n183Worst_ID">&mdash;</span></span>
+            </div>
+          </div>
+          <div class="card-group">
+            <p class="card-group-title"><span>Heading</span>
+              <span class="tooltip">ℹ️<span class="tooltip-box">A worked example of decoding one signal off this port - it reads HDT, THS, HDM and HDG sentences. It is shown here only, and is deliberately kept separate from the heading on the Boat tab, which comes from NMEA2000. Nothing on this regulator steers, navigates or charges by it.</span></span>
+            </p>
+            <div class="metric-row">
+              <span class="metric-label">Heading</span>
+              <span class="metric-value"><span id="li_n183Heading_ID">&mdash;</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Reference</span>
+              <span class="metric-value"><span id="li_n183HdgRef_ID">&mdash;</span></span>
+            </div>
+          </div>
+        </div>
+
         <div class="section-title" style="margin-top:16px;">Victron VE.Direct</div>
         <div class="grid">
           <div class="card-group">
@@ -10133,7 +10307,11 @@
               <span class="metric-value"><span id="li_dvccCcl_ID">&mdash;</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Sender</span>
+              <span class="metric-label">Source Dialect</span>
+              <span class="metric-value"><span id="li_dvccDialect_ID">&mdash;</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Sender Address</span>
               <span class="metric-value"><span id="li_dvccSrc_ID">&mdash;</span></span>
             </div>
           </div>
@@ -12325,6 +12503,27 @@
                 </div>
               </div>
 
+              <!-- NMEA 0183 serial drain -->
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">NMEA 0183 Receive
+                  <span class="tooltip">&#8505;&#65039;
+                    <span class="tooltip-box">The NMEA 0183 serial drain: pulls whatever arrived on the 0183 port
+                      in block copies and parses it out of memory, once every 50 ms. It never reads more than 512
+                      bytes in a pass, and gives up part way through if it has used 250 microseconds, leaving the
+                      rest in the port's buffer for the next pass - so a busy talker costs latency rather than
+                      loop time. Near-zero when the port is off. This row is the standing proof the 0183 input
+                      never intrudes on the control loop; if it ever crosses 500 microseconds the regulator says
+                      so on the console by itself.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_ReadNMEA0183_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_ReadNMEA0183_ses_ID">0</span>
+                </div>
+              </div>
+
               <!-- NMEA2K Receive / bus service (ParseMessages) -->
               <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">NMEA2K Receive
@@ -13085,6 +13284,9 @@
           <input type="button" id="alt-load-btn" value="Import New Reference Surface" class="btn-secondary"
             onclick="altLoadCsv()"
             title="Load a reference surface from a health dataset file (another unit or a backup) into the Uploaded reference surface — resident alongside My History, which is kept. Only the reference surface is read from the file; the trend, session and parameter rows are ignored. It switches grading to the uploaded surface; you'll choose Pause learning (just compare) or Continue learning My History while graded against it." />
+          <input type="button" value="Health Settings &amp; Reset" class="btn-secondary"
+            onclick="goToDiagSettings('c3')"
+            title="Jump to Setup &rarr; Alternator &rarr; Diag with the Charging System Health card showing: steady-state gates, curve-fit knobs, reference source, Pause / Continue learning, and Reset / Start Over. Reset needs settings unlocked." />
           <input type="file" id="alt-load-file" accept=".csv,text/csv,text/plain" style="display:none;" onchange="altUploadCsvFile(this)" />
         </span>
         </div>
@@ -13303,6 +13505,12 @@
               </form>
             </div>
           </div>
+          <p style="font-size:0.74em;color:var(--text-muted);margin:2px 0 0 0;">
+            The adjustable parameters — Damped Gain (cut depth), Required Improvement (verify bar),
+            Pocket Edge Taper (speed width), Retest Cooldown, Speed Steadiness, Detection Confirm
+            Scans — are in Setup &#9656; Alternator &#9656; Tuning &#9656; Current &#9656; Controller Parameters,
+            next to the PID Ki this switch acts on.
+          </p>
           <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
           <div class="metric-row telemetry-row">
             <span class="metric-label telemetry-label">Current-loop gain now, as a share of your PID Ki
@@ -13344,6 +13552,7 @@
               <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:14px;height:3px;background:#3a7bd5;display:inline-block;flex:none;"></span>Gain applied vs engine speed</span>
               <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:9px;height:9px;border-radius:50%;background:#3a7bd5;display:inline-block;flex:none;"></span>Verified episode</span>
               <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:9px;height:9px;border-radius:50%;border:2px solid #c07f2f;display:inline-block;box-sizing:border-box;flex:none;"></span>Did not respond</span>
+              <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:9px;height:9px;border-radius:50%;border:2px solid #8d8f95;display:inline-block;box-sizing:border-box;flex:none;"></span>Not concluded</span>
               <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:9px;height:9px;border-radius:50%;background:#8256b0;display:inline-block;flex:none;"></span>Voltage damper switched off</span>
               <span style="display:inline-flex;align-items:center;gap:5px;"><span style="width:14px;height:9px;background:rgba(130,86,176,0.25);display:inline-block;flex:none;"></span>Voltage-damper-off span</span>
               <span id="hgMapExcluded"></span>
@@ -13352,7 +13561,8 @@
               The blue line is the live rule: the current-loop gain the regulator applies at each
               engine speed — full everywhere, reduced across each learned trouble spot (the shaded
               span), ramping back to full over the tapered edges. Dots are the evidence: filled blue
-              at the speed of each verified episode, hollow amber where a wobble did not respond.
+              at the speed of each verified episode, hollow amber where a wobble did not respond,
+              hollow grey where the test was interrupted and settled nothing either way.
               The dashed vertical line is the engine right now.
             </p>
           </div>

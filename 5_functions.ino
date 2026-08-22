@@ -538,8 +538,12 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
   // Victron proprietary fast-packet (VREG carrier): dispatched here, ahead of the receive gate,
   // because the DVCC follow decode has its own master switch — and ONLY to its own decoder, so
   // "receive off" still means nothing reaches the verbose print or the handler-table scan.
+  // Gate matches dvccRawFrameTap's (NMEA2KData || dvccEn) on purpose: the UI tells the user to
+  // watch the decoded CVL/CCL and confirm them against the GX BEFORE enabling follow, which is
+  // impossible if this carrier only decodes once follow is already on. Decode-only — the clamps
+  // stay gated on dvccEn at their application sites and in dvccTick.
   if (N2kMsg.PGN == 126720UL) {
-    if (dvccEn == 1 && dvccSrcType == 0) VictronVreg126720(N2kMsg);
+    if ((dvccEn == 1 || NMEA2KData == 1) && dvccSrcType == 0) VictronVreg126720(N2kMsg);
     return;
   }
   // Receive toggle off: drop bus data here. ParseMessages may still be running purely to service
@@ -626,7 +630,7 @@ static void dvccCaptureFrame(unsigned long id, unsigned char len, const unsigned
     bucket = 0;
   }
   if (bucket >= 20) return;
-  if (dvccCapPause) return;  // /dvccCapture is serializing the ring; dropping a frame beats tearing one
+  if (dvccCapPause) return;  // /dvccCapture is snapshotting the ring; dropping a frame beats tearing one
   static uint32_t dedupKey[16];
   static uint32_t dedupMs[16];
   // Key covers the FULL payload: identical repeats collapse, but a frame whose limit VALUE
@@ -638,14 +642,22 @@ static void dvccCaptureFrame(unsigned long id, unsigned char len, const unsigned
   dedupKey[slot] = key;
   dedupMs[slot] = now;
   bucket++;
-  DvccCapEntry &e = dvccCapRing[dvccCapHead];
-  e.ms = now;
-  e.id = (uint32_t)id;
-  e.len = (len > 8) ? 8 : len;
-  memset(e.data, 0, sizeof(e.data));
-  memcpy(e.data, buf, e.len);
-  dvccCapHead = (uint16_t)((dvccCapHead + 1) % DVCC_CAP_N);
-  if (dvccCapCount < DVCC_CAP_N) dvccCapCount++;
+  // Re-checked under dvccCapMux, not just at entry: the unlocked check above can pass a frame
+  // that is still mid-copy when /dvccCapture (other core) sets the pause. Holding the lock across
+  // the whole slot write is what removes that one-frame tear window - the reader takes the same
+  // lock to set the pause, so a writer has either finished or backs off here.
+  portENTER_CRITICAL(&dvccCapMux);
+  if (!dvccCapPause) {
+    DvccCapEntry &e = dvccCapRing[dvccCapHead];
+    e.ms = now;
+    e.id = (uint32_t)id;
+    e.len = (len > 8) ? 8 : len;
+    memset(e.data, 0, sizeof(e.data));
+    memcpy(e.data, buf, e.len);
+    dvccCapHead = (uint16_t)((dvccCapHead + 1) % DVCC_CAP_N);
+    if (dvccCapCount < DVCC_CAP_N) dvccCapCount++;
+  }
+  portEXIT_CRITICAL(&dvccCapMux);
 }
 
 // RV-C Table 5.3 uint16 scalings: voltage 0.05 V/bit (>64250 = not available);
@@ -839,6 +851,7 @@ void dvccTick() {
   static uint32_t lastSeenCount = 0;
   static uint32_t settleStartMs = 0;
   static uint16_t settleFrames = 0;
+  static bool offStateCleared = false;
 
   if (dvccResetReq) {
     dvccResetReq = false;
@@ -852,9 +865,9 @@ void dvccTick() {
     }
   }
   if (dvccCfgChanged) {
-    // Source/instance edited: judge the new authority with clean decode state (sender lock,
-    // flap history, held Victron registers). An UNTRUSTED latch is deliberately preserved —
-    // it clears only via the reset button, the master toggle, or reboot.
+    // Source/instance edited, or follow just enabled: judge the authority with clean decode
+    // state (sender lock, flap history, held Victron registers). An UNTRUSTED latch is
+    // deliberately preserved — it clears only via the reset button, the master toggle, or reboot.
     dvccCfgChanged = false;
     settleStartMs = 0;
     settleFrames = 0;
@@ -867,9 +880,16 @@ void dvccTick() {
     dvccUntrustReason = 0;  // master off/on is an approved latch-reset path
     settleStartMs = 0;
     settleFrames = 0;
-    dvccClearDecodeState();
+    // Clear on the OFF transition only. Victron sends CVL and CCL as separate register frames, so
+    // clearing every tick while off meant the held pair was wiped between them and the two limits
+    // could never be read together — exactly the check the UI asks for before follow is enabled.
+    if (!offStateCleared) {
+      dvccClearDecodeState();
+      offStateCleared = true;
+    }
     return;
   }
+  offStateCleared = false;
 
   bool newFrame = (dvccRxCount != lastSeenCount);
   lastSeenCount = dvccRxCount;
@@ -922,6 +942,10 @@ void dvccTick() {
   if (isnan(dvccRxCvl) && isnan(dvccRxCcl)) {
     dvccState = DVCC_WAITING;  // frames but no usable limit fields
     dvccCvlV = dvccCclA = NAN;
+    // Stale settle progress here would promote the next usable limits to FOLLOWING on their
+    // first frame, skipping the settling vet (spec: consecutive in-range updates required).
+    settleStartMs = 0;
+    settleFrames = 0;
     return;
   }
 
@@ -1248,6 +1272,156 @@ void ReadVEData() {
   int end1 = micros();
   VeTime = end1 - start1;
   lastVEDataRead = currentTime;
+}
+
+// ── NMEA 0183 receive ────────────────────────────────────────────────────────
+// Serial2 on GPIO6, its own opto channel and its own connector pin (RJ3 p4) — nothing else on the
+// board or in firmware touches either, so this port is free to run at whatever baud/polarity the
+// attached talker wants. Receive only: no TX pin exists and the front end is one-way.
+//
+// Heading is decoded as a worked example. It is deliberately kept OUT of HeadingNMEA and
+// IDX_HEADING_NMEA: those belong to the NMEA2000 receiver, and silently merging two sources would
+// make "which one am I looking at" unanswerable. Anything that wants to consume 0183 heading for
+// real should become an explicit user-selected source, never an automatic fallback.
+
+// Heading back to absent. -1 is the "nothing decoded" sentinel CSV4_n183Heading already ships,
+// so the client needs no new field to tell a dead talker from a boat pointing north.
+void n183ClearHeading() {
+  n183HeadingDeg = -1.0f;
+  n183HdgRef = 0;
+  dataTimestamps[IDX_N183_HDG] = 0;
+}
+
+void applyNMEA0183Serial() {
+  n183ClearHeading();  // the port is about to change under it; a heading decoded at the old baud says nothing about the new one
+  Serial2.end();
+  Serial2.setRxBufferSize(2048);  // must precede begin(); 19200 fills the 256 B default in ~130 ms
+  Serial2.begin(NMEA0183Baud, SERIAL_8N1, 6, -1, NMEA0183Invert == 1);
+  while (Serial2.available()) Serial2.read();  // drop the partial line left by the old baud. flush() is TX-side only and Serial2 has no TX pin.
+}
+
+// One checksum-valid sentence, NUL-terminated, '$'/'!' and CRLF already stripped.
+static void n183HandleSentence(char *s) {
+  n183SentenceCount++;
+  MARK_FRESH(IDX_N183);
+
+  // Address field is <talker><type>, e.g. "HCHDT" — the talker prefix varies by device, the
+  // 3-char type does not, so match on the type only.
+  if (strlen(s) < 6 || s[5] != ',') return;
+  const char *type = s + 2;
+  uint8_t ref = 0;
+  if (!strncmp(type, "HDT", 3) || !strncmp(type, "THS", 3)) ref = 2;       // true heading
+  else if (!strncmp(type, "HDM", 3)) ref = 1;                              // magnetic heading
+  else if (!strncmp(type, "HDG", 3)) ref = 1;                              // magnetic; deviation/variation fields ignored, so never call it true
+  else return;
+
+  char *deg = s + 6;
+  char *end = strchr(deg, ',');
+  if (end) *end = '\0';
+  if (*deg == '\0') return;  // null field: talker is alive but has no fix/heading yet
+
+  // THS field 2 is a mode indicator: only 'A' (autonomous) and 'D' (differential) are usable data.
+  if (!strncmp(type, "THS", 3) && end) {
+    char mode = end[1];
+    if (mode != 'A' && mode != 'D') return;
+  }
+
+  float h = atof(deg);
+  if (h < 0.0f || h > 360.0f) return;
+  n183HeadingDeg = (h == 360.0f) ? 0.0f : h;
+  n183HdgRef = ref;
+  MARK_FRESH(IDX_N183_HDG);
+}
+
+// Assemble one byte into the sentence buffer. Returns nothing; commits through n183HandleSentence
+// on a line ending. Pure RAM work — no UART access, so the caller controls all driver-lock cost.
+static char n183Line[96];   // longest standard sentence is 82 B; anything longer is noise
+static uint8_t n183Len = 0;
+static bool n183Overrun = false;
+
+static void n183Feed(char c) {
+  if (c == '$' || c == '!') {         // start of sentence: abandon whatever came before
+    n183Len = 0;
+    n183Overrun = false;
+    return;
+  }
+  if (c != '\r' && c != '\n') {
+    if (n183Len < sizeof(n183Line) - 1) n183Line[n183Len++] = c;
+    else n183Overrun = true;
+    return;
+  }
+  if (n183Len == 0) return;           // bare line ending, nothing buffered
+  n183Line[n183Len] = '\0';
+  uint8_t completed = n183Len;
+  n183Len = 0;
+  if (n183Overrun) { n183Overrun = false; n183ChecksumErrCount++; return; }
+
+  // Trailing "*HH" is the XOR of everything between '$' and '*'. Sentences without one are rare in
+  // practice and unverifiable, so they are counted as errors rather than trusted.
+  char *star = strrchr(n183Line, '*');
+  if (!star || star != n183Line + completed - 3) { n183ChecksumErrCount++; return; }
+  *star = '\0';
+  uint8_t sum = 0;
+  for (char *p = n183Line; *p; p++) sum ^= (uint8_t)*p;
+  if (sum != (uint8_t)strtol(star + 1, nullptr, 16)) { n183ChecksumErrCount++; return; }
+
+  n183HandleSentence(n183Line);
+}
+
+// HARD REAL-TIME CONTRACT: this must never hold the control loop for more than 500 us.
+// Four independent limits enforce it, so no single estimate has to be right:
+//   1. A per-tick byte cap. 512 B is the most work this can ever be asked to do in one pass.
+//   2. A micros() deadline checked after every 64 B chunk, so the overrun exposure is one chunk,
+//      not one tick. Whatever is not consumed stays in the 2 KB driver ring and is picked up next
+//      tick — backpressure costs latency, never bytes.
+//   3. Block reads. Serial2.read(buf, n) takes the UART lock ONCE per chunk and memcpys, with
+//      timeout_ms = 0 so it never waits. read() byte-at-a-time pays that lock ~2 us PER BYTE and
+//      blew the whole budget on its own; readBytes() would be worse still — it blocks for
+//      getTimeout(), a full second by default. Neither may be used here.
+//   4. Parsing runs over the RAM chunk, not the UART, at roughly 20 ns/byte.
+// Throughput check: 512 B every 50 ms = 10 kB/s, against 3840 B/s arriving at the fastest
+// supported baud (38400). Nearly 3x margin, and the 2 KB ring absorbs a half second of burst.
+// The worst cost actually observed is published as ft_ReadNMEA0183 in the Function Timing table,
+// and the firmware complains to the console on its own if it ever crosses the budget.
+#define N183_DEADLINE_US   250   // checked between chunks; leaves room for one more chunk under the 500 us budget
+#define N183_TICK_MS       50
+#define N183_MAX_PER_TICK  512
+#define N183_BUDGET_US     500   // the promise being policed, not a control value
+
+void ReadNMEA0183Data() {
+  if (NMEA0183Data != 1) return;
+
+  static unsigned long lastRead = 0;
+  unsigned long nowMs = millis();
+  if (nowMs - lastRead < N183_TICK_MS) return;
+  lastRead = nowMs;
+
+  const uint32_t t0 = micros();
+  // A talker that goes quiet must stop reading as live. Same 10s DATA_TIMEOUT the NMEA2000
+  // heading ages out on; IDX_N183 can't serve here because it stays fresh on a GPS-only talker.
+  // Inside the t0 window on purpose: everything this function does is policed by N183_BUDGET_US.
+  if (n183HdgRef != 0 && IS_STALE(IDX_N183_HDG)) n183ClearHeading();
+  uint8_t buf[64];
+  uint16_t total = 0;
+
+  while (total < N183_MAX_PER_TICK) {
+    size_t got = Serial2.read(buf, sizeof(buf));   // non-blocking: returns what is already buffered
+    if (got == 0) break;
+    total += got;
+    for (size_t i = 0; i < got; i++) n183Feed((char)buf[i]);
+    if ((uint32_t)(micros() - t0) >= N183_DEADLINE_US) break;
+  }
+
+  // Self-policing. If the four limits above ever fail to hold the promise, say so out loud once a
+  // minute rather than letting it hide in a stats row nobody is looking at.
+  uint32_t spent = micros() - t0;
+  if (spent > N183_BUDGET_US) {
+    static unsigned long lastGripe = 0;
+    if (nowMs - lastGripe > 60000UL) {
+      lastGripe = nowMs;
+      queueConsoleMessageF("WARNING: NMEA 0183 drain took %luus (budget %dus) - report this", (unsigned long)spent, N183_BUDGET_US);
+    }
+  }
 }
 // Maintenance reboot engine. Tier constants + full ladder description live with
 // REBOOT_OPPORTUNISTIC_MS in Xregulator.ino. Runs every loop pass.
@@ -2755,8 +2929,19 @@ void logDashboardValues() {
   static unsigned long lastDashboardLog = 0;
   if (millis() - lastDashboardLog >= 300000) {  // Every 5 min — periodic time/context anchor
     lastDashboardLog = millis();
-    queueConsoleMessageF("DASHBOARD: IBV=%.2fV SoC=%d%% AltI=%.1fA BattI=%.1fA AltT=%d°F RPM=%d",
-                         IBV, SOC_percent / 100, MeasuredAmps, Bcur,
+    // No battery shunt -> Bcur is whatever floats on the INA current input and SOC_percent is a
+    // frozen NVS value (coulomb counting is HAS_BATT_SHUNT-gated). Print "n/a" rather than numbers
+    // that read like measurements in a log we later analyse as ground truth.
+    char socStr[8], bcurStr[12];
+    if (HAS_BATT_SHUNT) {
+      snprintf(socStr,  sizeof(socStr),  "%d%%",   SOC_percent / 100);
+      snprintf(bcurStr, sizeof(bcurStr), "%.1fA", Bcur);
+    } else {
+      strncpy(socStr,  "n/a", sizeof(socStr));
+      strncpy(bcurStr, "n/a", sizeof(bcurStr));
+    }
+    queueConsoleMessageF("DASHBOARD: IBV=%.2fV SoC=%s AltI=%.1fA BattI=%s AltT=%d°F RPM=%d",
+                         IBV, socStr, MeasuredAmps, bcurStr,
                          (int)AlternatorTemperatureF, (int)RPM);
   }
 }
@@ -3420,14 +3605,21 @@ void _ReadAnalogInputs_inner() {
                          lastIbvEmaMs = nowIna;
                          ibvFreshFlag = true;
 
+                         // No shunt -> the derivative is the slope of INA input noise. Leave g_dBcur_dt
+                         // at 0 and keep the slew roll empty so neither the CSV2 trace nor the
+                         // load-dump gate-tuning readout shows a number that reads like a measurement.
                          static float bcurPrev = 0.0f;
                          static uint32_t bcurPrevMs = 0;
-                         if (bcurPrevMs > 0) {
-                           uint32_t dtBcur = nowIna - bcurPrevMs;
-                           if (dtBcur >= 3 && dtBcur < 2000) {
-                             g_dBcur_dt = (Bcur - bcurPrev) / ((float)dtBcur * 0.001f);
-                             rollUpdate(ROLL_LDSLEW, g_dBcur_dt);   // load-dump slew gate-tuning readout
+                         if (HAS_BATT_SHUNT) {
+                           if (bcurPrevMs > 0) {
+                             uint32_t dtBcur = nowIna - bcurPrevMs;
+                             if (dtBcur >= 3 && dtBcur < 2000) {
+                               g_dBcur_dt = (Bcur - bcurPrev) / ((float)dtBcur * 0.001f);
+                               rollUpdate(ROLL_LDSLEW, g_dBcur_dt);   // load-dump slew gate-tuning readout
+                             }
                            }
+                         } else {
+                           g_dBcur_dt = 0.0f;
                          }
                          bcurPrev = Bcur;
                          bcurPrevMs = nowIna;
@@ -3443,7 +3635,9 @@ void _ReadAnalogInputs_inner() {
                        if (IBV < MinVoltage)          { MinVoltage          = IBV; }
                        if (IBV < MinVoltage_AllTime)  { MinVoltage_AllTime  = IBV; }
                        wmIgnUpdate(wmIgn_IBV,  IBV);   // ignition-cycle watermarks (lo + hi)
-                       wmIgnUpdate(wmIgn_Bcur, Bcur);
+                       // No shunt -> leave the battery-current watermark at NAN so the records row
+                       // renders empty instead of the hi/lo excursions of an unconnected input.
+                       if (HAS_BATT_SHUNT) wmIgnUpdate(wmIgn_Bcur, Bcur);
                      } else {
                        ina228ErrorCount++;   // implausible read — dropped (no MARK_FRESH)
                      }

@@ -220,9 +220,12 @@ bool executeFetchWeatherData() {
     UVToday = mjToday * MJ_TO_KWH_CONVERSION;
     UVTomorrow = mjTomorrow * MJ_TO_KWH_CONVERSION;
     UVDay2 = mjDay2 * MJ_TO_KWH_CONVERSION;
+    // Order is load-bearing: stamp the fetch age BEFORE publishing validity. analyzeWeatherMode()
+    // runs on the other core and voids any forecast whose stamp is stale or 0, so a valid-but-
+    // unstamped instant is enough to throw this forecast away for the whole next interval.
+    weatherLastUpdate = millis();   // was never written — the freshness gate measured uptime, not fetch age
     weatherDataValid = 1;
     weatherLastError[0] = '\0';
-    weatherLastUpdate = millis();   // was never written — the freshness gate measured uptime, not fetch age
     nextWeatherUpdate = millis() + WeatherUpdateInterval;   // honor the user's interval (hardcoded 1 h ignored it)
     Serial.printf("Solar forecast: Today=%.1f, Tomorrow=%.1f, Day2=%.1f kWh\n",
                   pKwHrToday, pKwHrTomorrow, pKwHr2days);
@@ -730,8 +733,7 @@ if (!BMP388Disconnected) {
   //Victron VeDirect and NMEA0183
   Serial1.setRxBufferSize(2048);               // must precede begin(); default 256 B overflows in the 2 s ReadVEData gap (BMV emits ~900 B/s)
   Serial1.begin(19200, SERIAL_8N1, 7, -1, 1);  // Victron VEDirect
-  Serial2.begin(19200, SERIAL_8N1, 6, -1, 0);  // ... note the "0" at end for normal logic.  This is combined NMEA0183 data from YachtDevices
-  Serial2.flush();              
+  applyNMEA0183Serial();  // Serial2 / GPIO6 at the user's baud + polarity. InitSystemSettings() has already run, so NVS values are live here.
 
   // INA228 Battery Voltage/Current Sensor
   if (!INA.begin()) {
@@ -1187,6 +1189,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     NMEA0183Data = settingRead(NK_NMEA0183Data).toInt();
   }
+  if (!settingExists(NK_NMEA0183Baud)) {
+    settingWrite(NK_NMEA0183Baud, String(NMEA0183Baud).c_str());
+  } else {
+    NMEA0183Baud = settingRead(NK_NMEA0183Baud).toInt();
+  }
+  if (!settingExists(NK_NMEA0183Invert)) {
+    settingWrite(NK_NMEA0183Invert, String(NMEA0183Invert).c_str());
+  } else {
+    NMEA0183Invert = settingRead(NK_NMEA0183Invert).toInt();
+  }
   if (!settingExists(NK_NMEA2KData)) {
     settingWrite(NK_NMEA2KData, String(NMEA2KData).c_str());
   } else {
@@ -1302,6 +1314,10 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     dvccSettleS = settingRead(NK_dvccSettleS).toInt();
   }
+  // Captured before either load overwrites the globals, so the recovery pair below is the compile-time
+  // default scaled exactly like the seed path — never a hardcoded 12 V number.
+  const float dvccCvlMinSeed = dvccCvlMin * seedVScale;
+  const float dvccCvlMaxSeed = dvccCvlMax * seedVScale;
   if (!settingExists(NK_dvccCvlMin)) {
     dvccCvlMin *= seedVScale;
     settingWrite(NK_dvccCvlMin, String(dvccCvlMin, 2).c_str());
@@ -1313,6 +1329,22 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_dvccCvlMax, String(dvccCvlMax, 2).c_str());
   } else {
     dvccCvlMax = settingRead(NK_dvccCvlMax).toFloat();
+  }
+  {
+    // Same bounds and same low < high rule the /settings handlers enforce, applied here because config
+    // import and the cloud config push write these keys raw and reach the globals only through a boot.
+    // A NaN survives the clamp untouched and fails the ordering test, which is the intent.
+    float cvlLo = constrain(dvccCvlMin, DVCC_CVL_ABS_MIN, DVCC_CVL_ABS_MAX);
+    float cvlHi = constrain(dvccCvlMax, DVCC_CVL_ABS_MIN, DVCC_CVL_ABS_MAX);
+    if (!(cvlLo < cvlHi)) { cvlLo = dvccCvlMinSeed; cvlHi = dvccCvlMaxSeed; }
+    if (cvlLo != dvccCvlMin || cvlHi != dvccCvlMax) {
+      queueConsoleMessageF("Stored setting out of range - DVCC plausible-CVL window was %.2f-%.2f V, corrected to %.2f-%.2f V",
+                           dvccCvlMin, dvccCvlMax, cvlLo, cvlHi);
+      dvccCvlMin = cvlLo;
+      dvccCvlMax = cvlHi;
+      settingWrite(NK_dvccCvlMin, String(dvccCvlMin, 2).c_str());
+      settingWrite(NK_dvccCvlMax, String(dvccCvlMax, 2).c_str());
+    }
   }
   if (!settingExists(NK_waveAmplitude)) {
     settingWrite(NK_waveAmplitude, String(waveAmplitude).c_str());
@@ -1959,32 +1991,51 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   if (!settingExists(NK_HuntGovEnable)) {
     settingWrite(NK_HuntGovEnable, String((int)HuntGovEnable).c_str());
   } else {
-    HuntGovEnable = (uint8_t)settingRead(NK_HuntGovEnable).toInt();
+    HuntGovEnable = (uint8_t)clampLoadedSetting("HuntGovEnable", NK_HuntGovEnable,
+                                                settingRead(NK_HuntGovEnable).toInt(),
+                                                HUNT_GOV_ENABLE_MIN, HUNT_GOV_ENABLE_MAX);
   }
   if (!settingExists(NK_HuntCutPct)) {
     settingWrite(NK_HuntCutPct, String((int)HuntCutPct).c_str());
   } else {
-    HuntCutPct = (uint8_t)settingRead(NK_HuntCutPct).toInt();
+    HuntCutPct = (uint8_t)clampLoadedSetting("HuntCutPct", NK_HuntCutPct,
+                                             settingRead(NK_HuntCutPct).toInt(),
+                                             HUNT_CUT_PCT_MIN, HUNT_CUT_PCT_MAX);
   }
   if (!settingExists(NK_HuntVerifyPct)) {
     settingWrite(NK_HuntVerifyPct, String((int)HuntVerifyPct).c_str());
   } else {
-    HuntVerifyPct = (uint8_t)settingRead(NK_HuntVerifyPct).toInt();
+    HuntVerifyPct = (uint8_t)clampLoadedSetting("HuntVerifyPct", NK_HuntVerifyPct,
+                                                settingRead(NK_HuntVerifyPct).toInt(),
+                                                HUNT_VERIFY_PCT_MIN, HUNT_VERIFY_PCT_MAX);
   }
   if (!settingExists(NK_HuntWingPct)) {
     settingWrite(NK_HuntWingPct, String((int)HuntWingPct).c_str());
   } else {
-    HuntWingPct = (uint8_t)settingRead(NK_HuntWingPct).toInt();
+    HuntWingPct = (uint8_t)clampLoadedSetting("HuntWingPct", NK_HuntWingPct,
+                                              settingRead(NK_HuntWingPct).toInt(),
+                                              HUNT_WING_PCT_MIN, HUNT_WING_PCT_MAX);
   }
   if (!settingExists(NK_HuntCooldownMin)) {
     settingWrite(NK_HuntCooldownMin, String((int)HuntCooldownMin).c_str());
   } else {
-    HuntCooldownMin = (uint8_t)settingRead(NK_HuntCooldownMin).toInt();
+    HuntCooldownMin = (uint8_t)clampLoadedSetting("HuntCooldownMin", NK_HuntCooldownMin,
+                                                  settingRead(NK_HuntCooldownMin).toInt(),
+                                                  HUNT_COOLDOWN_MIN_MIN, HUNT_COOLDOWN_MIN_MAX);
   }
   if (!settingExists(NK_HuntSteadyPct)) {
     settingWrite(NK_HuntSteadyPct, String((int)HuntSteadyPct).c_str());
   } else {
-    HuntSteadyPct = (uint8_t)settingRead(NK_HuntSteadyPct).toInt();
+    HuntSteadyPct = (uint8_t)clampLoadedSetting("HuntSteadyPct", NK_HuntSteadyPct,
+                                                settingRead(NK_HuntSteadyPct).toInt(),
+                                                HUNT_STEADY_PCT_MIN, HUNT_STEADY_PCT_MAX);
+  }
+  if (!settingExists(NK_HuntQualifyScans)) {
+    settingWrite(NK_HuntQualifyScans, String((int)HuntQualifyScans).c_str());
+  } else {
+    HuntQualifyScans = (uint8_t)clampLoadedSetting("HuntQualifyScans", NK_HuntQualifyScans,
+                                                   settingRead(NK_HuntQualifyScans).toInt(),
+                                                   HUNT_QUALIFY_SCANS_MIN, HUNT_QUALIFY_SCANS_MAX);
   }
   if (!settingExists(NK_reseedCorrEnable)) {
     settingWrite(NK_reseedCorrEnable, String((int)reseedCorrEnable).c_str());

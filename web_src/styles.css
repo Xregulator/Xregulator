@@ -904,6 +904,68 @@ details.integ-section[open] > summary.integ-section-title::after {
   margin: 4px 0 12px;
 }
 
+/* A group of Integrations cards that are ONE feature split up: the per-dialect cards (what to
+   listen for) plus the shared card whose settings apply to whichever dialect is selected. The
+   rail + tint is the only cue that they belong together. */
+.integ-group {
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  background: rgba(127, 127, 127, 0.06);
+  padding: 12px 12px 2px;
+  margin: 18px 0 16px;
+}
+.integ-group-title {
+  font-weight: bold;
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+.integ-group-copy {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted, #777);
+  margin: 0 0 14px;
+}
+/* "shared" marker in a card header. Stripped from settings-search breadcrumbs (ssBuildIndex)
+   alongside .integ-state so card names stay stable in search results. */
+.integ-badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #00867f;
+  background: rgba(0, 161, 154, 0.14);
+  border: 1px solid rgba(0, 161, 154, 0.28);
+  vertical-align: 2px;
+}
+.dark-mode .integ-badge {
+  color: #4fd6ce;
+  background: rgba(0, 161, 154, 0.20);
+}
+/* Pointer from a dialect card to the shared card that holds the rest of its settings */
+.integ-note {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted, #777);
+  border-top: 1px dashed rgba(127, 127, 127, 0.35);
+  padding-top: 8px;
+  margin: 12px 0 2px;
+}
+/* Live readout (not a setting) sitting in a settings card */
+.integ-live {
+  font-size: 14px;
+}
+/* No global :disabled rule exists for these buttons; the dialect cards need one so the
+   already-selected source reads as inert instead of as the obvious thing to click. */
+.integ-section .btn-primary:disabled,
+.integ-section .btn-primary:disabled:hover {
+  opacity: 0.5;
+  cursor: default;
+  box-shadow: none;
+}
+
 /* Live Data -> ESP32 Diagnostics — top-level collapsible sections. Values match the inline
    style the sibling Live Data pages still carry on their bare <details>, so the ESP32 page
    headers stay visually identical to those while being one class here. */

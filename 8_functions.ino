@@ -735,6 +735,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "HuntWingPct", NK_HuntWingPct, 1 },
   { "HuntCooldownMin", NK_HuntCooldownMin, 1 },
   { "HuntSteadyPct", NK_HuntSteadyPct, 1 },
+  { "HuntQualifyScans", NK_HuntQualifyScans, 1 },
   { "cvRecovSec", NK_cvRecovSec, 1 },      // retired, inert — kept so shared configs stay complete
   { "cvRecovEmaxV", NK_cvRecovEmaxV, 1 },  // retired, inert — kept so shared configs stay complete
   { "cvRecovKiMax", NK_cvRecovKiMax, 1 },
@@ -893,6 +894,8 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "bmsLogicLevelOff", NK_bmsLogicLevelOff, 1 },
   { "capLimitMode", NK_capLimitMode, 1 },
   { "NMEA0183Data", NK_NMEA0183Data, 1 },
+  { "NMEA0183Baud", NK_NMEA0183Baud, 1 },
+  { "NMEA0183Invert", NK_NMEA0183Invert, 1 },
   { "NMEA2KData", NK_NMEA2KData, 1 },
   { "n2kTxEnable", NK_n2kTxEn, 1 },
   { "n2kDeviceInstance", NK_n2kDevInst, 1 },

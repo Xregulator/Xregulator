@@ -1021,6 +1021,27 @@ void altFold_tick(uint32_t nowMs) {
   // only the EMA filters + the episode detector feed.
   altLive_rpm = fRpm; altLive_exc = exc; altLive_amps = fAmps;
   altLive_vbus = fVbus; altLive_tF = tF; altLive_duty = fDuty;
+
+  // Case-temp slope (F/min), fast-minus-slow EMA pair: for a ramp input emaFast-emaSlow settles at
+  // rate*(tauSlow-tauFast). Thermal-transient tag for the 2026-08-21 lag finding (case sensor lags
+  // windings; warm-up sessions grade ~10% low, and phase offsets at like tags track thermal state):
+  // rides the AltLive SSE (session dots latch it) and every emitted record's ex[1].
+  {
+    static float tsF = 0, tsS = 0; static uint32_t tsLast = 0;
+    if (!isnan(tF)) {
+      if (!tsLast) { tsF = tsS = tF; tsLast = nowMs; }
+      float dt = (nowMs - tsLast) * 0.001f;
+      if (dt > 0.004f) {
+        tsLast = nowMs;
+        if (dt > 5.0f) { tsF = tsS = tF; }          // feed gap: reseed instead of a spike
+        else {
+          tsF += (tF - tsF) * (dt / (5.0f + dt));   // tau 5 s
+          tsS += (tF - tsS) * (dt / (60.0f + dt));  // tau 60 s
+          altTempSlopeFMin = (tsF - tsS) / 55.0f * 60.0f;
+        }
+      }
+    }
+  }
   altLiveValid = (!isnan(fRpm) && !isnan(exc) && !isnan(fVbus) && fVbus >= ALT_MIN_BATT_V * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
   altLastFoldMs = nowMs;
 
@@ -1041,7 +1062,8 @@ void altFold_tick(uint32_t nowMs) {
   altSessTempGate.feed(eligible, tF, nowMs, altThermDegF, altSessTempDwell());   // lighter (half-dwell) temp gate for the session plot
   RawSample<ALT_NAXIS> s;
   s.x[0] = fRpm; s.x[1] = fDuty; s.x[2] = fVbus; s.x[3] = tF; s.out = fAmps; s.tMs = nowMs;
-  s.ex[0] = fDuty; s.ex[1] = 0;   // retain run duty (excitation is derived from it) for cloud diagnosis
+  s.ex[0] = fDuty; s.ex[1] = altTempSlopeFMin;   // retain run duty + case-temp slope (F/min) for diagnosis;
+                                                 // the emit averages both, so ex[1] = the run's mean thermal transient
   FrontPoint<ALT_NAXIS> ep;
   altEpisode.statBank = (fRpm >= ALT_STAT_CRUISE_RPM) ? 1 : 0;   // gate-blame counters split idle vs cruise
   bool emitted = altEpisode.feed(eligible, s, &ep);
@@ -1066,7 +1088,7 @@ void altFold_tick(uint32_t nowMs) {
   sp.x[2] = ep.x[2];                                    // Vbus
   sp.x[3] = ep.x[3];                                    // tempF
   sp.ex[0] = ep.x[1];                                   // raw run-avg duty (retained for cloud diagnosis)
-  sp.ex[1] = 0;
+  sp.ex[1] = ep.ex[1];                                  // run-avg case-temp slope (F/min) — thermal-transient tag
   sp.y = ep.y; sp.nSamp = ep.nSamp; sp.tEmit = ep.tEmit;
   if (altEmitQCount < ALT_EMIT_QUEUE) altEmitQ[altEmitQCount++].sp = sp;
 }
@@ -1160,6 +1182,7 @@ static float alf_sessN()     { return (float)altSessN; }
 static float alf_hiField()   { return altHiFieldAlert ? 1.0f : 0.0f; }    // high-field-low-output alert active
 static float alf_sim()       { return (altSimMode >= 0.5f) ? 1.0f : 0.0f; }
 static float alf_gAmps()     { return altLive_gAmps; }                    // graded boxcar-average amps (the % numerator)
+static float alf_tSlope()    { return altTempSlopeFMin; }                 // case-temp slope (F/min) — thermal-transient tag
 static float alf_syncAgo()   { if (lastAltHealthSyncEpoch <= 0 || !timeIsSynced) return -1.0f;
                                time_t n = time(NULL); return (n > (time_t)lastAltHealthSyncEpoch) ? (float)(n - (time_t)lastAltHealthSyncEpoch) : 0.0f; }
 // fold timing lives in the Function Timing table (ft_altHealth / ft_altFold rows) — not in this live stream
@@ -1175,6 +1198,7 @@ static AltLiveField ALT_LIVE[] = {
   {"hiFieldAlert", alf_hiField},
   {"sim", alf_sim}, {"syncAgoS", alf_syncAgo},
   {"gAmps", alf_gAmps},
+  {"tSlope", alf_tSlope},   // appended at END — stale-open dashboards zip fewer schema names than values, extras ignored
 };
 static const size_t ALT_LIVE_COUNT = sizeof(ALT_LIVE) / sizeof(ALT_LIVE[0]);
 static void altSendLive() {
@@ -1296,7 +1320,7 @@ void altDebugCsvSend(AsyncWebServerRequest *request) {
           } else if (st.phase == 2) {                            // scalar state
             switch (st.idx) {
               case 0: st.len = snprintf(st.line, sizeof(st.line), "LIVE,rpm_exc_vbus_tF_amps,%.0f,%.3f,%.2f,%.1f,%.2f\n", altLive_rpm, altLive_exc, altLive_vbus, altLive_tF, altLive_amps); break;
-              case 1: st.len = snprintf(st.line, sizeof(st.line), "LIVE,duty_pred_pct,%.1f,%.2f,%.1f\n", altLive_duty, altLive_pred, altLive_pct); break;
+              case 1: st.len = snprintf(st.line, sizeof(st.line), "LIVE,duty_pred_pct_tslope,%.1f,%.2f,%.1f,%.2f\n", altLive_duty, altLive_pred, altLive_pct, altTempSlopeFMin); break;
               case 2: st.len = snprintf(st.line, sizeof(st.line), "LIVE,state_refOk_refDist,%d,%d,%.3f\n", (int)altState, (int)altRefOk, altRefDist); break;
               case 3: st.len = snprintf(st.line, sizeof(st.line), "GATE,sessSteady_fullSteady_valid,%d,%d,%d\n", (int)altSessSteady, (int)altSteady, (int)altLiveValid); break;
               case 4: st.len = snprintf(st.line, sizeof(st.line), "GATE,ignoreTemp_paused_refSrc_haveUp_sim,%d,%.0f,%d,%d,%.0f\n", (int)IgnoreTemperature, altPaused, (int)altRefSource, (int)altHaveUpload, altSimMode); break;
@@ -1367,10 +1391,10 @@ void altDebugCsvSend(AsyncWebServerRequest *request) {
               default: st.phase = 3; st.idx = 0; break;
             }
             if (st.len > 0) st.idx++;
-          } else if (st.phase == 3) {                            // My History front points (x0..x3,y,nSamp,tEmit)
+          } else if (st.phase == 3) {                            // My History front points (x0..x3,y,nSamp,tEmit,dutyPct,tSlopeFmin)
             if (st.idx < st.myN) {
               FrontPoint<ALT_NAXIS> &p = altFrontBuf[st.idx];
-              st.len = snprintf(st.line, sizeof(st.line), "MYHIST,%d,%.0f,%.3f,%.2f,%.1f,%.2f,%u,%u\n", st.idx, p.x[0], p.x[1], p.x[2], p.x[3], p.y, (unsigned)p.nSamp, (unsigned)p.tEmit);
+              st.len = snprintf(st.line, sizeof(st.line), "MYHIST,%d,%.0f,%.3f,%.2f,%.1f,%.2f,%u,%u,%.1f,%.2f\n", st.idx, p.x[0], p.x[1], p.x[2], p.x[3], p.y, (unsigned)p.nSamp, (unsigned)p.tEmit, p.ex[0], p.ex[1]);
               st.idx++;
             } else { st.phase = 4; st.idx = 0; }
           } else if (st.phase == 4) {                            // Uploaded front points (x0..x3,y,nSamp,tEmit)
@@ -1662,9 +1686,13 @@ void altFrontInit() {
   // — the Vbus scale is class-aware there via the payload's sysV field (excitation needs no scaling:
   // it is physical field volts, and the MaxDuty class scaling keeps its range identical on any bank).
   altFront2.axisScale[0] = 25.0f;   // RPM
-  altFront2.axisScale[1] = 0.2f;    // excitation (temp-normalized field volts)
+  altFront2.axisScale[1] = 0.10f;   // excitation (temp-normalized field volts). 2026-08-21 sensitivity study:
+                                    // the old 0.2 cell spanned ~2.3% field ≈ ~5% output at measured g≈2 —
+                                    // coarser than the 2.5% amps steadiness band — so records within one cell
+                                    // differed by commanded field alone. Halved.
   altFront2.axisScale[2] = 0.1f;    // Vbus at 12V — class-corrected by altApplyClassScales() once SYSTEM_VOLTAGE_CLASS is loaded
-  altFront2.axisScale[3] = 5.0f;    // tempF
+  altFront2.axisScale[3] = 10.0f;   // tempF. Same study: ≤0.32%/F apparent slope → a 5F cell stays ≤1.6% output,
+                                    // inside the amps band; opened from 5.0 for 2x faster coverage per temp span.
   for (int a = 0; a < ALT_NAXIS; a++) altFrontUp.axisScale[a] = altFront2.axisScale[a];   // same metric for the borrowed surface
   queueConsoleMessageF("AltFront init: cap %d pts, ring %d, %.1fKB PSRAM",
     ALT_FRONT_CAP, ALT_EP_RING_CAP,

@@ -221,7 +221,9 @@ bool fsRemove(const char *path) {
 #define NK_MinFloatTime "MinFloatTime"
 #define NK_MinLearningInterval "MinLernngIntrvl"
 #define NK_MinRPMForField "MinRPMForField"
+#define NK_NMEA0183Baud "NMEA0183Baud"
 #define NK_NMEA0183Data "NMEA0183Data"
+#define NK_NMEA0183Invert "NMEA0183Invert"
 #define NK_NMEA2KData "NMEA2KData"
 #define NK_NeighborLearningFactor "NeghbrLrnngFctr"
 #define NK_OnOff "OnOff"
@@ -297,6 +299,25 @@ bool fsRemove(const char *path) {
 #define NK_HuntWingPct "HuntWingPct"
 #define NK_HuntCooldownMin "HuntCooldwnMin"
 #define NK_HuntSteadyPct "HuntSteadyPct"
+#define NK_HuntQualifyScans "HuntQualScans"
+// Accepted ranges for the oscillation-damper (hunt-governor) knobs. Single source of truth for the
+// /settings handlers AND the NVS load path — they used to carry the same numbers separately, and the
+// load path silently lost them (HuntCutPct = 0 from a garbage NVS string zeroes inner Ki in every
+// learned pocket). The /settings handlers in 3_functions.ino constrain() against these macros.
+#define HUNT_GOV_ENABLE_MIN     0
+#define HUNT_GOV_ENABLE_MAX     1
+#define HUNT_CUT_PCT_MIN       25
+#define HUNT_CUT_PCT_MAX       80
+#define HUNT_VERIFY_PCT_MIN     5
+#define HUNT_VERIFY_PCT_MAX    60
+#define HUNT_WING_PCT_MIN       5
+#define HUNT_WING_PCT_MAX      40
+#define HUNT_COOLDOWN_MIN_MIN   1
+#define HUNT_COOLDOWN_MIN_MAX  60
+#define HUNT_STEADY_PCT_MIN     1
+#define HUNT_STEADY_PCT_MAX    10
+#define HUNT_QUALIFY_SCANS_MIN  2
+#define HUNT_QUALIFY_SCANS_MAX  6
 #define NK_reseedCorrEnable "reseedCorrEn"
 #define NK_dutySlewEnable "dutySlewEn"
 #define NK_testSlewMode "testSlewMode"
@@ -563,6 +584,13 @@ bool fsRemove(const char *path) {
 #define NK_dvccSettleS     "dvccSettleS"
 #define NK_dvccCvlMin      "dvccCvlMin"
 #define NK_dvccCvlMax      "dvccCvlMax"
+// Plausible-CVL window bounds, absolute volts and deliberately class-agnostic so one pair covers
+// 12/24/36/48 V. Same numbers the /settings handlers in 3_functions.ino constrain to. The window
+// must also stay ordered, low < high: an inverted or
+// degenerate window latches DVCC follow to UNTRUSTED against every healthy BMS and "Reset Trust"
+// re-latches within a tick, so it is unrecoverable from the UI.
+#define DVCC_CVL_ABS_MIN 1.0f
+#define DVCC_CVL_ABS_MAX 70.0f
 
 #define SETTINGS_NVS_NAMESPACE "settings"
 
@@ -615,6 +643,20 @@ bool settingRemove(const char *key) {
   if (e == ESP_OK) e = nvs_commit(h);
   nvs_close(h);
   return e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND;  // already-absent counts as removed
+}
+
+// Range guard for the NVS load path (InitSystemSettings). The /settings handlers constrain what they
+// accept, but NVS is also written raw by config import and the cloud config push — both of which only
+// take effect through a reboot, so this load-side clamp is the one chokepoint that covers every writer.
+// A missing or corrupt NVS string parses to 0, which is inside no useful range. Writes the corrected
+// value back so the corruption cannot re-surprise on the next boot.
+long clampLoadedSetting(const char *name, const char *nvsKey, long value, long lo, long hi) {
+  long clamped = (value < lo) ? lo : ((value > hi) ? hi : value);
+  if (clamped != value) {
+    queueConsoleMessageF("Stored setting out of range - %s was %ld, corrected to %ld", name, value, clamped);
+    settingWrite(nvsKey, String(clamped).c_str());
+  }
+  return clamped;
 }
 
 #define SETTINGS_SCHEMA_VERSION 1
@@ -2021,14 +2063,18 @@ void updateSensorWindow() {
     }
   }
 
-  // Battery current
-  int32_t battCurr = (int32_t)(Bcur * 100.0);
-  if (battCurr < currentWindow->battCurr_min) currentWindow->battCurr_min = battCurr;
-  if (battCurr > currentWindow->battCurr_max) currentWindow->battCurr_max = battCurr;
-  if (shouldAccumulate) {
-    currentWindow->battCurr_area_v_us += (int64_t)battCurr * delta_us;
-    currentWindow->battCurr_valid_us += delta_us;
-    if (engineOn) currentWindow->battCurr_on_area_v_us += (int64_t)battCurr * delta_us;
+  // Battery current - CONDITIONAL on the shunt (same pattern as baro/alt-temp below). No shunt ->
+  // Bcur is INA input noise and SOC_percent is a frozen NVS value; leaving the window untouched
+  // keeps *_valid_us at 0, which the uploader turns into JSON null instead of invented numbers.
+  if (HAS_BATT_SHUNT) {
+    int32_t battCurr = (int32_t)(Bcur * 100.0);
+    if (battCurr < currentWindow->battCurr_min) currentWindow->battCurr_min = battCurr;
+    if (battCurr > currentWindow->battCurr_max) currentWindow->battCurr_max = battCurr;
+    if (shouldAccumulate) {
+      currentWindow->battCurr_area_v_us += (int64_t)battCurr * delta_us;
+      currentWindow->battCurr_valid_us += delta_us;
+      if (engineOn) currentWindow->battCurr_on_area_v_us += (int64_t)battCurr * delta_us;
+    }
   }
 
   // Alternator current
@@ -2050,12 +2096,14 @@ void updateSensorWindow() {
     if (engineOn) currentWindow->victronCurr_on_area_v_us += (int64_t)victronCurr * delta_us;
   }
 
-  int32_t soc = SOC_percent;
-  if (soc < currentWindow->soc_min) currentWindow->soc_min = soc;
-  if (soc > currentWindow->soc_max) currentWindow->soc_max = soc;
-  if (shouldAccumulate) {
-    currentWindow->soc_area_v_us += (int64_t)soc * delta_us;
-    currentWindow->soc_valid_us += delta_us;
+  if (HAS_BATT_SHUNT) {
+    int32_t soc = SOC_percent;
+    if (soc < currentWindow->soc_min) currentWindow->soc_min = soc;
+    if (soc > currentWindow->soc_max) currentWindow->soc_max = soc;
+    if (shouldAccumulate) {
+      currentWindow->soc_area_v_us += (int64_t)soc * delta_us;
+      currentWindow->soc_valid_us += delta_us;
+    }
   }
 
   // Barometric pressure - CONDITIONAL on freshness
@@ -2159,6 +2207,21 @@ void updateSensorWindow() {
     currentWindow->tempMargin_valid_us += delta_us;
   }
 
+  // A speed-source switch does not empty the 60-s ring in updateSustainedSpeed(), so for one window
+  // after it sogSust1m still carries the OLD source's samples while the stamp below would name the
+  // NEW one — and a mislabelled cloud speed record is permanent. Hold the record off for a full ring
+  // window after any change. Detected by watching the variable rather than by an invalidator call at
+  // each writer: the ring and its NMEA feeder live elsewhere, and a future writer would not know to
+  // call one.
+  static uint8_t sustSrcSeen = 0xFF;   // 0xFF = first pass, establish the baseline without a hold-off
+  static uint32_t sustSrcChangedMs = 0;
+  static bool sustSrcHold = false;
+  if ((uint8_t)currentSpeedSource != sustSrcSeen) {
+    if (sustSrcSeen != 0xFF) { sustSrcChangedMs = millis(); sustSrcHold = true; }
+    sustSrcSeen = (uint8_t)currentSpeedSource;
+  }
+  if (sustSrcHold && (millis() - sustSrcChangedMs) >= SUST_WINDOW_MS) sustSrcHold = false;
+
   // Speed over ground - CONDITIONAL on freshness
   if (!IS_STALE(IDX_SOG_NMEA)) {
     int32_t sog = (int32_t)(SOGNMEA * 100.0);
@@ -2166,10 +2229,10 @@ void updateSensorWindow() {
     if (sog > currentWindow->sog_max) currentWindow->sog_max = sog;
     // 0 while the 60-s window is uncovered — nothing to record then.
     int32_t sust = (int32_t)(sogSust1m * 100.0);
-    if (sust > currentWindow->sogSust1m_max) {
+    if (!sustSrcHold && sust > currentWindow->sogSust1m_max) {
       currentWindow->sogSust1m_max = sust;
       // Stamp the standing max's source so the cloud speed board can disqualify
-      // phone-GPS-sourced records (speedSourceMode is exclusive, so no mixing).
+      // phone-GPS-sourced records (the hold-off above is what keeps the ring single-source).
       currentWindow->sogSustPhone = (currentSpeedSource == GPS_PHONE) ? 1 : 0;
     }
     if (shouldAccumulate) {
@@ -2264,6 +2327,16 @@ void updateSensorWindow() {
   currentWindow->lon_current = smoothLon;
 }
 
+// A window whose sensor was absent for the whole window must upload JSON null, not the untouched
+// min/max init sentinels (999900 / -999900) and not a 0.0 average. A fabricated number here is
+// permanent: it lands in the cloud time series and every aggregate that reads the column.
+// Cloud rule (CLOUD_PLATFORM.md): no firmware-written column is NOT NULL, so null always ingests.
+static const char *ltJsonNum(char *buf, size_t n, double v, bool valid) {
+  if (valid) snprintf(buf, n, "%.2f", v);
+  else       strncpy(buf, "null", n);
+  return buf;
+}
+
 // Build the cloud upload JSON for one sensor snapshot into the global
 // payloadBuffer. Returns bytes written (excluding null terminator), 0 on
 // overflow. Used by the PSRAM-ring upload path (uploadBufferedRecords).
@@ -2277,6 +2350,12 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
 #define SAFE_AVG_1000(area, valid) ((valid) > 0 ? ((double)(area) / (double)(valid)) / 1000.0 : 0.0)
   time_t finalTs = reconstructTimestamp((time_t)snap.collectionTime);
   const char *timestampStr = formatTimestamp(finalTs);
+  // Battery current + SoC upload as null when the window never saw a shunt (BatteryShuntPresent=0
+  // or no shunt resistance): the accumulators are skipped upstream, so valid_us == 0 is the signal.
+  // engine-on avg rides the same flag — active_us can be non-zero while battCurr never accumulated.
+  const bool bcOk  = snap.window.battCurr_valid_us > 0;
+  const bool socOk = snap.window.soc_valid_us > 0;
+  char bcMinS[16], bcMaxS[16], bcAvgS[16], bcOnAvgS[16], socMinS[16], socMaxS[16], socAvgS[16];
   int written = snprintf(
     payloadBuffer, PAYLOAD_BUFFER_SIZE,
     "{"
@@ -2297,12 +2376,12 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     "\"current_time_source\":%d,"
     // Battery
     "\"batt_volt_min\":%.2f,\"batt_volt_max\":%.2f,\"batt_volt_avg\":%.2f,"
-    "\"batt_curr_min\":%.2f,\"batt_curr_max\":%.2f,\"batt_curr_avg\":%.2f,"
+    "\"batt_curr_min\":%s,\"batt_curr_max\":%s,\"batt_curr_avg\":%s,"
     // Alternator
     "\"alt_curr_min\":%.2f,\"alt_curr_max\":%.2f,\"alt_curr_avg\":%.2f,"
     "\"duty_cycle_min\":%.2f,\"duty_cycle_max\":%.2f,\"duty_cycle_avg\":%.2f,"
     "\"victron_curr_min\":%.2f,\"victron_curr_max\":%.2f,\"victron_curr_avg\":%.2f,"
-    "\"soc_min\":%.2f,\"soc_max\":%.2f,\"soc_avg\":%.2f,"
+    "\"soc_min\":%s,\"soc_max\":%s,\"soc_avg\":%s,"
     // Engine
     "\"rpm_min\":%d,\"rpm_max\":%d,\"rpm_avg\":%d,"
     // Temperatures
@@ -2331,7 +2410,7 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     "\"charge_stage\":%d,"
     // Engine-on-weighted averages (denominator = µs engine was spinning this window)
     // + coverage. engine_on_pct 0 ⇒ engine never ran ⇒ *_onavg values meaningless (0s).
-    "\"batt_volt_onavg\":%.2f,\"batt_curr_onavg\":%.2f,\"alt_curr_onavg\":%.2f,"
+    "\"batt_volt_onavg\":%.2f,\"batt_curr_onavg\":%s,\"alt_curr_onavg\":%.2f,"
     "\"victron_curr_onavg\":%.2f,\"duty_cycle_onavg\":%.2f,\"engine_on_pct\":%.2f,"
     // IMU peak motion (per-window aggregates)
     "\"imu_heel_min\":%.2f,\"imu_heel_max\":%.2f,\"imu_heel_avg\":%.2f,"
@@ -2356,16 +2435,18 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     (int)currentTimeSource,
     snap.window.battVolt_min / 100.0, snap.window.battVolt_max / 100.0,
     SAFE_AVG_100(snap.window.battVolt_area_v_us, snap.window.battVolt_valid_us),
-    snap.window.battCurr_min / 100.0, snap.window.battCurr_max / 100.0,
-    SAFE_AVG_100(snap.window.battCurr_area_v_us, snap.window.battCurr_valid_us),
+    ltJsonNum(bcMinS, sizeof(bcMinS), snap.window.battCurr_min / 100.0, bcOk),
+    ltJsonNum(bcMaxS, sizeof(bcMaxS), snap.window.battCurr_max / 100.0, bcOk),
+    ltJsonNum(bcAvgS, sizeof(bcAvgS), SAFE_AVG_100(snap.window.battCurr_area_v_us, snap.window.battCurr_valid_us), bcOk),
     snap.window.altCurr_min / 100.0, snap.window.altCurr_max / 100.0,
     SAFE_AVG_100(snap.window.altCurr_area_v_us, snap.window.altCurr_valid_us),
     snap.window.dutyCycle_min / 100.0, snap.window.dutyCycle_max / 100.0,
     SAFE_AVG_100(snap.window.dutyCycle_area_v_us, snap.window.dutyCycle_valid_us),
     snap.window.victronCurr_min / 100.0, snap.window.victronCurr_max / 100.0,
     SAFE_AVG_100(snap.window.victronCurr_area_v_us, snap.window.victronCurr_valid_us),
-    snap.window.soc_min / 100.0, snap.window.soc_max / 100.0,
-    SAFE_AVG_100(snap.window.soc_area_v_us, snap.window.soc_valid_us),
+    ltJsonNum(socMinS, sizeof(socMinS), snap.window.soc_min / 100.0, socOk),
+    ltJsonNum(socMaxS, sizeof(socMaxS), snap.window.soc_max / 100.0, socOk),
+    ltJsonNum(socAvgS, sizeof(socAvgS), SAFE_AVG_100(snap.window.soc_area_v_us, snap.window.soc_valid_us), socOk),
     snap.window.rpm_min, snap.window.rpm_max,
     (int)SAFE_AVG_100(snap.window.rpm_area_v_us, snap.window.rpm_valid_us),
     snap.window.altTemp_min / 100.0, snap.window.altTemp_max / 100.0,
@@ -2400,7 +2481,7 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     SAFE_AVG_100(snap.window.altZero_area_v_us, snap.window.altZero_valid_us),
     (int)snap.chargeStage,
     SAFE_AVG_100(snap.window.battVolt_on_area_v_us, snap.window.active_us),
-    SAFE_AVG_100(snap.window.battCurr_on_area_v_us, snap.window.active_us),
+    ltJsonNum(bcOnAvgS, sizeof(bcOnAvgS), SAFE_AVG_100(snap.window.battCurr_on_area_v_us, snap.window.active_us), bcOk),
     SAFE_AVG_100(snap.window.altCurr_on_area_v_us, snap.window.active_us),
     SAFE_AVG_100(snap.window.victronCurr_on_area_v_us, snap.window.active_us),
     SAFE_AVG_100(snap.window.dutyCycle_on_area_v_us, snap.window.active_us),
@@ -3033,7 +3114,9 @@ void pushLongTermRecord() {
     rec.activeFrac = (fr > 200) ? 200 : (uint8_t)fr;
     int64_t on_us = (int64_t)currentWindow->active_us;
     rec.onAvg[0] = ltScale((int32_t)(currentWindow->battVolt_on_area_v_us / on_us), 1);
-    rec.onAvg[1] = ltScale((int32_t)(currentWindow->battCurr_on_area_v_us / on_us), 10);
+    // Battery current rides its own envelope bit: with no shunt the accumulator is skipped, so
+    // active_us alone would publish a fabricated 0 A engine-on average.
+    if (rec.validMask & (1u << 1)) rec.onAvg[1] = ltScale((int32_t)(currentWindow->battCurr_on_area_v_us / on_us), 10);
     rec.onAvg[2] = ltScale((int32_t)(currentWindow->altCurr_on_area_v_us / on_us), 10);
     rec.onAvg[3] = ltScale((int32_t)(currentWindow->victronCurr_on_area_v_us / on_us), 10);
     rec.onAvg[4] = ltScale((int32_t)(currentWindow->dutyCycle_on_area_v_us / on_us), 1);

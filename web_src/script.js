@@ -350,7 +350,7 @@ const CSV1_FIELDS = [
     "cvKdFiltV",         // IBV smoothed by CvKdVoltFiltTC (V ×100) — "Voltage for D term" trace
     "huntDerate",        // hunt-governor live Ki derate (×100; 100 = full gain)
     "huntFreqHz",        // hunt-governor last confirmed wobble frequency (Hz ×100; 0 = none this session)
-    "huntState",         // 0 watching, 1 testing, 3 cooldown (2 unused since v2)
+    "huntState",         // 0 watching, 1 testing a Ki cut, 3 cooldown, 4 testing with the D term paused (2 unused since v2)
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -926,6 +926,10 @@ const CSV2_FIELDS = [
     "ft_dvcc_win", "ft_dvcc_ses",     // DVCC brain tick worst µs
     "ft_n2kParse_win", "ft_n2kParse_ses",  // NMEA2000.ParseMessages worst µs — RX drain, scales with bus traffic
     "huntKdScale",       // damper D-lever multiplier ×100 (100 = D-term running, 0 = paused for a test / mapped off at this speed)
+    "n183Sentences",           // NMEA 0183 checksum-valid sentences since boot (any type)
+    "n183ChecksumErrs",        // NMEA 0183 sentences that failed checksum
+    "ft_ReadNMEA0183_win",     // NMEA 0183 drain worst µs (window)
+    "ft_ReadNMEA0183_ses",     // NMEA 0183 drain worst µs (session)
 ];
 
 // Order MUST match ftBlameReg[] in Xregulator.ino — the blame indices in CSV2 point here.
@@ -943,7 +947,7 @@ const FT_BLAME_NAMES = [
     "Sensor History", "Upload Buffered", "Config Payload",
     "LT Ring Flush", "Ripple Flush", "Fast Alt Drain", "Fault Detector",
     "Zero-Drift Log", "Batt Health Save", "Knee Save", "N2K TX", "DVCC Brain",
-    "N2K RX",
+    "N2K RX", "NMEA 0183",
 ];
 
 // Worst field-on pass blame line under "Loop Time when Field is On" — names + ms of the top
@@ -982,6 +986,8 @@ const CSV4_FIELDS = [
     "currentNMPG",                // live fuel economy (naut mi/gal ×100)
     "ctrlLimiter",                // banner limiter code: 0 none, 1 alt current cap, 2 thermal derate, 3 CV voltage loop, 4 battery current limit, 5 field at max duty, 6 protection (cap binding or recovery window), 7 battery above target (zero-output stand-down), 8 BMS charge-current limit (DVCC CCL), 9 BMS charge-voltage limit (DVCC CVL)
     "chargeStage",                // CHARGE_STAGE_* code — feeds gLastChargeStage at 2 Hz for the mode ribbon
+    "n183Heading",                // NMEA 0183 decoded heading (deg ×10; negative = nothing decoded). Distinct from HeadingNMEA, which is the NMEA2000 source.
+    "n183HdgRef",                 // reference frame of the above: 0 none, 1 magnetic, 2 true
 ];
 
 // ── Gate-tuning live readouts ───────────────────────────────────────────────
@@ -991,6 +997,21 @@ const CSV4_FIELDS = [
 // peak-over-command rides CSV1 at 10Hz so its 10s peak is computed here. Each readout shows the number to
 // set the threshold relative to. Spans live next to each threshold input in index.html.
 const ROLL_EMPTY_SENTINEL = -1999999999;   // firmware sends -2000000000 when a 10s window had no sample
+
+// ── Battery-current "not available" ────────────────────────────────────────
+// With no battery shunt the INA current input still reads something, so the firmware sends the same
+// ROLL_EMPTY sentinel in these slots rather than that noise. Rewrite it to NaN at parse time, once,
+// so every downstream consumer inherits "no reading": readouts print "—", plots leave a gap, and the
+// analysis fits (autotune, diag) see NaN instead of a plausible-looking number.
+const BATT_NA_KEYS_CSV1 = ['Bcur'];
+const BATT_NA_KEYS_CSV2 = ['SOC_percent', 'dBcur_dt'];
+function battNaToNaN(data, keys) {
+    for (const k of keys) {
+        if (!(k in data)) continue;
+        const v = Number(data[k]);
+        if (!Number.isFinite(v) || v <= ROLL_EMPTY_SENTINEL) data[k] = NaN;
+    }
+}
 const GATE_READOUTS_CSV2 = [
     { spans: ['faRpmEdgeMargin_live'],                                                       f: 'faRpmEdge10sMin',  s: 10,    lbl: '10s worst margin', u: 'RPM', d: 1 },
     { spans: ['faAmpsDriftFloorA_live', 'faAmpsDriftPct_live'],                              f: 'faAmpsDrift10sMax', s: 100,  lbl: '10s peak drift',   u: 'A',   d: 2 },
@@ -1477,14 +1498,15 @@ function altExportHealthDataset(){
 function altSessSectionCsv(){
   const num = (v,dp) => (v==null || !isFinite(v)) ? '' : (dp==null ? v : (+v).toFixed(dp));
   const rows = ['# This Session graded points. state 0=MEASURED 1=ESTIMATED; ring 1=full steady run',
-                'SESSPT,idx,t_s,rpm,fieldPct,tempF,measAmps,gradedAmps,expectedAmps,pct,state,source,ring'];
+                'SESSPT,idx,t_s,rpm,fieldPct,tempF,measAmps,gradedAmps,expectedAmps,pct,state,source,ring,vbus,tSlopeFmin,sogKts'];
   let t0 = null;
   for(let i=0;i<altSessInfo.length;i++){
     const d = altSessInfo[i]; if(!d) continue;
     if(t0===null) t0 = altSessT[i];
-    rows.push(['SESSPT', i, num(altSessT[i]-t0,1), num(d.rpm,0), num(d.fieldPct,0), num(d.tempF,0),
+    rows.push(['SESSPT', i, num(altSessT[i]-t0,1), num(d.rpm,0), num(d.fieldPct,2), num(d.tempF,1),
                num(d.measAmps,1), num(d.amps,1), num(d.pred,1), num(d.pct,1),
-               num(d.state,0), num(d.source,0), num(d.ring,0)].join(','));
+               num(d.state,0), num(d.source,0), num(d.ring,0), num(d.vbus,2),
+               num(d.tSlope,2), num(d.sog,1)].join(','));
   }
   return rows.join('\n');
 }
@@ -2210,6 +2232,9 @@ function altSessionPush(){
     // dot amps ÷ pred reproduces pct; older firmware falls back to the fast live amps.
     rpm: altLive.rpm, amps: (altLive.gAmps > 0 ? altLive.gAmps : altLive.amps), pred: altLive.pred, pct: altLive.pct,
     tempF: window._lastAltTempF, fieldPct: window._lastFieldPct, measAmps: window._lastMeasAmps,
+    vbus: window._lastBatteryV,
+    tSlope: altLive.tSlope,   // case-temp slope F/min (undefined on pre-tSlope firmware -> blank column)
+    sog: (window._lastSogMs && Date.now() - window._lastSogMs < 10000) ? window._lastSogKts : null,
     state: st, source: altLive.source|0, ring: altLive.steady>=1 ? 1 : 0
   } : null);
   if (altSessT.length > ALT_SESS_MAX){ altSessT.shift(); altSessMeas.shift(); altSessEst.shift(); altSessGap.shift(); altSessRing.shift(); altSessInfo.shift(); }
@@ -2237,6 +2262,9 @@ function renderAltSessPoint(i){
     + ' · ' + n(d.tempF == null ? null : toDisplayTemp(d.tempF), 0, ' ' + tempUnitLabel()) + ' alt temp'
     + ' · ' + n(d.fieldPct, 0, '%') + ' field'
     + ' · expected ' + n(d.pred, 1, ' A')
+    + ' · ' + n(d.vbus, 2, ' V')
+    + (d.tSlope != null && isFinite(d.tSlope) ? ' · temp ' + (d.tSlope >= 0 ? '+' : '') + d.tSlope.toFixed(1) + '°/min' : '')
+    + (d.sog != null && isFinite(d.sog) ? ' · ' + d.sog.toFixed(1) + ' kt' : '')
     + '</span>';
 }
 
@@ -3007,6 +3035,9 @@ const CSV3_FIELDS = [
     "HuntWingPct",                   // damper pocket taper width, % of speed per side
     "HuntCooldownMin",               // damper retest cooldown after a failed test (min)
     "HuntSteadyPct",                 // damper engine-speed steadiness tolerance (%)
+    "HuntQualifyScans",              // damper wobble-confirm scan count (1.6 s each)
+    "NMEA0183Baud",                  // NMEA 0183 serial baud (4800 / 9600 / 19200 / 38400)
+    "NMEA0183Invert",                // NMEA 0183 polarity: 0 RS-232-level talker, 1 TTL-level talker
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3043,6 +3074,7 @@ const TS_FIELDS = [
     "ts_N2kSoc",
     "ts_Dvcc",
     "ts_WeatherFetch",
+    "ts_N183",
 ];
 
 // Detect if running in Capacitor (iOS/Android) vs web browser
@@ -3417,6 +3449,21 @@ function phoneSpeedNativePlugin() {
             window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundSpeed) || null;
 }
 let phoneSpeedNativeActive = false;
+let phoneSpeedNativeStopTried = false;   // false until this session has issued one unconditional bs.stop()
+
+// Tear down the JS fallback GNSS watch. Idempotent and safe with nothing running; the
+// 'pending' case leaves null behind so the in-flight starter cancels its own orphan.
+function stopPhoneSpeedJsWatch() {
+    const id = phoneSpeedWatchId;
+    if (id === null) return;
+    phoneSpeedWatchId = null;
+    if (id === 'pending') return;
+    if (phoneSpeedWatchIsCap) {
+        try { window.Capacitor.Plugins.Geolocation.clearWatch({ id: id }); } catch (e) { }
+    } else {
+        try { navigator.geolocation.clearWatch(id); } catch (e) { }
+    }
+}
 
 async function updatePhoneSpeedPoster(mode) {
     const wantFast = Number(mode) === 1;
@@ -3427,14 +3474,21 @@ async function updatePhoneSpeedPoster(mode) {
         try {
             await bs.start({ postUrl: buildURL('/set_phone_data') });
             phoneSpeedNativeActive = true;
+            phoneSpeedNativeStopTried = false;
+            // An earlier failed start may have left the JS watch running: two streams would
+            // post concurrently, so the native path always owns the teardown of the fallback.
+            stopPhoneSpeedJsWatch();
             return;
         } catch (e) {
             console.warn('[PhoneGPS] BackgroundSpeed start failed, falling back to JS watch:', e && e.message);
         }
     }
-    if (!wantFast && phoneSpeedNativeActive) {
+    if (!wantFast && bs && (phoneSpeedNativeActive || !phoneSpeedNativeStopTried)) {
+        // Stop once even when this session never started it: a native stream started before a
+        // webview reload is invisible to the flag and would run GPS until the app process dies.
         phoneSpeedNativeActive = false;
-        if (bs) { try { bs.stop(); } catch (e) { } }
+        phoneSpeedNativeStopTried = true;
+        try { bs.stop(); } catch (e) { }
     }
     if (wantFast && phoneSpeedWatchId === null) {
         if (IS_CAPACITOR) {
@@ -3463,15 +3517,8 @@ async function updatePhoneSpeedPoster(mode) {
                 err => diagWarn('[PhoneGPS] watch failed:', err && err.message),
                 { enableHighAccuracy: true, timeout: 10000 });
         }
-    } else if (!wantFast && phoneSpeedWatchId !== null) {
-        const id = phoneSpeedWatchId;
-        phoneSpeedWatchId = null;   // 'pending' case: the starter sees this and self-cancels
-        if (id === 'pending') return;
-        if (phoneSpeedWatchIsCap) {
-            try { window.Capacitor.Plugins.Geolocation.clearWatch({ id: id }); } catch (e) { }
-        } else {
-            try { navigator.geolocation.clearWatch(id); } catch (e) { }
-        }
+    } else if (!wantFast) {
+        stopPhoneSpeedJsWatch();
     }
 }
 window.updatePhoneSpeedPoster = updatePhoneSpeedPoster;
@@ -4614,9 +4661,11 @@ function startInterpLoop() {
 
         for (let s = 0; s < seriesCount; s++) {
             const p = state.prevY[s];
+            const n = state.nextY[s];
             // A null prev is the gap seam or the empty prefill — lerping from it yields nextY*t,
-            // which animates the first real sample up from zero. Snap instead.
-            dataArray[s + 1][last] = (p == null) ? state.nextY[s] : lerp(p, state.nextY[s], t);
+            // which animates the first real sample up from zero. Snap instead. A null NEXT is a
+            // sensor that has gone unavailable (no battery shunt): hold the gap, never lerp toward 0.
+            dataArray[s + 1][last] = (p == null || n == null) ? n : lerp(p, n, t);
         }
         return true;
     }
@@ -5758,7 +5807,10 @@ function processCSVDataOptimized(data) {
         processCSVDataOptimized._lastHb = Number(data.WifiHeartBeat);
 
         // ALWAYS UPDATE DATA STRUCTURES - Current/Temperature plot data
-        const battCurrent = 'Bcur' in data ? parseFloat(data.Bcur) / 100 : 0;
+        // null (not 0) when there is no battery shunt — uPlot renders a gap, and a flat 0 A trace
+        // would read as "the battery is taking nothing", which is a measurement we don't have.
+        const battCurrentRaw = 'Bcur' in data ? parseFloat(data.Bcur) / 100 : 0;
+        const battCurrent = Number.isFinite(battCurrentRaw) ? battCurrentRaw : null;
         const altCurrent = 'MeasuredAmps' in data ? parseFloat(data.MeasuredAmps) / 100 : 0;
         const altCurrentFilt = 'pidAltPV' in data ? parseFloat(data.pidAltPV) / 100 : 0;
         const fieldCurrent = 'iiout' in data ? parseFloat(data.iiout) / 100 : 0;
@@ -5768,6 +5820,7 @@ function processCSVDataOptimized(data) {
         if ('AlternatorTemperatureF' in data) window._lastAltTempF = parseFloat(data.AlternatorTemperatureF) / 100;
         if ('dutyCycle' in data) window._lastFieldPct = fieldPct;
         if ('MeasuredAmps' in data) window._lastMeasAmps = altCurrent;
+        if ('BatteryV' in data) window._lastBatteryV = parseFloat(data.BatteryV) / 100;
 
         // Shift all current data left and add new data at the end
         const prevY_current = [
@@ -6509,7 +6562,11 @@ function updateWeatherAlerts() {
     gpsAlert.style.display = gpsMissing ? 'block' : 'none';
     gpsStaleAlert.style.display = gpsStale ? 'block' : 'none';
 
-    if (weatherValid === 0 && !gpsMissing && !gpsStale) {
+    // In AP mode the fetch is impossible and "Update Weather Now" is hidden with the rest of the
+    // forecast block, so this alert would point at a control that isn't there — the offline note
+    // in that slot says it instead.
+    const apMode = (window._lastKnownMode === 1);   // 1 = MODE_AP
+    if (weatherValid === 0 && !gpsMissing && !gpsStale && !apMode) {
         weatherAlert.style.display = 'block';
     } else {
         weatherAlert.style.display = 'none';
@@ -6571,12 +6628,17 @@ function updateAllEchosOptimized(data) {
         { key: 'n2kEngDynEnable', id: 'n2kEngDynEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'n2kEngBitsEnable', id: 'n2kEngBitsEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'n2kRxBattInstance', id: 'n2kRxBattInstance_echo', transform: v => v },
+        { key: 'NMEA0183Baud', id: 'NMEA0183Baud_echo', transform: v => v },
+        { key: 'NMEA0183Invert', id: 'NMEA0183Invert_echo', transform: v => v == 1 ? 'Inverted' : 'Normal' },
         // Integrations card-header at-a-glance states (same keys as the echoes above, second ids)
         { key: 'NMEA2KData', id: 'integStateN2kRx', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'n2kTxEnable', id: 'integStateN2kTx', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'VeData', id: 'integStateVe', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'NMEA0183Data', id: 'integStateN183', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'dvccEn', id: 'dvccEn_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'dvccSrcType', id: 'dvccSrcType_echo', transform: v => v == 1 ? 'RV-C' : 'Victron VE.Can' },
+        { key: 'dvccSrcType', id: 'vicSel_echo', transform: v => v == 0 ? 'in use' : 'not in use' },
+        { key: 'dvccSrcType', id: 'rvcSel_echo', transform: v => v == 1 ? 'in use' : 'not in use' },
         { key: 'dvccInst', id: 'dvccInst_echo', transform: v => v == 0 ? 'Any' : v },
         { key: 'dvccSilenceS', id: 'dvccSilenceS_echo', transform: v => v },
         { key: 'dvccSettleS', id: 'dvccSettleS_echo', transform: v => v },
@@ -6768,6 +6830,7 @@ function updateAllEchosOptimized(data) {
         { key: 'HuntWingPct',       id: 'HuntWingPct_echo',       transform: v => v },
         { key: 'HuntCooldownMin',   id: 'HuntCooldownMin_echo',   transform: v => v },
         { key: 'HuntSteadyPct',     id: 'HuntSteadyPct_echo',     transform: v => v },
+        { key: 'HuntQualifyScans',  id: 'HuntQualifyScans_echo',  transform: v => v },
         { key: 'cvHelpersEnabled',  id: 'cvHelpersEnabled_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'coldChargeLockoutEnable', id: 'coldChargeLockoutEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'MinChargeTempF',    id: 'MinChargeTempF_echo',    transform: v => Math.round(toDisplayTemp(v)) },
@@ -6907,6 +6970,8 @@ function updateAllEchosOptimized(data) {
 
     // BatteryCurrentSource is a segmented A/B control (not a <select>)
     if ('BatteryCurrentSource' in data) syncSegmentedSelect('BatteryCurrentSource', data.BatteryCurrentSource);
+    if ('NMEA0183Baud' in data) syncSegmentedSelect('NMEA0183Baud', data.NMEA0183Baud);
+    if ('NMEA0183Invert' in data) syncSegmentedSelect('NMEA0183Invert', data.NMEA0183Invert);
 
     // Time-window buttons: the current setting is shown by highlighting its button
     if ('plotTimeWindow' in data) {
@@ -8926,10 +8991,13 @@ const HG_VERDICT = {
     'damped': 'Wobble stopped',
     'damped-partial': 'Wobble halved — reduced gain kept',
     'external-suspected': 'Not the regulator — full gain restored',
-    'aborted': 'Abandoned — conditions changed mid-episode',
+    'aborted': 'Not concluded — gain test interrupted, conditions changed',
     'recovered': 'Settled on its own',
     'damped-dterm': 'Wobble stopped — voltage damper switched off here',
     'dterm-no-resp': 'Voltage damper was not the cause — turned back on',
+    // Rows written before the abort verdicts were split carry plain 'aborted' for BOTH levers;
+    // they render as a gain test and cannot be told apart retroactively.
+    'aborted-dterm': 'Not concluded — voltage damper test interrupted, conditions changed',
 };
 
 // Wording is driven by state first, gain second: the derate alone cannot separate "inside a
@@ -8970,13 +9038,27 @@ function huntGovLiveOnCsv1(data) {
     if (g) g.textContent = on ? pct + '%' : '100%';
     const f = document.getElementById('hgFreqNow');
     if (f) f.textContent = (on && freq > 0) ? freq.toFixed(2) + ' Hz' : 'none';
+    // A test just concluded (state left 1/4): the episode record and map changed on the device —
+    // re-pull them if the section is open, so the list and plot can never sit stale against the
+    // live status line. 1.5 s grace lets the firmware queue the record first.
+    if (hgPrevHuntState !== null && hgPrevHuntState !== state
+        && (hgPrevHuntState === 1 || hgPrevHuntState === 4)) {
+        const det = document.getElementById('hgLedgerList');
+        const sec = det && det.closest('details');
+        if (sec && sec.open) setTimeout(fetchHuntLedger, 1500);
+    }
+    hgPrevHuntState = state;
     // Live engine-speed marker on the speed map: redraw at most 1/s, only when the plot is on
     // screen and the marker would visibly move.
     hgNowRpm = 'RPM' in data ? Number(data.RPM) || 0 : 0;
-    if (hgMapU && document.getElementById('hgMapPlot') && document.getElementById('hgMapPlot').offsetParent
-        && Date.now() - hgNowLastDrawMs > 1000 && Math.abs(hgNowRpm - hgNowDrawnRpm) >= 5) {
-        hgNowLastDrawMs = Date.now();
-        hgMapU.redraw();
+    if (hgMapU && Date.now() - hgNowLastDrawMs > 1000 && Math.abs(hgNowRpm - hgNowDrawnRpm) >= 5) {
+        // offsetParent forces a style/layout flush, so the visibility test is read last: only on
+        // the ~1/s frames that already cleared the throttle, never on every 10 Hz CSV1 frame.
+        const mapEl = document.getElementById('hgMapPlot');
+        if (mapEl && mapEl.offsetParent) {
+            hgNowLastDrawMs = Date.now();
+            hgMapU.redraw();
+        }
     }
 }
 
@@ -9010,8 +9092,11 @@ function fetchHuntLedger() {
             const rows = (lines.length && lines[0].indexOf('epoch,') === 0) ? lines.slice(1) : [];
             if (count) count.textContent = rows.length ? String(rows.length) : 'none';
             if (!rows.length) {
-                note('No wobble has ever been detected on this regulator — there has been nothing to damp. This is the normal, healthy case.');
-                renderHuntMap([]);   // pockets can outlive their evidence rows (ledger cap-trim) — still draw them
+                // Don't claim "never detected" until the map confirms there are no pockets either —
+                // pockets can outlive their evidence rows (ledger cap-trim), and a freshly-mapped
+                // pocket's record may not be readable yet. renderHuntMap fetches /huntmap and
+                // writes the honest note for whichever case holds.
+                renderHuntMap([], true);
                 return;
             }
             let html = '';
@@ -9029,16 +9114,23 @@ function fetchHuntLedger() {
                                                 : 'time unknown — logged before clock sync';
                 // D-lever records carry the voltage-movement metric (V/s), not field swing — the
                 // D-driven wobble lives in volts and barely registers in the field drive.
-                const isDterm = (verdict === 'damped-dterm' || verdict === 'dterm-no-resp');
+                // Which lever an abort was testing comes from the verdict token alone — both abort
+                // rows log steps = 1, so steps can never be used to tell them apart.
+                const isAbort = (verdict === 'aborted' || verdict === 'aborted-dterm');
+                const isDterm = (verdict === 'damped-dterm' || verdict === 'dterm-no-resp' || verdict === 'aborted-dterm');
                 const facts = [
                     (rpm > 0 ? rpm + ' rpm' : 'engine speed not recorded'),
                     (cv ? 'voltage-limited' : 'current-limited'),
                     freq.toFixed(2) + ' Hz wobble',
                     // "aborted" is logged with no end amplitude — the episode never reached a verdict.
-                    (verdict === 'aborted' ? 'field swing ' + a0.toFixed(1) + '% at the start'
+                    // Its aEnd is a 0 placeholder meaning "no post reading exists", so no abort row
+                    // may ever print an end value; the baseline unit follows the lever.
+                    (isAbort ? (isDterm ? 'voltage movement ' + a0.toFixed(2) + ' V/s at the start'
+                                        : 'field swing ' + a0.toFixed(1) + '% at the start')
                         : isDterm ? 'voltage movement ' + a0.toFixed(2) + ' → ' + aEnd.toFixed(2) + ' V/s'
                                   : 'field swing ' + a0.toFixed(1) + '% → ' + aEnd.toFixed(1) + '%'),
-                    (isDterm ? 'voltage damper paused' : steps === 1 ? '1 gain cut' : steps + ' gain cuts'),
+                    (isAbort ? (isDterm ? 'voltage damper test, no result' : 'current-loop gain test, no result')
+                        : isDterm ? 'voltage damper paused' : steps === 1 ? '1 gain cut' : steps + ' gain cuts'),
                     'gain left at ' + Math.round(derate * 100) + '%',
                 ];
                 html += '<div style="border-top:1px solid var(--border);padding:7px 0;">'
@@ -9058,8 +9150,8 @@ function fetchHuntLedger() {
 // ── Speed map: live gain-vs-speed profile (trapezoid pockets from /huntmap) + episode dots ──
 // The firmware's pocket map IS the control rule; this plot draws it verbatim: full gain
 // everywhere, the Damped Gain across each pocket core, linear taper over the wings. Dots are
-// ledger evidence (blue filled = verified, amber hollow = did not respond); the dashed vertical
-// is the live engine speed off CSV1. Colors are fixed and CVD-validated against both card
+// ledger evidence (blue filled = verified, amber hollow = did not respond, grey hollow = the test
+// was interrupted and concluded nothing); the dashed vertical is the live engine speed off CSV1. Colors are fixed and CVD-validated against both card
 // surfaces; axis/grid theming comes from the uPlot wrapper.
 let hgMapU = null;
 let hgMapData = { xs: [], profile: [], kept: [], rest: [], xlo: 0, xhi: 1000 };
@@ -9067,6 +9159,7 @@ let hgMapState = { pockets: [], cut: 50, wing: 15, enabled: 1 };
 let hgNowRpm = 0;
 let hgNowDrawnRpm = -1;
 let hgNowLastDrawMs = 0;
+let hgPrevHuntState = null;   // last huntState seen on CSV1 — a transition out of testing re-pulls the ledger/map
 
 // JS mirror of the firmware's huntMapGain(), in percent — Ki pockets (lever 0) only; D pockets
 // (lever 1) act on the voltage damper, not this gain, and draw as their own shading. Damper off =
@@ -9098,12 +9191,15 @@ function hgMapYRange() {
     hgMapData.kept.forEach(v => { if (v != null && v < mn) mn = v; });
     hgMapData.rest.forEach(v => { if (v != null && v < mn) mn = v; });
     (hgMapData.dkept || []).forEach(v => { if (v != null && v < mn) mn = v; });
+    (hgMapData.abrt || []).forEach(v => { if (v != null && v < mn) mn = v; });
     return [Math.max(0, Math.min(80, Math.floor((mn - 8) / 10) * 10)), 105];
 }
 
 // Entry point from fetchHuntLedger: pulls the live map, then draws it with the episode dots.
 // A failed /huntmap (old firmware, demo mode) degrades to a flat full-gain line + dots.
-function renderHuntMap(eps) {
+// noEpisodeRows: the ledger parse found nothing — the note under the list is written HERE, after
+// the map answers whether pockets exist, so the text can never contradict the live status line.
+function renderHuntMap(eps, noEpisodeRows) {
     fetch(buildURL('/huntmap'))
         .then(r => r.ok ? r.json() : null)
         .catch(() => null)
@@ -9112,6 +9208,14 @@ function renderHuntMap(eps) {
                 ? { pockets: map.pockets, cut: Number(map.cut) || 50, wing: Number(map.wing) || 15,
                     enabled: map.enabled === undefined ? 1 : Number(map.enabled) }
                 : { pockets: [], cut: 50, wing: 15, enabled: 1 };
+            if (noEpisodeRows) {
+                const list = document.getElementById('hgLedgerList');
+                if (list) list.innerHTML = '<div style="padding:6px 0;color:var(--text-muted);">'
+                    + (hgMapState.pockets.length
+                        ? 'The speed map below is active, but its episode details could not be read just now — press Re-read episode record.'
+                        : 'No wobble has ever been detected on this regulator — there has been nothing to damp. This is the normal, healthy case.')
+                    + '</div>';
+            }
             hgMapBuild(eps || []);
         });
 }
@@ -9142,21 +9246,24 @@ function hgMapBuild(eps) {
     hgMapState.pockets.forEach(p => { xset.push(p.lo * (1 - wing), p.lo, p.hi, p.hi * (1 + wing)); });
     pts.forEach(e => xset.push(e.rpm));
     xset.sort((a, b) => a - b);
-    const xs = [], profile = [], kept = [], rest = [], dkept = [];
-    xset.forEach(x => { xs.push(x); profile.push(hgProfileGain(x)); kept.push(null); rest.push(null); dkept.push(null); });
+    const xs = [], profile = [], kept = [], rest = [], dkept = [], abrt = [];
+    xset.forEach(x => { xs.push(x); profile.push(hgProfileGain(x)); kept.push(null); rest.push(null); dkept.push(null); abrt.push(null); });
     pts.forEach(e => {   // first free slot matching this rpm, so same-speed episodes each keep a dot
         for (let i = 0; i < xs.length; i++) {
-            if (xs[i] !== e.rpm || kept[i] !== null || rest[i] !== null || dkept[i] !== null) continue;
+            if (xs[i] !== e.rpm || kept[i] !== null || rest[i] !== null || dkept[i] !== null || abrt[i] !== null) continue;
             if (e.verdict === 'damped' || e.verdict === 'damped-partial') kept[i] = e.derate * 100;
             // D-verified dot sits at the Ki gain (usually 100%) — the pocket it made acts on the
             // voltage damper, drawn as purple shading, not on this line
             else if (e.verdict === 'damped-dterm') dkept[i] = e.derate * 100;
+            // An interrupted test proved nothing about the belt or the engine governor, so it can
+            // never share the amber "did not respond" series — that verdict is a real finding.
+            else if (e.verdict === 'aborted' || e.verdict === 'aborted-dterm') abrt[i] = e.derate * 100;
             else rest[i] = e.derate * 100;
             break;
         }
     });
-    hgMapData = { xs: xs, profile: profile, kept: kept, rest: rest, dkept: dkept, xlo: xlo, xhi: xhi };
-    if (hgMapU) { hgMapU.setData([xs, profile, kept, rest, dkept]); return; }   // setData re-runs the range fns
+    hgMapData = { xs: xs, profile: profile, kept: kept, rest: rest, dkept: dkept, abrt: abrt, xlo: xlo, xhi: xhi };
+    if (hgMapU) { hgMapU.setData([xs, profile, kept, rest, dkept, abrt]); return; }   // setData re-runs the range fns
     const opts = {
         width: plotFitWidth(el, 280),
         height: 200,
@@ -9170,6 +9277,8 @@ function hgMapBuild(eps) {
               points: { show: true, size: 8, width: 1.8, fill: 'transparent', stroke: '#c07f2f' } },
             { label: 'voltage damper off', stroke: '#8256b0', paths: () => null,
               points: { show: true, size: 8, fill: '#8256b0', stroke: '#8256b0' } },
+            { label: 'not concluded', stroke: '#8d8f95', paths: () => null,
+              points: { show: true, size: 8, width: 1.8, fill: 'transparent', stroke: '#8d8f95' } },
         ],
         scales: {
             x: { time: false, range: () => hgMapXRange() },
@@ -9209,7 +9318,7 @@ function hgMapBuild(eps) {
             }],
         },
     };
-    hgMapU = new uPlot(opts, [xs, profile, kept, rest, dkept], el);
+    hgMapU = new uPlot(opts, [xs, profile, kept, rest, dkept, abrt], el);
     new ResizeObserver(() => {
         if (hgMapU) hgMapU.setSize({ width: plotFitWidth(el, 280), height: 200 });
     }).observe(el);
@@ -11294,7 +11403,7 @@ function initCurrentTempPlot() {
                 init: [
                     (u) => {
                         createCustomLegend('current-temp-plot', [
-                            { label: "Battery Current (A)", color: "#4CAF50" },
+                            { label: "Battery Current (A)", color: "#4CAF50", reqBattCurrent: true },
                             { label: "Alternator Current (A)", color: "#2196F3" },
                             { label: "Field Current (A)", color: "#9C27B0" },
                             { label: "Field %", color: "#9E9E9E" },
@@ -12251,6 +12360,9 @@ flex-wrap: wrap;
   font-size: 12px;
   ${u ? 'cursor: pointer; user-select: none;' : ''}
 `;
+        // Legend entries for series that need a battery shunt hide with everything else tagged
+        // .req-batt-current (styles.css) — the trace itself is already all-null in that mode.
+        if (item.reqBattCurrent) legendItem.classList.add('req-batt-current');
         if (u) legendItem.title = 'Click to show/hide';
 
         const colorBox = document.createElement('div');
@@ -13624,6 +13736,7 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(CSV1_FIELDS.map((key, i) => [key, values[i]]));
+            battNaToNaN(data, BATT_NA_KEYS_CSV1);
             g_lastCsv1 = data;  // cache for the diagnostics snapshot in log exports
 
             // Thermal tuning plot: cache the two fast (CSV1) series for the live ring.
@@ -13694,6 +13807,13 @@ window.addEventListener("load", function () {
                     const ap = (Number(data.currentMode) === 1);  // 1 = MODE_AP
                     document.querySelectorAll('.ap-hide-row').forEach(el => { el.style.display = ap ? 'none' : ''; });
                     document.querySelectorAll('.ap-hide-inline').forEach(el => { el.style.display = ap ? 'none' : 'inline'; });
+                    // .ap-only-row is the inverse — shown ONLY in AP mode. Setup > Solar uses both:
+                    // the forecast block cannot be fetched without internet and hides, its offline
+                    // note takes that slot, and the manual position entry, the "Use automatic GPS"
+                    // clear button and the array settings stay reachable (a stale manual position
+                    // has no other UI escape). A pause left over from the last fetch releases itself
+                    // in firmware once the forecast goes stale (analyzeWeatherMode).
+                    document.querySelectorAll('.ap-only-row').forEach(el => { el.style.display = ap ? '' : 'none'; });
                 }
             }
             window._debugData = data;
@@ -13914,19 +14034,6 @@ window.addEventListener("load", function () {
                     if (softwareTab) {
                         softwareTab.style.display = 'none';
                     }
-
-                    // Setup > Solar is internet-only: no forecast can be fetched in AP mode, so the
-                    // whole tab would be dead controls over a frozen table. A pause left over from the
-                    // last fetch releases itself in firmware once the forecast goes stale
-                    // (analyzeWeatherMode), so hiding the toggle cannot strand the field off.
-                    // data-ap-hidden also keeps these rows out of the settings-search index.
-                    const wxTab = document.querySelector('#settings .sub-tab[onclick*="weathersolar"]');
-                    if (wxTab) wxTab.style.display = 'none';
-                    const wxPane = document.getElementById('settings-weathersolar');
-                    if (wxPane) {
-                        wxPane.dataset.apHidden = '1';
-                        if (wxPane.classList.contains('active')) showSubTab('settings', 'alternator');
-                    }
                 }
             }
 
@@ -13974,6 +14081,7 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
+            battNaToNaN(data, BATT_NA_KEYS_CSV2);
             g_lastCsv2 = data;  // cache for the diagnostics snapshot in log exports
             renderBattTempDerate();   // live board temp + applied derate scale arrive on CSV2
             renderLoopBlame(data);    // worst field-on pass attribution line
@@ -14383,13 +14491,14 @@ window.addEventListener("load", function () {
                     }
 
                     // Banner SOC is tight against the % sign — show 1 decimal instead of 2 to avoid overlap.
-                    if (elementId === "header-soc" && key === "SOC_percent") {
+                    if (Number.isFinite(num) && elementId === "header-soc" && key === "SOC_percent") {
                         newTextContent = (value / 100).toFixed(1);
                     }
 
                     // Banner amps: fixed 1 decimal at every magnitude so the decimal point never
                     // walks as ripple crosses 10/100 A (the 3-sig-fig scheme stays on data tabs).
-                    if ((elementId === "header-alt-current" || elementId === "header-batt-current")
+                    if (Number.isFinite(num)
+                        && (elementId === "header-alt-current" || elementId === "header-batt-current")
                         && (key === "MeasuredAmps" || key === "Bcur")) {
                         newTextContent = (value / 100).toFixed(1);
                     }
@@ -14753,6 +14862,8 @@ window.addEventListener("load", function () {
                 ["ft_boatPerf_ses_ID", "ft_boatPerf_ses"],
                 ["ft_n2kTx_win_ID", "ft_n2kTx_win"],
                 ["ft_n2kTx_ses_ID", "ft_n2kTx_ses"],
+                ["ft_ReadNMEA0183_win_ID", "ft_ReadNMEA0183_win"],
+                ["ft_ReadNMEA0183_ses_ID", "ft_ReadNMEA0183_ses"],
                 ["ft_dvcc_win_ID", "ft_dvcc_win"],
                 ["ft_dvcc_ses_ID", "ft_dvcc_ses"],
                 ["ft_n2kParse_win_ID", "ft_n2kParse_win"],
@@ -14968,6 +15079,26 @@ window.addEventListener("load", function () {
                 set2('n2kRxSoc_ID', (data.n2kRxSoc === undefined || soc < 0) ? '—' : soc + ' %');
             })();
 
+            // NMEA 0183 link health — Live Data → Integrations. The two counters are the whole point:
+            // they prove the port, the baud and the polarity are right regardless of whether any
+            // sentence type is understood. Values ride CSV2, staleness comes from TS.
+            (function () {
+                const card = document.getElementById('li_n183Sentences_ID');
+                if (!card || data.n183Sentences === undefined) return;
+                const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+                const sent = Number(data.n183Sentences);
+                const errs = Number(data.n183ChecksumErrs);
+                setText('li_n183Sentences_ID', String(sent));
+                setText('li_n183ChecksumErrs_ID', String(errs));
+                // Worst-case drain cost against the 500 us control-loop budget. Shown in us because
+                // the whole number lives under 1 ms by design; ms would round it all to "0.0".
+                const worst = Number(data.ft_ReadNMEA0183_ses);
+                setText('li_n183Worst_ID', Number.isFinite(worst) && worst >= 0 ? worst + ' \u00b5s' : '\u2014');
+                const age = Number((window.sensorAges || {}).n183 ?? 999999);
+                setText('li_n183Status_ID', sent === 0 && errs === 0 ? 'no data'
+                    : (age >= 999999 || age > 20000) ? 'stale' : 'live');
+            })();
+
             // DVCC follow status — Setup → Integrations (Charge-Limit Follow card) status row plus
             // its Live Data → Integrations mirror (li_ ids) and the card-header state word.
             // Values ride CSV2; staleness from TS.
@@ -14997,6 +15128,48 @@ window.addEventListener("load", function () {
                 // Reset control is only meaningful while the untrusted latch is set
                 const rst = document.getElementById('dvccReset_row');
                 if (rst) { const d = (st === 5) ? '' : 'none'; if (rst.style.display !== d) rst.style.display = d; }
+
+                // Per-dialect cards (Victron CAN / RV-C). Only the selected dialect is decoded at
+                // all, so its card carries the reception evidence and the other says plainly that
+                // it is idle. Source of truth is the firmware echo, not the <select> (which can sit
+                // mid-edit). Both cards stay untouched until that echo has actually arrived.
+                const srcTxt = (document.getElementById('dvccSrcType_echo') || {}).textContent || '';
+                if (!/RV-C|Victron/.test(srcTxt)) return;
+                const isRvc = srcTxt.indexOf('RV-C') >= 0;
+                setText('li_dvccDialect_ID', isRvc ? 'RV-C' : 'Victron VE.Can');
+                // Nothing is decoded unless ParseMessages runs: receive toggle OR the follow master
+                const portOn = ((document.getElementById('NMEA2KData_echo') || {}).textContent === 'Enabled') ||
+                               ((document.getElementById('dvccEn_echo') || {}).textContent === 'Enabled');
+                const everHeard = isFinite(src) && src !== 255;
+                const fresh = everHeard && age <= 20000;
+                const secs = Math.round(age / 1000);
+                let hWord, hDetail;
+                if (!portOn) {
+                    hWord = 'CAN receive off';
+                    hDetail = 'turn on Receive NMEA2K Data (NMEA 2000 card) or Follow BMS Charge Limits below';
+                } else if (!everHeard) {
+                    hWord = 'none heard';
+                    hDetail = 'nothing decoded yet';
+                } else if (!fresh) {
+                    hWord = 'silent';
+                    hDetail = 'last decoded ' + secs + ' s ago, from addr ' + src;
+                } else {
+                    hWord = 'heard';
+                    hDetail = 'addr ' + src + ' \u00b7 ' + secs + ' s ago';
+                }
+                const chip = !portOn ? 'source \u00b7 receive off' : (fresh ? 'source \u00b7 heard' : 'source \u00b7 no data');
+                const idleDetail = 'not decoded \u2014 ' + (isRvc ? 'RV-C' : 'Victron VE.Can') + ' is the selected source';
+                setText('integStateVic', isRvc ? 'not selected' : chip);
+                setText('integStateRvc', isRvc ? chip : 'not selected');
+                setText('vicHeardWord_ID', isRvc ? 'idle' : hWord);
+                setText('rvcHeardWord_ID', isRvc ? hWord : 'idle');
+                setText('vicHeardDetail_ID', isRvc ? idleDetail : hDetail);
+                setText('rvcHeardDetail_ID', isRvc ? hDetail : idleDetail);
+                // Re-clicking the source already in use would needlessly restart settling
+                const btnVic = document.getElementById('vicUseBtn');
+                const btnRvc = document.getElementById('rvcUseBtn');
+                if (btnVic) { btnVic.disabled = !isRvc; setText('vicUseBtn', isRvc ? 'Use Victron VE.Can' : 'In use'); }
+                if (btnRvc) { btnRvc.disabled = isRvc; setText('rvcUseBtn', isRvc ? 'In use' : 'Use RV-C'); }
             })();
 
             // (live engine fuel flow + economy GPH/NMPG readouts moved to the CSVData4 / NavStream handler)
@@ -15215,6 +15388,22 @@ window.addEventListener("load", function () {
             // briefly regress a fresh stage transition, so it no longer writes this.
             if (data.chargeStage !== undefined) gLastChargeStage = data.chargeStage;
 
+            // NMEA 0183 decoded heading — Live Data → Integrations only. Deliberately NOT merged into
+            // HeadingNMEA/_navLast: that field is the NMEA2000 source and everything downstream
+            // assumes one origin for it. -10 is the firmware's "nothing decoded" sentinel (-1 ×10).
+            if (data.n183Heading !== undefined) {
+                const hEl = document.getElementById('li_n183Heading_ID');
+                if (hEl) {
+                    const raw = Number(data.n183Heading);
+                    const ref = Number(data.n183HdgRef);
+                    const txt = raw < 0 ? '\u2014' : (raw / 10).toFixed(1) + '\u00b0';
+                    if (hEl.textContent !== txt) hEl.textContent = txt;
+                    const rEl = document.getElementById('li_n183HdgRef_ID');
+                    const rTxt = ['\u2014', 'Magnetic', 'True'][ref] || '\u2014';
+                    if (rEl && rEl.textContent !== rTxt) rEl.textContent = rTxt;
+                }
+            }
+
             // Cache raw nav values for cross-listener consumers (baro Zambretti forecast on CSV2).
             Object.assign(window._navLast, data);
 
@@ -15224,6 +15413,9 @@ window.addEventListener("load", function () {
             // GPS moving state for IMU mode graying (SOGNMEA is ×100)
             if (data.SOGNMEA !== undefined) {
                 try { updateIMUMovingState(data.SOGNMEA); updateIMUModeStyles(); } catch (err) { }
+                // Freshness-stamped latch for the alt-health session dots (motion ground truth per dot);
+                // _navLast alone would serve a stale value forever after GPS loss.
+                window._lastSogKts = parseFloat(data.SOGNMEA) / 100; window._lastSogMs = Date.now();
             }
 
             // NavStream numeric readouts. Compact renderer sharing the module-level DOM-diff cache
@@ -15739,7 +15931,8 @@ window.addEventListener("load", function () {
                 stwNMEA: data.ts_StwNMEA,
                 n2kBatt: data.ts_N2kBatt,
                 n2kSoc: data.ts_N2kSoc,
-                dvcc: data.ts_Dvcc
+                dvcc: data.ts_Dvcc,
+                n183: data.ts_N183
             };
 
             updateWeatherForecastAge(data.ts_WeatherFetch);
@@ -16370,11 +16563,22 @@ function goToCVMode() {
 }
 
 // Live Data > Diag is results-only; its knobs are the 6th alt-tab under Setup > Alternator.
-function goToDiagSettings() {
+// ck (optional, 'c1'..'c4') also selects that checkpoint pill and scrolls its card into view.
+// The pill is .click()ed rather than class-swapped: the filter's active state is private to
+// initDiagCheckpoints, so only a real click keeps the pill and the shown cards in agreement.
+function goToDiagSettings(ck) {
     showMainTab('settings');
     showSubTab('settings', 'alternator');
     showAltTab('primary', 'settings-diag');
     window.scrollTo(0, 0);
+    if (!ck) return;
+    const panel = document.getElementById('settings-diag');
+    if (!panel) return;
+    const pill = panel.querySelector('.checkpoint-filters button[data-filter="' + ck + '"]');
+    if (pill) pill.click();
+    // ~= matches one word of the space-separated list, so a card shared by two checkpoints still hits.
+    const card = panel.querySelector('.checkpoint-param[data-checkpoints~="' + ck + '"]');
+    if (card) requestAnimationFrame(() => card.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 
 // Frozen page response stuff
@@ -17120,11 +17324,11 @@ const SINFO = {
     // ── Diag: Oscillation Damper ──
     huntGov: () => [
         ['Signal', S_DUTY + ' — the applied duty actually written to the field, sampled at a fixed 20&nbsp;samples/s so the analysis band never moves when the control loop cadence changes'],
-        ['Detects', 'a sustained tone in one of six fixed frequency slots from 0.31 to 2.34&nbsp;Hz, measured over a 6.4&nbsp;s window (Goertzel, Hann-weighted). It must beat 0.5% duty swing AND stand 3× above the other slots, on 3 scans in a row with engine speed steady (within ' + svv('HuntSteadyPct_echo', '%') + ' of where it started), before a test opens'],
+        ['Detects', 'a sustained tone in one of six fixed frequency slots from 0.31 to 2.34&nbsp;Hz, measured over a 6.4&nbsp;s window (Goertzel, Hann-weighted). It must beat 0.5% duty swing AND stand 3× above the other slots, on ' + svv('HuntQualifyScans_echo', '') + ' scans in a row with engine speed steady (within ' + svv('HuntSteadyPct_echo', '%') + ' of where it started), before a test opens. A wobble that keeps the voltage damper (D-term) rhythmically reversing qualifies at a lower duty bar — its rhythm is the evidence'],
         ['Ignored while', 'open loop, a protection or recovery is acting, any tuning/commissioning routine is running, manual field is on, the current target has just moved, or engine speed is drifting — none of those are the plant hunting'],
-        ['Acts on', 'the current loop\'s integral gain (PID Ki): one cut to ' + svv('HuntCutPct_echo', '%') + ' of your setting, then a re-measure. Verified cuts are mapped by engine speed and applied proactively at that speed from then on, tapering to full gain over ' + svv('HuntWingPct_echo', '%') + ' of speed beyond the trouble spot'],
-        ['Kept only if', 'the wobble shrinks at least ' + svv('HuntVerifyPct_echo', '%') + ', averaged 3 scans before vs 3 after. Otherwise full gain is restored and no test runs for ' + svv('HuntCooldownMin_echo', ' min') + '. The map survives restarts; Clear System erases it'],
-        ['Set', 'the Oscillation Damper switch and its five settings on Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters, next to the PID Ki it acts on'],
+        ['Acts on', 'one lever per test. Usually the current loop\'s integral gain (PID Ki): one cut to ' + svv('HuntCutPct_echo', '%') + ' of your setting, then a re-measure. When the D-term is the part swinging, it is paused instead — and switched off entirely across a verified trouble spot, never reduced partway. Verified fixes are mapped by engine speed and applied proactively at that speed from then on, tapering to full gain over ' + svv('HuntWingPct_echo', '%') + ' of speed beyond the trouble spot'],
+        ['Kept only if', 'the wobble shrinks at least ' + svv('HuntVerifyPct_echo', '%') + ', averaged scans before vs after. A failed D-term test rolls straight into the Ki test; only when every lever fails is full strength restored, with no new test for ' + svv('HuntCooldownMin_echo', ' min') + '. The map survives restarts; Clear System erases it'],
+        ['Set', 'the Oscillation Damper switch and its six settings on Setup ▸ Alternator ▸ Tuning ▸ Current ▸ Controller Parameters, next to the PID Ki it acts on'],
     ],
     // ── Protections: Detection ──
     MaxTableValue: () => [
@@ -19842,6 +20046,10 @@ function cvBinToCsv(d, csv3) {
         'huntDerate', 'huntFreq_Hz', 'huntState',
     ].join(','));
 
+    // No battery shunt -> battI is INA input noise and dBcur_dt its slope; blank both columns,
+    // matching the firmware-side /cvlog.csv. Same reason the ovFilt/recovActive columns blank.
+    const noBattCsv = document.body.classList.contains('no-batt-current');
+
     for (let i = 0; i < d.count; i++) {
         lines.push([
             d.ts[i].toFixed(3),
@@ -19857,7 +20065,7 @@ function cvBinToCsv(d, csv3) {
             d.rpm[i],
             d.battV_filt[i].toFixed(2),
             d.ch1Interval[i], d.iExcess[i], d.iExcessBulk[i],
-            d.battI[i].toFixed(1), d.dBcur_dt[i], d.loadDumpActive[i],
+            noBattCsv ? '' : d.battI[i].toFixed(1), noBattCsv ? '' : d.dBcur_dt[i], d.loadDumpActive[i],
             d.cvDSlope[i].toFixed(4), d.awState[i],
             d.voltLoopInterval[i], d.inaInterval[i],
             d.kdTrim[i].toFixed(4), d.capReason[i],
@@ -26317,6 +26525,10 @@ window.addEventListener('load', function () {
   const ONAVG = [
     ['battVolt',100], ['battCurr',10], ['altCurr',10], ['victronCurr',10], ['duty',100]
   ];
+  // ONAVG key -> its envelope validMask bit. A clear bit means the window held NO valid
+  // sample of that field (battCurr on a unit with no battery shunt is dead in every record),
+  // so its engine-on accumulator is a zero-initialised artifact, never a measurement.
+  const ONAVG_VALID_BIT = ONAVG.map(([k]) => ENV.findIndex(([ek]) => ek === k));
 
   // Only a genuine power-off should break the trace. Cadence jitter or a few missed
   // samples must NOT insert a gap-marker — ltBin nulls a whole bin that contains one,
@@ -26397,12 +26609,16 @@ window.addEventListener('load', function () {
       // cover = engine-on % (activeFrac/2); 0 = engine never ran → onAvg null (line
       // breaks). An all-empty window (battVolt validMask bit clear) has UNKNOWN engine
       // state → cover null. Older 132 B records: cover null → onAvg baked = wall avg,
-      // so charts fed by pre-v4 firmware keep their solid center line.
+      // so charts fed by pre-v4 firmware keep their solid center line. Each onAvg also
+      // needs its OWN field valid bit (ONAVG_VALID_BIT) — activeFrac alone says the engine
+      // ran, not that the field was measurable.
       if (recSize >= 144) {
         const af = dv.getUint8(base + 142);
         cover.push((valid & 1) ? af / 2 : null);
         ONAVG.forEach(([k, scale], oi) => {
-          fields[k].onAvg.push(af > 0 ? ltNz(k, dv.getInt16(base + 132 + oi * 2, true) / scale) : null);
+          const vb = ONAVG_VALID_BIT[oi];
+          const ok = af > 0 && (vb < 0 || (valid & (1 << vb)));
+          fields[k].onAvg.push(ok ? ltNz(k, dv.getInt16(base + 132 + oi * 2, true) / scale) : null);
         });
       } else {
         cover.push(null);
@@ -26893,11 +27109,15 @@ window.addEventListener('load', function () {
     // including engine-off time — the two diverge exactly in mixed run/rest windows.
     // Victron/Solar keeps the wall-clock line as its solid: solar charges engine-off,
     // so engine-gating its center line would hide at-anchor charging.
+    // No battery shunt fitted (body.no-batt-current mirrors firmware HAS_BATT_SHUNT): battery
+    // current is dead in every record, so drop the series rather than offer an empty legend entry.
+    const noBattShunt = document.body.classList.contains('no-batt-current');
     buildLtChart('lt-current-plot', {
       title: 'Currents (A)',
       scales: [ { name:'A', label:'Amps', side:3 } ],
-      series: [ { key:'battCurr',    scale:'A', color:'#FF9800', label:'Battery (A)',       band:true, on:true, ah:true },
-                { key:'battCurrW',   dataKey:'battCurr', scale:'A', color:'#FF9800', label:'Battery incl. engine off',    faint:true },
+      series: [ ...(noBattShunt ? [] : [
+                { key:'battCurr',    scale:'A', color:'#FF9800', label:'Battery (A)',       band:true, on:true, ah:true },
+                { key:'battCurrW',   dataKey:'battCurr', scale:'A', color:'#FF9800', label:'Battery incl. engine off',    faint:true }]),
                 { key:'altCurr',     scale:'A', color:'#4CAF50', label:'Alternator (A)',    band:true, on:true, ah:true },
                 { key:'altCurrW',    dataKey:'altCurr',  scale:'A', color:'#4CAF50', label:'Alternator incl. engine off', faint:true },
                 { key:'victronCurr', scale:'A', color:'#2196F3', label:'Victron/Solar (A)', band:true } ]
@@ -28920,10 +29140,11 @@ function ssBuildIndex() {
             if (el.tagName === 'DETAILS') {
                 const sum = el.querySelector(':scope > summary');
                 if (sum) {
-                    // Strip the live at-a-glance state from Integrations card headers so the
-                    // breadcrumb is the stable card name, not "NMEA 2000 Rx On · Tx Off".
+                    // Strip the live at-a-glance state and the "shared" badge from Integrations
+                    // card headers so the breadcrumb is the stable card name, not
+                    // "NMEA 2000 Rx On · Tx Off" or "Charge-Limit Follow shared".
                     const sc = sum.cloneNode(true);
-                    sc.querySelectorAll('.integ-state, .tooltip').forEach(n => n.remove());
+                    sc.querySelectorAll('.integ-state, .integ-badge, .tooltip').forEach(n => n.remove());
                     crumbs.push(ssTidy(sc.textContent));
                 }
             } else if (el.id && (el.classList.contains('sub-tab-content') ||
