@@ -6459,7 +6459,9 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   bool chargingEnabledLocal = (Ignition == 1 && OnOff == 1);
 
   if (bmsLogic == 1) {
-    bool bmsSignalActiveLocal = !digitalRead(36);
+    // GPIO42 = BMSLogic opto (U16); inverted — the phototransistor pulls the pin low when the
+    // external 5-28 V signal is present.
+    bool bmsSignalActiveLocal = !digitalRead(42);
     if (bmsLogicLevelOff == 0) {
       chargingEnabledLocal = chargingEnabledLocal && bmsSignalActiveLocal;
     } else {

@@ -8364,7 +8364,7 @@
             <details class="integ-section">
               <summary class="integ-section-title">Victron CAN (DVCC)<span class="integ-state"><span id="integStateVic">?</span></span></summary>
 
-              <p class="integ-copy">Listens for the charge voltage and current limits (CVL/CCL) Victron equipment exchanges over its proprietary VE.Can messages &mdash; the coordination Victron calls DVCC. The GX device or managed battery must share this regulator's 250 kbps NMEA2000/VE.Can port, and that port has to be listening: turn on Receive NMEA2K Data in the NMEA 2000 card above, or the follow switch below. Victron messages carry no bank number, so there is nothing to filter here &mdash; the first device heard becomes the authority, and its address shows in the status row below.</p>
+              <p class="integ-copy">Listens for the charge voltage and current limits (CVL/CCL) Victron equipment exchanges over its proprietary VE.Can messages &mdash; the coordination Victron calls DVCC. The GX device or managed battery must share this regulator's 250 kbps NMEA2000/VE.Can port, and that port has to be listening: turn on Receive NMEA2K Data in the NMEA 2000 card above, or the follow switch below. There is no bank filter here &mdash; the first device heard becomes the authority, and its address shows in the status row below.</p>
 
               <div class="form-row">
                 <div class="form-label">Use as Limit Source (<span id="vicSel_echo">?</span>):
@@ -8412,7 +8412,7 @@
               <hr />
               <div class="form-row">
                 <div class="form-label">RV-C Battery Instance (<span id="dvccInst_echo">?</span>):
-                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">For the RV-C source: the battery bank number to obey. 1 is the main house bank by RV-C convention; 0 obeys whichever bank is heard. Victron messages carry no bank number, so with the Victron source this is ignored — the first device heard becomes the authority and is shown in the status row.</span></span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">For the RV-C source: the battery bank number to obey. 1 is the main house bank by RV-C convention; 0 obeys whichever bank is heard. This setting is ignored with the Victron source, where the first device heard becomes the authority and is shown in the status row.</span></span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
