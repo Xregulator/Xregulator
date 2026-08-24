@@ -1122,11 +1122,26 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     hardwarePresent = settingRead(NK_hardwarePresent).toInt();
   }
-  if (!settingExists(NK_gpsTimeSourceMode)) {
-    settingWrite(NK_gpsTimeSourceMode, String(gpsTimeSourceMode).c_str());
+  if (!settingExists(NK_timeSourceMode)) {
+    settingWrite(NK_timeSourceMode, String(timeSourceMode).c_str());
   } else {
-    gpsTimeSourceMode = (uint8_t)settingRead(NK_gpsTimeSourceMode).toInt();
-    if (gpsTimeSourceMode > GTS_NTP) gpsTimeSourceMode = GTS_AUTO;  // sanity
+    timeSourceMode = (uint8_t)settingRead(NK_timeSourceMode).toInt();
+    if (timeSourceMode > TSRC_NTP) timeSourceMode = TSRC_AUTO;  // sanity
+  }
+  // Position source split out of the combined key on 2026-08-24. A device upgrading
+  // from a build that only had the combined setting has no NK_gpsPositionSource yet:
+  // derive it from what the owner had chosen, so a forced NMEA/phone choice survives.
+  // The old NTP value was time-only and left position on the auto chain.
+  if (!settingExists(NK_gpsPositionSource)) {
+    switch (timeSourceMode) {
+      case TSRC_NMEA:  gpsPositionSource = GPS_SRC_NMEA;  break;
+      case TSRC_PHONE: gpsPositionSource = GPS_SRC_PHONE; break;
+      default:         gpsPositionSource = GPS_SRC_AUTO;  break;
+    }
+    settingWrite(NK_gpsPositionSource, String(gpsPositionSource).c_str());
+  } else {
+    gpsPositionSource = (uint8_t)settingRead(NK_gpsPositionSource).toInt();
+    if (gpsPositionSource > GPS_SRC_PHONE) gpsPositionSource = GPS_SRC_AUTO;  // sanity
   }
   if (!settingExists(NK_speedSourceMode)) {
     settingWrite(NK_speedSourceMode, String(speedSourceMode).c_str());
@@ -1680,6 +1695,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_displayTempUnit, String(displayTempUnit).c_str());
   } else {
     displayTempUnit = (uint8_t)settingRead(NK_displayTempUnit).toInt();
+  }
+  if (!settingExists(NK_displayVolUnit)) {
+    settingWrite(NK_displayVolUnit, String(displayVolUnit).c_str());
+  } else {
+    displayVolUnit = (uint8_t)settingRead(NK_displayVolUnit).toInt();
   }
   if (!settingExists(NK_PulleyRatio)) {
     settingWrite(NK_PulleyRatio, String(PulleyRatio, 2).c_str());
@@ -5133,7 +5153,7 @@ void restoreSoftClock() {
 }
 void syncTimeFromGPS(uint16_t daysSince1970, double secondsSinceMidnight) {
   // Manual mode gate: only AUTO and NMEA-forced accept NMEA time.
-  if (gpsTimeSourceMode == GTS_PHONE || gpsTimeSourceMode == GTS_NTP) return;
+  if (timeSourceMode == TSRC_PHONE || timeSourceMode == TSRC_NTP) return;
   time_t gpsTime = (daysSince1970 * 86400UL) + (time_t)secondsSinceMidnight;
 
   if (gpsTime > 1577836800) {  // Jan 1, 2020
@@ -5170,9 +5190,9 @@ void syncTimeFromPhone(time_t phoneEpochSec) {
     if (diff > 86400LL) return;  // > 24h off — likely bad phone clock
   }
   // Manual mode gate: only AUTO and PHONE-forced accept phone time.
-  if (gpsTimeSourceMode == GTS_NMEA || gpsTimeSourceMode == GTS_NTP) return;
+  if (timeSourceMode == TSRC_NMEA || timeSourceMode == TSRC_NTP) return;
   // AUTO: NMEA still wins if fresh. PHONE-forced: take it regardless.
-  if (gpsTimeSourceMode == GTS_AUTO) {
+  if (timeSourceMode == TSRC_AUTO) {
     bool nmeaFresh = (lastNmea2kSystemTimeMs > 0) &&
                      (millis() - lastNmea2kSystemTimeMs < NMEA_TIME_FRESH_MS);
     if (nmeaFresh) return;
@@ -5189,13 +5209,13 @@ void syncTimeFromPhone(time_t phoneEpochSec) {
 }
 
 // Promote phone GPS into the effective Latitude/Longitude globals. Respects
-// gpsTimeSourceMode: AUTO defers to fresh NMEA; PHONE-forced always proceeds;
-// NMEA/NTP-forced never proceed. MARK_FRESH on each index so IS_STALE-gated
+// gpsPositionSource: AUTO defers to fresh NMEA; PHONE-forced always proceeds;
+// NMEA-forced never proceeds. MARK_FRESH on each index so IS_STALE-gated
 // consumers (distance, smoothing, sensor hist) actually see the phone fix.
 void consumePhoneGps() {
   if (gpsManualActive) return;  // sticky manual override beats phone
-  if (gpsTimeSourceMode == GTS_NMEA || gpsTimeSourceMode == GTS_NTP) return;
-  if (gpsTimeSourceMode == GTS_AUTO) {
+  if (gpsPositionSource == GPS_SRC_NMEA) return;
+  if (gpsPositionSource == GPS_SRC_AUTO) {
     bool nmeaFresh = (lastNmea2kGnssMs > 0) &&
                      (millis() - lastNmea2kGnssMs < NMEA_GPS_FRESH_MS);
     if (nmeaFresh) return;  // NMEA wins in AUTO
@@ -5231,19 +5251,25 @@ void applyPhoneSpeed(bool newSpd, bool newHdg) {
   }
 }
 
-// Resolve current GPS + time source labels every loop tick. Behaviour depends
-// on user-set gpsTimeSourceMode:
-//   GTS_AUTO  — freshness-arbitrated priority chain (NMEA→Phone→NTP). Promotes
-//               phone GPS to effective globals when NMEA stale; demotes both
-//               source labels to none/drifting when nothing fresh.
-//   GTS_NMEA  — force NMEA. Don't touch GNSS handler's writes. Label NMEA
-//               always (even when stale — dashboard's IS_STALE greying alerts
-//               the user).
-//   GTS_PHONE — force phone. Overwrite LatitudeNMEA/LongitudeNMEA from phone
-//               values. MARK_FRESH only if phone is actually fresh (so stale
-//               forced data doesn't poison distance/smoothing).
-//   GTS_NTP   — NTP-only time; GPS falls through to AUTO chain (NTP doesn't
-//               give position).
+// Resolve current position + time source labels every loop tick. Position and
+// time are INDEPENDENT settings; each resolves on its own chain.
+//
+// gpsPositionSource (latitude/longitude):
+//   GPS_SRC_AUTO  — freshness-arbitrated: NMEA when fresh, else phone. Promotes
+//                   phone GPS to the effective globals when NMEA is stale.
+//   GPS_SRC_NMEA  — force NMEA. Don't touch the GNSS handler's writes. Label NMEA
+//                   always (even when stale — the dashboard's IS_STALE greying
+//                   alerts the user).
+//   GPS_SRC_PHONE — force phone. Overwrite LatitudeNMEA/LongitudeNMEA from phone
+//                   values. MARK_FRESH only if phone is actually fresh, so stale
+//                   forced data doesn't poison distance/smoothing.
+//
+// timeSourceMode (the clock):
+//   TSRC_AUTO  — NMEA SystemTime → phone → NTP, by freshness.
+//   TSRC_NMEA  — force NMEA time.
+//   TSRC_PHONE — force phone time. Works in AP mode, where nothing else does.
+//   TSRC_NTP   — force NTP. Carries no position, so it says nothing about the
+//                position chain above.
 // Cheap (a few unsigned compares); safe to call every tick.
 void resolveSources() {
   unsigned long now = millis();
@@ -5263,11 +5289,11 @@ void resolveSources() {
     MARK_FRESH(IDX_LONGITUDE_NMEA);
     currentGpsSource = GPS_MANUAL;
   } else
-  switch (gpsTimeSourceMode) {
-    case GTS_NMEA:
+  switch (gpsPositionSource) {
+    case GPS_SRC_NMEA:
       currentGpsSource = GPS_NMEA;  // honor user choice even when stale
       break;
-    case GTS_PHONE:
+    case GPS_SRC_PHONE:
       LatitudeNMEA  = LatitudePhone;
       LongitudeNMEA = LongitudePhone;
       if (phoneGpsFresh) {
@@ -5277,8 +5303,7 @@ void resolveSources() {
       }
       currentGpsSource = GPS_PHONE;
       break;
-    case GTS_AUTO:
-    case GTS_NTP:  // GPS falls through to AUTO (NTP is time-only)
+    case GPS_SRC_AUTO:
     default:
       if (nmeaGpsFresh) {
         // GNSS handler already set GPS_NMEA + MARK_FRESH on parse.
@@ -5298,7 +5323,7 @@ void resolveSources() {
   // ── Time source label ──────────────────────────────────────────────────
   // (Forced modes never need label-flipping here — the syncTime* setters are
   // already gated, so only the authorized source can write the timebase.)
-  if (gpsTimeSourceMode == GTS_AUTO) {
+  if (timeSourceMode == TSRC_AUTO) {
     if (nmeaTimeFresh) {
       // SystemTime handler sets TIME_GPS on parse.
     } else if (phoneTimeFresh) {
@@ -5323,16 +5348,16 @@ void checkTimeSync() {
   // itself early-returns if the mode disallows it. NMEA/Phone-forced: never
   // touch NTP (the syncTimeFromNTP early-return handles this too, but skip
   // the call to avoid the WiFi check + log noise).
-  if (gpsTimeSourceMode == GTS_AUTO) {
+  if (timeSourceMode == TSRC_AUTO) {
     bool nmeaTimeFresh  = (lastNmea2kSystemTimeMs > 0) &&
                           (currentMillis - lastNmea2kSystemTimeMs < NMEA_TIME_FRESH_MS);
     bool phoneTimeFresh = (lastPhoneTimeMs > 0) &&
                           (currentMillis - lastPhoneTimeMs < PHONE_FRESH_MS);
     if (!nmeaTimeFresh && !phoneTimeFresh) syncTimeFromNTP();
-  } else if (gpsTimeSourceMode == GTS_NTP) {
+  } else if (timeSourceMode == TSRC_NTP) {
     syncTimeFromNTP();
   }
-  // GTS_NMEA / GTS_PHONE → never NTP.
+  // TSRC_NMEA / TSRC_PHONE → never NTP.
 }
 // Format timestamp into static buffer - returns pointer to timestampBuffer
 const char *formatTimestamp(time_t timestamp) {

@@ -1019,6 +1019,362 @@ void altWinStatsCsvSend(AsyncWebServerRequest *request) {
   request->send(200, "text/csv", out);
 }
 
+// ══ GATE-TUNING CAPTURE ═══════════════════════════════════════════════════════════════════════
+// Manual session logger (this block) + field sweeper (altSweep_tick, next to fieldCurve_tick).
+// Spec: Working Markdown Docs/ALT_GATE_TUNING_CAPTURE_SPEC.md. Replaces the gate-replay ring
+// (/altraw.csv + /altemits.csv), removed 2026-08-23.
+//
+// WHY IT EXISTS: the record book's admission gate keeps only runs that beat the local surface
+// estimate, so any upward bias in that surface reads as a healthy machine grading below 100%. Sizing
+// the gates needs per-axis output sensitivities, and the closed-loop operating data cannot give them:
+// the regulator holds a target by trading field against engine speed, so those two never move
+// independently and a fit on ordinary running reports "field barely matters" when the truth is "the
+// regulator was cancelling it". This logs a hand-run experiment where they DO move independently.
+//
+// 10 Hz, and 10 Hz is not a compromise: EP_FEED_DT_MS = 100, so the Episode detector already
+// decimates the ~200 Hz fold to 10 Hz before any steadiness decision — an offline replay is
+// sample-for-sample aligned with what the live gate would have done. It also clears the fixed
+// 1.5006 Hz bus disturbance (5 Hz Nyquist), which a 2 Hz log would fold straight into the band the
+// smear measurement lives in.
+#define ALTLOG_DT_MS       100u    // 10 Hz — the cadence the gate itself evaluates at (EP_FEED_DT_MS)
+#define ALTLOG_BLOCKS      3
+#define ALTLOG_BLOCK_ROWS  3855    // rows per 64 KB block at 17 B/row (65,535 B — the 1 B remainder
+                                   // is left unused rather than splitting a row across two blocks)
+#define ALTLOG_CAP_ROWS    ((uint32_t)ALTLOG_BLOCKS * ALTLOG_BLOCK_ROWS)   // 11565 rows = 19.3 min
+#define ALTLOG_STALE_MS    300u    // fold older than this → field is off / control path not running
+
+// 17 B/row. Every axis is stored 20-100x finer than the band it gates, so quantization can never be
+// mistaken for movement. Saturating stores (altQI16/altQU16): amps clip at ±327.67 A (a 500 A
+// install running above that logs a flat line, which is visible; it does not wrap), bus volts at
+// 65.535 V (above any 48 V-class cut), temp at ±3276.7 °F. A NaN case temp stores 0 — implausible on
+// a running alternator, so the analysis treats 0 °F as "no reading" rather than as data.
+struct __attribute__((packed)) AltLogRow {
+  uint16_t dtMs;      // ms since the previous row (uint16 caps an in-row gap at 65 s; longer ends the segment)
+  int16_t  rpm;
+  uint16_t duty;      // field % ×100
+  uint16_t vbus;      // mV
+  int16_t  tempF;     // °F ×10 — RAW: the health tool never filters temp (slow, quantized, noise-free)
+  int16_t  tSlope;    // case-temp rate of change, °F/min ×100 — the device's own altTempSlopeFMin
+                      // (fast-minus-slow EMA pair in the fold), NOT recomputed offline: it needs
+                      // filter history from before Record was pressed, and it is the same number the
+                      // record book stamps on every point (ex[1]), so a replay must see the same one.
+                      // Full resolution on purpose — near-zero versus a couple of °F/min is the whole
+                      // settled-vs-warming discriminator, and warm-up sessions grade ~10% low
+  int16_t  amps;      // A ×100, EMA-filtered (altEmaSec) — the signal the detector acts on
+  int16_t  ampsRaw;   // A ×100, MEAN of the fresh CH1 conversions since the previous row (see below)
+  uint8_t  flags;     // b0 field on, b1 manual mode, b2 sweeper active, b3 sweep direction (1=down),
+                      // b4 protection binding, b5 detector eligible, b6 detector full-steady,
+                      // b7 this sweep reversed early — a control limit or Reverse now, not its ceiling
+  // No segment index. A recording is deliberately FLUID — one press of Record, then whatever the
+  // operator does: a sweep, throttle movements, ordinary driving, in any order. Nothing on the device
+  // knows where one "run" ends and the next begins, and nothing needs to: these flag bits already mark
+  // every transition the analysis can split on (sweeper on/off, up leg vs down, manual vs auto, field
+  // on vs off), and dtMs marks any real gap. A counter on top of that was a second, weaker copy.
+};
+static_assert(sizeof(AltLogRow) == 17, "AltLogRow lost its packing — the 192 KB budget assumes 17 B");
+
+// 192 KB as 3 × 64 KB blocks, NOT one allocation. Free PSRAM measured 848 KB (2026-08-23) and a
+// single contiguous request that size is not safe at that level: cvLog's 334 KB is one
+// heap_caps_malloc and it silently lost its boot allocation once already, serving empty files for
+// days, at a HIGHER free figure than this. Chunking removes the contiguity question entirely.
+// Allocated on Record, freed on dump-and-clear — steady-state cost is zero.
+static AltLogRow *altLogBlk[ALTLOG_BLOCKS] = { nullptr, nullptr, nullptr };
+static uint32_t altLogSessionId = 0;      // millis() at Record — files from one campaign sort by it
+static uint32_t altLogStartMs = 0, altLogLastRowMs = 0;
+static uint32_t altLogEpoch = 0;          // wall-clock seconds at session start (0 = clock never synced)
+static uint8_t  altLogEndReason = 0, altLogChargeStage = 0;
+static float    altLogStartTempF = 0.0f, altLogStartVbus = 0.0f;
+static bool     altLogWarned60 = false;   // one-shot 60-s-remaining console warning
+static double   altLogRawSum = 0.0;       // CH1 accumulator for THIS row's ampsRaw mean
+static uint32_t altLogRawN = 0;
+static uint32_t altLogCh1Seen = 0;        // last ch1AtCount consumed — edge-detects a fresh conversion
+static bool     altEligibleNow = false;   // detector eligibility, exported from altFold_tick for flags b5
+// Every button press is a REQUEST consumed on the control loop, never an action taken on the web
+// task: allocation, freeing and the state machine all run on the one task that also writes rows, so
+// a Discard can never free the buffer out from under a row write. Same reason the field curve is
+// request-driven. The dump lambda reads the blocks from the web task, so a release also waits for
+// any transfer in flight (with a staleness escape, since an abandoned connection may never
+// disconnect cleanly).
+// (the request flags themselves live in Xregulator.ino — the /get handlers are compiled before this file)
+static volatile bool altLogDlBusy = false;
+static uint32_t altLogDlStartMs = 0;
+static inline bool altLogDlActive() {
+  return altLogDlBusy && ((uint32_t)(millis() - altLogDlStartMs) < 30000u);
+}
+
+// A macro, not an inline function: Arduino hoists every function prototype to the top of the merged
+// sketch, ahead of this struct, so anything returning an AltLogRow* would not compile.
+#define ALTLOG_AT(row) (&altLogBlk[(row) / ALTLOG_BLOCK_ROWS][(row) % ALTLOG_BLOCK_ROWS])
+static void altLogFree() {
+  for (int i = 0; i < ALTLOG_BLOCKS; i++) { if (altLogBlk[i]) { free(altLogBlk[i]); altLogBlk[i] = nullptr; } }
+}
+// All-or-nothing: a partial allocation would record a short session nobody notices is short.
+static bool altLogAlloc() {
+  for (int i = 0; i < ALTLOG_BLOCKS; i++) {
+    altLogBlk[i] = (AltLogRow *)ps_malloc((size_t)ALTLOG_BLOCK_ROWS * sizeof(AltLogRow));
+    if (!altLogBlk[i]) { altLogFree(); return false; }
+  }
+  return true;
+}
+
+static void altLogClear() {
+  altLogFree();
+  altLogState = 0; altLogRows = 0; altLogSecLeft = 0; altLogEndReason = 0;
+  altLogRawSum = 0.0; altLogRawN = 0; altLogWarned60 = false;
+}
+
+// reason: 1 = user Stop, 2 = capacity reached (FULL). The buffer NEVER wraps — a deliberate capture
+// that silently ate its own beginning would be worse than one that stopped.
+static void altLogStopRec(uint8_t reason) {
+  if (altLogState != 1) return;
+  altLogState = (reason == 2) ? 3 : 2;
+  altLogEndReason = reason;
+  float secs = (float)(millis() - altLogStartMs) / 1000.0f;
+  queueConsoleMessageF("Gate capture: %s at %lu rows (%.0f s) — Dump to keep it",
+                       (reason == 2) ? "BUFFER FULL, recording stopped" : "stopped",
+                       (unsigned long)altLogRows, secs);
+}
+
+static bool altLogStartRec() {
+  if (altLogState == 1) { queueConsoleMessage("Gate capture: already recording"); return false; }
+  if (IgnoreTemperature) {   // temp is one of the four axes AND the gate that disables the whole fold
+    queueConsoleMessage("Gate capture: blocked — Ignore Temperature is on, so there is no case-temp axis to log");
+    return false;
+  }
+  if (altLogState != 0) {    // STOPPED or FULL, never dumped — the browser confirms before we get here
+    queueConsoleMessageF("Gate capture: discarding the previous %lu-row session (never dumped)", (unsigned long)altLogRows);
+    altLogClear();
+  }
+  if (!altLogAlloc()) {
+    queueConsoleMessageF("Gate capture: PSRAM alloc FAILED for 192 KB in 3 blocks (%u KB free) — not recording",
+                         (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+    return false;
+  }
+  altLogSessionId = millis();
+  altLogStartMs = altLogSessionId;
+  altLogLastRowMs = altLogSessionId;
+  altLogEpoch = timeIsSynced ? (uint32_t)time(NULL) : 0;
+  altLogRows = 0; altLogEndReason = 0; altLogWarned60 = false;
+  altLogRawSum = 0.0; altLogRawN = 0; altLogCh1Seen = ch1AtCount;
+  altLogStartTempF = TempToUse;
+  altLogStartVbus = getBatteryVoltage();
+  altLogChargeStage = (uint8_t)chargeStageDisplay;
+  altLogSecLeft = (float)ALTLOG_CAP_ROWS / 10.0f;
+  altLogState = 1;
+  queueConsoleMessageF("Gate capture: RECORDING — %lu rows capacity, %.1f min at 10 Hz",
+                       (unsigned long)ALTLOG_CAP_ROWS, altLogSecLeft / 60.0f);
+  return true;
+}
+
+// Consume the button requests. Runs on the control loop, so it is the only place the 192 KB is
+// allocated, freed, or handed to the state machine.
+static void altLogService() {
+  if (!altLogStartReq && !altLogStopReq && !altLogClearReq) return;
+  if (altLogDlActive()) return;   // a dump is streaming these blocks — hold every request until it ends
+  if (altLogStopReq)  { altLogStopReq = false;  altLogStopRec(1); }
+  if (altLogClearReq) {
+    altLogClearReq = false;
+    if (altLogState == 1) queueConsoleMessage("Gate capture: clear ignored — still recording");
+    else if (altLogState == 0) queueConsoleMessage("Gate capture: nothing to clear");
+    else { altLogClear(); queueConsoleMessage("Gate capture: buffer cleared, 192 KB PSRAM released"); }
+  }
+  if (altLogStartReq) { altLogStartReq = false; altLogStartRec(); }
+}
+
+// Called from loop() every pass. Accumulates raw CH1 amps continuously and writes one row per
+// ALTLOG_DT_MS. Idle cost is a single compare.
+void altLog_tick(uint32_t nowMs) {
+  altLogService();
+  if (altLogState != 1) return;
+
+  // ampsRaw MUST be a mean, not a point sample. CH1 delivers fresh amps roughly every 30 ms, so at
+  // 10 Hz a point sample would take one conversion in three and alias current ripple into the one
+  // column intended for re-deriving the EMA offline — which defeats its purpose. ch1AtCount ticks
+  // once per confirmed CH1 read, so this edge-detects every fresh conversion and averages them.
+  // The other channels update slower than 10 Hz, so point samples are correct for them.
+  if (ch1AtCount != altLogCh1Seen) {
+    altLogCh1Seen = ch1AtCount;
+    if (!isnan(MeasuredAmps)) { altLogRawSum += MeasuredAmps; altLogRawN++; }
+  }
+
+  if ((uint32_t)(nowMs - altLogLastRowMs) < ALTLOG_DT_MS) return;
+
+  // Auto-stop: the next write would exceed capacity. Stop, keep every row, say so loudly.
+  if (altLogRows >= ALTLOG_CAP_ROWS) { altLogStopRec(2); return; }
+
+  uint32_t dt = nowMs - altLogLastRowMs;
+  altLogLastRowMs = nowMs;
+
+  // The fold exports the EMA-filtered detector inputs at ~200 Hz but only on a normal field-on
+  // control tick. A stale fold means the field is off (or a fault path is running): log the raw
+  // live values with the field-on bit clear, so an off stretch reads as an off stretch instead of
+  // as a hole in the record.
+  bool foldFresh = (altLastFoldMs != 0) && ((uint32_t)(nowMs - altLastFoldMs) < ALTLOG_STALE_MS);
+  float rpm, duty, vbus, amps;
+  if (foldFresh) {
+    rpm = altLive_rpm; duty = altLive_duty; vbus = altLive_vbus; amps = altLive_amps;
+  } else {
+    rpm = RPM; duty = dutyCycle; vbus = getBatteryVoltage();
+    amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;
+    altEligibleNow = false;
+  }
+  float rawAmps = (altLogRawN > 0) ? (float)(altLogRawSum / (double)altLogRawN) : amps;
+  altLogRawSum = 0.0; altLogRawN = 0;
+
+  uint8_t fl = 0;
+  bool manualNow = (sysMode == SYS_MODE_MANUAL);
+  if (!gpio4IsLow)                 fl |= 0x01;
+  if (manualNow)                   fl |= 0x02;
+  if (altSweepActive != 0)         fl |= 0x04;
+  if (altSweepActive == 2)         fl |= 0x08;   // down leg
+  if (ctrlLimiter == 6)            fl |= 0x10;   // a protection is binding or a recovery window is open
+  if (altEligibleNow)              fl |= 0x20;
+  if (altSteady)                   fl |= 0x40;
+  if (altSweepActive != 0 && altSweepLimitRev)
+                                   fl |= 0x80;   // this sweep turned around early — a control limit or the
+                                                 // Reverse now button, not its commanded ceiling. Gated on the
+                                                 // sweep being live so the bit describes a run, not a leftover.
+
+
+  AltLogRow *r = ALTLOG_AT(altLogRows);
+  r->dtMs    = (dt > 65535u) ? 65535u : (uint16_t)dt;
+  r->rpm     = altQI16(rpm, 1.0f);
+  r->duty    = altQU16(duty, 100.0f);
+  r->vbus    = altQU16(vbus, 1000.0f);
+  r->tempF   = altQI16(TempToUse, 10.0f);
+  r->tSlope  = altQI16(altTempSlopeFMin, 100.0f);
+  r->amps    = altQI16(amps, 100.0f);
+  r->ampsRaw = altQI16(rawAmps, 100.0f);
+  r->flags   = fl;
+  altLogRows++;
+
+  altLogSecLeft = (float)(ALTLOG_CAP_ROWS - altLogRows) / 10.0f;
+  if (!altLogWarned60 && altLogSecLeft <= 60.0f) {
+    altLogWarned60 = true;
+    queueConsoleMessage("Gate capture: 60 s of buffer left — wrap up the sweep in progress");
+  }
+}
+
+// ---- dump header (128+ B, little-endian, mirrored by parseAltLogBin() in script.js) ----
+// Dump-and-restart produces many small files instead of one large one, so each file has to carry the
+// settings that shaped it: a mid-campaign gate change would otherwise make two files silently
+// incomparable. Session id + start epoch keep them in order.
+struct __attribute__((packed)) AltLogHdr {
+  uint32_t magic;        // 'ALGL'
+  uint16_t ver;
+  uint16_t rowBytes;
+  uint32_t rowCount;
+  uint32_t capRows;
+  uint32_t sessionId;
+  uint32_t epoch;        // wall clock at session start (0 = never synced)
+  uint32_t startMs;
+  uint32_t durMs;
+  uint16_t dtMs;         // nominal sample interval
+  uint8_t  voltClass;
+  uint8_t  endReason;    // 0 still recording, 1 Stop, 2 FULL
+  uint8_t  chargeStage;
+  uint8_t  pad0[3];      // keeps the floats below 4-byte aligned (one byte was the retired segment index)
+  float    startTempF, startVbus;
+  float    emaSec, rpmTol, dutyTolPct, vbusTol, thermDegF, thermSec, ampsTolPct, ampsFloorA;
+  float    rpmSec, dutySec, vbusSec, ampsSec, minRunSec;
+  uint32_t emitAvgMs;
+  float    axisScale[4];
+  char     fw[16];
+};
+static_assert(sizeof(AltLogHdr) == 136, "AltLogHdr size changed — parseAltLogBin() in script.js must match");
+
+// /altlog.bin — header then rows, streamed. Refused while recording: a growing row count under a
+// chunked reader would hand out a file whose header disagrees with its body.
+void altLogBinSend(AsyncWebServerRequest *request) {
+  // Claim the transfer interlock BEFORE reading any of the state it protects: altLogService only
+  // holds a Discard back while altLogDlActive(), so a guard that ran first could pass on a live
+  // buffer and then have the control loop free it under the streaming lambda. Every early return
+  // below releases it by hand — onDisconnect is not registered yet at that point.
+  altLogDlStartMs = millis();   // before the flag: altLogDlActive() reads both, and only when busy
+  altLogDlBusy = true;
+  if (altLogState == 1) {
+    altLogDlBusy = false;
+    request->send(409, "text/plain", "recording — press Stop first\n");
+    return;
+  }
+  if (altLogState == 0 || altLogRows == 0 || !altLogBlk[0]) {
+    altLogDlBusy = false;
+    request->send(200, "application/octet-stream", "");
+    return;
+  }
+
+  struct AltLogDL {
+    uint8_t  hdr[sizeof(AltLogHdr)];
+    int      hdrPos;
+    uint32_t row, total;
+    uint8_t  rowBuf[sizeof(AltLogRow)];
+    int      rowPos, rowLen;
+    bool     done;
+  };
+  AltLogDL st;
+  memset(&st, 0, sizeof(st));
+  st.total = altLogRows;
+
+  request->onDisconnect([]() { altLogDlBusy = false; });   // Safari tears connections down abruptly
+
+  AltLogHdr h;
+  memset(&h, 0, sizeof(h));
+  h.magic = 0x414C474Cu;   // 'ALGL'
+  h.ver = 1;
+  h.rowBytes = (uint16_t)sizeof(AltLogRow);
+  h.rowCount = altLogRows;
+  h.capRows = ALTLOG_CAP_ROWS;
+  h.sessionId = altLogSessionId;
+  h.epoch = altLogEpoch;
+  h.startMs = altLogStartMs;
+  h.durMs = altLogLastRowMs - altLogStartMs;
+  h.dtMs = (uint16_t)ALTLOG_DT_MS;
+  h.voltClass = (uint8_t)SYSTEM_VOLTAGE_CLASS;
+  h.endReason = altLogEndReason;
+  h.chargeStage = altLogChargeStage;
+  h.startTempF = altLogStartTempF;
+  h.startVbus = altLogStartVbus;
+  h.emaSec = altEmaSec;       h.rpmTol = altRpmTol;       h.dutyTolPct = altDutyTolPct;
+  h.vbusTol = altVbusTol;     h.thermDegF = altThermDegF; h.thermSec = altThermSec;
+  h.ampsTolPct = altAmpsTolPct; h.ampsFloorA = altAmpsFloorA;
+  h.rpmSec = altRpmSec;       h.dutySec = altDutySec;     h.vbusSec = altVbusSec;
+  h.ampsSec = altAmpsSec;     h.minRunSec = altMinRunSec;
+  h.emitAvgMs = (uint32_t)ALT_EMIT_AVG_MS;
+  for (int a = 0; a < ALT_NAXIS; a++) h.axisScale[a] = altFront2.axisScale[a];
+  strncpy(h.fw, FIRMWARE_VERSION, sizeof(h.fw) - 1);
+  memcpy(st.hdr, &h, sizeof(h));
+
+  AsyncWebServerResponse *response = request->beginChunkedResponse(
+    "application/octet-stream",
+    [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+      if (st.done) return 0;
+      size_t written = 0;
+      while (written < maxLen) {
+        if (st.hdrPos < (int)sizeof(AltLogHdr)) {
+          size_t canSend = min(maxLen - written, (size_t)((int)sizeof(AltLogHdr) - st.hdrPos));
+          memcpy(buf + written, st.hdr + st.hdrPos, canSend);
+          written += canSend;
+          st.hdrPos += (int)canSend;
+          continue;
+        }
+        if (st.rowPos >= st.rowLen) {
+          if (st.row >= st.total) { st.done = true; altLogDlBusy = false; return written; }
+          memcpy(st.rowBuf, ALTLOG_AT(st.row), sizeof(AltLogRow));
+          st.rowLen = (int)sizeof(AltLogRow);
+          st.rowPos = 0;
+          st.row++;
+        }
+        size_t canSend = min(maxLen - written, (size_t)(st.rowLen - st.rowPos));
+        memcpy(buf + written, st.rowBuf + st.rowPos, canSend);
+        written += canSend;
+        st.rowPos += (int)canSend;
+      }
+      return written;
+    });
+  response->addHeader("Cache-Control", "no-cache");
+  request->send(response);
+}
+
 // Live: called from the pidLog hook (~200 Hz). Bench-sim: called at 1 Hz from altHealth_tick.
 // Reads the final control state, EMA-filters the detector inputs, feeds the Episode detector, and on a
 // steady-run emit builds the surface point and STASHES it into altEmitQ — the O(count) work (front
@@ -1104,6 +1460,7 @@ void altFold_tick(uint32_t nowMs) {
   // can't act as a barrier that wipes the look-back ring mid-run.
   altEpisodeSyncCfg(fAmps);
   bool eligible = (!isnan(fVbus) && fVbus >= ALT_MIN_BATT_V * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f) && fAmps >= altMinAmps && fDuty >= altMinDuty && fRpm >= 0);
+  altEligibleNow = eligible;                                                    // exported for the gate-capture log's flags byte
   altSessTempGate.feed(eligible, tF, nowMs, altThermDegF, altSessTempDwell());   // lighter (half-dwell) temp gate for the session plot
   RawSample<ALT_NAXIS> s;
   s.x[0] = fRpm; s.x[1] = fDuty; s.x[2] = fVbus; s.x[3] = tF; s.out = fAmps; s.tMs = nowMs;
@@ -1227,6 +1584,16 @@ static float alf_hiField()   { return altHiFieldAlert ? 1.0f : 0.0f; }    // hig
 static float alf_sim()       { return (altSimMode >= 0.5f) ? 1.0f : 0.0f; }
 static float alf_gAmps()     { return altLive_gAmps; }                    // graded boxcar-average amps (the % numerator)
 static float alf_tSlope()    { return altTempSlopeFMin; }                 // case-temp slope (F/min) — thermal-transient tag
+// Gate-tuning capture state. It rides AltLive rather than a CSV channel: AltLive is the alt-health
+// module's own 1 Hz frame, the recorder UI lives on the same page, and the frame is schema-zipped
+// (/altschema) so appending a field cannot desynchronize a stale-open dashboard the way a CSV
+// index map can. A 1 Hz countdown is also all a seconds-remaining readout needs.
+static float alf_logState()  { return (float)altLogState; }               // 0 idle, 1 recording, 2 stopped, 3 full
+static float alf_logRows()   { return (float)altLogRows; }
+static float alf_logSecLeft(){ return altLogSecLeft; }                    // capacity remaining at the fixed 10 Hz rate
+static float alf_logCap()    { return (float)ALTLOG_CAP_ROWS; }
+static float alf_sweepState(){ return (float)altSweepActive; }            // 0 idle, 1 ramp up, 2 ramp down, 3 easing out
+static float alf_sweepRev()  { return (float)altSweepRevWhy; }            // 0 ceiling, 1 a control limit, 2 Reverse now
 static float alf_syncAgo()   { if (lastAltHealthSyncEpoch <= 0 || !timeIsSynced) return -1.0f;
                                time_t n = time(NULL); return (n > (time_t)lastAltHealthSyncEpoch) ? (float)(n - (time_t)lastAltHealthSyncEpoch) : 0.0f; }
 // fold timing lives in the Function Timing table (ft_altHealth / ft_altFold rows) — not in this live stream
@@ -1243,10 +1610,13 @@ static AltLiveField ALT_LIVE[] = {
   {"sim", alf_sim}, {"syncAgoS", alf_syncAgo},
   {"gAmps", alf_gAmps},
   {"tSlope", alf_tSlope},   // appended at END — stale-open dashboards zip fewer schema names than values, extras ignored
+  {"logState", alf_logState}, {"logRows", alf_logRows}, {"logSecLeft", alf_logSecLeft},
+  {"logCap", alf_logCap},
+  {"sweepState", alf_sweepState}, {"sweepRev", alf_sweepRev},
 };
 static const size_t ALT_LIVE_COUNT = sizeof(ALT_LIVE) / sizeof(ALT_LIVE[0]);
 static void altSendLive() {
-  char buf[384];
+  char buf[512];   // truncates rather than overruns (see the break below); sized well past the field list
   int off = 0;
   for (size_t i = 0; i < ALT_LIVE_COUNT; i++) {
     int n = snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), ALT_LIVE[i].get());
@@ -1510,6 +1880,7 @@ void altDebugCsvSend(AsyncWebServerRequest *request) {
   response->addHeader("Cache-Control", "no-cache");
   request->send(response);
 }
+
 // Parse a BEFRONT1 CSV (the cloud's pruned front, or a saved/uploaded file) into a TARGET surface +
 // its backing buffer, replacing it. toUploaded=false → My History (cloud sync-back); true → Uploaded
 // surface (browser Load CSV). Uses a bool (not a FrontStore<> reference) so Arduino's auto-prototype
@@ -5107,6 +5478,219 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       return true;
     }
     dutyOut = fcEaseInFromDuty + (stepDuty - fcEaseInFromDuty) * frac;
+    return true;
+  }
+
+  return false;
+}
+
+
+// altSweep_tick() — gate-tuning field sweeper (ALT_GATE_TUNING_CAPTURE_SPEC.md §8)
+//
+// A continuous duty ramp, up and back down, for the held-speed half of the sensitivity experiment.
+// Same contract as fieldCurve_tick: returns true while active, and the caller must force
+// GOV_BYPASS_SLEW + MANUAL PID and use dutyOut as the command.
+//
+// Modelled on fieldCurve_tick because that already solves the hard parts — easing in from the live
+// operating duty instead of snapping, easing out so a fast current collapse does not trip a
+// protection, and tearing down cleanly when the canonical fast-OV layer cuts the field. What differs:
+//   - a continuous ramp, not step-and-dwell (default 1 %/s);
+//   - up THEN down in one run. At 1 %/s against a field time constant near 0.7 s the output lags
+//     duty by roughly 0.7% of duty, and averaging the two directions cancels a symmetric lag
+//     exactly. The reversal also decorrelates the two monotone confounders — speed sag under rising
+//     field load, case temperature rising through the sweep — from the field axis;
+//   - no knee detection and no proposed settings. It is a stimulus generator; the analysis is offline.
+// Bounded by MaxDuty, the real per-bus field ceiling, exactly as the field curve is: ramping past it
+// records flat, false amps. Over-voltage is not handled here — the fast-OV layer on the control path
+// fires before this override runs and latches altSweepAbortRequested (6_functions.ino).
+// Turn around SHORT of the current and voltage limits, never on them. The soft layers that normally
+// keep the machine off its limits — Group 1/2 over-voltage, iExcess, load dump, the thermal derate, the whole min-select
+// ceiling chain — are all inside the !sysIDRunning body and therefore bypassed for the entire sweep.
+// Only the hard-cut layer is left, so arriving exactly at a limit with 1 %/s of field still building
+// and a ~0.7 s field lag behind it is how a sweep ends in a protection cut, and a cut throws away the
+// down leg the lag cancellation depends on. These margins buy back the overshoot the missing soft
+// layers would have absorbed.
+// Both margins are panel controls (altSweepMarginA / altSweepMarginV, defaults 10 A and 0.15 V),
+// posted with the start request exactly like rate/from/to.
+// No temperature margin, on the user's call. Case temperature moves on a thermal time constant, not
+// a field one: it cannot overshoot the way current and bus volts do behind the ramp's ~0.7 s field
+// lag, so there is nothing for a margin to buy back, and taking one would end sweeps early.
+// A 10 A margin would swallow a small cap whole (25 A at idle leaves 15 A of usable span, and a 12 A
+// cap would refuse to sweep at all), so the current margin also never takes more than a quarter of
+// the limit it guards — which is a clamp on the user's number too, not just on the default.
+static inline float altSweepAmpMargin(float limitA) { return fminf(altSweepMarginA, 0.25f * limitA); }
+
+// Which control limit, if any, the machine is approaching right now — evaluated from live
+// measurements against the CONFIGURED limits, deliberately not from ctrlLimiter: the sweep owns duty
+// through the same override the field curve uses, so the normal min-select chain that publishes
+// ctrlLimiter is bypassed for the whole run (and is forced to 0 while it runs). Each test therefore
+// has to repeat the enable gates the min-select chain applies, or the sweep turns around on a limit
+// the regulator itself would not have honoured.
+static const char *altSweepLimitNow() {
+  float v = getBatteryVoltage();
+  if (ChargingVoltageTarget > 0.5f && v >= ChargingVoltageTarget - altSweepMarginV)
+                                                                           return "charge-voltage target";
+  // DVCC limits count only while actually following a BMS — dvccCvlV/dvccCclA hold their last
+  // decoded values when the link drops or the feature is off, and a stale one would end every sweep.
+  bool dvccFollowing = (dvccEn == 1 && dvccState == 3);
+  if (dvccFollowing && !isnan(dvccCvlV) && v >= dvccCvlV - altSweepMarginV)
+                                                                           return "BMS voltage limit";
+  float amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;
+  // capLimitMode 1 = the cap table is watts, not amps (the min-select chain divides it by bus volts).
+  float capA = (capLimitMode == 1 && v > 0.5f) ? (interpolateRPMTable(RPM, rpmCapPowerTable) / v)
+                                               : interpolateRPMTable(RPM, rpmCapCurrentTable);
+  capA = fminf(capA, (float)MaxTableValue);
+  if (capA > 0.5f && amps >= capA - altSweepAmpMargin(capA))               return "current limit at this engine speed";
+  if (dvccFollowing && !isnan(dvccCclA) && dvccCclA > 0.5f && amps >= dvccCclA - altSweepAmpMargin(dvccCclA))
+                                                                           return "BMS current limit";
+  // Same enable gate the battery-limit ceiling uses in the min-select chain (BattLimitEnable +
+  // a configured INA228 shunt), so a disabled limit cannot cut the sweep short.
+  if (BattLimitEnable && HAS_BATT_SHUNT && BatteryCurrentSource == 0 && BattCurrentLimitA > 0.5f
+      && !isnan(Bcur) && Bcur >= BattCurrentLimitA - altSweepAmpMargin(BattCurrentLimitA))
+                                                                           return "battery current limit";
+  if (TemperatureLimitF > 0 && !isnan(TempToUse) && TempToUse >= TemperatureLimitF)
+                                                                           return "alternator temperature limit";
+  return nullptr;
+}
+#define ALTSWEEP_LIMIT_CONFIRM_MS 250u   // a limit must hold this long to turn the ramp around — current
+                                         // ripple touching a cap for one sample is not the machine
+                                         // arriving at it, and at 1 %/s this costs 0.25% of duty
+
+bool altSweep_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
+  static uint8_t  phase = 0;        // 0 idle, 1 ease-in, 2 ramp, 3 ease-out
+  static float    fromDuty = 0.0f, toDuty = 0.0f, curDuty = 0.0f, ratePctS = 1.0f;
+  static float    easeFromDuty = 0.0f;
+  static uint32_t easeStartMs = 0, lastRampMs = 0, limSinceMs = 0;
+  static bool     goingDown = false;
+
+  if (phase != 0 && altSweepAbortRequested) {
+    altSweepAbortRequested = false;
+    // A teardown outside this function (protection cut, or the field leaving normal AUTO — both in
+    // 6_functions.ino) has already cleared altSweepActive and said why on the console. Only the plain
+    // Stop-sweep press arrives here with the run still marked live, so only that one announces.
+    if (altSweepActive != 0) queueConsoleMessage("Field sweep: aborted");
+    altSweepActive = 0;
+    altSweepLastEndMs = millis();
+    phase = 0;
+    return false;
+  }
+
+  // ── IDLE: wait for trigger (do NOT touch dutyOut — another override may own it) ──
+  if (phase == 0) {
+    if (!altSweepRequested) return false;
+    // A request is only consumed on a normal running control tick, so one pressed with the engine
+    // stopped (or during a fault lockout) would otherwise sit armed and start a field ramp by itself
+    // whenever running resumed. Expire it instead — the button is a metre away from the throttle.
+    if ((uint32_t)(nowMs - altSweepReqMs) > 30000u) {
+      altSweepRequested = false;
+      queueConsoleMessage("Field sweep: start request expired — the control loop was not running (engine stopped or field off). Press Start again.");
+      return false;
+    }
+    altSweepRequested = false;
+    altSweepAbortRequested = false;
+
+    // Max Field % is the ONLY ceiling. The field curve additionally stops at FIELDCURVE_DUTY_MAX,
+    // but that is its own knee-search bound, not a field limit — carrying it here would have meant a
+    // second, lower cap the panel could not name and the user could not look up. Reaching MaxDuty is
+    // nothing new: governor_apply clamps every duty the regulator commands to it on every tick.
+    float dutyCeil = MaxDuty;
+    fromDuty = constrain(altSweepFromPct, 0.0f, dutyCeil);
+    toDuty   = (altSweepToPct <= 0.0f) ? dutyCeil : constrain(altSweepToPct, 0.0f, dutyCeil);
+    ratePctS = constrain(altSweepRatePctS, 0.1f, 10.0f);
+    if (toDuty - fromDuty < 1.0f) {
+      queueConsoleMessageF("Field sweep: refused — span %.1f%%→%.1f%% is under 1%% after clamping to Max Field %% (%.0f%%)",
+                           fromDuty, toDuty, dutyCeil);
+      return false;
+    }
+    curDuty = fromDuty;
+    goingDown = false;
+    limSinceMs = 0;
+    altSweepLimitRev = false;
+    altSweepRevWhy = 0;
+    altSweepReverseReq = false;   // a press from before this run must not turn the new one around
+    lastRampMs = nowMs;
+    altSweepActive = 1;
+    // Ease from the live operating duty to the ramp floor over FIELDCURVE_EASE_MS. Under
+    // GOV_BYPASS_SLEW an un-eased entry is an instant step in either direction, so ease both ways.
+    easeFromDuty = lastAppliedDuty;
+    easeStartMs = nowMs;
+    phase = 1;
+    queueConsoleMessageF("Field sweep: %.1f%% → %.1f%% → %.1f%% at %.2f%%/s (~%.0f s), Max Field %% %.0f%%",
+                         fromDuty, toDuty, fromDuty, ratePctS, 2.0f * (toDuty - fromDuty) / ratePctS, dutyCeil);
+  }
+
+  // ── EASE-IN ───────────────────────────────────────────────────────────────
+  if (phase == 1) {
+    float frac = (float)(nowMs - easeStartMs) / FIELDCURVE_EASE_MS;
+    if (frac >= 1.0f) {
+      dutyOut = curDuty;
+      lastRampMs = nowMs;      // ramp clock starts only once the field has arrived
+      phase = 2;
+      return true;
+    }
+    dutyOut = easeFromDuty + (curDuty - easeFromDuty) * frac;
+    return true;
+  }
+
+  // ── RAMP (up, then down) ──────────────────────────────────────────────────
+  if (phase == 2) {
+    float dt = (float)(nowMs - lastRampMs) * 0.001f;
+    lastRampMs = nowMs;
+    if (dt > 0.5f) dt = 0.5f;                 // a loop stall must not teleport the command
+    curDuty += (goingDown ? -1.0f : 1.0f) * ratePctS * dt;
+    // Turn around at the first control limit the machine reaches — voltage target, current cap at
+    // this speed, battery or BMS limit, temperature — instead of driving into it. Past a limit the
+    // rows stop measuring what the sweep is for (output as a function of field) and start measuring
+    // whatever is holding the machine back, and at a high state of charge driving on ends in a
+    // protection cut, which throws away the down leg the lag cancellation needs. The down leg runs
+    // at the SAME rate, so the pair stays symmetric and still averages the field lag out.
+    const char *lim = goingDown ? nullptr : altSweepLimitNow();
+    if (lim) { if (limSinceMs == 0) limSinceMs = nowMs; } else limSinceMs = 0;
+    bool limReached = (limSinceMs != 0) && ((uint32_t)(nowMs - limSinceMs) >= ALTSWEEP_LIMIT_CONFIRM_MS);
+    // Reverse now: the operator sees something the limit tests cannot — a noise, a smell, a gauge —
+    // and turns the ramp around by hand. No confirmation dwell; the press IS the confirmation.
+    bool manualRev = altSweepReverseReq && !goingDown;
+    if (altSweepReverseReq) altSweepReverseReq = false;
+    if (limReached || manualRev) {
+      goingDown = true;
+      altSweepActive = 2;
+      altSweepLimitRev = true;      // rides flags bit 7 on every row from here to the end of the run
+      altSweepRevWhy = manualRev ? 2 : 1;
+      limSinceMs = 0;
+      if (manualRev)
+        queueConsoleMessageF("Field sweep: reversed by hand at %.1f%% field (%.1f A, %.2f V) — coming back down at the same rate",
+                             curDuty, ampsRaw, getBatteryVoltage());
+      else
+        queueConsoleMessageF("Field sweep: %s reached at %.1f%% field (%.1f A, %.2f V) — reversing at the same rate",
+                             lim, curDuty, ampsRaw, getBatteryVoltage());
+    } else if (!goingDown && curDuty >= toDuty) {
+      curDuty = toDuty;
+      goingDown = true;
+      altSweepActive = 2;
+      queueConsoleMessageF("Field sweep: top of ramp %.1f%% (%.1f A) — returning down", curDuty, ampsRaw);
+    } else if (goingDown && curDuty <= fromDuty) {
+      curDuty = fromDuty;
+      easeFromDuty = curDuty;
+      easeStartMs = nowMs;
+      altSweepActive = 3;
+      phase = 3;
+      queueConsoleMessage("Field sweep: complete — easing the field out");
+    }
+    dutyOut = curDuty;
+    return true;
+  }
+
+  // ── EASE-OUT ──────────────────────────────────────────────────────────────
+  if (phase == 3) {
+    float frac = (float)(nowMs - easeStartMs) / FIELDCURVE_EASE_MS;
+    if (frac >= 1.0f) {
+      altSweepActive = 0;
+      altSweepLastEndMs = millis();
+      phase = 0;
+      dutyOut = FIELDCURVE_DUTY_START;
+      return false;
+    }
+    dutyOut = easeFromDuty + (FIELDCURVE_DUTY_START - easeFromDuty) * frac;
     return true;
   }
 

@@ -67,7 +67,10 @@ enum Csv1Index {
   CSV1_huntFreqHz,       // hunt-governor last confirmed wobble frequency (Hz ×100; 0 = none seen this session). Rides CSV1 rather than CSV4 so the Diag live row can never show a fresh derate beside a stale frequency
   CSV1_huntState,        // hunt-governor state: 0 watching (gain follows the pocket map), 1 testing a current-loop gain (Ki) cut, 3 cooldown after a failed test, 4 testing with the voltage damper (D-term) paused (2 unused since v2)
 
-  CSV1_FIELD_COUNT  // = 49
+  CSV1_sessionId,        // boot identity — same value in every channel this boot; proves a cached block is from this run
+  CSV1_sendMs,           // millis() when this payload was built; a consumer ages every other channel against this one
+
+  CSV1_FIELD_COUNT  // = 51
 };
 
 enum Csv2Index {
@@ -682,6 +685,9 @@ enum Csv2Index {
   CSV2_ft_ReadNMEA0183_win,  // NMEA 0183 drain worst us (window) — the 0.5 ms control-loop budget check
   CSV2_ft_ReadNMEA0183_ses,  // NMEA 0183 drain worst us (session)
 
+  CSV2_sessionId,         // boot identity — matches CSV1_sessionId while this cached block is from the live run
+  CSV2_sendMs,            // millis() when this payload was BUILT (CSV2 builds one pass and sends the next)
+
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
 
@@ -709,7 +715,10 @@ enum Csv4Index {
   CSV4_chargeStage,             // CHARGE_STAGE_* code — rides NavStream so the Plots-tab mode ribbon tracks stage changes at ~500ms (CSV2 still carries it for the thermal ring)
   CSV4_n183Heading,             // NMEA 0183 decoded heading (deg ×10; -10 = nothing decoded). Separate from CSV4_HeadingNMEA, which is the NMEA2000 source.
   CSV4_n183HdgRef,              // reference frame of the above: 0 none, 1 magnetic, 2 true
-  CSV4_FIELD_COUNT  // = 21
+  CSV4_bmsSignalActive,         // live BMS on/off opto input (GPIO42): 1 = 5-28 V present at the wire, 0 = dead/open. Raw pin, before the Present/Absent polarity choice
+  CSV4_sessionId,               // boot identity — matches CSV1_sessionId while this cached block is from the live run
+  CSV4_sendMs,                  // millis() when this payload was built
+  CSV4_FIELD_COUNT  // = 24
 };
 
 enum Csv3Index {
@@ -967,7 +976,7 @@ enum Csv3Index {
   CSV3_NMEA0183Data,            // 0/1
   CSV3_NMEA2KData,              // 0/1
   CSV3_timeAxisModeChanging,    // 0/1
-  CSV3_gpsTimeSourceMode,       // 0=auto, 1=NMEA-forced, 2=Phone-forced, 3=NTP-time-forced
+  CSV3_timeSourceMode,       // 0=auto, 1=NMEA-forced, 2=Phone-forced, 3=NTP-time-forced
   CSV3_speedSourceMode,         // 0=NMEA 2000, 1=phone GPS (speed/course owner — selectable, never auto)
   // Fast alt-current diagnostic knobs (Pattern B echo)
   CSV3_faEnabled,               // 0/1 — global ON/OFF
@@ -1108,6 +1117,13 @@ enum Csv3Index {
   CSV3_HuntTrigPct,            // damper detection bar: peak-bin duty swing % (x100)
   CSV3_NMEA0183Baud,           // NMEA 0183 serial baud (4800 / 9600 / 19200 / 38400)
   CSV3_NMEA0183Invert,         // NMEA 0183 UART polarity: 0 RS-232-level talker, 1 TTL-level talker
+  CSV3_displayVolUnit,         // fuel volume display preference: 0 US gallons, 1 litres
+
+  CSV3_gpsPositionSource,      // 0=auto, 1=NMEA-forced, 2=phone-forced (position only; the clock is CSV3_timeSourceMode)
+  CSV3_sessionId,              // boot identity — matches CSV1_sessionId while this cached block is from the live run
+  CSV3_sendMs,                 // millis() when this settings echo was built. CSV3 is event-driven with a 60 s
+                               // fallback, so an age much past ~60 s means the echo stopped arriving and every
+                               // setting in this block predates whatever the device is actually running.
 
   CSV3_FIELD_COUNT  // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
 };
@@ -1150,7 +1166,11 @@ enum TsIndex {
   TS_WeatherFetch,  // age of the last successful solar-forecast fetch (Open-Meteo)
   TS_N183,          // NMEA 0183 serial receive staleness (any checksum-valid sentence)
 
-  TS_FIELD_COUNT  // = 35
+  TS_sessionId,     // boot identity — matches CSV1_sessionId while this cached block is from the live run
+  TS_sendMs,        // millis() when this payload was built. Every other TS field is an AGE, so without this
+                    // a frozen block reads as a set of plausible ages that simply stopped advancing.
+
+  TS_FIELD_COUNT  // = 37
 };
 
 
@@ -3114,6 +3134,13 @@ void setupServer() {
   server.on("/altwinstats.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     altWinStatsCsvSend(request);
   });
+  // Gate-tuning capture dump: 136 B header + 17 B rows, streamed binary, decoded to CSV in the
+  // browser (parseAltLogBin in script.js) and handed over with deliverFile(). Refuses while
+  // recording. Clearing is a separate press (/get?altLogClear=1) so the file is safely in hand
+  // before the buffer is freed.
+  server.on("/altlog.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
+    altLogBinSend(request);
+  });
   // Performance-vs-engine-hours trend (header + points, chunked). This is the headline. Decimated to
   // <= TR_MAXOUT output points for readability + payload (full hourly history stays on the device):
   // each output point is one bucket of source hours — the low line = min of the source hours' P10s
@@ -3308,10 +3335,20 @@ void setupServer() {
       char *bodyc = strdup(importConfigBuf.c_str());
       importConfigBuf = "";
       if (!bodyc) { request->send(500, "text/plain", "Out of memory"); return; }
+      String preClassV = settingRead(NK_BatteryVoltage);
+      // Recorded BEFORE the write burst, because the burst itself is what may stall the loop and the
+      // console line is the only trace afterwards. The UI warns pre-Apply; this covers every other
+      // caller (bench noReboot, curl) and leaves the stutter explained in the log.
+      bool fieldWasLive = (fieldActiveStatus > 0);
+      if (fieldWasLive) queueConsoleMessage("Config import starting with the field driving - each setting saved to NVS can briefly pause the control loop; prefer importing with charging off");
       int n = applyImportConfig(bodyc);
       free(bodyc);
       if (n < 0) { request->send(400, "text/plain", "No config object in body"); return; }
-      bool reboot = !request->hasParam("noReboot") || request->getParam("noReboot")->value().toInt() == 0;
+      // noReboot is a bench affordance (no UI path uses it) and it leaves RAM stale against the NVS the
+      // manifest loop just wrote. Harmless for ordinary keys; NOT harmless for a class change, where the
+      // conversion mutates RAM while the loop's overwrites land only in NVS. Force the reboot there.
+      bool classMoved = (settingRead(NK_BatteryVoltage) != preClassV);
+      bool reboot = classMoved || !request->hasParam("noReboot") || request->getParam("noReboot")->value().toInt() == 0;
       if (reboot) { rebootRequested = true; rebootRequestedAt = millis(); }
       String resp = "{\"applied\":";
       resp += n; resp += ",\"reboot\":"; resp += (reboot ? 1 : 0); resp += "}";
@@ -3944,7 +3981,8 @@ void setupServer() {
                                  : (fieldCurveActive != 0) ? "Field curve"
                                  : (fieldCutActive != 0) ? "Field cut"
                                  : (protTestActive != 0) ? "Protection test"
-                                 : cvStressActive ? "CV stress test" : nullptr;
+                                 : cvStressActive ? "CV stress test"
+                                 : (altSweepActive != 0) ? "Gate-tuning field sweep" : nullptr;
       if (sysMode == SYS_MODE_MANUAL) {
         queueConsoleMessage("SystemID: start blocked — not allowed in manual mode (duty is fixed; test cannot drive the field)");
       } else if (!sysidModeOK) {
@@ -4017,7 +4055,8 @@ void setupServer() {
                          : (fieldCurveActive != 0) ? "Field curve"
                          : (fieldCutActive != 0) ? "Field cut"
                          : (protTestActive != 0) ? "Protection test"
-                         : cvStressActive ? "CV stress test" : nullptr;
+                         : cvStressActive ? "CV stress test"
+                         : (altSweepActive != 0) ? "Gate-tuning field sweep" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Field curve: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
@@ -4052,7 +4091,8 @@ void setupServer() {
                          : (fieldCurveActive != 0) ? "Field curve"
                          : (fieldCutActive != 0) ? "Field cut"
                          : (protTestActive != 0) ? "Protection test"
-                         : cvStressActive ? "CV stress test" : nullptr;
+                         : cvStressActive ? "CV stress test"
+                         : (altSweepActive != 0) ? "Gate-tuning field sweep" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Field cut: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
@@ -4111,7 +4151,8 @@ void setupServer() {
                          : resTestActive ? "Resonance current-check"
                          : (fieldCurveActive != 0) ? "Field curve"
                          : (fieldCutActive != 0) ? "Field cut"
-                         : cvStressActive ? "CV stress test" : nullptr;
+                         : cvStressActive ? "CV stress test"
+                         : (altSweepActive != 0) ? "Gate-tuning field sweep" : nullptr;
       if (mode < 1 || mode > 5) {
         queueConsoleMessage("Protection test: start blocked — invalid mode");
       } else if (protTestActive != 0) {
@@ -4175,7 +4216,8 @@ void setupServer() {
                          : (fieldCurveActive != 0) ? "Field curve"
                          : (fieldCutActive != 0) ? "Field cut"
                          : (protTestActive != 0) ? "Protection test"
-                         : cvStressActive ? "CV stress test" : nullptr;
+                         : cvStressActive ? "CV stress test"
+                         : (altSweepActive != 0) ? "Gate-tuning field sweep" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Min% knee: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
@@ -4196,6 +4238,79 @@ void setupServer() {
       foundParameter = true;
       fieldCurveAbortRequested = true;
       queueConsoleMessage("Min% knee: abort requested via web UI");
+    }
+
+    // ── Gate-tuning capture: session logger + field sweeper (ALT_GATE_TUNING_CAPTURE_SPEC.md) ──
+    // Buttons, not URL parameters typed by hand: this is operated while also managing a throttle.
+    // The browser confirms the discard before pressing Record over an un-dumped session.
+    // Each of these only RAISES a flag: the 192 KB is allocated, freed and state-changed on the
+    // control loop (altLogService), so a press can never free the buffer while a row is being
+    // written. Refusals and confirmations come back on the console a few ms later, exactly as the
+    // field curve reports its own start.
+    if (request->hasParam("altLogRecord")) {
+      foundParameter = true;
+      altLogStartReq = true;
+    }
+    if (request->hasParam("altLogStop")) {
+      foundParameter = true;
+      altLogStopReq = true;
+    }
+    if (request->hasParam("altLogClear")) {
+      foundParameter = true;
+      // Sent by the browser only AFTER the decoded CSV is in the user's hands, and by the Discard
+      // button. The service refuses it while recording, so a stray press cannot erase a live capture.
+      altLogClearReq = true;
+    }
+    if (request->hasParam("altSweepStart")) {
+      foundParameter = true;
+      if (request->hasParam("rate")) altSweepRatePctS = request->getParam("rate")->value().toFloat();
+      if (request->hasParam("from")) altSweepFromPct  = request->getParam("from")->value().toFloat();
+      if (request->hasParam("to"))   altSweepToPct    = request->getParam("to")->value().toFloat();
+      // Turnaround margins. 0 is legal and means "turn around on the limit itself" — the ramp then
+      // relies on the hard-cut layer alone, which is the behaviour the margins exist to avoid, so it
+      // is allowed but never the default. Upper clamps keep a fat-fingered entry from making the
+      // span shorter than the 1% minimum and refusing every sweep.
+      if (request->hasParam("marginA"))
+        altSweepMarginA = constrain(request->getParam("marginA")->value().toFloat(), 0.0f, 100.0f);
+      if (request->hasParam("marginV"))
+        altSweepMarginV = constrain(request->getParam("marginV")->value().toFloat(), 0.0f, 2.0f);
+      const char *busy = (systemIDActive != 0) ? "Plant Delay test"
+                         : TuningMode ? "Current tuning"
+                         : CVTuningMode ? "Voltage tuning"
+                         : cvPlantFitActive ? "Voltage Control Autotuning"
+                         : batteryHealthTestActive ? "Battery health test"
+                         : resTestActive ? "Resonance current-check"
+                         : (fieldCurveActive != 0) ? "Field curve"
+                         : (fieldCutActive != 0) ? "Field cut"
+                         : (protTestActive != 0) ? "Protection test"
+                         : cvStressActive ? "CV stress test"
+                         : (altSweepActive != 0) ? "Gate-tuning field sweep" : nullptr;
+      if (sysMode != SYS_MODE_AUTO) {
+        // Same rule as the field curve: the duty override lives in the AUTO control path, and the
+        // bumpless resume restores AUTO state. In MANUAL the user's fixed duty owns the field —
+        // which is the throttle-sweep condition anyway, and needs no sweeper.
+        queueConsoleMessage("Field sweep: start blocked — only allowed in AUTO mode");
+      } else if (busy != nullptr) {
+        queueConsoleMessageF("Field sweep: start blocked — %s is active", busy);
+      } else if ((millis() - altSweepLastEndMs) > 2000UL) {
+        altSweepAbortRequested = false;
+        altSweepReqMs = millis();
+        altSweepRequested = true;
+      } else {
+        queueConsoleMessage("Field sweep: start ignored (cooldown)");
+      }
+    }
+    if (request->hasParam("altSweepCancel")) {
+      foundParameter = true;
+      altSweepAbortRequested = true;
+      queueConsoleMessage("Field sweep: abort requested via web UI");
+    }
+    // Reverse now: only the up leg can be turned around, and only while one is actually running —
+    // a flag left armed from a refused press would turn the NEXT sweep around at its first tick.
+    if (request->hasParam("altSweepReverse")) {
+      foundParameter = true;
+      if (altSweepActive == 1) altSweepReverseReq = true;
+      else queueConsoleMessage("Field sweep: Reverse now ignored — no ramp is on its way up");
     }
     if (request->hasParam("addKneeAnchor")) {
       foundParameter = true;
@@ -5426,18 +5541,30 @@ void setupServer() {
       settingWrite(NK_VMGTargetBearing, String(VMGTargetBearing).c_str());
     }
     // No VMGUseTrueWind param — both VMGs (manual + upwind) are always computed.
-    if (request->hasParam("gpsTimeSourceMode")) {
+    if (request->hasParam("timeSourceMode")) {
       foundParameter = true;
-      inputMessage = request->getParam("gpsTimeSourceMode")->value();
+      inputMessage = request->getParam("timeSourceMode")->value();
       uint8_t m = (uint8_t)inputMessage.toInt();
-      if (m > GTS_NTP) m = GTS_AUTO;  // sanity
-      gpsTimeSourceMode = m;
-      settingWrite(NK_gpsTimeSourceMode, String(gpsTimeSourceMode).c_str());
-      const char *lbl = (m == GTS_AUTO)  ? "auto"
-                      : (m == GTS_NMEA)  ? "NMEA only"
-                      : (m == GTS_PHONE) ? "phone only"
+      if (m > TSRC_NTP) m = TSRC_AUTO;  // sanity
+      timeSourceMode = m;
+      settingWrite(NK_timeSourceMode, String(timeSourceMode).c_str());
+      const char *lbl = (m == TSRC_AUTO)  ? "auto"
+                      : (m == TSRC_NMEA)  ? "NMEA only"
+                      : (m == TSRC_PHONE) ? "phone only"
                                          : "NTP time only";
-      queueConsoleMessageF("GPS/time source mode set to %s", lbl);
+      queueConsoleMessageF("Time source set to %s", lbl);
+    }
+    if (request->hasParam("gpsPositionSource")) {
+      foundParameter = true;
+      inputMessage = request->getParam("gpsPositionSource")->value();
+      uint8_t m = (uint8_t)inputMessage.toInt();
+      if (m > GPS_SRC_PHONE) m = GPS_SRC_AUTO;  // sanity
+      gpsPositionSource = m;
+      settingWrite(NK_gpsPositionSource, String(gpsPositionSource).c_str());
+      queueConsoleMessageF("Position source set to %s",
+                           (m == GPS_SRC_AUTO)  ? "auto"
+                         : (m == GPS_SRC_NMEA)  ? "NMEA only"
+                                                : "phone only");
     }
     if (request->hasParam("speedSourceMode")) {
       foundParameter = true;
@@ -5774,6 +5901,12 @@ void setupServer() {
       settingWrite(NK_displayTempUnit, inputMessage.c_str());
       displayTempUnit = (uint8_t)inputMessage.toInt();
     }
+    if (request->hasParam("displayVolUnit")) {
+      foundParameter = true;
+      inputMessage = request->getParam("displayVolUnit")->value();
+      settingWrite(NK_displayVolUnit, inputMessage.c_str());
+      displayVolUnit = (uint8_t)inputMessage.toInt();
+    }
     if (request->hasParam("PulleyRatio")) {
       foundParameter = true;
       inputMessage = request->getParam("PulleyRatio")->value();
@@ -5965,7 +6098,8 @@ void setupServer() {
       // Mutex: refuse turn-on if another test is already running. All four tests must run independently.
       if (requested == 1 && TuningMode == 0) {
         const char *blocker = (systemIDActive != 0) ? "Plant Delay Test"
-                                                    : (CVTuningMode ? "Voltage tuning" : nullptr);
+                              : (altSweepActive != 0) ? "Gate-tuning field sweep"
+                                                      : (CVTuningMode ? "Voltage tuning" : nullptr);
         if (blocker != nullptr) {
           queueConsoleMessageF("Current tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
         } else {
@@ -7290,7 +7424,8 @@ void setupServer() {
       // Mutex: refuse turn-on if another test is already running. All four tests must run independently.
       if (requested == 1 && CVTuningMode == 0) {
         const char *blocker = (systemIDActive != 0) ? "Plant Delay Test"
-                                                    : (TuningMode ? "Current tuning" : nullptr);
+                              : (altSweepActive != 0) ? "Gate-tuning field sweep"
+                                                      : (TuningMode ? "Current tuning" : nullptr);
         if (blocker != nullptr) {
           queueConsoleMessageF("Voltage tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
         } else {
@@ -8218,7 +8353,7 @@ void setupServer() {
   // CV plant-fit status + result (commissioning Step 7 polls this). "aborted" reported independently of
   // "active" (same rationale as /fieldcurve.json — a protection cut can leave active latched).
   server.on("/cvplantfit.json", HTTP_GET, [](AsyncWebServerRequest *request) {
-    std::shared_ptr<char> bufPtr((char *)ps_malloc(960), [](char *p) { if (p) free(p); });
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(1024), [](char *p) { if (p) free(p); });
     if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
     char *buf = bufPtr.get();
     char eK[96], eS[48]; int pK = 0, pS = 0;   // per-edge stiffness + keep/drop status for the wizard table
@@ -8226,14 +8361,16 @@ void setupServer() {
       pK += snprintf(eK + pK, sizeof(eK) - pK, i ? ",%.1f" : "%.1f", cvpfEdgeK[i]);
       pS += snprintf(eS + pS, sizeof(eS) - pS, i ? ",%d" : "%d", (int)cvpfEdgeStat[i]);
     }
-    snprintf(buf, 960,
+    snprintf(buf, 1024,
              "{\"active\":%d,\"phase\":%d,\"ready\":%d,\"ok\":%d,\"aborted\":%d,"
              "\"K_mVpA\":%.1f,\"Ka_mVpA\":%.2f,\"Kb_mVpA\":%.2f,\"dV_mV\":%.0f,\"dI\":%.2f,\"snr\":%.0f,\"horizonS\":%.1f,"
              "\"Kp\":%.2f,\"Ki\":%.2f,\"stepA\":%.1f,\"capHeadroomA\":%.1f,\"rpmAtFit\":%.0f,\"rpmMinAtFit\":%.0f,\"rpmMaxAtFit\":%.0f,\"battVAtFit\":%.2f,\"socAtFit\":%.0f,\"diMaxA\":%.1f,\"warn\":%d,"
+             "\"driftSetupPct\":%.1f,\"driftTrainPct\":%.1f,"
              "\"eK\":[%s],\"eS\":[%s],\"abort\":\"%s\"}",
              cvPlantFitActive ? 1 : 0, (int)cvpfPhase, cvpfReady ? 1 : 0, cvpfOk ? 1 : 0, (cvpfState == 3) ? 1 : 0,
              cvpfK * 1000.0f, cvpfKa * 1000.0f, cvpfKb * 1000.0f, cvpfDV * 1000.0f, cvpfDI, cvpfSNR, cvpfHorizonS,
-             cvpfKp, cvpfKi, cvpfStepA, cvpfCapHeadroomA, cvpfRpmAtFit, cvpfRpmMinAtFit, cvpfRpmMaxAtFit, cvpfBattVAtFit, cvpfSocAtFit, cvpfDiMaxA, (int)cvpfWarn, eK, eS, cvpfAbortMsg);
+             cvpfKp, cvpfKi, cvpfStepA, cvpfCapHeadroomA, cvpfRpmAtFit, cvpfRpmMinAtFit, cvpfRpmMaxAtFit, cvpfBattVAtFit, cvpfSocAtFit, cvpfDiMaxA, (int)cvpfWarn,
+             cvpfDriftSetupPct, cvpfDriftTrainPct, eK, eS, cvpfAbortMsg);
     request->send(200, "application/json", buf);
   });
 
@@ -8256,9 +8393,12 @@ void setupServer() {
                         "# cvfit confidence record (firmware)\n"
                         "# K_mV_per_A,%.2f\n# horizon_S,%.2f\n# dV_mV,%.1f\n# dI_A,%.3f\n# snr,%.1f\n"
                         "# Kp,%.2f,Ki,%.2f\n# stepA,%.1f,warnBits,%d\n"
+                        "# baseDuty_pct,%.2f,stepDuty_pct,%.2f\n"
+                        "# driftSetup_pct,%.1f,driftTrain_pct,%.1f\n"
                         "t_s,IBV_V,Bcur_A,MeasuredAmps_A\n",
                         cvpfK * 1000.0f, cvpfHorizonS, cvpfDV * 1000.0f, cvpfDI, cvpfSNR,
-                        cvpfKp, cvpfKi, cvpfStepA, (int)cvpfWarn);
+                        cvpfKp, cvpfKi, cvpfStepA, (int)cvpfWarn,
+                        cvpfBaseDuty, cvpfStepDuty, cvpfDriftSetupPct, cvpfDriftTrainPct);
     AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
       [st](uint8_t *out, size_t maxLen, size_t) mutable -> size_t {
         size_t w = 0;
@@ -9028,7 +9168,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason; +4: cvPTerm, cvIterm, cvKdTrim, cvKdFiltV; +1: huntDerate; +2: huntFreqHz, huntState
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason; +4: cvPTerm, cvIterm, cvKdTrim, cvKdFiltV; +1: huntDerate; +2: huntFreqHz, huntState
+                               "%u,%u",  // +2: sessionId, sendMs
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -9080,7 +9221,9 @@ void SendWifiData() {
                                SafeInt(g_cvKdFiltV, 100),      // CSV1_cvKdFiltV — IBV smoothed by CvKdVoltFiltTC (V ×100)
                                SafeInt(g_huntDerate, 100),     // CSV1_huntDerate — hunt-governor live Ki derate (×100)
                                SafeInt(g_huntFreqHz, 100),     // CSV1_huntFreqHz — last confirmed wobble frequency (Hz ×100)
-                               (int)g_huntState                // CSV1_huntState — 0 watching, 1 testing a current-loop gain (Ki) cut, 3 cooldown, 4 testing with the voltage damper (D-term) paused (2 unused since v2)
+                               (int)g_huntState,               // CSV1_huntState — 0 watching, 1 testing a current-loop gain (Ki) cut, 3 cooldown, 4 testing with the voltage damper (D-term) paused (2 unused since v2)
+                               (unsigned)g_sessionId,          // CSV1_sessionId
+                               (unsigned)millis()              // CSV1_sendMs — the reference clock every other channel is aged against
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
@@ -9109,7 +9252,7 @@ void SendWifiData() {
   // channels. These fields used to ride the 5 s CSV2 cadence and looked frozen on the dial/helm.
   if (!sentSomething && now - lastpayload4send >= 500UL && events.count() > 0) {
     static char *payload4 = nullptr;
-    static const size_t PAYLOAD4_SIZE = 256;  // (19 fields + 1) × 7 = 140, rounded up with headroom
+    static const size_t PAYLOAD4_SIZE = 256;  // ~7 B/field, plus the two 10-digit stamp fields; rounded up with headroom
     if (!payload4) {
       payload4 = (char *)ps_malloc(PAYLOAD4_SIZE);  // allocated to PSRAM
       if (!payload4) {
@@ -9120,7 +9263,8 @@ void SendWifiData() {
     int payload4Len = snprintf(payload4, PAYLOAD4_SIZE,
                                "%d,"  // CSV4_FIELD_COUNT
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%u,%u",  // +2: sessionId, sendMs
 
                                CSV4_FIELD_COUNT,
                                SafeInt(HeadingNMEA),                     // CSV4_HeadingNMEA
@@ -9143,7 +9287,10 @@ void SendWifiData() {
                                (int)ctrlLimiter,                         // CSV4_ctrlLimiter -> banner limiter code
                                SafeInt(chargeStageDisplay),              // CSV4_chargeStage -> Plots-tab mode ribbon
                                SafeInt(n183HeadingDeg, 10),              // CSV4_n183Heading (deg ×10; -1 stays -10)
-                               (int)n183HdgRef                           // CSV4_n183HdgRef
+                               (int)n183HdgRef,                          // CSV4_n183HdgRef
+                               (int)bmsSignalActive,                     // CSV4_bmsSignalActive
+                               (unsigned)g_sessionId,                    // CSV4_sessionId
+                               (unsigned)millis()                        // CSV4_sendMs
     );
     if (payload4Len < 0 || payload4Len >= PAYLOAD4_SIZE) {
       Serial.printf("payload4 truncated or format error: %d\n", payload4Len);
@@ -9163,8 +9310,8 @@ void SendWifiData() {
   const bool sysIDRunning = (systemIDActive != 0);
   if ((sysIDRunning || !sentSomething) && now - lastpayload2send >= (sysIDRunning ? 500UL : 5000UL) && events.count() > 0) {
     static char *payload2 = nullptr;
-    // 565 specifiers; nominal ~3.2 kB. Sized by the 7 B/field rule (exhausted at ~1170 fields) rather than the
-    // frame, because overflow returns early from SendWifiData and kills CSV2 + CSV3 + TS until reboot. PSRAM.
+    // Sized by the ~7 B/field rule rather than the observed frame, because an overflow returns early
+    // from SendWifiData and kills CSV2 + CSV3 + TS until reboot. PSRAM.
     static const size_t PAYLOAD2_SIZE = 8192;
     static int payload2Len = 0;       // persists between the build pass and the send pass
     static uint8_t csv2Phase = 0;     // 0 = build this due pass, 1 = send the built payload next pass
@@ -9234,7 +9381,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d\n",   // +4 NMEA 0183: sentences, checksum errors, drain worst us window/session
+                               "%d,%d,%d,%d,"   // +4 NMEA 0183: sentences, checksum errors, drain worst us window/session
+                               "%u,%u\n",       // +2: sessionId, sendMs
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
                                SafeInt(MeasuredAmpsMax, 100),
@@ -9821,7 +9969,9 @@ void SendWifiData() {
                                (int)n183SentenceCount,
                                (int)n183ChecksumErrCount,
                                SafeInt(ft_ReadNMEA0183.worstWindow),
-                               SafeInt(ft_ReadNMEA0183.worstSession));
+                               SafeInt(ft_ReadNMEA0183.worstSession),
+                               (unsigned)g_sessionId,   // CSV2_sessionId
+                               (unsigned)millis());     // CSV2_sendMs — build time; the send happens one pass later
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
@@ -9849,7 +9999,11 @@ void SendWifiData() {
   // PRIORITY 5: CSVData3 — sent immediately when settingsDirty (event-driven), or every 60s fallback
   if (!sentSomething && (settingsDirty || now - lastpayload3send >= 60000) && events.count() > 0) {
     static char *payload3 = nullptr;
-    static const size_t PAYLOAD3_SIZE = 3000;  // ~7 chars per field ≈ 2.3k at the current 330 fields; 3000 leaves wide-field headroom (overflow is caught below, not truncated silently)
+    // ~7 B/field, and this is the tightest of the five buffers — CSV3 grows every time a setting is
+    // added, so check it when adding a block of them. Overflow is caught below rather than truncating,
+    // but the catch returns early from SendWifiData, which stops CSV3 for good and skips TS on any pass
+    // CSV3 is due. Raise this before that happens, not after.
+    static const size_t PAYLOAD3_SIZE = 3000;
     if (!payload3) {
       payload3 = (char *)ps_malloc(PAYLOAD3_SIZE);  // allocated to PSRAM
       if (!payload3) {
@@ -9892,7 +10046,10 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d\n",   // damper detection bar (x100) + 2 NMEA 0183: baud, polarity
+                               "%d,%d,%d,"   // damper detection bar (x100) + 2 NMEA 0183: baud, polarity
+                               "%d,"         // displayVolUnit
+                               "%d,"         // gpsPositionSource
+                               "%u,%u\n",    // +2: sessionId, sendMs
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
                                SafeInt(BulkVoltage, 100),
@@ -10146,7 +10303,7 @@ void SendWifiData() {
                                SafeInt(NMEA0183Data),
                                SafeInt(NMEA2KData),
                                SafeInt(timeAxisModeChanging),
-                               (int)gpsTimeSourceMode,
+                               (int)timeSourceMode,
                                (int)speedSourceMode,
                                (int)faEnabled,
                                (int)faAlarmEnable,
@@ -10284,7 +10441,11 @@ void SendWifiData() {
                                (int)HuntQualifyScans,
                                SafeInt(HuntTrigPct, 100),
                                (int)NMEA0183Baud,
-                               (int)NMEA0183Invert);
+                               (int)NMEA0183Invert,
+                               SafeInt(displayVolUnit),
+                               (int)gpsPositionSource,
+                               (unsigned)g_sessionId,   // CSV3_sessionId
+                               (unsigned)millis());     // CSV3_sendMs
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
       return;
@@ -10301,7 +10462,7 @@ void SendWifiData() {
   if (!sentSomething && now - lastTimestampSend >= 3000 && events.count() > 0) {
 
     static char *timestampPayload = nullptr;
-    static const size_t TIMESTAMP_PAYLOAD_SIZE = 512;  // 36 fields; the weather field alone can be 10 digits, and an overflow kills TS until reboot
+    static const size_t TIMESTAMP_PAYLOAD_SIZE = 512;  // every field is an age and the weather one can be 10 digits; an overflow kills TS until reboot
     if (!timestampPayload) {
       timestampPayload = (char *)ps_malloc(TIMESTAMP_PAYLOAD_SIZE);  // allocated to PSRAM
       if (!timestampPayload) {
@@ -10310,7 +10471,8 @@ void SendWifiData() {
       }
     }
     int timestampPayloadLen = snprintf(timestampPayload, TIMESTAMP_PAYLOAD_SIZE,
-                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,"
+                                       "%lu,%lu",  // +2: sessionId, sendMs
                                        (unsigned long)TS_FIELD_COUNT,
                                        (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),
                                        (dataTimestamps[IDX_LATITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LATITUDE_NMEA]),
@@ -10349,7 +10511,9 @@ void SendWifiData() {
                                        // 17 min, well inside the normal 6-hour refresh interval, so
                                        // the shared sensor sentinel would read as a real age here.
                                        (weatherLastUpdate == 0) ? 4294967295UL : (unsigned long)(now - weatherLastUpdate),
-                                       (dataTimestamps[IDX_N183] == 0) ? 999999 : (now - dataTimestamps[IDX_N183])
+                                       (dataTimestamps[IDX_N183] == 0) ? 999999 : (now - dataTimestamps[IDX_N183]),
+                                       (unsigned long)g_sessionId,   // TS_sessionId
+                                       (unsigned long)now            // TS_sendMs (`now` is this dispatch tick's millis())
     );
     if (timestampPayloadLen < 0 || timestampPayloadLen >= TIMESTAMP_PAYLOAD_SIZE) {
       Serial.printf("timestampPayload truncated or format error: %d\n", timestampPayloadLen);

@@ -453,8 +453,10 @@ bool fsRemove(const char *path) {
 #define NK_cvWaveAmplitudeV "cvWaveAmplitudV"
 #define NK_cvWavePeriodSec "cvWavePeriodSec"
 #define NK_displayTempUnit "displayTempUnit"
+#define NK_displayVolUnit "displayVolUnit"
 #define NK_gpsManualActive "gpsManualActive"
-#define NK_gpsTimeSourceMode "gpsTimeSourceMd"
+#define NK_timeSourceMode "gpsTimeSourceMd"   // legacy key string: predates the 2026-08-24 position/time split
+#define NK_gpsPositionSource "gpsPosSource"
 #define NK_speedSourceMode "speedSourceMode"
 #define NK_hardwarePresent "hardwarePresent"
 #define NK_maxPoints "maxPoints"
@@ -4490,7 +4492,7 @@ void syncTimeFromNTP() {
     return;  // Skip during OTA — don't arm fast retry; OTA path is brief.
   }
   // Manual mode gate: only AUTO and NTP-forced ever fall through to NTP.
-  if (gpsTimeSourceMode == GTS_NMEA || gpsTimeSourceMode == GTS_PHONE) return;
+  if (timeSourceMode == TSRC_NMEA || timeSourceMode == TSRC_PHONE) return;
   if (currentMode != MODE_CLIENT || WiFi.status() != WL_CONNECTED) {
     // WiFi not ready yet (typical on cold boot before association). Arm a
     // fast retry so the next checkTimeSync() tick fires ~60s from now

@@ -736,7 +736,8 @@ static bool dvccDecodeVreg351(const unsigned char *p, int len, float &cvl, float
 // 0x2001 VE_REG_LINK_VSET un16 0.01 V/bit, 0x2016 VE_REG_LINK_CHARGE_VOLTAGE_SETPOINT (second
 // official vset register — decoded identically until a capture shows which one Venus sends),
 // 0x2015 VE_REG_LINK_CHARGE_CURRENT_LIMIT un16 0.1 A/bit (0xFFFF = limit not available/removed).
-// Still provisional: 0x2108 (officially VE_REG_BMS_IO) and the 0x351 BMS-Can-mirror guess.
+// 0x2108 VE_REG_BMS_IO field layout is from Victron's open Lynx Smart BMS decoder (spec §14);
+// the register id itself and the 0x351 BMS-Can-mirror guess are still capture-pending.
 // A wrong provisional read stays fail-safe by construction: CVL only ever clamps downward and a
 // far-off value trips the plausibility window; CCL only moves a min-selected ceiling.
 // Returns true when the register id was recognized (even if the sender lock rejected it).
@@ -758,11 +759,15 @@ static bool dvccVicHandleReg(uint16_t vreg, const unsigned char *p, int len, uin
     uint16_t raw = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
     if (!dvccVicAcceptSender(src)) return true;
     dvccVicCcl = (raw == 0xFFFF) ? NAN : raw * 0.1f;
-  } else if (vreg == 0x2108) {  // officially VE_REG_BMS_IO, un32 IO bitmask (bit map not public);
-    // the Revatek ==2 reading is kept provisionally — really a bit-1 guess, capture-pending
+  } else if (vreg == 0x2108) {  // VE_REG_BMS_IO: 2-bit fields, allowed-to-charge at bits 2-3
+    // (0 = unknown, 1 = allowed, 2/3 = not allowed) per Victron's own Lynx Smart BMS decoder,
+    // dbus-ble-sensors/src/victron-lsbms.c. Revatek's whole-byte ==2 reading is ORed in until a
+    // capture picks a winner: both hypotheses mean stop charging, and a spurious cut is the safe
+    // error — 0xFF stays the not-available sentinel so a glitched byte never reads as a cut.
     if (len < 1 || p[0] == 0xFF) return false;
     if (!dvccVicAcceptSender(src)) return true;
-    dvccVicCut = (p[0] == 2);
+    uint8_t atc = (uint8_t)((p[0] >> 2) & 0x03);
+    dvccVicCut = (atc >= 2) || (p[0] == 2);
   } else {
     return false;
   }

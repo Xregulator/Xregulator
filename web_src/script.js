@@ -229,6 +229,83 @@ function setTempUnit(unit) {
     fetch(buildURL(`/get?displayTempUnit=${unit}`)).catch(() => {});
 }
 
+// Fuel volume unit preference — 0=US gallons (default), 1=litres. Echoed from CSV3.
+// Display only: the fuel table stays GPH x100 on the wire and in NVS, and the used-fuel
+// totals stay litres, exactly as the firmware accumulates them.
+let displayVolUnit = 0;
+const LITRES_PER_US_GAL = 3.785411784;
+
+function toDisplayVol(litres) {            // used-fuel totals are litres-native
+    return displayVolUnit === 1 ? litres : litres / LITRES_PER_US_GAL;
+}
+function gphToDisplayFlow(gph) {           // fuel table + live flow are gallons-native
+    return displayVolUnit === 1 ? gph * LITRES_PER_US_GAL : gph;
+}
+function displayFlowToGph(v) {
+    return displayVolUnit === 1 ? v / LITRES_PER_US_GAL : v;
+}
+function nmpgToDisplayEcon(nmpg) {         // nautical miles per gallon -> per litre
+    return displayVolUnit === 1 ? nmpg / LITRES_PER_US_GAL : nmpg;
+}
+function volUnitLabel()     { return displayVolUnit === 1 ? 'L' : 'gal'; }
+function volFlowUnitLabel() { return displayVolUnit === 1 ? 'L/hr' : 'gal/hr'; }
+function volEconUnitLabel() { return displayVolUnit === 1 ? 'naut mi/L' : 'naut mi/gal'; }
+
+let _fuelCurveVolUnit = 0;   // unit baked into the economy plot's axis label and data
+function updateAllVolUnitLabels() {
+    document.querySelectorAll('.fuelvol-unit-label').forEach(el => { el.textContent = volUnitLabel(); });
+    document.querySelectorAll('.fuelflow-unit-label').forEach(el => { el.textContent = volFlowUnitLabel(); });
+    document.querySelectorAll('.fuelecon-unit-label').forEach(el => { el.textContent = volEconUnitLabel(); });
+
+    // The 200 gal/hr ceiling is authored in gallons; the browser validates what is typed.
+    document.querySelectorAll('#fuel-table-body input[id^="fuelTableGPH"]').forEach(inp => {
+        inp.max = displayVolUnit === 1 ? Math.ceil(200 * LITRES_PER_US_GAL) : 200;
+    });
+
+    const gBtn = document.getElementById('volUnitGal_btn');
+    const lBtn = document.getElementById('volUnitL_btn');
+    if (gBtn && lBtn) {
+        gBtn.classList.toggle('on', displayVolUnit === 0);
+        lBtn.classList.toggle('on', displayVolUnit === 1);
+    }
+
+    if (_fuelCurveVolUnit !== displayVolUnit) {
+        const prev = _fuelCurveVolUnit;
+        _fuelCurveVolUnit = displayVolUnit;
+        // Axis label and y values are both unit-bearing, and uPlot bakes the label at
+        // construction — tear the plot down so the next CSV4 frame rebuilds it.
+        if (typeof window.fuelCurveOnUnitChange === 'function') window.fuelCurveOnUnitChange(prev);
+    }
+
+    refreshFuelTableDisplayValues();
+}
+
+function setVolUnit(unit) {
+    displayVolUnit = unit;
+    updateAllVolUnitLabels();
+    // buildURL is mandatory under Capacitor — see setTempUnit.
+    fetch(buildURL(`/get?displayVolUnit=${unit}`)).catch(() => {});
+}
+
+// The GPH cells hold display units but are submitted as gallons. _fuelGphShadow is the
+// gallons truth for every cell, so a unit flip re-renders without a round trip to the device.
+const _fuelGphShadow = new Array(10).fill(null);
+
+function fuelSetCellFromGph(i, gph) {
+    _fuelGphShadow[i] = gph;
+    const el = document.getElementById(`fuelTableGPH${i}_input`);
+    if (el) el.value = gphToDisplayFlow(gph).toFixed(2);
+}
+
+function refreshFuelTableDisplayValues() {
+    for (let i = 0; i < 10; i++) {
+        if (_fuelGphShadow[i] === null) continue;
+        const el = document.getElementById(`fuelTableGPH${i}_input`);
+        if (el && el !== document.activeElement) el.value = gphToDisplayFlow(_fuelGphShadow[i]).toFixed(2);
+    }
+    if (typeof drawFuelCurve === 'function') drawFuelCurve();
+}
+
 // Convert a form input value from display unit back to °F before GET submission.
 // Temporarily rewrites the input value, lets the form submit, then restores the display value.
 function convertTempFormIfNeeded(form, inputName, isDelta, zeroMeansOff) {
@@ -300,6 +377,35 @@ let g_lastCsv3 = null; // Last received CSV3 data object — used by cvBinToCsv 
 let g_lastCsv1 = null; // Last received CSV1 (live numbers) — for the diagnostics snapshot in log exports
 let g_lastCsv2 = null; // Last received CSV2 (diagnostics/timing/health) — for the diagnostics snapshot
 let g_lastTs = null;   // Last received TS (staleness ages) — for the diagnostics snapshot
+let g_lastCsv4 = null; // Last received CSV4 / NavStream — for the diagnostics snapshot
+
+// Per-stream receive bookkeeping, the client half of the freshness stamps the device puts in every
+// payload. The device stamps sessionId + sendMs, which catches one channel falling behind the rest.
+// It cannot catch ALL channels freezing together — a cached script.js whose field arrays predate an
+// OTA fails the schema gate below on every channel at once, and the caches then serve pre-flash
+// values with pre-flash stamps that agree with each other perfectly. rxWallMs (this browser's clock)
+// and the reject counters are the only evidence of that case, so both ride the snapshot.
+// Budgets are the channel cadence with slack: CSV1 ~100ms, CSV4 500ms, CSV2 5s, CSV3 60s, TS 3s.
+const STREAM_BUDGET_MS = { csv1: 2000, csv2: 20000, csv3: 130000, csv4: 3000, ts: 12000 };
+const g_streamMeta = {
+    csv1: { rxWallMs: 0, rejects: 0, lastReject: null },
+    csv2: { rxWallMs: 0, rejects: 0, lastReject: null },
+    csv3: { rxWallMs: 0, rejects: 0, lastReject: null },
+    csv4: { rxWallMs: 0, rejects: 0, lastReject: null },
+    ts:   { rxWallMs: 0, rejects: 0, lastReject: null },
+};
+function noteStreamRx(name) {
+    const m = g_streamMeta[name];
+    if (m) m.rxWallMs = Date.now();
+}
+// Called from a schema/length mismatch branch, where the payload is dropped and the cache goes stale
+// with no other trace. `declared` is the device's field count, `expected` this build's array length.
+function noteStreamReject(name, declared, expected) {
+    const m = g_streamMeta[name];
+    if (!m) return;
+    m.rejects++;
+    m.lastReject = { declared: Number(declared), expected: Number(expected), atWallMs: Date.now() };
+}
 
 const CSV1_FIELDS = [
     "AlternatorTemperatureF",
@@ -351,6 +457,8 @@ const CSV1_FIELDS = [
     "huntDerate",        // hunt-governor live Ki derate (×100; 100 = full gain)
     "huntFreqHz",        // hunt-governor last confirmed wobble frequency (Hz ×100; 0 = none this session)
     "huntState",         // 0 watching, 1 testing a Ki cut, 3 cooldown, 4 testing with the D term paused (2 unused since v2)
+    "sessionId",         // device boot identity, same in every channel this boot
+    "sendMs",            // device millis() when this payload was built — the reference clock the other channels are aged against
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -930,6 +1038,8 @@ const CSV2_FIELDS = [
     "n183ChecksumErrs",        // NMEA 0183 sentences that failed checksum
     "ft_ReadNMEA0183_win",     // NMEA 0183 drain worst µs (window)
     "ft_ReadNMEA0183_ses",     // NMEA 0183 drain worst µs (session)
+    "sessionId",               // device boot identity, same in every channel this boot
+    "sendMs",                  // device millis() when this payload was BUILT (CSV2 sends one pass later)
 ];
 
 // Order MUST match ftBlameReg[] in Xregulator.ino — the blame indices in CSV2 point here.
@@ -988,6 +1098,9 @@ const CSV4_FIELDS = [
     "chargeStage",                // CHARGE_STAGE_* code — feeds gLastChargeStage at 2 Hz for the mode ribbon
     "n183Heading",                // NMEA 0183 decoded heading (deg ×10; negative = nothing decoded). Distinct from HeadingNMEA, which is the NMEA2000 source.
     "n183HdgRef",                 // reference frame of the above: 0 none, 1 magnetic, 2 true
+    "bmsSignalActive",            // live BMS on/off opto input: 1 = 5-28 V present at the wire, 0 = dead/open. Raw pin, before the Present/Absent polarity choice
+    "sessionId",                  // device boot identity, same in every channel this boot
+    "sendMs",                     // device millis() when this payload was built
 ];
 
 // ── Gate-tuning live readouts ───────────────────────────────────────────────
@@ -1210,7 +1323,8 @@ let altSettings = {};
 let altLive = { valid:false, rpm:0, exc:0, amps:0, pred:0, pct:0, worstPct:0, overallPct:0,
                 status:0, steady:false, engHours:0, coverage:0, haveCurve:0, ptCount:0,
                 source:0, paused:0, refOk:1, refDist:0, state:3,
-                sessionMean:0, sessionP10:0, sessionN:0, hiFieldAlert:0, sim:0, gAmps:0 };
+                sessionMean:0, sessionP10:0, sessionN:0, hiFieldAlert:0, sim:0, gAmps:0,
+                logState:0, logRows:0, logSecLeft:0, logCap:0, sweepState:0, sweepRev:0 };
 let altTrend = [];     // committed trend points: [{eng, worst, overall}]
 let _altTrendPending = false, _altTrendLastFetch = 0;
 let altTrendPlot = null;
@@ -1510,6 +1624,291 @@ function altSessSectionCsv(){
   }
   return rows.join('\n');
 }
+// ── Gate-tuning capture: session logger + field sweeper ──────────────────────
+// Spec: Working Markdown Docs/ALT_GATE_TUNING_CAPTURE_SPEC.md. State arrives on the AltLive frame
+// (1 Hz, schema-zipped) as logState / logRows / logSecLeft / logCap / sweepState / sweepRev.
+// Buttons, not URL parameters: this is operated by hand while also managing a throttle.
+const ALTLOG_HDR_BYTES = 136;    // must match AltLogHdr in 7_functions.ino
+const ALTLOG_ROW_BYTES = 17;     // must match AltLogRow
+const ALTLOG_CAP_ROWS = 11565;   // must match ALTLOG_CAP_ROWS in 7_functions.ino (3 x 3855 rows of 17 B)
+const ALTLOG_STATE_LABEL = ['idle', 'RECORDING', 'stopped', 'BUFFER FULL'];
+const ALTSWEEP_STATE_LABEL = ['idle', 'ramping up', 'ramping down', 'easing out'];
+// Both halves zero-padded, so the string is the same width at 0:07 as at 18:12 — the readout must
+// not change length as the clock runs down. Paired with tabular-nums on the span in the markup.
+const altLogMMSS = s => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}:${String(Math.max(0, s) % 60).padStart(2, '0')}`;
+
+// Safety notice. The sweeper takes the field off the regulator, which switches out every soft
+// protection layer (spec section 8), so the panel says so in full rather than in a tooltip. Shown
+// once per page load when the panel is first expanded — a notice that fires on every expand gets
+// dismissed reflexively — and always reachable from the panel's own red button.
+let _altCapSafetyShown = false;
+function altCapSafetyOpen() {
+    const ov = document.getElementById('altcap-safety-overlay');
+    if (!ov) return;
+    try { altSweepEchoMargins(); } catch (e) {}   // quote the margins that are actually set
+    ov.style.display = 'flex';
+    _altCapSafetyShown = true;
+}
+function altCapSafetyClose() {
+    const ov = document.getElementById('altcap-safety-overlay');
+    if (ov) ov.style.display = 'none';
+}
+function altCapSafetyOnPanelOpen() {
+    if (!_altCapSafetyShown) altCapSafetyOpen();
+}
+
+// One gate for every device write here: unlocked, and a real regulator on the other end.
+function altCapPost(query) {
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return false; }
+    if (DEMO_MODE) { xAlert('Demo mode — no regulator is connected, so the capture cannot be controlled.'); return false; }
+    fetchWithTimeout(buildURL('/get?' + query), {}, 5000).catch(() => {});
+    return true;
+}
+
+function altCapEnable(id, on) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.disabled = !on;
+    el.style.opacity = on ? '' : '0.45';
+    el.style.cursor = on ? 'pointer' : 'default';
+}
+
+function altCaptureRender() {
+    const st = altLive.logState | 0;
+    const recording = (st === 1);
+    const stEl = document.getElementById('altlog-state');
+    if (stEl) stEl.textContent = ALTLOG_STATE_LABEL[st] || '?';
+    const cd = document.getElementById('altlog-countdown');
+    if (cd) {
+        // Time only, m:ss, always the same shape. The row count was a number nobody acts on, and it
+        // grew a digit mid-recording — which re-wrapped this line and shifted the whole row. The
+        // span is tabular-nums in the markup so the digits themselves are fixed-width too.
+        const rows = altLive.logRows | 0, cap = (altLive.logCap | 0) || ALTLOG_CAP_ROWS;
+        if (recording) {
+            const left = Math.max(0, altLive.logSecLeft | 0);
+            cd.textContent = `${altLogMMSS(left)} left`;
+            cd.style.color = (left <= 60) ? '#e07b39' : '';
+        } else if (st === 2 || st === 3) {
+            cd.textContent = `${altLogMMSS(Math.round(rows / 10))} recorded — dump or discard`;
+            cd.style.color = (st === 3) ? '#e07b39' : '';
+        } else {
+            cd.textContent = `${altLogMMSS(Math.round(cap / 10))} capacity`;
+            cd.style.color = '';
+        }
+    }
+    const rb = document.getElementById('altlog-record-btn');
+    if (rb) rb.value = recording ? 'Stop' : 'Record';
+    // Dump and Discard only once a recording is finished and still held; Reverse now only while a
+    // ramp is on its way up. A button that cannot do anything reads as inert, not as a live control.
+    altCapEnable('altlog-dump-btn', st === 2 || st === 3);
+    altCapEnable('altlog-discard-btn', st === 2 || st === 3);
+    const sw = altLive.sweepState | 0;
+    const rev = altLive.sweepRev | 0;   // 0 reached its ceiling, 1 a control limit, 2 Reverse now
+    const swEl = document.getElementById('altsweep-state');
+    if (swEl) swEl.textContent = (ALTSWEEP_STATE_LABEL[sw] || '?') +
+        ((sw === 2 && rev === 1) ? ' — turned around short of a limit'
+         : (sw === 2 && rev === 2) ? ' — turned around by hand' : '');
+    const swb = document.getElementById('altsweep-btn');
+    if (swb) swb.value = sw ? 'Stop sweep' : 'Start sweep';
+    altCapEnable('altsweep-rev-btn', sw === 1);
+    altSweepSyncCeiling();
+    altSweepEchoMargins();
+}
+
+// Both sweep bounds are capped at the live Max Field %, which is the firmware's only ceiling too, and
+// "up to" starts there — so the box shows the real number instead of a note explaining what empty
+// means. Only ever fills an EMPTY box: a value the user typed is theirs.
+function altSweepSyncCeiling() {
+    const md = parseFloat(getField('MaxDuty_echo'));
+    if (!(md > 0)) return;                      // no live value yet — leave the markup defaults alone
+    const cap = String(Math.round(md));
+    ['altsweep-to', 'altsweep-from'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.max = cap;
+    });
+    const to = document.getElementById('altsweep-to');
+    // Never while the box has focus: clearing it to type a new number would otherwise be undone by
+    // the next 1 Hz frame, mid-keystroke.
+    if (to && to.value.trim() === '' && document.activeElement !== to) to.value = cap;
+}
+
+// The margins are settable, so the two places that quote them — the line under the sweeper state and
+// the safety notice — read the boxes rather than repeating the defaults. A safety notice that names
+// numbers the run will not use is worse than one that names none.
+function altSweepMargins() {
+    const num = (id, dflt) => {
+        const v = parseFloat((document.getElementById(id) || {}).value);
+        return isFinite(v) && v >= 0 ? v : dflt;
+    };
+    return { a: num('altsweep-margin-a', 10), v: num('altsweep-margin-v', 0.15) };
+}
+
+function altSweepEchoMargins() {
+    const m = altSweepMargins();
+    const note = document.getElementById('altsweep-note');
+    if (note) note.textContent = (m.a > 0 || m.v > 0)
+        ? `turns around ${m.a} A / ${m.v} V short of the first limit it approaches, and comes back down at the same rate`
+        : 'turns around on the first limit it reaches, and comes back down at the same rate';
+    const ea = document.getElementById('altcap-safety-margin-a');
+    const ev = document.getElementById('altcap-safety-margin-v');
+    if (ea) ea.textContent = String(m.a);
+    if (ev) ev.textContent = String(m.v);
+}
+
+function altLogRecordPress() {
+    const st = altLive.logState | 0;
+    if (st === 1) { altCapPost('altLogStop=1'); return; }
+    if (st === 2 || st === 3) {
+        if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
+        xConfirm(`Recording will discard the ${altLive.logRows | 0} rows already captured — they have not been dumped. Continue?`)
+            .then(ok => { if (ok) altCapPost('altLogRecord=1'); });
+        return;
+    }
+    altCapPost('altLogRecord=1');
+}
+
+function altLogDiscardPress() {
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
+    if ((altLive.logState | 0) === 1) { xAlert('Press Stop first — the recording is still running.'); return; }
+    if ((altLive.logState | 0) === 0) { xAlert('Nothing to discard.'); return; }
+    xConfirm(`Discard ${altLive.logRows | 0} recorded rows without saving them?`)
+        .then(ok => { if (ok) altCapPost('altLogClear=1'); });
+}
+
+// Fetch, decode, hand over the CSV, and only then clear the device buffer — a failed transfer must
+// never be the reason a deliberate capture is gone.
+async function altLogDumpPress() {
+    if (DEMO_MODE) { xAlert('Demo mode — no regulator is connected, so there is nothing to dump.'); return; }
+    const st = altLive.logState | 0;
+    if (st === 1) { xAlert('Press Stop first — the file has to match a finished session.'); return; }
+    if (st === 0) { xAlert('Nothing recorded yet.'); return; }
+    let buf = null;
+    try {
+        const resp = await fetch(buildURL('/altlog.bin'));
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        buf = await resp.arrayBuffer();
+    } catch (err) {
+        xAlert('Gate capture download failed: ' + err + ' — the recording is still on the device, try again.');
+        return;
+    }
+    const d = parseAltLogBin(buf);
+    if (!d) {
+        xAlert('Gate capture: the device returned an unreadable file (truncated transfer?) — the recording is still on the device, try again.');
+        return;
+    }
+    const ts = getLogTimestamp(), sfx = getLogNameSuffix();
+    deliverFile(`altgate_${ts}${sfx}.csv`, altLogToCsv(d), 'text/csv');
+    fetchWithTimeout(buildURL('/get?altLogClear=1'), {}, 5000).catch(() => {});
+}
+
+function altSweepReversePress() {
+    altCapPost('altSweepReverse=1');
+}
+
+function altSweepPress() {
+    if ((altLive.sweepState | 0) !== 0) { altCapPost('altSweepCancel=1'); return; }
+    const val = id => { const e = document.getElementById(id); return e ? e.value.trim() : ''; };
+    const rate = val('altsweep-rate') || '1.0';
+    const from = val('altsweep-from') || '5';
+    // The box is pre-filled with Max Field % and capped there, but a number input still accepts a
+    // typed-over value, so clamp on the way out. 0 is the firmware's "resolve it yourself" fallback
+    // and only reaches it if Max Field % has not arrived from the device yet.
+    const md = parseFloat(getField('MaxDuty_echo'));
+    let to = parseFloat(val('altsweep-to'));
+    if (!(to > 0)) to = (md > 0) ? md : 0;
+    else if (md > 0 && to > md) to = md;
+    const m = altSweepMargins();
+    altCapPost(`altSweepStart=1&rate=${encodeURIComponent(rate)}&from=${encodeURIComponent(from)}` +
+               `&to=${encodeURIComponent(String(Math.round(to)))}` +
+               `&marginA=${encodeURIComponent(m.a)}&marginV=${encodeURIComponent(m.v)}`);
+}
+
+// 136-byte header + 17-byte rows, little-endian. Mirrors AltLogHdr / AltLogRow in 7_functions.ino —
+// change one and you must change the other.
+function parseAltLogBin(buf) {
+    if (!buf || buf.byteLength < ALTLOG_HDR_BYTES + ALTLOG_ROW_BYTES) return null;
+    const dv = new DataView(buf);
+    if (dv.getUint32(0, true) !== 0x414C474C) return null;   // 'ALGL'
+    const h = {
+        ver: dv.getUint16(4, true), rowBytes: dv.getUint16(6, true),
+        rowCount: dv.getUint32(8, true), capRows: dv.getUint32(12, true),
+        sessionId: dv.getUint32(16, true), epoch: dv.getUint32(20, true),
+        startMs: dv.getUint32(24, true), durMs: dv.getUint32(28, true),
+        dtMs: dv.getUint16(32, true), voltClass: dv.getUint8(34),
+        endReason: dv.getUint8(35), chargeStage: dv.getUint8(36),
+        startTempF: dv.getFloat32(40, true), startVbus: dv.getFloat32(44, true),
+        emaSec: dv.getFloat32(48, true), rpmTol: dv.getFloat32(52, true),
+        dutyTolPct: dv.getFloat32(56, true), vbusTol: dv.getFloat32(60, true),
+        thermDegF: dv.getFloat32(64, true), thermSec: dv.getFloat32(68, true),
+        ampsTolPct: dv.getFloat32(72, true), ampsFloorA: dv.getFloat32(76, true),
+        rpmSec: dv.getFloat32(80, true), dutySec: dv.getFloat32(84, true),
+        vbusSec: dv.getFloat32(88, true), ampsSec: dv.getFloat32(92, true),
+        minRunSec: dv.getFloat32(96, true), emitAvgMs: dv.getUint32(100, true),
+        axisScale: [dv.getFloat32(104, true), dv.getFloat32(108, true),
+                    dv.getFloat32(112, true), dv.getFloat32(116, true)],
+        fw: '',
+    };
+    if (h.rowBytes !== ALTLOG_ROW_BYTES) return null;
+    for (let i = 120; i < 136; i++) { const c = dv.getUint8(i); if (!c) break; h.fw += String.fromCharCode(c); }
+    const avail = Math.floor((buf.byteLength - ALTLOG_HDR_BYTES) / ALTLOG_ROW_BYTES);
+    const n = Math.min(h.rowCount, avail);
+    if (n < 1) return null;
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+        const o = ALTLOG_HDR_BYTES + i * ALTLOG_ROW_BYTES;
+        rows.push({
+            dtMs: dv.getUint16(o, true),
+            rpm: dv.getInt16(o + 2, true),
+            duty: dv.getUint16(o + 4, true) / 100,
+            vbus: dv.getUint16(o + 6, true) / 1000,
+            tempF: dv.getInt16(o + 8, true) / 10,
+            tSlope: dv.getInt16(o + 10, true) / 100,   // case-temp rate, °F/min
+            amps: dv.getInt16(o + 12, true) / 100,
+            ampsRaw: dv.getInt16(o + 14, true) / 100,
+            flags: dv.getUint8(o + 16),
+        });
+    }
+    return { hdr: h, rows, truncated: (n < h.rowCount) };
+}
+
+// The header exists because dump-and-restart makes many small files instead of one large one: a
+// mid-campaign settings change would otherwise make two files silently incomparable.
+function altLogToCsv(d) {
+    const h = d.hdr;
+    const L = [];
+    L.push('# ALTGATE1 gate-tuning capture');
+    L.push(`# sessionId=${h.sessionId} rows=${h.rowCount} cap=${h.capRows}` +
+           ` rateHz=${(1000 / h.dtMs).toFixed(1)} ended=${['recording', 'stop', 'full'][h.endReason] || h.endReason}`);
+    L.push(`# epoch=${h.epoch}${h.epoch ? ' (' + new Date(h.epoch * 1000).toISOString() + ')' : ' (clock never synced)'}` +
+           ` deviceMs=${h.startMs} durMs=${h.durMs}`);
+    L.push(`# fw=${h.fw} voltClass=${h.voltClass}V startTempF=${h.startTempF.toFixed(1)}` +
+           ` startVbus=${h.startVbus.toFixed(2)} chargeStage=${h.chargeStage}`);
+    L.push(`# gates: emaSec=${h.emaSec} rpmTol=${h.rpmTol} dutyTolPct=${h.dutyTolPct} vbusTol=${h.vbusTol}` +
+           ` thermDegF=${h.thermDegF} thermSec=${h.thermSec} ampsTolPct=${h.ampsTolPct} ampsFloorA=${h.ampsFloorA}`);
+    L.push(`# dwells: rpmSec=${h.rpmSec} dutySec=${h.dutySec} vbusSec=${h.vbusSec} ampsSec=${h.ampsSec}` +
+           ` minRunSec=${h.minRunSec} emitAvgMs=${h.emitAvgMs} axisScale=${h.axisScale.join('|')}`);
+    L.push('# amps/rpm/fieldPct/vbus are EMA-filtered (emaSec) as the detector sees them; tempF is raw;');
+    L.push('# tSlope_Fmin is the device\'s own case-temp rate (fast-minus-slow EMA pair), the same number');
+    L.push('# every stored record carries — a warming machine grades low, so it is a needed regressor, not a nicety.');
+    L.push('# ampsRaw is the MEAN of the fresh current conversions in that row (anti-aliased, not a point sample).');
+    if (d.truncated) L.push('# WARNING: transfer ended early — rows below are fewer than the header claims.');
+    L.push('# sweepRevEarly=1 means that sweep turned around early — a control limit or Reverse now — not at its ceiling.');
+    L.push('# There is no segment column: a recording is fluid. Split on the flag columns (sweep, sweepDown,');
+    L.push('# manual, fieldOn) and on dt_ms, which carry every transition the device can actually see.');
+    L.push('t_s,dt_ms,rpm,fieldPct,vbus,tempF,tSlope_Fmin,amps,ampsRaw,fieldOn,manual,sweep,sweepDown,protection,eligible,steady,sweepRevEarly');
+    let t = 0;   // first row is t=0: time is relative to the start of the file
+    for (let i = 0; i < d.rows.length; i++) {
+        const r = d.rows[i];
+        if (i) t += r.dtMs;
+        L.push([(t / 1000).toFixed(3), r.dtMs, r.rpm, r.duty.toFixed(2), r.vbus.toFixed(3), r.tempF.toFixed(1),
+                r.tSlope.toFixed(2), r.amps.toFixed(2), r.ampsRaw.toFixed(2),
+                (r.flags & 1) ? 1 : 0, (r.flags & 2) ? 1 : 0, (r.flags & 4) ? 1 : 0, (r.flags & 8) ? 1 : 0,
+                (r.flags & 16) ? 1 : 0, (r.flags & 32) ? 1 : 0, (r.flags & 64) ? 1 : 0,
+                (r.flags & 128) ? 1 : 0].join(','));
+    }
+    return L.join('\n') + '\n';
+}
+
 // ── Generated-file delivery with feedback ────────────────────────────────────
 // Every file this page generates (CSV/JSON exports, Download Logs, config backup)
 // goes through deliverFile(). Desktop/Android: per-file anchor download plus a
@@ -1669,6 +2068,16 @@ function cfgDiffToggleAll(){
   if(b) b.textContent=target?'Uncheck All':'Check All';
 }
 function _cfgEsc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// True only on POSITIVE, FRESH evidence that the field is driving. An import writes one NVS commit
+// per changed key and a commit blocks BOTH cores during sector erase (see the deleted phased-save
+// note in 5_functions.ino), so a big import while charging can stall the control loop. A stale or
+// absent CSV1 frame is not evidence — stay silent rather than cry wolf on a page that just loaded.
+function _cfgFieldIsLive(){
+  const m=(typeof g_streamMeta==='object'&&g_streamMeta)?g_streamMeta.csv1:null;
+  if(!m||!m.rxWallMs||Date.now()-m.rxWallMs>STREAM_BUDGET_MS.csv1) return false;
+  const fa=(typeof g_lastCsv1==='object'&&g_lastCsv1)?parseInt(g_lastCsv1.fieldActiveStatus,10):0;
+  return fa>=1&&fa<=4;   // same live/off split as fieldOffReasonUpdate; 0 or NaN = off
+}
 async function cfgDiffPreview(blobText, sourceLabel){
   let incoming;
   try{ incoming=JSON.parse(blobText); }catch(e){ xAlert('That is not a valid configuration file.'); return null; }
@@ -1751,8 +2160,17 @@ async function cfgDiffPreview(blobText, sourceLabel){
       +'<table style="width:100%; border-collapse:collapse; font-size:0.85em;"><tr style="color:#667; text-align:left;"><th></th><th style="padding:3px 8px 3px 0;">Key</th><th style="padding:3px 8px;">This device</th><th style="padding:3px 0;">Source file</th></tr>'
       +refRows.map(refRow).join('')+'</table>';
   }
-  body.innerHTML=h;
   const hasRows=!!(nChange||nFresh);
+  // Field-on advisory. Above the table so it is read before the Apply button, and advisory only —
+  // the import is legitimate at any time, it just costs the control loop a stutter it does not have
+  // to pay. Suppressed when nothing would be written.
+  if(hasRows&&_cfgFieldIsLive()){
+    h='<div style="color:#f0a500; border:1px solid #6a4a00; background:#241c05; border-radius:4px; padding:8px 10px; margin-bottom:12px; font-size:0.9em; line-height:1.45;">'
+      +'Charging is running right now. Applying saves '+(nChange+nFresh)+' setting'+((nChange+nFresh)===1?'':'s')
+      +' to permanent memory, and each save can briefly pause the regulator\'s control loop. '
+      +'Best done with charging switched off. You can still apply.</div>'+h;
+  }
+  body.innerHTML=h;
   document.getElementById('cfgdiff-apply-btn').style.display=hasRows?'':'none';
   const tb=document.getElementById('cfgdiff-toggle-btn');
   if(tb){ tb.style.display=hasRows?'':'none'; tb.textContent='Uncheck All'; }
@@ -2980,7 +3398,7 @@ const CSV3_FIELDS = [
     "NMEA0183Data",                   // moved from CSV2 (0/1)
     "NMEA2KData",                     // moved from CSV2 (0/1)
     "timeAxisModeChanging",           // moved from CSV2 (0/1)
-    "gpsTimeSourceMode",              // 0=auto, 1=NMEA, 2=Phone, 3=NTP (time only)
+    "timeSourceMode",                // 0=auto, 1=NMEA, 2=Phone, 3=NTP — the CLOCK only; position is gpsPositionSource
     "speedSourceMode",                // 0=NMEA 2000, 1=phone GPS (speed/course owner — selectable, never auto)
     // Fast alt-current diagnostic knobs (Pattern B echo)
     "faEnabled",                     // 0/1 — global ON/OFF
@@ -3121,6 +3539,10 @@ const CSV3_FIELDS = [
     "HuntTrigPct",                   // damper detection bar: peak-bin duty swing % (x100)
     "NMEA0183Baud",                  // NMEA 0183 serial baud (4800 / 9600 / 19200 / 38400)
     "NMEA0183Invert",                // NMEA 0183 polarity: 0 RS-232-level talker, 1 TTL-level talker
+    "displayVolUnit",                // fuel volume display preference: 0 US gallons, 1 litres
+    "gpsPositionSource",             // 0=auto, 1=NMEA, 2=Phone — position only; the clock is timeSourceMode
+    "sessionId",                     // device boot identity, same in every channel this boot
+    "sendMs",                        // device millis() when this settings echo was built; event-driven with a 60 s fallback
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3158,6 +3580,8 @@ const TS_FIELDS = [
     "ts_Dvcc",
     "ts_WeatherFetch",
     "ts_N183",
+    "ts_sessionId",   // device boot identity, same in every channel this boot
+    "ts_sendMs",      // device millis() when this payload was built — every other TS field is an age measured at that instant
 ];
 
 // Detect if running in Capacitor (iOS/Android) vs web browser
@@ -3495,11 +3919,91 @@ async function postPhoneFix(loc) {
     }
 }
 
+// True when the owner has switched on something that actually consumes this phone's
+// position: Defer to Solar (forecast needs coordinates), phone-forced position source,
+// or phone as the speed/course owner. All three arrive on the CSV3 settings echo. Until
+// one is on, the app neither asks for location nor sends any, so a default install runs
+// its whole life without a location prompt.
+function phonePositionWanted() {
+    return Number(window.weatherModeEnabled) === 1
+        || Number(window.gpsPositionSource) === 2
+        || Number(window.speedSourceMode) === 1;
+}
+
+// Ask for location, in context, at the moment the owner switches on a feature that needs
+// it. Apple's HIG wants an explainer to carry ONE button that leads to the system alert —
+// the decline belongs to iOS, not to us — so this is xAlert, not a confirm. Returns true
+// only if authorization ended up granted. Keep the explainer SHORT: a purpose string long
+// enough to overflow the system alert collapses it to a single "Allow Once" button
+// (measured 2026-08-24: 517 chars fine, 556 collapses), and the same restraint applies here.
+async function requestPhoneLocationPermission(whyLine) {
+    if (!IS_CAPACITOR || !window.Capacitor.Plugins || !window.Capacitor.Plugins.Geolocation) return false;
+    if (await phoneLocationGranted()) return true;
+    try {
+        const p = await window.Capacitor.Plugins.Geolocation.checkPermissions();
+        if (p && p.location === 'denied') {
+            await xAlert('Location is turned off for X Regulator. Turn it on in iOS Settings ' +
+                         '> Privacy & Security > Location Services > X Regulator, then choose ' +
+                         'While Using the App.', 'Location is off');
+            return false;
+        }
+    } catch (e) { /* services off system-wide — the request below will fail harmlessly */ }
+    await xAlert(whyLine, 'Share this phone\'s position?', { okText: 'Continue' });
+    try {
+        const r = await window.Capacitor.Plugins.Geolocation.requestPermissions();
+        return r && r.location === 'granted';
+    } catch (e) {
+        return false;
+    }
+}
+
+// Defer to Solar reads the forecast for the boat's coordinates, so switching it on is the
+// third and last thing that can need this phone's location — and only when the boat has no
+// NMEA GPS of its own to supply them. Called from the toggle's onchange after it submits.
+async function weatherModeToggled(isOn) {
+    if (!isOn) return;
+    if (Number(window.currentGpsSource) === 1) return;   // boat's own NMEA GPS already supplies coordinates
+    await requestPhoneLocationPermission(
+        'The solar forecast is looked up for your position. X Regulator can take it from this ' +
+        'phone when the boat has no GPS of its own. It goes only to your regulator.');
+}
+
+// Position source selector. Only "Phone only" consumes this phone's location, so only that
+// choice asks. Auto arbitrates whatever arrives and never triggers a prompt on its own.
+async function gpsPositionSourceChanged(sel) {
+    if (Number(sel.value) === 2) {
+        const ok = await requestPhoneLocationPermission(
+            'X Regulator will send this phone\'s position to your regulator, so it can log ' +
+            'distance run and anchorages without a GPS on the NMEA 2000 bus. It goes only to ' +
+            'your regulator on your local network.');
+        if (!ok) { sel.value = String(window.gpsPositionSource ?? 0); return; }
+    }
+    sel.form.submit();
+    submitMessage();
+}
+
+// Authorization state WITHOUT prompting. Capacitor's checkPermissions() reads the state;
+// getCurrentPosition() is what triggers the system alert when the state is notDetermined,
+// so it must never be used as the test. Throws if Location Services are off system-wide.
+async function phoneLocationGranted() {
+    if (!IS_CAPACITOR || !window.Capacitor.Plugins || !window.Capacitor.Plugins.Geolocation) return false;
+    try {
+        const p = await window.Capacitor.Plugins.Geolocation.checkPermissions();
+        return p && p.location === 'granted';
+    } catch (e) {
+        return false;   // services disabled, or the plugin can't answer — treat as no
+    }
+}
+
 async function postPhoneDataToDevice() {
-    // All fields are trusted-LAN backup sources — NMEA always outranks phone GPS/time on
-    // the device, and speed applies only when the user selected the phone as speed source,
-    // so no lock-state gating is needed.
-    const loc = await getPhoneLocation();
+    // Time goes on every tick and needs no permission — in AP mode the phone is the only
+    // clock the device has. Position rides along ONLY when the owner turned on a feature
+    // that uses it AND authorization already exists; postPhoneFix(null) sends time alone.
+    // Never call getPhoneLocation() before that check: it prompts.
+    let loc = null;
+    if (phonePositionWanted() && await phoneLocationGranted()) {
+        loc = await getPhoneLocation();
+    }
     await postPhoneFix(loc);
 }
 
@@ -3632,6 +4136,12 @@ async function speedSourceModeChanged(sel) {
             { title: 'Use phone GPS for speed?', okText: 'Use Phone GPS' }
         );
         if (!ok) { sel.value = '0'; return; }
+        // Ask for authorization here rather than at launch: this is the moment the feature
+        // is switched on, which is what guideline 5.1.1(ii) and the HIG both want.
+        const granted = await requestPhoneLocationPermission(
+            'X Regulator needs this phone\'s location to use it as the vessel speed source. ' +
+            'Speed and course go to your regulator on your local network.');
+        if (!granted) { sel.value = '0'; return; }
     }
     sel.form.submit();
     submitMessage();
@@ -3995,6 +4505,7 @@ function initializeEventSource() {
             altLive.valid = altLive.valid === 1;
             altLive.steady = altLive.steady === 1;
             updateAltHealth();
+            try { altCaptureRender(); } catch (err) {}      // gate-tuning recorder state + countdown
             try { altSessMaybeRecover(); } catch (err) {}   // pull the device series on connect / after a gap
             try { altSessionPush(); } catch (err) {}   // 1 Hz session plot feed
             queueAltTrendUpdate();
@@ -4009,10 +4520,16 @@ function initializeEventSource() {
             altSchema.settings.forEach((k, i) => {
                 altSettings[k] = v[i];
                 if (ALT_NOECHO[k]) return;
-                const el = document.getElementById(k + '_echo');
-                if (el) el.textContent = (k === 'altThermDegF')   // temperature band — follows C/F toggle (delta)
+                const txt = (k === 'altThermDegF')   // temperature band — follows C/F toggle (delta)
                     ? toDisplayTempDelta(v[i]).toFixed(1)
                     : (Math.round(v[i] * 1000) / 1000);
+                const el = document.getElementById(k + '_echo');
+                if (el) el.textContent = txt;
+                // Band-matrix cells carry the value IN the box — a table has no room for the
+                // "(30)" parenthetical — so the echo drives the input as well, except while the
+                // user is typing in that box.
+                const inp = document.querySelector('input[data-echo="' + k + '"]');
+                if (inp && document.activeElement !== inp && inp.dataset.dirty !== '1') inp.value = txt;
             });
             sinfoRefreshOpen();   // alt* echoes feed the C3 "s" signal-info boxes
         }, false);
@@ -6739,8 +7256,10 @@ function updateAllEchosOptimized(data) {
         { key: 'IgnoreTemperature', id: 'IgnoreTemperature_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'IgnoreRPM', id: 'IgnoreRPM_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'MinRPMForField', id: 'MinRPMForField_echo', transform: v => v },
-        { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v == 1 ? 'Yes' : 'No' },
-        { key: 'bmsLogicLevelOff', id: 'bmsLogicLevelOff_echo', transform: v => v == 0 ? 'Low' : 'High' },
+        { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        // 0 = charge while the input is energized. That reads LOW at the ESP32 (the opto inverts),
+        // which is what the old Low/High labels meant — and what installers read backwards.
+        { key: 'bmsLogicLevelOff', id: 'bmsLogicLevelOff_echo', transform: v => v == 0 ? 'Present' : 'Absent' },
         { key: 'AlarmActivate', id: 'AlarmActivate_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'TempAlarm', id: 'TempAlarm_echo', transform: v => Number(v) === 0 ? 'Off' : Math.round(toDisplayTemp(v)) },
         { key: 'TempAlarmLow', id: 'TempAlarmLow_echo', transform: v => Number(v) === 0 ? 'Off' : Math.round(toDisplayTemp(v)) },
@@ -6789,7 +7308,8 @@ function updateAllEchosOptimized(data) {
         { key: 'ManualLifePercentage', id: 'ManualLifePercentage_echo', transform: v => v },
         { key: 'BatteryCurrentSource', id: 'BatteryCurrentSource_echo', transform: v => ({0: 'INA228 Shunt', 1: 'NMEA2K', 2: 'NMEA0183', 3: 'Victron VE.Direct'}[v] ?? v) },
         { key: 'timeAxisModeChanging', id: 'timeAxisModeChanging_echo', transform: v => v == 1 ? 'UNIX' : 'Elapsed' },
-        { key: 'gpsTimeSourceMode', id: 'gpsTimeSourceMode_echo', transform: v => ({0:'Auto', 1:'NMEA only', 2:'Phone only', 3:'NTP time only'}[v] ?? '?') },
+        { key: 'timeSourceMode', id: 'timeSourceMode_echo', transform: v => ({0:'Auto', 1:'NMEA only', 2:'Phone only', 3:'NTP time only'}[v] ?? '?') },
+        { key: 'gpsPositionSource', id: 'gpsPositionSource_echo', transform: v => ({0:'Auto', 1:'NMEA only', 2:'Phone only'}[v] ?? '?') },
         { key: 'speedSourceMode', id: 'speedSourceMode_echo', transform: v => ({0:'NMEA 2000', 1:'Phone GPS'}[v] ?? '?') },
         { key: 'webgaugesinterval', id: 'webgaugesinterval_echo', transform: v => v },
         // plotTimeWindow has no text echo — its buttons highlight the active value instead (below)
@@ -7031,7 +7551,8 @@ function updateAllEchosOptimized(data) {
     // sync forever.
     const selectSyncs = updateAllEchosOptimized._selectSyncs || (updateAllEchosOptimized._selectSyncs = [
         { key: 'AmpSensorRange',        name: 'AmpSensorRange' },
-        { key: 'gpsTimeSourceMode',     name: 'gpsTimeSourceMode' },
+        { key: 'timeSourceMode',        name: 'timeSourceMode' },
+        { key: 'gpsPositionSource',     name: 'gpsPositionSource' },
         { key: 'speedSourceMode',       name: 'speedSourceMode' },
         { key: 'UseFloat',              name: 'UseFloat' },
         { key: 'n2kTempSource',         name: 'n2kTempSource' },
@@ -7116,6 +7637,29 @@ function submitMessage() {
         setTrackedTimeout(() => this.classList.remove('button-pulse'), 600);
     }
 }
+
+// A group Save posts EVERY input in the group, so an untouched blank box would arrive as an empty
+// value and the /get handler would read it back as 0 and wipe that setting. Disabled controls are
+// not serialized: blank boxes are disabled for the duration of the submit and re-enabled straight
+// after. Returns false — cancelling the submit — when nothing in the group was filled in.
+function dropEmpty(form) {
+    const all = Array.from(form.querySelectorAll('input[type="number"]'));
+    const blank = all.filter(i => i.value.trim() === '');
+    if (blank.length === all.length) return false;
+    blank.forEach(i => { i.disabled = true; });
+    setTimeout(() => blank.forEach(i => { i.disabled = false; }), 0);
+    // submitted — the device's echo is authoritative again for these boxes
+    all.forEach(i => { delete i.dataset.dirty; });
+    return true;
+}
+
+// An echo-driven box (the C3 band matrix) is refreshed by the 5 s AltSettings frame. Typing marks
+// it dirty so a frame landing between blur and the Save click cannot silently revert the edit;
+// dropEmpty clears the flag once the value has actually been sent.
+document.addEventListener('input', function (e) {
+    const el = e.target;
+    if (el && el.matches && el.matches('input[data-echo]')) el.dataset.dirty = '1';
+}, true);
 
 //this allows user to turn the alternator OFF even without entering a passoword, for safety reasons, but not ON
 function handleAlternatorToggle(checkbox) {
@@ -7533,7 +8077,7 @@ async function handleVesselInfoSave(event) {
 
             messageDiv.style.backgroundColor = '#e8f5e9';
             messageDiv.style.color = '#2e7d32';
-            messageDiv.innerHTML = 'Vessel info saved successfully! You can now access other tabs.<br>To push this profile to the cloud, go to Cloud Features &rarr; Registration (cloud features are on by default).';
+            messageDiv.textContent = 'Vessel info saved successfully! You can now access other tabs.';
 
             // Update dual-control echoes immediately
             updateEchoIfChanged('SolarWatts_echo', vesselData.solar_watts);
@@ -7548,7 +8092,7 @@ async function handleVesselInfoSave(event) {
             // factory-fresh device's popup in a reused tab — a true first save re-arms it.
             if (result.firstSave === true) sessionStorage.removeItem('socSeedDismissed');
             (_orientChanged
-                ? xAlert('Because the mounting orientation changed, the saved level reference (Level Zero) no longer matches how the device sits, and heel/pitch will read wrong until it is recaptured.\n\nWith the boat sitting level, press Zero Now in the Vessel Info section to re-zero.', 'Re-do Level Zero')
+                ? xAlert('Because the mounting orientation changed, the saved level reference (Level offsets) no longer matches how the device sits, and heel/pitch will read wrong until it is recaptured.\n\nWith the boat sitting level, press Zero Now in the Vessel Info section to re-zero.', 'Re-do Level Offsets')
                 : Promise.resolve())
                 .then(() => maybeProposeBatteryDefaults(vesselData, _prevBatt, result.firstSave === true))  // async, never blocks the save result
                 // Factory-fresh device: the firmware runs its deferred SoC seed on Core 1 some time
@@ -7564,13 +8108,14 @@ async function handleVesselInfoSave(event) {
                     // point and that modal writes a prerequisite field (battery defaults already applied
                     // and bails for Other, the only chemistry whose field set overlaps; the SoC popup
                     // writes SocSeedAck / ManualSOCPoint only).
-                    if (result.firstSave === true) _commPrepPrefetch = commPrepFetchCfg();
+                    if (result.firstSave === true) { _commPrepPrefetch = commPrepFetchCfg(); vesselNextStepNote(true); }
                     for (let i = 0; i < 6; i++) {
                         if (i) await new Promise(res => setTimeout(res, 1000));   // check before sleeping: a snapshot already on file costs nothing
                         _socSeedData = null;
                         await socSeedFetch();
                         if (_socSeedData && _socSeedData.snap) break;
                     }
+                    vesselNextStepNote(false);
                     if (_socSeedData && _socSeedData.snap && !_socSeedData.ack && !sessionStorage.getItem('socSeedDismissed')) {
                         await new Promise(res => { _socSeedResolve = res; socSeedOpen(); });
                     }
@@ -7973,6 +8518,59 @@ function _battDefSkipNote(txt) {
     md.innerHTML += '<br><span style="color:#e6a23c;">' + txt + '</span>';
 }
 
+// First-save chain only: between the vessel/battery-defaults banner and the next popup the page
+// sits idle on the device (SoC-seed poll, then the /exportConfig prefetch), which reads as a
+// finished save. Painting is delayed 600 ms so the common fast path never flashes the line, and a
+// tail swap at 12 s keeps a stalled chain from looking like a completed one.
+// While waiting the whole banner is taken over: green + "saved successfully" is exactly what makes
+// a wait line appended under it invisible, so the box turns teal and pulses, the wait line goes
+// FIRST, and the save result is demoted beneath it. Restored on clear.
+let _vesselWaitShowTimer = null;
+let _vesselWaitTailTimer = null;
+let _vesselWaitSavedStyle = null;   // banner's success/error colours, put back when the wait clears
+function vesselNextStepNote(on) {
+    if (_vesselWaitShowTimer !== null) { clearTrackedTimeout(_vesselWaitShowTimer); _vesselWaitShowTimer = null; }
+    if (_vesselWaitTailTimer !== null) { clearTrackedTimeout(_vesselWaitTailTimer); _vesselWaitTailTimer = null; }
+    const gone = document.getElementById('vessel-next-wait');
+    if (gone) gone.remove();
+    const back = document.getElementById('vessel-info-message');
+    if (back && _vesselWaitSavedStyle) {
+        back.classList.remove('vessel-wait-busy');
+        back.style.backgroundColor = _vesselWaitSavedStyle.bg;
+        back.style.color = _vesselWaitSavedStyle.fg;
+        _vesselWaitSavedStyle = null;
+    }
+    if (!on) return;
+    _vesselWaitShowTimer = setTrackedTimeout(() => {
+        _vesselWaitShowTimer = null;
+        const md = document.getElementById('vessel-info-message');
+        if (!md) return;
+        md.style.display = 'block';
+        _vesselWaitSavedStyle = { bg: md.style.backgroundColor, fg: md.style.color };
+        md.style.backgroundColor = '#dff5f2';
+        md.style.color = '#0f5f58';
+        md.classList.add('vessel-wait-busy');
+        const el = document.createElement('div');
+        el.id = 'vessel-next-wait';
+        el.style.cssText = 'margin:0 0 8px; font-size:1.12em; font-weight:700; line-height:1.35;';
+        // currentColor: the banner's busy teal (or the amber it escalates to below), never a fixed blue
+        el.innerHTML = 'Loading the next step (up to 10 seconds). Stay on this page.'
+            + '<span style="margin-left:6px; white-space:nowrap;">'
+            + '<span class="cloud-loading-dot" style="background:currentColor; vertical-align:middle;"></span>'
+            + '<span class="cloud-loading-dot" style="background:currentColor; vertical-align:middle;"></span>'
+            + '<span class="cloud-loading-dot" style="background:currentColor; vertical-align:middle;"></span></span>';
+        md.insertBefore(el, md.firstChild);
+        _vesselWaitTailTimer = setTrackedTimeout(() => {
+            _vesselWaitTailTimer = null;
+            const tail = document.getElementById('vessel-next-wait');
+            if (!tail) return;
+            const box = document.getElementById('vessel-info-message');
+            if (box) { box.style.backgroundColor = '#fdf3e3'; box.style.color = '#8a5a12'; }
+            tail.textContent = 'Still waiting on the regulator. If nothing opens in a few seconds, press Update Vessel Info again.';
+        }, 12000);
+    }, 600);
+}
+
 // ===== Commissioning Prerequisites screen =====
 // Shown once, after the battery-defaults popup, on a first Vessel Info save. Presents the
 // sensor/current settings commissioning depends on, pre-filled from /exportConfig, then hands off
@@ -8021,7 +8619,9 @@ async function maybeShowCommPrereqs() {
     try {
         if (!settingsUnlocked) syncArmState();  // same stale-mirror case as the battery-defaults popup
         const pre = _commPrepPrefetch; _commPrepPrefetch = null;
+        vesselNextStepNote(true);
         const j = await (pre || commPrepFetchCfg());
+        vesselNextStepNote(false);
         if (!j) { _battDefSkipNote('Could not read the current device settings, so the commissioning prerequisites screen was skipped. Those settings are all available under Setup.'); return; }
         // Same response also carries the RPM cap tables the NEXT screen needs, so hand them over
         // rather than making openRpmCap re-fetch. The cap tables live in the "learning" namespace and
@@ -8426,8 +9026,8 @@ function fuPanel(inner) {
             <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; text-align:center;">${inner}</div>
           </div>`;
 }
-function xAlert(msg, title) {
-    const p = _xDlgQueue.then(() => _xDlgShow(msg, { title: title }));
+function xAlert(msg, title, opts) {
+    const p = _xDlgQueue.then(() => _xDlgShow(msg, Object.assign({ title: title }, opts || {})));
     _xDlgQueue = p.then(() => { }, () => { });
     return p;
 }
@@ -9489,18 +10089,54 @@ function hideWaitingForRegulator() {
     setTimeout(() => { el.style.display = 'none'; }, 480);
 }
 
-// Landing tab, applied once on open: always Live Data → Alternator (this is an alternator
-// controller — the field state must not decide what the user sees first).
+// Delay applied to the Diag fast-scope kick when Diag is entered by the cold-open landing (below),
+// so first paint and telemetry wiring finish before the waveform/flipbook fetches start. Consumed
+// (and cleared) by the one showSubTab('livedata','diag') that follows.
+let diagScopeKickDelayMs = 0;
+const COLD_OPEN_SCOPE_DELAY_MS = 4000;
+
+// Phone-sized screens only: coarse pointer rules out a laptop in a narrow window, and the SHORTER
+// viewport edge catches a phone held either way (landscape width is ~850, its height ~400).
+// Tablets sit well above this (iPad portrait's short edge is 768) and are not nudged.
+function _isPhoneSizedScreen() {
+    try {
+        const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+        return !!coarse && Math.min(window.innerWidth, window.innerHeight) <= 600;
+    } catch (e) { return false; }
+}
+
+// Recommendation, never a gate: setup is a long form plus a wizard with tables and plots, and it is
+// done once. Fires only on the incomplete-vessel-info landing, so it cannot reach a set-up boat.
+// The address is quoted live — API_BASE_URL in the app (discovered IP, else alternator.local), the
+// page's own origin in a browser — so the user has something to type rather than "this address".
+function smallScreenSetupMsg() {
+    let addr = '';
+    try { addr = IS_CAPACITOR ? API_BASE_URL : window.location.origin; } catch (e) { addr = ''; }
+    if (!addr || addr.indexOf('demo.invalid') >= 0) addr = 'http://alternator.local';
+    return 'First-time setup goes much easier on a laptop or desktop browser than on a phone.\n\n'
+        + 'Vessel Info is a long form, and the commissioning that follows it shows tables and plots '
+        + 'that need room to read.\n\n'
+        + 'On a laptop joined to the same network, browse to:\n' + addr + '\n\n'
+        + 'Everyday monitoring is fine on a phone — it is the one-time setup that wants the bigger screen.';
+}
+
+// Landing tab, applied once on open: always Live Data → Diag, so Charging System Health is the
+// first thing seen (fixed destination — the field state must not decide what the user sees first).
 // Vessel Info incomplete overrides to Setup.
 function applyLandingTab() {
     try {
         if (!vesselInfoComplete) {
             showMainTab('settings');
             showSubTab('settings', 'vessel-info');
+            if (_isPhoneSizedScreen()) xAlert(smallScreenSetupMsg(), 'Recommended: Set Up On A Laptop', { okText: 'Continue anyway' });
             return;
         }
         showMainTab('livedata');
-        showSubTab('livedata', 'alternator');
+        // Diag's fast scope pulls a waveform + the flipbook the moment the tab shows; on a cold
+        // open that competes with the rest of the app coming up. Hand showSubTab a delay for this
+        // one entry only — manual Diag clicks stay immediate.
+        diagScopeKickDelayMs = COLD_OPEN_SCOPE_DELAY_MS;
+        showSubTab('livedata', 'diag');
     } catch (err) {}
 }
 
@@ -9911,9 +10547,24 @@ function fieldOffReasonText(reasonCode) {
         case 18: return 'commissioning — field resting';
         case 19: return 'field on but no alternator output — check field wiring, ON/OFF switch, or alternator (may be a false RPM signal)';
         case 20: return 'resting — solar forecast is strong (Defer to Solar)';
+        case 21: return 'BMS on/off signal is withholding permission to charge';
         // 0 NONE (transient), 11 MANUAL (shown as its own status word) — no OFF annotation
         default: return '';
     }
+}
+
+// Minimal BMS On/Off Control (Setup > Integrations): the raw opto input, plus what it means now.
+// present/absent is the WIRE, not the ESP32 pin — the opto inverts, and the firmware already undid it.
+// The polarity choice and the enable both come from the CSV3 settings echo, so the effect word stays
+// blank until that cache exists rather than guessing a direction.
+function renderBmsSignalRow(present) {
+    const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+    setText('bmsSigWord_ID', present ? 'present' : 'absent');
+    const c3 = (typeof g_lastCsv3 === 'object' && g_lastCsv3) ? g_lastCsv3 : null;
+    if (!c3 || c3.bmsLogic === undefined) { setText('bmsSigEffect_ID', '\u2014'); return; }
+    if (Number(c3.bmsLogic) !== 1) { setText('bmsSigEffect_ID', 'not in use'); return; }
+    const permits = (Number(c3.bmsLogicLevelOff) === 0) ? !!present : !present;
+    setText('bmsSigEffect_ID', permits ? 'charging permitted' : 'charging blocked');
 }
 
 function fieldOffReasonUpdate(fieldActiveStatus, reasonCode) {
@@ -12317,6 +12968,7 @@ function updateAllStalenessStyles() {
     // --- IMU — all displays share one timestamp ---
     applyStaleStyleByAge("imu_heel_deg_ID", sa.imu);
     applyStaleStyleByAge("imu_pitch_deg_ID", sa.imu);
+    applyStaleStyleByAge("imuLiveAttitude_ID", sa.imu);
     applyStaleStyleByAge("imu_vertical_accel_g_ID", sa.imu);
     applyStaleStyleByAge("imu_total_accel_g_ID", sa.imu);
     applyStaleStyleByAge("imu_yaw_rate_dps_ID", sa.imu);
@@ -12794,6 +13446,12 @@ function updateTogglesFromData(data) {
         }
         updateCheckbox("timeAxisModeChanging_checkbox", data.timeAxisModeChanging, "timeAxisModeChanging");
         updateCheckbox("weatherModeEnabled_checkbox", data.weatherModeEnabled, "weatherModeEnabled");
+        // Stash the three settings that decide whether this phone's position is wanted at
+        // all — phonePositionWanted() reads them, and the 60 s poster asks for no location
+        // until one of them is on. Echo-driven, so a change made on another client lands here too.
+        if (data.weatherModeEnabled !== undefined) window.weatherModeEnabled = Number(data.weatherModeEnabled);
+        if (data.gpsPositionSource  !== undefined) window.gpsPositionSource  = Number(data.gpsPositionSource);
+        if (data.speedSourceMode    !== undefined) window.speedSourceMode    = Number(data.speedSourceMode);
         updateFloatVisibility();
 
 
@@ -13168,18 +13826,25 @@ async function confirmVoltageRescale(oldV, newV) {
         + '  Hard-shutdown trip → ' + fmt(hardV) + ' V\n\n'
         + 'These field-duty settings also rescale (inversely) so field current stays constant:\n'
         + dline('Max Field', 'MaxDuty_echo', '%') + '\n'
-        + dline('Duty ramp rate', 'DutyRampRate_echo', '%/s') + '\n\n'
+        + dline('Min Field', 'MinDuty_echo', '%') + '\n'
+        + dline('Duty ramp rate', 'DutyRampRate_echo', '%/s') + '\n'
+        + dline('Slow duty ramp rate', 'DutySlowRampRate_echo', '%/s') + '\n\n'
+        + 'IT ALSO ERASES THESE, and they cannot be recovered:\n'
+        + '  - Your commissioned Min Field % floor table, and the learning behind it. It goes back '
+        + 'to the flat 1% default and the Min Field floor step has to be run again.\n'
+        + '  - Learned oscillation-damper engine-speed ranges.\n\n'
         + 'Protection margins and tuning-helper thresholds (overvoltage trip margins, sensor '
-        + 'disagreement threshold, target ramp rates, slope-bleed settings, CV test wave '
-        + 'amplitude, and similar voltage-referenced bands) rescale with the new voltage, and '
-        + 'field-duty bands (Min Field, alternator-health steadiness bands and duty floor) '
-        + 'rescale inversely.\n\n'
+        + 'disagreement threshold, target ramp rates, voltage-damper arm and deadband thresholds, '
+        + 'CV test wave amplitude, and similar voltage-referenced bands) rescale with the new voltage, '
+        + 'and field-duty bands (knee margin and step, alternator-health steadiness bands and duty '
+        + 'floor) rescale inversely. Voltage-loop gains are unaffected: the stored battery stiffness '
+        + 'is rescaled with the bank precisely so the loop behaves the same per cell.\n\n'
         + 'It rescales from the CURRENT values, so if you already entered real ' + newV
         + 'V setpoints by hand, press Cancel.\n\nContinue and save?';
     return await xConfirm(msg);
 }
 
-// Level Zero: the offsets are averaged over ~2s on the device before they echo back, so show a
+// Level offsets row (Zero Now): the offsets are averaged over ~2s on the device before they echo back, so show a
 // quiet inline "calculating…" instead of a dead label. The window also suppresses the immediate
 // CSV3 echo of the OLD offsets (see the CSV3 listener); the capture-complete frame lands after it.
 // 4.5s comfortably covers the ~2s capture and the firmware's 5s timeout safety net.
@@ -13190,7 +13855,19 @@ function renderImuZeroLabel(data) {
     const pOff = Number(data.imuPitchOffset) / 100;
     el.textContent = (Number.isFinite(hOff) && Number.isFinite(pOff) && (hOff !== 0 || pOff !== 0))
         ? `heel ${hOff.toFixed(1)}° / pitch ${pOff.toFixed(1)}°`
-        : 'not set';
+        : 'none stored';
+}
+// "Reading now" line under the Zero Now buttons: the live, offset-corrected attitude, so a capture can be
+// checked on the spot — level and still after a good Zero Now reads near 0.0. Rides CSV1 (~10 Hz), unlike
+// the stored offsets in the label above, which ride CSV3.
+function renderImuLiveAttitude(data) {
+    const el = document.getElementById('imuLiveAttitude_ID');
+    if (!el || !data) return;
+    const h = Number(data.imu_heel_deg) / 100;
+    const p = Number(data.imu_pitch_deg) / 100;
+    el.textContent = (Number.isFinite(h) && Number.isFinite(p))
+        ? `heel ${h.toFixed(1)}° / pitch ${p.toFixed(1)}°`
+        : '—';
 }
 function startImuZero() {
     const el = document.getElementById('imuZeroStatus_ID');
@@ -13284,10 +13961,11 @@ const FIELD_FAULT_REASONS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 16, 
 
 // Single OFF-state classifier shared by the minimized pill AND the expanded status word so the two
 // can never disagree. reason 10 while enabled = engine-on-but-not-charging (IDLE); faults = FAULT.
-// 20 (solar-forecast rest) is the same shape as 10: switched on, running, deliberately not charging.
+// 20 (solar-forecast rest) and 21 (BMS on/off signal) are the same shape as 10: switched on,
+// running, deliberately not charging.
 function classifyFieldOff(reason, enabled) {
     if (FIELD_FAULT_REASONS.has(reason)) return { word: 'FAULT', pillCls: 'st-fault', expClass: 'field-status-fault' };
-    if ((reason === 10 || reason === 20) && enabled) return { word: 'IDLE',  pillCls: 'st-idle',  expClass: 'field-status-idle' };
+    if ((reason === 10 || reason === 20 || reason === 21) && enabled) return { word: 'IDLE',  pillCls: 'st-idle',  expClass: 'field-status-idle' };
     return { word: 'OFF', pillCls: 'st-off', expClass: 'field-status-inactive' };
 }
 
@@ -13304,6 +13982,7 @@ function computeStripState() {
     if (cs === 'COMMISSIONING')                    return { label: 'SETUP', cls: 'st-test' };
     if (cs === 'PLANT TEST' || cs === 'CURR TEST') return { label: 'TEST',  cls: 'st-test' };
     if (cs === 'WAVE GEN')                         return { label: 'WAVE',  cls: 'st-test' };
+    if (cs === 'TUNING SWEEP')                     return { label: 'SWEEP', cls: 'st-test' };
     // Zero-output stand-down (ctrlLimiter 7): battery/other source holds the bus above target —
     // field parked at floor delivering nothing. Below the test words, above the stage words.
     if (limFresh && Number(window._ctrlLimiter) === 7) return { label: 'BATT > TGT', cls: 'st-idle' };
@@ -13656,7 +14335,10 @@ window.addEventListener("load", function () {
         input.addEventListener('input', function () {
             fuelTableHasChanges = true;
             dirtyFuelInputs.add(input.id);
+            const gphIdx = input.id.match(/^fuelTableGPH(\d)_input$/);
+            if (gphIdx) _fuelGphShadow[Number(gphIdx[1])] = displayFlowToGph(parseFloat(input.value) || 0);
             showFuelTableSaveButton();
+            drawFuelCurve();
         });
     });
 
@@ -13723,6 +14405,21 @@ window.addEventListener("load", function () {
         if (!validateFuelTable()) {
             e.preventDefault();
             return false;
+        }
+
+        // In litres mode the GPH cells show L/hr but the firmware stores gallons. Swap in the
+        // gallons value for the browser's synchronous serialization, restore the display on the
+        // next tick — same trick as convertTempFormIfNeeded(). Done BEFORE the pending map is
+        // filled so the recorded values are gallons and match the CSV3 echo.
+        if (displayVolUnit === 1) {
+            const restore = [];
+            for (let i = 0; i < 10; i++) {
+                const el = document.getElementById(`fuelTableGPH${i}_input`);
+                if (!el) continue;
+                restore.push([el, el.value]);
+                el.value = displayFlowToGph(parseFloat(el.value) || 0).toFixed(2);
+            }
+            setTimeout(() => { restore.forEach(([el, v]) => { el.value = v; }); }, 0);
         }
 
         dirtyFuelInputs.forEach(id => {
@@ -13808,6 +14505,7 @@ window.addEventListener("load", function () {
             if (values.length !== declaredCount) {
                 if (!window.lastCsv1WarnTime || Date.now() - window.lastCsv1WarnTime > 10000) {
                     console.warn(`[CSV1] length mismatch: declared=${declaredCount}, actual=${values.length}`, raw.slice(0, 5));
+                    noteStreamReject('csv1', declaredCount, values.length);
                     window.lastCsv1WarnTime = Date.now();
                 }
                 return;
@@ -13815,6 +14513,7 @@ window.addEventListener("load", function () {
             if (declaredCount !== CSV1_FIELDS.length) {
                 if (!window.lastCsv1WarnTime || Date.now() - window.lastCsv1WarnTime > 10000) {
                     console.warn(`[CSV1] schema mismatch: ESP32=${declaredCount}, UI=${CSV1_FIELDS.length}`);
+                    noteStreamReject('csv1', declaredCount, CSV1_FIELDS.length);
                     window.lastCsv1WarnTime = Date.now();
                 }
                 return;
@@ -13823,6 +14522,7 @@ window.addEventListener("load", function () {
             const data = Object.fromEntries(CSV1_FIELDS.map((key, i) => [key, values[i]]));
             battNaToNaN(data, BATT_NA_KEYS_CSV1);
             g_lastCsv1 = data;  // cache for the diagnostics snapshot in log exports
+            noteStreamRx('csv1');
 
             // Thermal tuning plot: cache the two fast (CSV1) series for the live ring.
             try { thermalLiveOnCsv1(data); } catch (e) { }
@@ -13841,6 +14541,9 @@ window.addEventListener("load", function () {
 
             // Oscillation damper live state (Diag ▸ Alternator) — gain, wobble frequency, state word.
             try { huntGovLiveOnCsv1(data); } catch (e) { }
+
+            // Vessel Info ▸ Level offsets: live attitude under the Zero Now buttons.
+            try { renderImuLiveAttitude(data); } catch (e) { }
 
             // Update all "session window" labels with the current elapsed time since
             // "Reset Peak Values" was pressed (or boot). One CSV1 field drives every
@@ -14016,9 +14719,9 @@ window.addEventListener("load", function () {
                     else if (key === "Icv") {
                         newTextContent = (value / 100).toFixed(2);
                     }
-                    // Default: display as integer
+                    // Default: display as integer, thousands-separated above 10000
                     else {
-                        newTextContent = Math.round(value);
+                        newTextContent = fmtIntReadout(key, value);
                     }
                     // ONLY UPDATE DOM IF VALUE ACTUALLY CHANGED
                     const cacheKey = `${elementId}_${key}`;
@@ -14103,6 +14806,7 @@ window.addEventListener("load", function () {
                 updateFields(otherFields);
                 updateAllEchosOptimized(data);
                 updateTogglesFromData(data);
+                updateFuelTableHighlight(data);   // fuel breakpoints are keyed to raw RPM, a CSV1 field
             }
 
             // One-time check to hide tabs in AP mode
@@ -14153,6 +14857,7 @@ window.addEventListener("load", function () {
             if (values.length !== declaredCount) {
                 if (!window.lastCsv2WarnTime || Date.now() - window.lastCsv2WarnTime > 10000) {
                     console.warn(`[CSV2] length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                    noteStreamReject('csv2', declaredCount, values.length);
                     window.lastCsv2WarnTime = Date.now();
                 }
                 return;
@@ -14160,6 +14865,7 @@ window.addEventListener("load", function () {
             if (declaredCount !== CSV2_FIELDS.length) {
                 if (!window.lastCsv2WarnTime || Date.now() - window.lastCsv2WarnTime > 10000) {
                     console.warn(`[CSV2] schema mismatch: ESP32=${declaredCount}, UI=${CSV2_FIELDS.length}`);
+                    noteStreamReject('csv2', declaredCount, CSV2_FIELDS.length);
                     window.lastCsv2WarnTime = Date.now();
                 }
                 return;
@@ -14168,6 +14874,7 @@ window.addEventListener("load", function () {
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
             battNaToNaN(data, BATT_NA_KEYS_CSV2);
             g_lastCsv2 = data;  // cache for the diagnostics snapshot in log exports
+            noteStreamRx('csv2');
             renderBattTempDerate();   // live board temp + applied derate scale arrive on CSV2
             renderLoopBlame(data);    // worst field-on pass attribution line
             renderImuInstallWarning(data.imuInstallCode);
@@ -14509,15 +15216,15 @@ window.addEventListener("load", function () {
                         "SolarChargedEnergy_AllTime"].includes(key)) {
                         newTextContent = (value / 1000).toFixed(3);
                     }
-                    // Fuel display handling
+                    // Fuel totals: firmware accumulates litres ×100, display unit is the user's pick
                     else if (key === "EngineFuelUsed" || key === "EngineFuelUsed_AllTime") {
-                        newTextContent = (value / 100).toFixed(2);
+                        newTextContent = toDisplayVol(value / 100).toFixed(2);
                     }
                     else if (key.startsWith("ft_") || key === "VeTime2") {
                         newTextContent = (value / 1000).toFixed(1);
                     }
                     else if (key === "AlternatorFuelUsed" || key === "AlternatorFuelUsed_AllTime") {
-                        newTextContent = (value / 100).toFixed(2);
+                        newTextContent = toDisplayVol(value / 100).toFixed(2);
                     }
                     else if (["EngineRunTime", "AlternatorOnTime", "EngineRunTime_AllTime", "AlternatorOnTime_AllTime"].includes(key)) {
                         const totalSeconds = (value / 100) * 3600;
@@ -14570,9 +15277,9 @@ window.addEventListener("load", function () {
                           || key === "wmIgn_VMGup_lo" || key === "wmIgn_VMGup_hi") {
                         newTextContent = (value / 10).toFixed(1);
                     }
-                    // Default: display as integer
+                    // Default: display as integer, thousands-separated above 10000
                     else {
-                        newTextContent = Math.round(value);
+                        newTextContent = fmtIntReadout(key, value);
                     }
 
                     // Banner SOC is tight against the % sign — show 1 decimal instead of 2 to avoid overlap.
@@ -15188,6 +15895,9 @@ window.addEventListener("load", function () {
             // its Live Data → Integrations mirror (li_ ids) and the card-header state word.
             // Values ride CSV2; staleness from TS.
             (function () {
+                // Banner first: it is global, so it must not depend on the Integrations markup
+                // that the two early-returns below guard.
+                if (data.dvccState !== undefined) updateDvccNotice(Number(data.dvccState), Number(data.dvccRxSrcAddr));
                 const row = document.getElementById('dvccStatus_row');
                 const card = document.getElementById('li_dvccStatus_card');
                 if ((!row && !card) || data.dvccState === undefined) return;
@@ -15381,6 +16091,12 @@ window.addEventListener("load", function () {
                 } else if (cvTuningModeActive) {
                     chargeStageEl.textContent = 'WAVE GEN';
                     chargeStageEl.className = 'charge-stage charge-stage-test';
+                } else if ((altLive.sweepState | 0) !== 0) {
+                    // Gate-tuning field sweep owns the field directly and the whole min-select chain
+                    // is bypassed, so ctrlLimiter is forced to 0 and every limiter cue goes quiet.
+                    // Without this the banner reads BULK/ABSORPTION while nothing it names is running.
+                    chargeStageEl.textContent = 'TUNING SWEEP';
+                    chargeStageEl.className = 'charge-stage charge-stage-test';
                 } else if (stage === 1) {
                     chargeStageEl.textContent = 'BULK';
                     chargeStageEl.className = 'charge-stage charge-stage-bulk';
@@ -15447,6 +16163,7 @@ window.addEventListener("load", function () {
             if (values.length !== declaredCount) {
                 if (!window.lastCsv4WarnTime || Date.now() - window.lastCsv4WarnTime > 10000) {
                     console.warn(`[CSV4] length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                    noteStreamReject('csv4', declaredCount, values.length);
                     window.lastCsv4WarnTime = Date.now();
                 }
                 return;
@@ -15454,12 +16171,15 @@ window.addEventListener("load", function () {
             if (declaredCount !== CSV4_FIELDS.length) {
                 if (!window.lastCsv4WarnTime || Date.now() - window.lastCsv4WarnTime > 10000) {
                     console.warn(`[CSV4] schema mismatch: ESP32=${declaredCount}, UI=${CSV4_FIELDS.length}`);
+                    noteStreamReject('csv4', declaredCount, CSV4_FIELDS.length);
                     window.lastCsv4WarnTime = Date.now();
                 }
                 return;
             }
 
             const data = Object.fromEntries(CSV4_FIELDS.map((key, i) => [key, values[i]]));
+            g_lastCsv4 = data;  // cache for the diagnostics snapshot in log exports
+            noteStreamRx('csv4');
 
             // Banner limiter tint: repaint on arrival — the 2 s staleness pass alone point-samples
             // this 500 ms feed and holds a stale code on screen; it still runs as the stale-fallback.
@@ -15488,6 +16208,10 @@ window.addEventListener("load", function () {
                     if (rEl && rEl.textContent !== rTxt) rEl.textContent = rTxt;
                 }
             }
+
+            // Minimal On/Off Control status row (Setup > Integrations). Raw pin at 2 Hz so an
+            // installer can toggle their BMS output and watch it follow before enabling the gate.
+            if (data.bmsSignalActive !== undefined) renderBmsSignalRow(Number(data.bmsSignalActive));
 
             // Cache raw nav values for cross-listener consumers (baro Zambretti forecast on CSV2).
             Object.assign(window._navLast, data);
@@ -15524,7 +16248,7 @@ window.addEventListener("load", function () {
                 if (!Number.isFinite(num)) txt = "—";
                 else if (key === "STWNMEA") txt = num < 0 ? "—" : (num / 100).toFixed(2);
                 else if (navScale100.has(key)) txt = (num / 100).toFixed(2);
-                else txt = Math.round(num);
+                else txt = fmtIntReadout(key, num);
                 const cacheKey = `${elementId}_${key}`;
                 if (lastValues.get(cacheKey) !== txt) {
                     lastValues.set(cacheKey, txt);
@@ -15537,11 +16261,11 @@ window.addEventListener("load", function () {
                 const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
                 if (data.currentFuelGPH !== undefined) {
                     const gph = Number(data.currentFuelGPH) / 100;
-                    setText('fuelGPHID', gph > 0 ? gph.toFixed(2) : '—');
+                    setText('fuelGPHID', gph > 0 ? gphToDisplayFlow(gph).toFixed(2) : '—');
                 }
                 if (data.currentNMPG !== undefined) {
                     const nmpg = Number(data.currentNMPG) / 100;
-                    setText('fuelNMPGID', nmpg > 0 ? nmpg.toFixed(2) : '—');
+                    setText('fuelNMPGID', nmpg > 0 ? nmpgToDisplayEcon(nmpg).toFixed(2) : '—');
                 }
             } catch (err) { /* never let fuel readout break NavStream dispatch */ }
         }, false);
@@ -15555,6 +16279,7 @@ window.addEventListener("load", function () {
             if (values.length !== declaredCount) {
                 if (!window.lastCsv3WarnTime || Date.now() - window.lastCsv3WarnTime > 10000) {
                     console.warn(`[CSV3] length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                    noteStreamReject('csv3', declaredCount, values.length);
                     window.lastCsv3WarnTime = Date.now();
                 }
                 return;
@@ -15562,6 +16287,7 @@ window.addEventListener("load", function () {
             if (declaredCount !== CSV3_FIELDS.length) {
                 if (!window.lastCsv3WarnTime || Date.now() - window.lastCsv3WarnTime > 10000) {
                     console.warn(`[CSV3] schema mismatch: ESP32=${declaredCount}, UI=${CSV3_FIELDS.length}`);
+                    noteStreamReject('csv3', declaredCount, CSV3_FIELDS.length);
                     window.lastCsv3WarnTime = Date.now();
                 }
                 return;
@@ -15569,6 +16295,7 @@ window.addEventListener("load", function () {
 
             const data = Object.fromEntries(CSV3_FIELDS.map((key, i) => [key, values[i]]));
             g_lastCsv3 = data;  // cache for cvBinToCsv header
+            noteStreamRx('csv3');
 
             // Fast phone-speed watch follows the speedSourceMode echo: start the GNSS
             // watch when the user selects phone, stop it when they leave. Wrapped so a
@@ -15616,6 +16343,10 @@ window.addEventListener("load", function () {
             if (data.displayTempUnit !== undefined && data.displayTempUnit !== displayTempUnit) {
                 displayTempUnit = data.displayTempUnit;
                 updateAllTempUnitLabels();
+            }
+            if (data.displayVolUnit !== undefined && data.displayVolUnit !== displayVolUnit) {
+                displayVolUnit = data.displayVolUnit;
+                updateAllVolUnitLabels();
             }
             // Cache interval/window from CSV3 (settings stream) for gap detection and plot sizing
             if (data.webgaugesinterval) {
@@ -15727,7 +16458,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 1000).toFixed(1);
                     }
                     else {
-                        newTextContent = Math.round(value);
+                        newTextContent = fmtIntReadout(key, value);
                     }
 
                     const cacheKey = `${elementId}_${key}`;
@@ -15773,9 +16504,8 @@ window.addEventListener("load", function () {
                         rpmInput.value = data[`fuelTableRPM${i}`];
                     }
 
-                    const gphInput = document.getElementById(`fuelTableGPH${i}_input`);
-                    if (gphInput && data[`fuelTableGPH${i}`] !== undefined) {
-                        gphInput.value = (data[`fuelTableGPH${i}`] / 100).toFixed(2);
+                    if (data[`fuelTableGPH${i}`] !== undefined) {
+                        fuelSetCellFromGph(i, data[`fuelTableGPH${i}`] / 100);
                     }
                 }
 
@@ -15814,6 +16544,8 @@ window.addEventListener("load", function () {
 
                 const gphInput = document.getElementById(`fuelTableGPH${i}_input`);
                 if (gphInput && gphInput !== document.activeElement && !dirtyFuelInputs.has(gphInput.id)) {
+                    // Pending values are recorded in gallons at submit, so both sides of this
+                    // comparison stay gallons regardless of which unit the cell is showing.
                     const incomingGPH = data[`fuelTableGPH${i}`] !== undefined ? (data[`fuelTableGPH${i}`] / 100).toFixed(2) : undefined;
                     const pendingGPH = pendingFuelTableValues.get(gphInput.id);
 
@@ -15821,18 +16553,20 @@ window.addEventListener("load", function () {
                         if (incomingGPH !== undefined && Math.abs(Number(incomingGPH) - Number(pendingGPH.value)) < 0.011) {
                             gphInput.classList.remove('table-input-pending');
                             pendingFuelTableValues.delete(gphInput.id);
-                            gphInput.value = incomingGPH;
+                            fuelSetCellFromGph(i, Number(incomingGPH));
                         } else if (Date.now() > pendingGPH.deadlineMs) {
                             gphInput.classList.remove('table-input-pending');
                             pendingFuelTableValues.delete(gphInput.id);
                             setTableStatus('fuel-table-status', 'Save not confirmed');
-                            if (incomingGPH !== undefined) gphInput.value = incomingGPH;
+                            if (incomingGPH !== undefined) fuelSetCellFromGph(i, Number(incomingGPH));
                         }
                     } else if (window.fuelTableInitialized && incomingGPH !== undefined) {
-                        gphInput.value = incomingGPH;
+                        fuelSetCellFromGph(i, Number(incomingGPH));
                     }
                 }
             }
+
+            drawFuelCurve();   // CSV3 is the only path that repopulates the cells from the device
 
             if (pendingFuelTableValues.size === 0 && !fuelTableHasChanges) {
                 const fuelStatus = document.getElementById('fuel-table-status');
@@ -15965,6 +16699,7 @@ window.addEventListener("load", function () {
             if (values.length !== declaredCount) {
                 if (!window.lastTsWarnTime || Date.now() - window.lastTsWarnTime > 10000) {
                     console.warn(`[TimestampData] length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                    noteStreamReject('ts', declaredCount, values.length);
                     window.lastTsWarnTime = Date.now();
                 }
                 return;
@@ -15972,6 +16707,7 @@ window.addEventListener("load", function () {
             if (declaredCount !== TS_FIELDS.length) {
                 if (!window.lastTsWarnTime || Date.now() - window.lastTsWarnTime > 10000) {
                     console.warn(`[TimestampData] schema mismatch: ESP32=${declaredCount}, UI=${TS_FIELDS.length}`);
+                    noteStreamReject('ts', declaredCount, TS_FIELDS.length);
                     window.lastTsWarnTime = Date.now();
                 }
                 return;
@@ -15979,6 +16715,7 @@ window.addEventListener("load", function () {
 
             const data = Object.fromEntries(TS_FIELDS.map((key, i) => [key, values[i]]));
             g_lastTs = data;  // cache for the diagnostics snapshot in log exports
+            noteStreamRx('ts');
 
             window.sensorAges = {
                 heading: data.ts_HeadingNMEA,
@@ -16373,9 +17110,11 @@ function showMainTab(tabName) {
     }
 
     if (tabName === 'livedata') {
-        // Ensure a sub-tab is always visible; on first visit none may be active yet
+        // Ensure a sub-tab is always visible; on first visit none may be active yet.
+        // Same destination as applyLandingTab() so an early manual click isn't yanked
+        // to another sub-tab when the landing finally applies.
         if (!document.querySelector('#livedata .sub-tab-content.active')) {
-            showSubTab('livedata', 'alternator');
+            showSubTab('livedata', 'diag');
         }
     }
 
@@ -16469,8 +17208,12 @@ function showSubTab(parentTab, subTabName, evt = null) {
 
     // Resume the Fast Alt-Current scope only if its Waveforms section is expanded and on-screen
     if (parentTab === 'livedata' && subTabName === 'diag') {
-        if (typeof fastDiagIsVisible === 'function' && fastDiagIsVisible()
-            && typeof fastDiagOnOpen === 'function') fastDiagOnOpen();
+        const kickFastDiag = () => {
+            if (typeof fastDiagIsVisible === 'function' && fastDiagIsVisible()
+                && typeof fastDiagOnOpen === 'function') fastDiagOnOpen();
+        };
+        if (diagScopeKickDelayMs) { setTrackedTimeout(kickFastDiag, diagScopeKickDelayMs); diagScopeKickDelayMs = 0; }
+        else kickFastDiag();
         // Ripple heatmap draws once at load and skips while hidden; its <details> is open by
         // default so ontoggle never fires. Redraw now the Diag tab is actually on-screen.
         if (typeof drawRippleMap === 'function') setTimeout(drawRippleMap, 60);
@@ -16519,7 +17262,15 @@ function showDiagPanel(panelName, evt = null) {
     document.querySelectorAll('#livedata-diag .diag-panel-tab').forEach(b => b.classList.remove('active'));
     const panel = document.getElementById('diag-panel-' + panelName);
     if (panel) panel.classList.add('active');
-    if (evt && evt.target) evt.target.classList.add('active');
+    if (evt && evt.target) {
+        evt.target.classList.add('active');
+    } else {
+        // deep link (goToAltHealthDisplay): no event to mark, so match the pill by its handler —
+        // otherwise every pill is left inactive and the tab strip reads as broken
+        document.querySelectorAll('#livedata-diag .diag-panel-tab').forEach(b => {
+            if ((b.getAttribute('onclick') || '').includes(`showDiagPanel('${panelName}'`)) b.classList.add('active');
+        });
+    }
     // Battery Health canvas was sized at width 0 while hidden — refresh once it's visible.
     if (panelName === 'battery') {
         updateBattHealthChemNote();
@@ -16661,6 +17412,94 @@ function goToDiagSettings(ck) {
     // ~= matches one word of the space-separated list, so a card shared by two checkpoints still hits.
     const card = panel.querySelector('.checkpoint-param[data-checkpoints~="' + ck + '"]');
     if (card) requestAnimationFrame(() => card.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+}
+
+// Header safety strip for charge-limit follow (#dvcc-banner). Follow ON while the state is
+// anything but FOLLOWING means the clamps are NAN and the regulator is running its own targets
+// — safe in direction, but an owner who enabled follow may believe the BMS is the backstop and
+// have left local targets that only made sense behind it. States: 1 waiting, 4 stale,
+// 5 untrusted. Never call this a protection: no limit received is not a fault, it is the
+// absence of a request.
+const DVCC_NOTICE_GRACE_MS = 60000;   // a GX rebooting or booting after us must not raise a banner
+let dvccNoticeSince = 0;
+
+function updateDvccNotice(st, srcAddr) {
+    const el = document.getElementById('dvcc-banner');
+    if (!el) return;
+    let msg = '';
+    if (st === 5) {
+        // Latched — it needs a deliberate reset, so waiting out a grace period buys nothing.
+        dvccNoticeSince = 0;
+        msg = '<b>BMS CHARGE LIMITS REJECTED</b> &mdash; an implausible value was received. This '
+            + "regulator's own targets are in control until the trust latch is reset.";
+    } else if (st === 1 || st === 4) {
+        if (!dvccNoticeSince) dvccNoticeSince = Date.now();
+        if (Date.now() - dvccNoticeSince >= DVCC_NOTICE_GRACE_MS) {
+            msg = (st === 4)
+                ? '<b>BMS CHARGE LIMITS LOST</b> &mdash; the sender went silent. This '
+                  + "regulator's own targets are in control."
+                : ((srcAddr === 255 || !isFinite(srcAddr))
+                    ? '<b>NO BMS CHARGE LIMITS</b> &mdash; follow is on but nothing is arriving. This '
+                      + "regulator's own targets are in control. Check the CAN wiring, the bus "
+                      + 'termination, and the selected dialect.'
+                    : '<b>NO BMS CHARGE LIMITS</b> &mdash; the sender is on the bus but is not '
+                      + "publishing limits (CVL/CCL). This regulator's own targets are in control.");
+        }
+    } else {
+        dvccNoticeSince = 0;   // off / settling / following
+    }
+    if (msg) { if (el.innerHTML !== msg) el.innerHTML = msg; }
+    const disp = msg ? 'block' : 'none';
+    if (el.style.display !== disp) el.style.display = disp;
+}
+
+// Target of the #dvcc-banner tap: the card that owns the state it is complaining about.
+function goToDvccFollow() {
+    showMainTab('settings');
+    showSubTab('settings', 'integrations');
+    window.scrollTo(0, 0);
+    const sec = document.getElementById('dvccFollowSection');
+    if (!sec) return;
+    for (let el = sec; el && el !== document.body; el = el.parentElement) {
+        if (el.tagName === 'DETAILS') el.open = true;
+    }
+    requestAnimationFrame(() => sec.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+}
+
+// Oscillation Damper: the Diag card carries the live state, its switch and seven knobs live
+// next to the PID Ki they act on. Ancestor details are force-opened — Controller Parameters
+// ships open, but a user who collapsed it would otherwise get an invisible scroll target.
+function goToHuntSettings() {
+    goToTuning('current');
+    const row = document.getElementById('huntGovSetupRow');
+    if (!row) return;
+    for (let el = row.parentElement; el && el !== document.body; el = el.parentElement) {
+        if (el.tagName === 'DETAILS') el.open = true;
+    }
+    requestAnimationFrame(() => row.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+}
+
+// Mirror of goToHuntSettings(): from the damper's knobs to its live status, speed map and
+// episode record. Opening the card fires its ontoggle, which re-reads the ledger.
+function goToHuntDisplay() {
+    showMainTab('livedata');
+    showSubTab('livedata', 'diag');
+    showDiagPanel('alternator');
+    const card = document.getElementById('huntDamperCard');
+    if (!card) return;
+    card.open = true;
+    requestAnimationFrame(() => card.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+}
+
+// Reciprocal of goToDiagSettings('c3'): from the C3 knobs to the readouts they drive.
+function goToAltHealthDisplay() {
+    showMainTab('livedata');
+    showSubTab('livedata', 'diag');
+    showDiagPanel('alternator');
+    const card = document.getElementById('c3HealthCard');
+    if (!card) return;
+    card.open = true;
+    requestAnimationFrame(() => card.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 
 // Frozen page response stuff
@@ -16822,6 +17661,75 @@ function validateSettings() {
     });
 }
 
+
+// Reads the ten breakpoint rows as the firmware does: row 0 always counts, later rows only
+// while RPM is non-zero, and the first zero ends the table (5_functions.ino fuelRate_GPH).
+// Burn values come back in the DISPLAY unit, not gallons — for the curve and the row
+// highlight only. The gallons truth is _fuelGphShadow.
+function readFuelTablePoints() {
+    const pts = [];
+    for (let i = 0; i < 10; i++) {
+        const rpmInput = document.getElementById(`fuelTableRPM${i}_input`);
+        const gphInput = document.getElementById(`fuelTableGPH${i}_input`);
+        if (!rpmInput || !gphInput) break;
+        const rpm = parseFloat(rpmInput.value) || 0;
+        if (i > 0 && rpm <= 0) break;
+        pts.push([rpm, parseFloat(gphInput.value) || 0]);
+    }
+    return pts;
+}
+
+// Burn curve under the table. Draws exactly what the firmware interpolates — straight between
+// points, first and last value held flat past the ends — so a mistyped breakpoint reads as a
+// kink. Colours come from .fc-* CSS classes so a dark-mode flip needs no redraw.
+function drawFuelCurve() {
+    const svg = document.getElementById('fuelCurveSvg');
+    if (!svg) return;
+    const pts = readFuelTablePoints();
+    if (pts.length < 2) { svg.innerHTML = ''; return; }
+
+    const W = 320, H = 110, L = 34, R = 6, T = 8, B = 20;
+    const maxR = pts[pts.length - 1][0] || 1;
+    const maxG = Math.max(...pts.map(p => p[1]), 0.1);
+    const X = r => L + (r / maxR) * (W - L - R);
+    const Y = g => H - B - (g / maxG) * (H - T - B);
+
+    let d = `M ${X(0)} ${Y(pts[0][1])} `;          // flat clamp below the first breakpoint
+    pts.forEach(p => { d += `L ${X(p[0])} ${Y(p[1])} `; });
+
+    let out = `<line class="fc-grid" x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}"/>`
+            + `<line class="fc-grid" x1="${L}" y1="${T}" x2="${L}" y2="${H - B}"/>`
+            + `<path class="fc-line" d="${d}"/>`;
+    pts.forEach(p => { out += `<circle class="fc-dot" cx="${X(p[0])}" cy="${Y(p[1])}" r="2.6"/>`; });
+    out += `<text class="fc-lbl" x="${L - 4}" y="${T + 8}" text-anchor="end">${maxG.toFixed(1)}</text>`
+         + `<text class="fc-lbl" x="${L - 4}" y="${H - B + 3}" text-anchor="end">0</text>`
+         + `<text class="fc-lbl" x="${L}" y="${H - 6}">0 rpm</text>`
+         + `<text class="fc-lbl" x="${W - R}" y="${H - 6}" text-anchor="end">${maxR} rpm</text>`;
+    svg.innerHTML = out;
+}
+
+// Tints the fuel row bracketing live engine RPM. Own class, not the cap table's
+// .learning-table-row-active — updateLearningTableHighlight() clears that one document-wide.
+let _fuelHighlightRow = -1;
+function updateFuelTableHighlight(data) {
+    if (data.RPM === undefined) return;
+    const rpm = Number(data.RPM);
+    const pts = readFuelTablePoints();
+
+    let row = -1;
+    if (pts.length >= 2 && rpm > 0) {
+        for (let i = pts.length - 1; i >= 0; i--) {
+            if (rpm >= pts[i][0]) { row = i; break; }
+        }
+    }
+    if (row === _fuelHighlightRow) return;
+
+    const prev = document.getElementById(`fuelRow${_fuelHighlightRow}`);
+    if (prev) prev.classList.remove('fuel-table-row-active');
+    const next = document.getElementById(`fuelRow${row}`);
+    if (next) next.classList.add('fuel-table-row-active');
+    _fuelHighlightRow = row;
+}
 
 function validateFuelTable() {
     const errors = [];
@@ -18217,6 +19125,29 @@ function formatMinutesToDHM(minutes) {
     return parts.join(' ');
 }
 
+// Thousands separators for raw integer readouts (counters, cumulative totals). The 10000
+// threshold keeps the comma from blinking in and out on a value that sits near it.
+function groupInt(n) {
+    const r = Math.round(Number(n));
+    if (!Number.isFinite(r)) return '\u2014';
+    return Math.abs(r) >= 10000 ? r.toLocaleString('en-US') : String(r);
+}
+
+// Integer readouts that must stay unpunctuated. RPM: a comma would appear at 10000 and walk the
+// banner width, and RPMID is parsed back out of the DOM. firmwareVersionInt: major*10000 +
+// minor*100 + patch, so "1,0,203" is not a version. The others are read back with parseInt off
+// textContent (BulkStage, WifiWakeSecondsRemaining, weatherDataValid, every systemID* result)
+// or are identifier halves.
+const NO_GROUP_KEYS = new Set([
+    'RPM', 'RPMMax', 'RPMMax_AllTime', 'faDomRpm', 'faSesPkpkRpm',
+    'wmIgn_RPM_hi', 'wmIgn_RPM_lo', 'currentRPMTableIndex',
+    'firmwareVersionInt', 'BulkStage', 'WifiWakeSecondsRemaining', 'weatherDataValid',
+    'deviceIdUpper', 'deviceIdLower'
+]);
+function fmtIntReadout(key, v) {
+    return (NO_GROUP_KEYS.has(key) || key.startsWith('systemID')) ? String(Math.round(v)) : groupInt(v);
+}
+
 // Compact metric suffix for large counters (accel/gyro sample totals reach billions
 // on multi-month uptimes; raw digits blow out the diagnostics row). 3 sig figs.
 function abbrevCount(n) {
@@ -18505,13 +19436,76 @@ async function fetchLogArrayBuffer(path) {
 // csv1 = live numbers, csv2 = diagnostics/timing/health, csv3 = settings echo, ts = staleness ages.
 // NOTE: values are RAW as transmitted (display /N scaling is applied later per-field), so e.g.
 // BatteryV reads 1401, not 14.01 — see the CSV field map for per-field scale factors.
+// Age one cached block against CSV1's clock. Both stamps are device millis() as unsigned 32-bit, so
+// the subtraction is done in that arithmetic (>>> 0) and stays correct across the ~49-day wrap.
+// A block can legitimately be NEWER than the reference — only one channel sends per loop iteration,
+// so CSV4/CSV2/CSV3/TS routinely land a few ms after the last CSV1 — and that lands in the top half
+// of the unsigned range. Report those as 0 rather than 4.29 billion, which would flag every capture.
+function deviceAgeMs(blockSendMs, refSendMs) {
+    const b = Number(blockSendMs), r = Number(refSendMs);
+    if (!Number.isFinite(b) || !Number.isFinite(r)) return null;
+    const d = (r - b) >>> 0;
+    return d > 0x80000000 ? 0 : d;
+}
+// One row per channel: is this cached block from the live run, and how old is it?
+// device_age_ms is authoritative but only exists if the block parsed at least once; client_age_ms is
+// this browser's own clock since that block last arrived and is the only signal when a channel is
+// being rejected outright. `stale` is true if EITHER exceeds the channel budget, or the block is from
+// a different boot than CSV1 — the settings echo disagreeing with the live log is exactly the trap
+// this exists to make visible (2026-08-21: a pre-OTA CSV3 read PidKi 3.808 while the loop ran 5.0515).
+function buildStreamFreshness() {
+    const blocks = { csv1: g_lastCsv1, csv2: g_lastCsv2, csv3: g_lastCsv3, csv4: g_lastCsv4, ts: g_lastTs };
+    const refSession = g_lastCsv1 ? Number(g_lastCsv1.sessionId) : null;
+    const refSendMs = g_lastCsv1 ? Number(g_lastCsv1.sendMs) : null;
+    const nowWall = Date.now();
+    const out = {
+        reference: 'csv1',
+        device_session_id: Number.isFinite(refSession) ? refSession : null,
+        note: 'device_age_ms = csv1.sendMs - <block>.sendMs (device clock); client_age_ms = this browser since last accepted payload',
+        streams: {},
+    };
+    for (const [name, data] of Object.entries(blocks)) {
+        const meta = g_streamMeta[name] || {};
+        const budget = STREAM_BUDGET_MS[name];
+        const sid = data ? Number(name === 'ts' ? data.ts_sessionId : data.sessionId) : null;
+        const sms = data ? Number(name === 'ts' ? data.ts_sendMs : data.sendMs) : null;
+        const devAge = (data && name !== 'csv1') ? deviceAgeMs(sms, refSendMs) : (data ? 0 : null);
+        const cliAge = meta.rxWallMs ? (nowWall - meta.rxWallMs) : null;
+        const sessionMatch = (Number.isFinite(sid) && Number.isFinite(refSession)) ? (sid === refSession) : null;
+        out.streams[name] = {
+            received: !!data,
+            session_id: Number.isFinite(sid) ? sid : null,
+            session_matches_csv1: sessionMatch,
+            device_send_ms: Number.isFinite(sms) ? sms : null,
+            device_age_ms: devAge,
+            client_age_ms: cliAge,
+            budget_ms: budget,
+            rejects: meta.rejects || 0,
+            last_reject: meta.lastReject || null,
+            stale: !data
+                || sessionMatch === false
+                || (devAge !== null && devAge > budget)
+                || (cliAge !== null && cliAge > budget),
+        };
+    }
+    return out;
+}
+
+// Frozen diagnostics snapshot — last-received telemetry objects, no device fetch.
+// csv1 = live numbers, csv2 = diagnostics/timing/health, csv3 = settings echo, csv4 = nav/wind/solar,
+// ts = staleness ages. Each block is cached independently and can be stale on its own, so `freshness`
+// carries the per-block verdict — read it before trusting any value here against a same-click log.
+// NOTE: values are RAW as transmitted (display /N scaling is applied later per-field), so e.g.
+// BatteryV reads 1401, not 14.01 — see the CSV field map for per-field scale factors.
 function getDiagnosticsSnapshot() {
     return {
         captured_at: new Date().toISOString(),
         note: 'raw as-transmitted values (pre display scaling)',
+        freshness: buildStreamFreshness(),
         csv1: g_lastCsv1 || null,
         csv2: g_lastCsv2 || null,
         csv3: g_lastCsv3 || null,
+        csv4: g_lastCsv4 || null,
         ts: g_lastTs || null,
     };
 }
@@ -22676,6 +23670,7 @@ function cxCutCauseText(code) {
         case 17: return 'the cold-charge lockout';
         case 19: return 'the field being driven with no alternator output';
         case 20: return 'Defer to Solar resting the alternator on a strong solar forecast';
+        case 21: return 'the BMS on/off signal withholding permission to charge';
         default: return '';
     }
 }
@@ -22686,7 +23681,7 @@ const CX_CUT_NAME_TO_CODE = {
     'VOLT_IMPLAUSIBLE': 5, 'VOLT_DISAGREE_CRIT': 6, 'VOLT_SPIKE': 7, 'VOLT_DISAGREE_WARN': 8,
     'LOCKOUT': 9, 'DISABLED': 10, 'MANUAL': 11, 'INA228 hardware overvoltage': 12,
     'HARD_OVERCURRENT': 13, 'RPM_TOO_LOW': 14, 'CURRENT_STALE': 15, 'FAST_OVERVOLTAGE': 16,
-    'Battery too cold to charge': 17, 'TACH_IMPLAUSIBLE': 19, 'SOLAR_PAUSE': 20
+    'Battery too cold to charge': 17, 'TACH_IMPLAUSIBLE': 19, 'SOLAR_PAUSE': 20, 'BMS_OFF': 21
 };
 function cxCutIsOv(code) { return code === 7 || code === 12 || code === 16; }
 
@@ -23501,7 +24496,7 @@ function cxRenderCVPlant(b) {
     const remedyPending = !!(f && f.ok && f.remedy && !cx.cvApplied && !cx.cvWeakAck);
     let body = '';
     if (cx.cvFitRunning) {
-        body += '<p style="color:#4a9eff;">Running Voltage Control Autotuning — hands off the throttle and other loads until the result appears (~35 s).</p>' +
+        body += '<p style="color:#4a9eff;">Running Voltage Control Autotuning — hands off the throttle and other loads until the result appears (~40 s).</p>' +
             '<p id="cvFitPhase" style="font-size:13px;color:#ddd;margin-top:-2px;">' + (cx.cvFitPhase || 'Starting…') + '</p>';
     }
     else if (f) {
@@ -23518,6 +24513,8 @@ function cxRenderCVPlant(b) {
                 : (f.remedy ? '' : '<br>Data is valid.');
             const condBits = [];
             if (f.rpm > 0) condBits.push(f.rpm + ' RPM' + (f.rpmMax > 0 ? ' (' + f.rpmMin + '–' + f.rpmMax + ')' : ''));
+            const drift = Math.abs(f.driftTrain || 0) >= Math.abs(f.driftSetup || 0) ? (f.driftTrain || 0) : (f.driftSetup || 0);
+            if (Math.abs(drift) >= 2) condBits.push('engine drift ' + cxCVFitSigned(drift) + '%');
             if (f.battV != null && f.battV > 0) condBits.push(f.battV.toFixed(2) + ' V');
             if (f.soc >= 0) condBits.push('SOC ' + f.soc.toFixed(0) + '%');
             const condLine = condBits.length
@@ -23578,7 +24575,7 @@ function cxCVPollFit() {
     const giveUp = () => (performance.now() - (cx._cvPollStart || 0) > 120000);
     fetch(buildURL('/cvplantfit.json')).then(r => r.json()).then(j => {
         const phaseTxt = ['Settling at the baseline current…', 'Probing to size the test step…', 'Practice run — holding the step…',
-                          'Pulsing — measuring the fast response…', 'Returning to baseline…'];
+                          'Back to the baseline — capturing its field level…', 'Pulsing — measuring the fast response…', 'Returning to baseline…'];
         cx.cvFitPhase = phaseTxt[j.phase] || 'Running…';
         const el = document.getElementById('cvFitPhase'); if (el) el.textContent = cx.cvFitPhase; else commissionRender();
         if (j.active) { setTrackedTimeout(cxCVPollFit, 800); return; }
@@ -23609,16 +24606,25 @@ function cvFitFromDevice(j) {
     if (w & 4)  faceExtra.push('Some pulse edges were unusable (a disturbance or timing hiccup) — the result comes from the clean ones. Re-run if you want a firmer reading.');
     if (w & 8)  faceExtra.push('Something else moved during the test (a load switched, or another charger). Re-run with all other loads steady.');
     if (w & 16) faceExtra.push('Over-voltage headroom was tight — the step was reduced to protect the bank.');
+    if (w & 32) {
+        const worst = Math.abs(j.driftTrainPct || 0) >= Math.abs(j.driftSetupPct || 0) ? (j.driftTrainPct || 0) : (j.driftSetupPct || 0);
+        faceExtra.push('Engine speed ' + (worst < 0 ? 'fell' : 'rose') + ' about ' + Math.abs(worst).toFixed(0) +
+                       '% during the test. The reading still divides by the current it actually measured, so it is usable — a steadier speed would tighten it.');
+    }
     // Weak-signal remedy: size a stronger current step from the measured SNR + delivered ΔI, bounded by the
     // alternator cap-table headroom the device reports (capHeadroomA) and an absolute 100 A backstop.
     const K = (j.K_mVpA || 0) / 1000, dI = j.dI || 0, snr = j.snr || 0;
+    const driftSetup = (j.driftSetupPct != null) ? j.driftSetupPct : 0, driftTrain = (j.driftTrainPct != null) ? j.driftTrainPct : 0;
     const capHead = (j.capHeadroomA != null) ? j.capHeadroomA : 0;
     let remedy = null;
     if (((w & 2) || (w & 1)) && K > 0 && dI > 0.5 && snr > 0) {
         const SNR_GOAL = 15;
         const needDI = Math.ceil(dI * (SNR_GOAL / Math.max(1, snr)));   // step that would reach a comfortable SNR
         const useDI  = Math.ceil(Math.min(needDI, capHead, 100));       // what we can command within the table + backstop
-        const targetDV = (w & 16) ? 0.18 : 0.30;                        // firmware fell back to the 180 mV probe after an OV brush
+        // Class-scaled, matching cvpfVScale() in 8_functions.ino: the firmware probes 300 mV per 12V
+        // block (180 mV after an OV fall-back), so on a 48V bank the real amplitude is 1200 mV. Left
+        // fixed, rippleLimited below passed on any bank above 12V and the panel quoted the wrong mV.
+        const targetDV = ((w & 16) ? 0.18 : 0.30) * ((parseInt(window._nominalStored, 10) || 12) / 12);
         const dV = (j.dV_mV || 0) / 1000;
         remedy = { needDI: needDI, useDI: useDI, capHead: Math.round(capHead),
                    // Firmware honors a boosted diMax past the fixed ΔV target (unless it OV-fell-back),
@@ -23639,6 +24645,7 @@ function cvFitFromDevice(j) {
              snr: j.snr, eps20: 0, horizonS: j.horizonS, dIalt: j.dI,
              rpm: Math.round(j.rpmAtFit || 0), rpmMin: Math.round(j.rpmMinAtFit || 0), rpmMax: Math.round(j.rpmMaxAtFit || 0),
              battV: (j.battVAtFit != null ? j.battVAtFit : null), soc: (j.socAtFit != null ? j.socAtFit : -1),
+             driftSetup: driftSetup, driftTrain: driftTrain,
              warns: (remedy ? faceExtra : allWarns), warnsLog: allWarns, remedy: remedy, edges: edges };
 }
 
@@ -24012,6 +25019,8 @@ function cxFdDraw() {
 // Full fit diagnostics → dashboard Console tab (appendConsoleLine, so they ride along in Download Logs / the
 // remote log relay) AND the browser DevTools console. Deliberately NOT on the wizard face — see the brief
 // result panel in cxRenderCVPlant. Same numbers that used to clutter the face, plus the marks.
+function cxCVFitSigned(v) { const n = (v == null || !isFinite(v)) ? 0 : v; return (n >= 0 ? '+' : '') + n.toFixed(1); }
+
 function cxCVFitLog(f, m) {
     const L = [];
     if (!f || !f.ok) {
@@ -24020,6 +25029,7 @@ function cxCVFitLog(f, m) {
         L.push('CVfit: K = ' + (f.K20 * 1000).toFixed(1) + ' mV/A (settled ΔV/ΔI at ~' + (f.horizonS != null ? f.horizonS.toFixed(1) : '0.6') + 's, median over pulse edges)  Kp ' + f.Kp.toFixed(1) + '  Ki ' + f.Ki.toFixed(1) + ' (12V-equiv)');
         L.push('CVfit: ΔV ' + (f.achievedDV * 1000).toFixed(0) + ' mV  ΔI ' + (f.dIalt != null ? f.dIalt.toFixed(1) : '?') + ' A  SNR ' + (f.snr != null ? f.snr.toFixed(0) : '?') + '×');
         L.push('CVfit: conditions — ' + (f.rpm > 0 ? f.rpm + ' RPM' : 'RPM ?') + '  ' + (f.battV != null ? f.battV.toFixed(2) + ' V' : 'V ?') + '  ' + (f.soc >= 0 ? 'SOC ' + f.soc.toFixed(0) + '%' : 'SOC n/a'));
+        L.push('CVfit: engine drift — setup ' + cxCVFitSigned(f.driftSetup) + '%  train ' + cxCVFitSigned(f.driftTrain) + '% (like-for-like: base current either end of setup, base duty either end of the train)');
         const wl = f.warnsLog || f.warns; if (wl && wl.length) L.push('CVfit: advisories — ' + wl.join(' | '));
     }
     for (const line of L) { try { appendConsoleLine(line, true); } catch (e) { } }
@@ -25840,10 +26850,97 @@ function cxShowHelpfulHints() {
     const abort = document.getElementById('commission-abort-row'); if (abort) abort.style.display = 'none';
     const b = document.getElementById('commission-body');
     if (!b) { cxHintsDone(); return; }
+    cxCloudProbeStart();   // runs while this page is being read, so Done doesn't wait on a cloud round-trip
     b.innerHTML = CX_HELPFUL_HINTS_HTML +
         '<button onclick="cxHintsDone()" class="btn-primary" style="width:100%; padding:9px; margin-top:16px;">Done</button>';
 }
-function cxHintsDone() {
+
+// ===== Post-commissioning cloud-registration pitch =====
+// Deliberately AFTER commissioning, not after the Vessel Info save: the first upload from a
+// commissioned regulator carries a real tune and real measurements, so it is worth something.
+//
+// Eligibility is settled by a live /checkRegistration, which is the device itself opening a TLS
+// connection to the cloud — a pass proves internet AND answers "already registered?" in one trip.
+// It is fired when the Helpful Hints page paints so the ~1-3 s round-trip hides behind reading time.
+// The cheap disqualifiers are checked first, before any network cost:
+//   AP (hotspot) mode   — no internet path exists, and updateCloudFeaturesToggleState hides the tab
+//   Cloud Features off  — updateCloudFeaturesTabVisibility hides the tab, so there is nowhere to land
+//   already registered  — session flag; the probe re-confirms it anyway
+let _cxCloudProbe = null;
+function cxCloudProbeStart() {
+    _cxCloudProbe = null;
+    if (typeof DEMO_MODE !== 'undefined' && DEMO_MODE) return;
+    if (window._lastKnownMode === 1) return;
+    const cb = document.getElementById('CloudFeatures_checkbox');
+    if (!cb || !cb.checked) return;
+    if (isDeviceRegistered) return;
+    _cxCloudProbe = cloudOpPost(buildURL('/checkRegistration'), { method: 'POST', body: new FormData() }, 8000)
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null);   // no internet, or the staged op was superseded — either way, no pitch
+}
+
+// null result = the regulator could not reach the cloud. Unresolved at 3 s = same treatment: the
+// user pressed Done and must not be held, and a silent skip costs nothing (the Registration tab
+// is still there). Both fall through to the pre-existing Done behaviour.
+async function cxCloudPitchDue() {
+    const probe = _cxCloudProbe; _cxCloudProbe = null;   // consume: a second Done can't reuse a stale verdict
+    if (!probe) return false;
+    const data = await Promise.race([
+        probe,
+        new Promise(res => setTrackedTimeout(() => res('pending'), 3000))
+    ]);
+    if (data === 'pending' || !data) return false;
+    if (data.registered && data.valid) {
+        isDeviceRegistered = true;
+        try { sessionStorage.setItem('deviceRegistered', '1'); } catch (e) {}
+        return false;
+    }
+    return true;
+}
+
+const CX_CLOUD_PITCH_HTML =
+    '<p style="font-size:14px; line-height:1.5; margin:0 0 12px;"><strong>One more thing worth doing</strong> &mdash; registering this regulator is free, and here\'s what it allows:</p>' +
+    '<ul style="list-style:none; padding:0; margin:0; font-size:13px; line-height:1.6;">' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Firmware updates.</strong> The mechanism for bug fixes and new features.</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">History past a month.</strong> The regulator stores about 30 days of long-term records on board. Registered devices store unlimited history in the Cloud.</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Configuration Sharing</strong> lets you browse setups from similar boats and load them as a starting point.</li>' +
+    '<li style="margin-bottom:12px;"><strong style="color:#2ec4b6;">Leaderboards and Fleet Stats</strong> show how your boat compares to the fleet in metrics like &ldquo;days at sea&rdquo;, &ldquo;lifetime solar harvest&rdquo;, and &ldquo;highest alternator output&rdquo;.</li>' +
+    '<li style="margin-bottom:0;"><strong style="color:#2ec4b6;">Support.</strong> Logs can be pulled automatically instead of manual downloads and emails.</li>' +
+    '</ul>' +
+    '<p style="font-size:13px; line-height:1.6; margin:16px 0 0; color:#ddd;">' +
+    'Registering shows your username, boat type, and length publicly on the leaderboards.<br>' +
+    'Contact info and location are never shared.<br>' +
+    'The <strong>Delete My Account</strong> button removes all stored Cloud data; the regulator keeps working locally either way.</p>';
+
+// Terminal page, same shell as Helpful Hints. OK is the only exit — it lands on the Registration
+// form rather than committing anything, so there is nothing here to decline.
+function cxShowCloudPitch() {
+    const b = document.getElementById('commission-body');
+    if (!b) { cxCloudPitchNo(); return; }
+    b.innerHTML = CX_CLOUD_PITCH_HTML +
+        '<button onclick="cxCloudPitchGo()" class="btn-primary" style="width:100%; padding:9px; margin-top:16px;">Go to Registration now</button>' +
+        '<button onclick="cxCloudPitchNo()" class="btn-secondary" style="width:100%; padding:9px; margin-top:8px;">No thanks, I don\'t trust you yet</button>';
+}
+
+// showMainTab('cloudfeatures') alone re-inits the profile form; the sub-tab call is added only when
+// a previous visit left a different Cloud sub-tab active, so the common path stages one cloud op,
+// not two (a second would supersede the first and surface as a "could not reach cloud" banner).
+function cxCloudPitchGo() {
+    closeCommissionModal(); cx = null; cxPlanUserSet = false;
+    showMainTab('cloudfeatures');
+    const mp = document.getElementById('cloudfeatures-myprofile');
+    if (mp && !mp.classList.contains('active')) showSubTab('cloudfeatures', 'myprofile');
+}
+
+// Declining lands where Finish always landed — the Commissioning checklist, showing the pass
+// they just completed. Registration stays one tab away; nothing here is a one-shot offer.
+function cxCloudPitchNo() {
+    closeCommissionModal(); cx = null; cxPlanUserSet = false;
+    goToCommissioning();
+}
+
+async function cxHintsDone() {
+    if (await cxCloudPitchDue()) { cxShowCloudPitch(); return; }
     closeCommissionModal(); cx = null; cxPlanUserSet = false;   // re-default the plan next time
     goToCommissioning();   // land on the Commissioning checklist
 }
@@ -27446,8 +28543,12 @@ window.addEventListener('load', function () {
   // 30-day chunks, each older than the last; reaching the loaded edge opens + fetches
   // the next chunk. When cloud is off/unregistered the pre-ring region simply stays
   // empty (one-line hint), never an error, and the in-ring month is never greyed.
-  const LT_CLOUD_CHUNK_S        = 30 * 86400;    // pull 30 days of older history per request
-  const LT_CLOUD_MAX_LOOKBACK_S = 365 * 86400;   // stop pulling beyond ~1 year back
+  // No lookback ceiling: registered history is advertised as unlimited, so the chain runs until
+  // the cloud answers with an empty chunk (see ltCloudPull). A chunk that lands entirely inside a
+  // period the boat was powered off ends it early — the same truncation that has always applied
+  // to gaps, now reachable at any age rather than only inside the first year.
+  const LT_CLOUD_CHUNK_S    = 30 * 86400;   // pull 30 days of older history per request
+  const LT_CLOUD_GAP_PROBES = 6;            // empty 30-day windows stepped over before declaring the end
   // JS field key → sensor_history column prefix (envelope: _min/_max/_avg; avg-only: _avg).
   const LT_CLOUD_COL = {
     battVolt:'batt_volt', battCurr:'batt_curr', altCurr:'alt_curr', victronCurr:'victron_curr',
@@ -27464,7 +28565,11 @@ window.addEventListener('load', function () {
     battVolt:'batt_volt_onavg', battCurr:'batt_curr_onavg', altCurr:'alt_curr_onavg',
     victronCurr:'victron_curr_onavg', duty:'duty_cycle_onavg'
   };
-  let ltCloud = { avail: undefined, fetching: false, oldest: null, exhausted: false };
+  // oldest    = oldest record actually LOADED (drives the brush clamp — never move it for an
+  //             empty window, or the brush opens onto blank space)
+  // probeFrom = top of the next window to REQUEST; set only while stepping back over confirmed
+  //             empty windows, so a retry after a network failure doesn't re-ask for them
+  let ltCloud = { avail: undefined, fetching: false, oldest: null, probeFrom: null, exhausted: false };
 
   function ltCloudEnabled() {
     // Source of truth is the checkbox — the settings echo (updateCheckbox) keeps
@@ -27623,34 +28728,46 @@ window.addEventListener('load', function () {
     if (mn && typeof _brushFormatTime === 'function') mn.textContent = _brushFormatTime(_brushState.dataMin);
   }
 
-  // Pull the next older 30-day chunk (cloud-gated, deduped, bounded, chains while the
-  // brushed range still extends past the loaded edge).
+  // Pull the next older 30-day chunk (cloud-gated, deduped, chains while the brushed range
+  // still extends past the loaded edge). Terminated by an empty chunk, not by an age limit.
   async function ltCloudPull() {
     if (!ltData || ltCloud.fetching || ltCloud.exhausted) return;
     if (!ltCloudEnabled()) { ltCloud.avail = false; return; }
     // local had little (≤1 pt or <1h span) → after the fill, show the whole loaded range
     const wasSparse = (ltData.n < 2) || ((ltData.t[ltData.n - 1] - ltData.t[0]) < 3600);
-    const boundary = (ltCloud.oldest != null) ? ltCloud.oldest : ltData.t[0];
-    if (boundary <= Math.floor(Date.now() / 1000) - LT_CLOUD_MAX_LOOKBACK_S) { ltCloud.exhausted = true; ltCloudClampReach(); return; }
+    const boundary = (ltCloud.probeFrom != null) ? ltCloud.probeFrom
+                   : (ltCloud.oldest != null) ? ltCloud.oldest : ltData.t[0];
     ltCloud.fetching = true;
     try {
       const token = await ensureCloudToken();
       if (!token) { ltCloud.avail = false; ltCloudClampReach(); return; }  // not registered → no cloud tier
       ltCloud.avail = true;
-      const startSec = boundary - LT_CLOUD_CHUNK_S;
-      const resp = await fetch(`${SUPABASE_URL}/functions/v1/get-history`, {
-        method: 'POST', headers: cloudHeaders(),
-        body: JSON.stringify({ token, start: ltIso(startSec), end: ltIso(boundary) })
-      });
-      if (!resp.ok) { if (resp.status === 401) g_cloudToken = null; return; }   // leave state → retry later
-      const json = await resp.json();
-      const rows = (json && json.data) ? json.data.slice() : [];
-      rows.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));   // ascending
       const interval = ltData.interval || 600;
-      const slice = ltCloudRowsToSlice(rows, interval, boundary);
-      if (slice.n === 0) { ltCloud.exhausted = true; ltCloudClampReach(); return; }  // no older data
+      // An empty chunk means "nothing in THIS window", not "nothing older" — a boat laid up for a
+      // season leaves whole empty months in front of real data. Step back over them before giving
+      // up. Bounded: LT_CLOUD_GAP_PROBES empty windows in a row ends it, so a lay-up longer than
+      // LT_CLOUD_GAP_PROBES * 30 days still truncates there. ltCloudPrepend draws the seam gap
+      // across whatever was skipped, so the chart never joins two eras with a straight line.
+      let win = boundary, slice = null;
+      for (let probe = 0; probe <= LT_CLOUD_GAP_PROBES; probe++) {
+        const startSec = win - LT_CLOUD_CHUNK_S;
+        const resp = await fetch(`${SUPABASE_URL}/functions/v1/get-history`, {
+          method: 'POST', headers: cloudHeaders(),
+          body: JSON.stringify({ token, start: ltIso(startSec), end: ltIso(win) })
+        });
+        if (!resp.ok) { if (resp.status === 401) g_cloudToken = null; return; }   // leave state → retry later
+        const json = await resp.json();
+        const rows = (json && json.data) ? json.data.slice() : [];
+        rows.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));   // ascending
+        const s = ltCloudRowsToSlice(rows, interval, win);
+        if (s.n > 0) { slice = s; break; }
+        win = startSec;
+        ltCloud.probeFrom = startSec;   // this window is confirmed empty — don't re-ask for it
+      }
+      if (!slice) { ltCloud.exhausted = true; ltCloudClampReach(); return; }  // no older data
       ltCloudPrepend(slice, interval);
       ltCloud.oldest = slice.t[0];
+      ltCloud.probeFrom = null;
       ltFullRange = [ ltData.t[0], ltFullRange ? ltFullRange[1] : ltData.t[ltData.n - 1] ];
       ltCloudExtendReach();
     } catch (e) {
@@ -27739,7 +28856,7 @@ window.addEventListener('load', function () {
       ],
       axes: [
         { scale: "x", label: "RPM", values: (u, t) => t.map(v => Math.round(v)) },
-        { scale: "mpg", label: "naut mi / gal", side: 3,
+        { scale: "mpg", label: volEconUnitLabel().replace('naut mi/', 'naut mi / '), side: 3,
           splits: edgeLabeledSplits(() => yManual !== null) }
       ],
       legend: { show: false }
@@ -27780,6 +28897,17 @@ window.addEventListener('load', function () {
     }]);
   }
 
+  // Unit flip: the axis label is baked at construction and the pinned Y range is in the old
+  // unit, so convert the pin and drop the plot — the next CSV4 frame rebuilds it.
+  window.fuelCurveOnUnitChange = function (prevUnit) {
+    if (yManual) {
+      const k = prevUnit === 1 ? LITRES_PER_US_GAL : 1 / LITRES_PER_US_GAL;
+      yManual = [yManual[0] * k, yManual[1] * k];
+      localStorage.setItem('fuelCurveYRange', JSON.stringify(yManual));
+    }
+    if (plot) { plot.destroy(); plot = null; }
+  };
+
   window.updateFuelCurve = function (data) {
     if (data.fuelCurveNMPG_0 === undefined) return;        // not in this payload
     const el = document.getElementById('fuelCurvePlot');
@@ -27792,7 +28920,7 @@ window.addEventListener('load', function () {
     const y = new Array(NBINS);
     let bestV = 0, bestI = -1;
     for (let i = 0; i < NBINS; i++) {
-      const v = Number(data['fuelCurveNMPG_' + i]) / 100;
+      const v = nmpgToDisplayEcon(Number(data['fuelCurveNMPG_' + i]) / 100);
       y[i] = v > 0 ? v : null;                              // 0 = empty bin -> gap
       if (v > bestV) { bestV = v; bestI = i; }
     }
@@ -27800,7 +28928,7 @@ window.addEventListener('load', function () {
     const best = document.getElementById('fuelCurveBestID');
     if (best) {
       const txt = bestI >= 0
-        ? bestV.toFixed(2) + ' naut mi/gal at ~' + Math.round(bestI * binW) + '–' + Math.round((bestI + 1) * binW) + ' rpm'
+        ? bestV.toFixed(2) + ' ' + volEconUnitLabel() + ' at ~' + Math.round(bestI * binW) + '–' + Math.round((bestI + 1) * binW) + ' rpm'
         : '—';
       if (best.textContent !== txt) best.textContent = txt;
     }
@@ -29205,6 +30333,32 @@ function ssBuildPanelNames() {
     return map;
 }
 
+// Breadcrumb for one indexed element: walk to #settings collecting the panels and <details> it
+// sits inside. Shared by the .form-row pass and the data-ss-label table pass.
+function ssCrumbs(node, names) {
+    const crumbs = [];
+    for (let el = node.parentElement; el && el.id !== 'settings'; el = el.parentElement) {
+        if (el.tagName === 'DETAILS') {
+            const sum = el.querySelector(':scope > summary');
+            if (sum) {
+                // Strip the live at-a-glance state and the "shared" badge from Integrations
+                // card headers so the breadcrumb is the stable card name, not
+                // "NMEA 2000 Rx On · Tx Off" or "Charge-Limit Follow shared".
+                const sc = sum.cloneNode(true);
+                sc.querySelectorAll('.integ-state, .integ-badge, .tooltip').forEach(n => n.remove());
+                crumbs.push(ssTidy(sc.textContent));
+            }
+        } else if (el.id && (el.classList.contains('sub-tab-content') ||
+            el.classList.contains('alt-panel') ||
+            el.classList.contains('tuning-panel') ||
+            el.classList.contains('diag-panel'))) {
+            crumbs.push(names[el.id] || el.id);
+        }
+    }
+    crumbs.reverse();
+    return crumbs.filter((c, i) => i === 0 || c !== crumbs[i - 1]);
+}
+
 function ssBuildIndex() {
     const names = ssBuildPanelNames();
     const list = [];
@@ -29217,28 +30371,13 @@ function ssBuildIndex() {
         const label = ssCleanLabel(clone.textContent);
         if (label.length < 2) return;
         const tipEl = labEl.querySelector('.tooltip-box');
-        const crumbs = [];
-        for (let el = row.parentElement; el && el.id !== 'settings'; el = el.parentElement) {
-            if (el.tagName === 'DETAILS') {
-                const sum = el.querySelector(':scope > summary');
-                if (sum) {
-                    // Strip the live at-a-glance state and the "shared" badge from Integrations
-                    // card headers so the breadcrumb is the stable card name, not
-                    // "NMEA 2000 Rx On · Tx Off" or "Charge-Limit Follow shared".
-                    const sc = sum.cloneNode(true);
-                    sc.querySelectorAll('.integ-state, .integ-badge, .tooltip').forEach(n => n.remove());
-                    crumbs.push(ssTidy(sc.textContent));
-                }
-            } else if (el.id && (el.classList.contains('sub-tab-content') ||
-                el.classList.contains('alt-panel') ||
-                el.classList.contains('tuning-panel') ||
-                el.classList.contains('diag-panel'))) {
-                crumbs.push(names[el.id] || el.id);
-            }
-        }
-        crumbs.reverse();
-        const dedup = crumbs.filter((c, i) => i === 0 || c !== crumbs[i - 1]);
-        list.push({ label: label, tip: tipEl ? ssTidy(tipEl.textContent) : '', crumbs: dedup, el: row });
+        list.push({ label: label, tip: tipEl ? ssTidy(tipEl.textContent) : '', crumbs: ssCrumbs(row, names), el: row });
+    });
+
+    // A settings TABLE has no .form-row/.form-label to scrape, so each editable cell opts in with
+    // data-ss-label — without this the C3 band matrix would drop out of search entirely.
+    document.querySelectorAll('#settings [data-ss-label]').forEach(cell => {
+        list.push({ label: cell.dataset.ssLabel, tip: '', crumbs: ssCrumbs(cell, names), el: cell });
     });
 
     const stop = {};
@@ -29770,10 +30909,10 @@ function usageFetchStats() {
             if (!j || j.err) return;
             const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
             set('usageTodayTime', usageFmtDur(j.today.ms || 0));
-            set('usageTodayOpens', j.today.opens);
+            set('usageTodayOpens', groupInt(j.today.opens || 0));
             set('usageLifeTime', ((j.life.s || 0) / 3600).toFixed(1) + ' h');
-            set('usageLifeOpens', j.life.opens);
-            set('usageLifeDays', j.life.days);
+            set('usageLifeOpens', groupInt(j.life.opens || 0));
+            set('usageLifeDays', groupInt(j.life.days || 0));
             const pageNames = usagePageNames();
             const btnNames = (j.today.btns && j.today.btns.length) ? usageBtnNames(pageNames) : {};
             const nameCell = (label, ctx) => {
@@ -29787,7 +30926,7 @@ function usageFetchStats() {
                 }
                 return td;
             };
-            const numCell = v => { const td = document.createElement('td'); td.textContent = v; return td; };
+            const numCell = v => { const td = document.createElement('td'); td.textContent = (typeof v === 'number') ? groupInt(v) : v; return td; };
             const fill = (id, rows, span, makeCells) => {
                 const box = document.getElementById(id);
                 if (!box) return;

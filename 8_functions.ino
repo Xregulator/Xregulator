@@ -819,6 +819,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "T0_C", NK_T0_C, 1 },
   { "WindingTempOffset", NK_WindingTempOffset, 1 },
   { "displayTempUnit", NK_displayTempUnit, 1 },
+  { "displayVolUnit", NK_displayVolUnit, 1 },
   { "LearningUpStep", NK_LearningUpStep, 1 },
   { "LearningDownStep", NK_LearningDownStep, 1 },
   { "LearningSettlingPeriod", NK_LearningSettlingPeriod, 1 },
@@ -924,7 +925,8 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "dvccCvlMax", NK_dvccCvlMax, 1 },
   { "VeData", NK_VeData, 1 },
   { "weatherModeEnabled", NK_weatherModeEnabled, 1 },
-  { "gpsTimeSourceMode", NK_gpsTimeSourceMode, 1 },
+  { "timeSourceMode", NK_timeSourceMode, 1 },
+  { "gpsPositionSource", NK_gpsPositionSource, 1 },
   { "speedSourceMode", NK_speedSourceMode, 1 },
   { "wifiNapEnabled", NK_wifiNapEnabled, 1 },
   { "ZeroLogEnable", NK_ZeroLogEnable, 1 },
@@ -1475,9 +1477,36 @@ int applyImportConfig(const char *body) {
   String preClass = settingRead(NK_BatteryVoltage);
   String preCap   = settingRead(NK_BatteryCapacity_Ah);
   String preChem  = settingRead(NK_batteryType);
+  // System voltage class is not an ordinary setting — it is the MEANING of every other volt- and
+  // duty-domain value, so it is handled BEFORE the manifest loop rather than inside it. A payload that
+  // carries only the class (a one-key admin push) brings nothing to reinterpret the rest of NVS with, so
+  // run the same conversion /saveVesselInfo runs; a full export carries every converted key, so the loop
+  // below then overwrites the conversion key by key and that import behaves exactly as it did before.
+  // Without this a bare "BatteryVoltage=12" push to a 48V boat left a 57 V bulk target and a 58 V
+  // shutdown trip over a 12 V bank, with nothing able to trip. applyNominalVoltageChange also resets the
+  // Min% floor table and clears the learned oscillation speed pockets (both were class-specific), which
+  // is why the post-loop block below no longer does its own knee reset.
+  bool cfgClassBad = false;
+  {
+    String cv;
+    if (cfgJsonExtract(cfg, "BatteryVoltage", cv)) {
+      int newV = cv.toInt();
+      if (newV != 12 && newV != 24 && newV != 36 && newV != 48) {
+        // Dropped here rather than written: the boot loader silently coerces a bad value to 12, which on a
+        // 48V boat is the same catastrophe by a slower route.
+        cfgClassBad = true;
+        queueConsoleMessageF("IMPORT WARNING: ignoring invalid system voltage \"%s\" in the imported config", cv.c_str());
+      } else if (newV != (int)SYSTEM_VOLTAGE_CLASS) {
+        int oldV = (int)SYSTEM_VOLTAGE_CLASS;
+        SYSTEM_VOLTAGE_CLASS = (uint8_t)newV;
+        applyNominalVoltageChange(oldV, newV);   // persists the class + every converted setting, synchronously
+      }
+    }
+  }
   int applied = 0;
   for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
     if (CONFIG_MANIFEST[i].tier == 3) continue;   // export-only: this device's own history, never adopted
+    if (cfgClassBad && strcmp(CONFIG_MANIFEST[i].param, "BatteryVoltage") == 0) continue;
     String val;
     if (cfgJsonExtract(cfg, CONFIG_MANIFEST[i].param, val)) {
       if (settingWrite(CONFIG_MANIFEST[i].nvsKey, val.c_str())) {
@@ -1494,15 +1523,13 @@ int applyImportConfig(const char *body) {
         || settingRead(NK_batteryType) != preChem) {
       raiseRecommissionNag();
     }
-    // Voltage-class change: the knee-learned Min% floors are duty values learned at the OLD
-    // class (~2x field per class step) and are NOT in the import payload — the boot rebuild
-    // would re-apply them over the imported minDutyTable. Reset to defaults (Auto Min%
-    // re-learns them); the advisory nag above stays the only recommission prompt. Same pair
-    // as the imported-breakpoints-moved path in applyImportTables.
+    // Voltage-class change: the conversion above already reset the knee-learned Min% floors (they were
+    // duty values learned at the OLD class, ~2x field per class step, and are NOT in the import payload —
+    // the boot rebuild would otherwise re-apply them over the imported minDutyTable). Only the wizard
+    // stage clear is left to do here; applyImportTables still runs last, so an imported table wins.
     if (classChanged) {
-      kneeLearnResetDefaults();
       commissionClearStage(7);
-      queueConsoleMessage("IMPORT WARNING: battery voltage class changed - learned Min% field floors reset to safe defaults; recommissioning recommended");
+      queueConsoleMessage("IMPORT WARNING: battery voltage class changed - charge profile, protection trips and field-duty limits converted to the new class; learned Min% field floors reset and learned oscillation speed ranges cleared; recommissioning recommended");
     }
   }
   // Registry knobs — generic import mirroring the export side.
@@ -1566,7 +1593,7 @@ bool bhStartTest() {
   if (!bhSamples || !bhResults){ bhAbortReason = "buffers unallocated";      return false; }
   if (RPM < 100)               { bhAbortReason = "engine not running";       return false; }
   if (sysMode != SYS_MODE_AUTO){ bhAbortReason = "must be in AUTO mode";     return false; }   // generator only runs in the AUTO control path
-  if (TuningMode || CVTuningMode || systemIDActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || resTestActive || cvStressActive || protTestActive) { bhAbortReason = "another test active"; return false; }
+  if (TuningMode || CVTuningMode || systemIDActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || resTestActive || cvStressActive || protTestActive || (altSweepActive != 0)) { bhAbortReason = "another test active"; return false; }
   if (BatteryCurrentSource != 0 || !HAS_BATT_SHUNT){ bhAbortReason = "needs INA228 battery shunt"; return false; }
   if (bhNumEdges < 3) bhNumEdges = 3;
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
@@ -1692,11 +1719,15 @@ void bhServiceCompletion() {
 }
 
 // ════════════════════════ CV PLANT FIT (firmware voltage-loop identification) ════════════════════════
-// Ohmic-anchor pulse train (spec: CV_Gain_Ohmic_Anchor_Redesign_Spec.md): SETTLE (CC, capture baseDuty) →
+// Ohmic-anchor pulse train (spec: CV_Gain_Ohmic_Anchor_Redesign_Spec.md): SETTLE (CC at the base level) →
 // PILOT (probe + size the step under the OV/gassing/cap-table guards) → HOLD (CC practice run, capture
-// stepDuty) → PULSES (4× abrupt base/step duty squares; the 2 s holds give settled baselines either side
-// of every edge) → RELEASE. Fit = per-edge settled ΔV (CVPF_EDGE_V0/V1_MS window, 550-650 ms)/ΔI,
-// median of 8 edges → cvpfKa.
+// stepDuty) → REBASE (CC back to the base level, capture baseDuty) → PULSES (4× abrupt base/step duty
+// squares; the 2 s holds give settled baselines either side of every edge) → RELEASE. Fit = per-edge
+// settled ΔV (CVPF_EDGE_V0/V1_MS window, 550-650 ms)/ΔI, median of 8 edges → cvpfKa.
+// REBASE exists so both replayed duties are learned one settle apart instead of a whole setup apart:
+// capturing baseDuty back at SETTLE let engine speed move between the two captures and put them at
+// different plant gains, which flattened every edge (bench 2026-08-04). It also makes the pair
+// self-consistent under load sag — each level is learned at the engine speed the train will replay it at.
 static const uint32_t CVPF_SAMPLE_INTERVAL_MS = 40;    // CC phases — ample for settled means; bounds buffer fill
 static const uint32_t CVPF_SAMPLE_FAST_MS = 10;        // PULSES/RELEASE — tick-cadence sampling across the edges
 static const uint32_t CVPF_SETTLE_MIN_MS = 2000;
@@ -1704,6 +1735,7 @@ static const uint32_t CVPF_SETTLE_TIMEOUT_MS = 15000;  // proceed with what sett
 static const uint32_t CVPF_T_PILOT_MS  = 3000;
 static const uint32_t CVPF_INBAND_MS   = 1000;         // measured-current dwell inside the band that counts as settled
 static const uint32_t CVPF_HOLD_TIMEOUT_MS = 10000;
+static const uint32_t CVPF_REBASE_SETTLE_MS = 6000;     // return-to-base settle allowance ON TOP of the fall-rate ramp (see the REBASE budget)
 static const uint32_t CVPF_PULSE_SEG_MS = 2000;
 static const uint32_t CVPF_COND_SKIP_MS = 900;         // wait out the post-edge reaction before averaging result-card conditions in a segment
 static const uint32_t CVPF_EDGE_V0_MS = 550;           // ΔV readout ~600 ms after the edge — the timescale the CV loop
@@ -1714,6 +1746,12 @@ static const float    CVPF_CAP_MARGIN_A   = 5.0f;      // keep the commanded ste
 static const float    CVPF_V_RESERVE = 0.15f;          // keep the projected step peak this far below the hard-OV cut
 static const float    CVPF_GASSING_V_12V = 14.2f;      // ~2.37 V/cell — oxygen-evolution onset on lead-acid
 
+// Volt-domain class scale for the probe. Everything this test measures in VOLTS (the DeltaV target, both
+// OV cushions) is per-cell-equivalent and scales with the bus, same rule as the gassing gate below.
+// Everything it commands in AMPS stays flat: on n series 12V blocks a per-cell-equal step is the same
+// amps, which is why cvpfBaseA/cvpfPilotA/CVPF_DI_MAX_DEFAULT are correctly class-invariant.
+static inline float cvpfVScale() { return (float)SYSTEM_VOLTAGE_CLASS / 12.0f; }
+
 // Lithium does not evolve gas at any charge voltage we permit; every other chemistry does. "other" is treated
 // as gassing: a false refusal costs the user a retry, a false pass ships an over-gained loop.
 static bool cvpfChemGasses() {
@@ -1722,7 +1760,7 @@ static bool cvpfChemGasses() {
 
 void cvpfSample(uint32_t nowMs) {
   if (!cvpfBuf || cvpfBufCount >= cvpfBufCap) return;
-  uint32_t interval = (cvpfPhase >= 3) ? CVPF_SAMPLE_FAST_MS : CVPF_SAMPLE_INTERVAL_MS;
+  uint32_t interval = (cvpfPhase >= 4) ? CVPF_SAMPLE_FAST_MS : CVPF_SAMPLE_INTERVAL_MS;
   if (nowMs - cvpfSampleLastMs < interval) return;
   cvpfSampleLastMs = nowMs;
   cvpfBuf[cvpfBufCount].tMs  = nowMs;
@@ -1780,10 +1818,15 @@ static void cvpfSizeStep() {
   // The pilot chord (~2-3 s) matches the 2 s pulse holds, so it sizes the step peak directly.
   float Klong    = cvpfPilotK;
   float Kupper   = Klong * 1.5f;                                             // pessimistic (bigger K → smaller ΔI)
-  // CVPF cushions are fixed ABSOLUTE volts, not class-scaled: the probe ΔV is sensor-resolution-limited
-  // (excellent noise floor), so a fixed step gives full SNR at any bank voltage and the step peak it bounds
-  // is ~absolute. Scaling these up would only shrink the achievable step on a stiff 24/36/48V bank for no gain.
-  float headroom = fmaxf(0.05f, AlternatorHardShutdownV - cvpfPilotVbase - CVPF_V_RESERVE);
+  // CVPF cushions are class-scaled (cvpfVScale), NOT fixed absolute volts. The old rationale — "the probe
+  // ΔV is sensor-resolution-limited, so a fixed step gives full SNR at any bank" — was wrong by two orders
+  // of magnitude: cvpfSNR divides cvpfDV by the RMS residual of the pre-edge window, which is BUS RIPPLE.
+  // The SNR<12 warn bit corresponds to ~25 mV of residual against an INA228 bus LSB of 195 uV, so the metric
+  // is ripple-limited, and ripple scales with the bus. A fixed 300 mV also shrinks the current chord by
+  // 12/class, pinning it near the steep low-current tangent on lead-acid (reads K high -> Kp low).
+  // CVPF_V_RESERVE scales for a second reason: unscaled it left the projected step peak 4x closer to the
+  // hard-OV cut per cell on a 48V bank.
+  float headroom = fmaxf(0.05f, AlternatorHardShutdownV - cvpfPilotVbase - CVPF_V_RESERVE * cvpfVScale());
   float di = cvpfDiMaxA;
   di = fminf(di, headroom / fmaxf(1e-3f, Kupper));
   // Target-ΔV sizing — skipped on an operator-boosted re-run (diMax raised), whose whole point is a
@@ -1806,8 +1849,13 @@ static float    cvpfAmpsEma = 0.0f;
 static uint32_t cvpfInBandMs = 0;
 static int8_t   cvpfSeg = -1;      // current pulse segment; even = base duty, odd = step duty
 static float    cvpfBaseAmps = 0.0f;    // settled output at SETTLE exit — pinned-output diagnostics reference
-static float    cvpfSettleRpm = 0.0f;   // RPM at SETTLE exit — reported when drift wrecks the pulse replay
-static char     cvpfDiagBuf[256];       // composed diagnostic aborts (cvpfAbortMsg points here); longest message + UTF-8 dashes reaches ~220 bytes
+static float    cvpfSettleRpm = 0.0f;   // RPM at SETTLE exit — base-load anchor for the setup-drift advisory
+static float    cvpfHoldAmps = 0.0f;    // settled output at HOLD exit (crest level) — pairs with the REBASE floor level
+// RPM over the settled tails of the FIRST and LAST base segments of the train. Same commanded duty at both
+// ends, so their difference is pure engine drift with the test's own load sag cancelled out.
+static double   cvpfSeg0RpmSum = 0.0, cvpfSeg6RpmSum = 0.0;
+static uint32_t cvpfSeg0RpmN = 0, cvpfSeg6RpmN = 0;
+static char     cvpfDiagBuf[256];       // composed diagnostic aborts (cvpfAbortMsg points here); longest message + UTF-8 dashes reaches ~231 bytes
 
 // Called every control tick from the duty-override block in AdjustField (like fieldCut_tick). Returns
 // true only while PULSES/RELEASE own duty; CC phases return false. Ends by clearing cvPlantFitActive.
@@ -1816,7 +1864,7 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
   cvpfSample(nowMs);
   uint32_t elapsed = nowMs - cvpfPhaseStartMs;
   switch (cvpfPhase) {
-    case 0: {  // SETTLE — current-PID at the base level; capture the settled duty as the pulse floor
+    case 0: {  // SETTLE — current-PID at the base level; establishes the reference output and speed (REBASE captures the floor duty)
       cvpfCmdA = cvpfBaseA;
       cvpfAmpsEma += 0.05f * (measA - cvpfAmpsEma);
       bool arrived = fabsf(setpointLimited - cvpfBaseA) < 0.5f;
@@ -1824,7 +1872,6 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
       if (inBand) { if (cvpfInBandMs == 0) cvpfInBandMs = nowMs; } else cvpfInBandMs = 0;
       bool settled = (elapsed >= CVPF_SETTLE_MIN_MS) && cvpfInBandMs && (nowMs - cvpfInBandMs >= CVPF_INBAND_MS);
       if (settled || elapsed >= CVPF_SETTLE_TIMEOUT_MS) {
-        cvpfBaseDuty = lastAppliedDuty;
         cvpfBaseAmps = cvpfAmpsEma; cvpfSettleRpm = (float)RPM;
         cvpfPhase = 1; cvpfPhaseStartMs = nowMs;
       }
@@ -1868,11 +1915,12 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
     case 2: {  // HOLD — practice run at the sized step; capture the settled duty as the pulse crest
       float target = cvpfBaseA + cvpfStepA;
       cvpfCmdA = target;
-      // Runtime OV guard: first trip → shrink to a 180 mV step and re-hold; still over-volting → give up.
-      // 0.10 V cushion is fixed absolute (the fixed-ΔV probe's overshoot is ~absolute, not per-cell).
-      if (IBV > AlternatorHardShutdownV - 0.10f) {
+      // Runtime OV guard: first trip → shrink to a 180 mV (12V-equivalent) step and re-hold; still
+      // over-volting → give up. Cushion and reduced target both class-scaled: at 48V a fixed 0.10 V gave a
+      // quarter of the warning time before the hard cut, since the bus traverses it 4x faster per cell.
+      if (IBV > AlternatorHardShutdownV - 0.10f * cvpfVScale()) {
         if (!cvpfFellBack) {
-          cvpfFellBack = true; cvpfTargetDV = 0.18f; cvpfWarn |= 0x10;
+          cvpfFellBack = true; cvpfTargetDV = 0.18f * cvpfVScale(); cvpfWarn |= 0x10;
           cvpfSizeStep();
           cvpfPhaseStartMs = nowMs; cvpfInBandMs = 0;
           queueConsoleMessageF("CV plant-fit: over-voltage headroom tight — step reduced to %.0f A, re-testing", cvpfStepA);
@@ -1891,16 +1939,6 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
       // flat and every edge would drop; abort with the numbers instead of burning the 18 s train.
       // (settled implies in-band delivery, so this only fires on the timeout path.)
       if (settled || elapsed >= CVPF_HOLD_TIMEOUT_MS) {
-        // Proven bench failure 2026-08-04: RPM rose between the base capture and here, the plant-gain
-        // shift ate the entire duty delta (base 23.3% / step 23.4%), and every replayed edge was flat.
-        // Duty delta itself can't be gated (a big machine legitimately steps 8 A in <1% duty) — RPM can.
-        if (cvpfSettleRpm > 100.0f && fabsf((float)RPM - cvpfSettleRpm) > 0.08f * cvpfSettleRpm) {
-          snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
-                   "RPM moved %.0f -> %.0f between learning the base and step field levels — the replayed pulses would mis-step; hold RPM steady and re-run",
-                   cvpfSettleRpm, (float)RPM);
-          cvpfAbort(cvpfDiagBuf);
-          break;
-        }
         if (cvpfAmpsEma - cvpfBaseAmps < 2.0f) {
           snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
                    "practice step didn't raise output (%.1f -> %.1f A with +%.0f A commanded) — alternator at its output ceiling for this RPM, or the field circuit didn't carry it; re-run once output can move",
@@ -1909,26 +1947,71 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
           break;
         }
         cvpfStepDuty = lastAppliedDuty;
+        cvpfHoldAmps = cvpfAmpsEma;
+        cvpfPhase = 3; cvpfPhaseStartMs = nowMs; cvpfInBandMs = 0;
+        queueConsoleMessageF("CV plant-fit: crest level captured (%.1f%% at %.1f A) — returning to base to capture its duty alongside it",
+                             cvpfStepDuty, cvpfHoldAmps);
+      }
+      break; }
+    case 3: {  // REBASE — current-PID back down to the base level; the floor duty is captured HERE, one
+               // settle after the crest, so both replayed levels carry the same engine speed and plant gain
+      cvpfCmdA = cvpfBaseA;
+      if (IBV > AlternatorHardShutdownV - 0.10f * cvpfVScale()) {
+        cvpfAbort("over-voltage while returning to the baseline current — lower the charge target or raise OV headroom, then re-run");
+        break;
+      }
+      cvpfAmpsEma += 0.05f * (measA - cvpfAmpsEma);
+      bool arrived = fabsf(setpointLimited - cvpfBaseA) < 0.5f;
+      bool inBand = arrived && fabsf(cvpfAmpsEma - cvpfBaseA) < fmaxf(2.0f, 0.15f * cvpfBaseA);
+      if (inBand) { if (cvpfInBandMs == 0) cvpfInBandMs = nowMs; } else cvpfInBandMs = 0;
+      bool settled = (elapsed >= CVPF_SETTLE_MIN_MS) && cvpfInBandMs && (nowMs - cvpfInBandMs >= CVPF_INBAND_MS);
+      // Walking the setpoint back down is fall-rate limited (TEST_ENTRY_RATE_A), so the budget has to
+      // cover the ramp itself before the settle window: a boosted 100 A step needs 12.5 s just to reach
+      // the base setpoint. A fixed timeout here would capture a mid-ramp duty as the pulse floor.
+      uint32_t budget = CVPF_REBASE_SETTLE_MS + (uint32_t)(1000.0f * cvpfStepA / TEST_ENTRY_RATE_A);
+      if (elapsed >= budget && !arrived) {
+        cvpfAbort("the current loop never walked back down to the baseline inside its time budget — re-run");
+        break;
+      }
+      if (settled || elapsed >= budget) {
+        cvpfBaseDuty = lastAppliedDuty;
+        cvpfRebaseRpm = (float)RPM;
+        // The train replays exactly this pair of settled levels, so the measured current gap between them
+        // IS the ΔI every edge will see. Below 2 A the per-edge |dI| test rejects all 8 — say so now
+        // instead of burning the 18 s train. Replaces the old ±8% RPM gate, which compared two speeds
+        // taken at deliberately different alternator loads and so rejected the test's own load sag.
+        float dIpair = cvpfHoldAmps - cvpfAmpsEma;
+        if (dIpair < 2.0f) {
+          snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
+                   "the two field levels came out only %.1f A apart (%.1f%% / %.1f%% duty, %.1f / %.1f A) — the pulses would have no step to measure; re-run where the alternator has room to move",
+                   dIpair, cvpfBaseDuty, cvpfStepDuty, cvpfAmpsEma, cvpfHoldAmps);
+          cvpfAbort(cvpfDiagBuf);
+          break;
+        }
         // Restore the pre-test setpoint BEFORE first returning true — the SystemID resume snapshot fires
         // on this tick's rising edge and must not capture the test current (same trick as fieldCut_tick).
         setpointLimited = cvpfPreSetpoint;
         cvpfCcActive = false;
         cvpfSeg = 0;
-        cvpfPhase = 3; cvpfPhaseStartMs = nowMs;
-        queueConsoleMessageF("CV plant-fit: duties captured (base %.1f%% / step %.1f%%) — pulsing", cvpfBaseDuty, cvpfStepDuty);
+        cvpfPhase = 4; cvpfPhaseStartMs = nowMs;
+        queueConsoleMessageF("CV plant-fit: duties captured (base %.1f%% / step %.1f%%, %.1f A apart) — pulsing",
+                             cvpfBaseDuty, cvpfStepDuty, dIpair);
         dutyOut = cvpfBaseDuty;
         return true;
       }
       break; }
-    case 3: {  // PULSES — abrupt duty squares; every segment boundary is a measured edge
-      if (IBV > AlternatorHardShutdownV - 0.10f) {
+    case 4: {  // PULSES — abrupt duty squares; every segment boundary is a measured edge
+      // Same class-scaled cushion as HOLD/REBASE, and it matters most here: these edges are direct-duty,
+      // so nothing paces the rise, and an unscaled 0.10 V gave a 48 V bus a quarter of the warning time
+      // per cell before the hard cut.
+      if (IBV > AlternatorHardShutdownV - 0.10f * cvpfVScale()) {
         cvpfAbort("over-voltage during the pulse train — re-run once charging is steady");
         break;
       }
       int seg = (int)(elapsed / CVPF_PULSE_SEG_MS);   // 0,2,4,6 = base; 1,3,5,7 = step
       if (seg > 7) {
         if (cvpfEdgeCount < 8) cvpfEdgeMs[cvpfEdgeCount++] = nowMs;   // final step→base edge opens RELEASE
-        cvpfPhase = 4; cvpfPhaseStartMs = nowMs;
+        cvpfPhase = 5; cvpfPhaseStartMs = nowMs;
         dutyOut = cvpfBaseDuty;
         return true;
       }
@@ -1936,13 +2019,17 @@ bool cvpf_tick(float &dutyOut, float measA, uint32_t nowMs) {
         if (seg > 0 && cvpfEdgeCount < 8) cvpfEdgeMs[cvpfEdgeCount++] = nowMs;   // this tick writes the new duty
         cvpfSeg = seg;
       }
+      bool tail = (elapsed - (uint32_t)seg * CVPF_PULSE_SEG_MS) >= CVPF_COND_SKIP_MS;   // past the post-edge reaction
       // Result-card conditions: the two middle segments (3 = high step, 4 = low base), settled tail only —
       // one high + one low centers the reported voltage on the operating point being characterized.
-      if ((seg == 3 || seg == 4) && (elapsed - (uint32_t)seg * CVPF_PULSE_SEG_MS) >= CVPF_COND_SKIP_MS)
-        cvpfAccumConditions();
+      if ((seg == 3 || seg == 4) && tail) cvpfAccumConditions();
+      // Drift readout: first vs last BASE segment. Identical commanded duty at both ends, so whatever
+      // separates them is real engine drift across the measurement — not the step's load sag.
+      if (seg == 0 && tail) { cvpfSeg0RpmSum += RPM; cvpfSeg0RpmN++; }
+      if (seg == 6 && tail) { cvpfSeg6RpmSum += RPM; cvpfSeg6RpmN++; }
       dutyOut = (seg & 1) ? cvpfStepDuty : cvpfBaseDuty;
       return true; }
-    case 4: {  // RELEASE — settled base hold that closes the final edge's ΔI window, then hand back
+    case 5: {  // RELEASE — settled base hold that closes the final edge's ΔI window, then hand back
       dutyOut = cvpfBaseDuty;
       if (elapsed >= CVPF_PULSE_SEG_MS) {
         cvPlantFitActive = false;   // resume block reseeds the PID bumplessly at the applied (base) duty
@@ -2007,8 +2094,8 @@ void cvpfProcess() {
     float dStepPct = cvpfStepDuty - cvpfBaseDuty;
     if (dStepPct < 1.5f) {
       snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
-               "pulse edges unusable — the setup phases learned two nearly identical field levels (%.1f%% / %.1f%%): RPM or load shifted during setup, or output was pinned (RPM %.0f -> %.0f during the test). Hold RPM steady and re-run",
-               cvpfBaseDuty, cvpfStepDuty, cvpfSettleRpm, (float)RPM);
+               "pulse edges unusable — the two field levels came out nearly identical (%.1f%% / %.1f%%) even though they were learned back to back: output was pinned at a floor, a ceiling, or a limiter. Re-run where the alternator has room to move",
+               cvpfBaseDuty, cvpfStepDuty);
       cvpfAbortMsg = cvpfDiagBuf;
     } else if (dIaltMed < 1.0f) {
       snprintf(cvpfDiagBuf, sizeof(cvpfDiagBuf),
@@ -2034,6 +2121,16 @@ void cvpfProcess() {
   if (cvpfSNR < 12.0f) cvpfWarn |= 0x02;                                 // weak signal vs ripple
   if (!noShunt && dIaltMed > 0.5f
       && fabsf(dIaltMed - cvpfDI) / dIaltMed > 0.15f) cvpfWarn |= 0x08;  // alt vs battery step disagree ⇒ a load moved
+  // Engine drift, measured between LIKE operating points only — SETTLE exit vs REBASE exit are both the
+  // base current, seg 0 vs seg 6 are both the base duty. Comparing across the step instead would just
+  // read the test's own load sag. Advisory: the fit divides by measured ΔI and medians 8 edges, so drift
+  // is second-order here; when it does bite it shows up first as dropped edges (bit2).
+  float r0 = cvpfSeg0RpmN ? (float)(cvpfSeg0RpmSum / cvpfSeg0RpmN) : 0.0f;
+  float r6 = cvpfSeg6RpmN ? (float)(cvpfSeg6RpmSum / cvpfSeg6RpmN) : 0.0f;
+  cvpfDriftSetupPct = (cvpfSettleRpm > 100.0f && cvpfRebaseRpm > 0.0f)
+                        ? 100.0f * (cvpfRebaseRpm - cvpfSettleRpm) / cvpfSettleRpm : 0.0f;
+  cvpfDriftTrainPct = (r0 > 100.0f && r6 > 0.0f) ? 100.0f * (r6 - r0) / r0 : 0.0f;
+  if (fabsf(cvpfDriftSetupPct) > 10.0f || fabsf(cvpfDriftTrainPct) > 10.0f) cvpfWarn |= 0x20;
   // display Kp/Ki (mirrors recomputeCvGains; recomputeCvGains is authoritative when the user Applies Ka)
   float vNorm = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;
   float kp = cvAlpha / fmaxf(1e-6f, cvpfKa * vNorm);
@@ -2047,9 +2144,9 @@ void cvpfProcess() {
   cvpfSocAtFit   = (socInfoAvailable && cvpfCondN) ? (float)(cvpfSocSum / cvpfCondN) : -1.0f;  // −1 → SOC untrustworthy, UI blanks it
   cvpfCapHeadroomA = fmaxf(0.0f, g_I_cap - cvpfBaseA);   // how much bigger a step the alternator table allows at this RPM
   cvpfOk = true; cvpfState = 2;
-  queueConsoleMessageF("CV plant-fit: K=%.1f mV/A (median of %d/%d edges) dV=%.0f mV dI=%.2f A SNR=%.0f -> Kp %.1f Ki %.1f warn=%d (%luus)",
+  queueConsoleMessageF("CV plant-fit: K=%.1f mV/A (median of %d/%d edges) dV=%.0f mV dI=%.2f A SNR=%.0f -> Kp %.1f Ki %.1f warn=%d drift setup %+.1f%% train %+.1f%% (%luus)",
                        cvpfKa * 1000.0f, nK, (int)cvpfEdgeCount, cvpfDV * 1000.0f, cvpfDI, cvpfSNR, cvpfKp, cvpfKi, (int)cvpfWarn,
-                       (unsigned long)(micros() - tP));
+                       cvpfDriftSetupPct, cvpfDriftTrainPct, (unsigned long)(micros() - tP));
 }
 
 bool cvpfStartTest(float diMaxReq) {
@@ -2057,14 +2154,14 @@ bool cvpfStartTest(float diMaxReq) {
   if (!cvpfBuf)                 { cvpfAbortMsg = "buffer unallocated";     return false; }
   if (RPM < 100)                { cvpfAbortMsg = "engine not running";     return false; }
   if (sysMode != SYS_MODE_AUTO) { cvpfAbortMsg = "must be in AUTO mode";   return false; }
-  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvStressActive || protTestActive) {
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvStressActive || protTestActive || (altSweepActive != 0)) {
     cvpfAbortMsg = "another test active"; return false;
   }
   cvpfBufCount = 0; cvpfSampleLastMs = 0;
   cvpfPhase = 0;
   cvpfPhaseStartMs = millis(); cvpfTestStartMs = cvpfPhaseStartMs;
   cvpfBaseA = 10.0f; cvpfPilotA = 6.0f; cvpfStepA = 6.0f;
-  cvpfTargetDV = 0.30f; cvpfFellBack = false;  // fixed absolute ΔV probe (sensor-resolution-limited, not per-cell)
+  cvpfTargetDV = 0.30f * cvpfVScale(); cvpfFellBack = false;  // 300 mV per 12V block — ripple-limited SNR, so per-cell (see cvpfVScale)
   cvpfCmdA = cvpfBaseA;
   cvpfDiMaxA = (diMaxReq > CVPF_DI_MAX_DEFAULT) ? fminf(diMaxReq, CVPF_DI_MAX_CEIL) : CVPF_DI_MAX_DEFAULT;
   if (cvpfDiMaxA > CVPF_DI_MAX_DEFAULT)
@@ -2079,12 +2176,15 @@ bool cvpfStartTest(float diMaxReq) {
   cvpfK = cvpfDV = cvpfDI = cvpfSNR = 0.0f; cvpfKp = cvpfKi = 0.0f;
   cvpfRpmSum = cvpfBattVSum = cvpfSocSum = 0.0; cvpfCondN = 0;
   cvpfRpmMinAtFit = cvpfRpmMaxAtFit = 0.0f;
+  cvpfSeg0RpmSum = cvpfSeg6RpmSum = 0.0; cvpfSeg0RpmN = cvpfSeg6RpmN = 0;
+  cvpfSettleRpm = cvpfRebaseRpm = 0.0f; cvpfHoldAmps = 0.0f;
+  cvpfDriftSetupPct = cvpfDriftTrainPct = 0.0f;
   cvpfCcActive = true;
   // Active flag before state=1: cvpfServiceCompletion on Core 1 reads (cvpfState==1 && !active)
   // as run-complete, so state must never be 1 while the active flag is still false.
   cvPlantFitActive = true;
   cvpfState = 1;
-  queueConsoleMessage("CV plant-fit: started (settle -> size -> practice run -> 4 abrupt duty pulses, ~0.6s stiffness read)");
+  queueConsoleMessage("CV plant-fit: started (settle -> size -> practice run -> return to base -> 4 abrupt duty pulses, ~0.6s stiffness read)");
   return true;
 }
 
@@ -2212,7 +2312,7 @@ bool cvStressStartTest() {
   if (cvStressActive)           { cvStressAbortMsg = "already running";      return false; }
   if (RPM < 100)                { cvStressAbortMsg = "engine not running";   return false; }
   if (sysMode != SYS_MODE_AUTO) { cvStressAbortMsg = "must be in AUTO mode"; return false; }
-  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || protTestActive) {
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || protTestActive || (altSweepActive != 0)) {
     cvStressAbortMsg = "another test active"; return false;
   }
   if (millis() - cvsLastEndMs < 2000UL) { cvStressAbortMsg = "cooling down — retry in a moment"; return false; }
@@ -3461,6 +3561,8 @@ void cxLedgerLogCvpf() {
     d += ",\"base_a\":"; cfgAppendNum(d, cvpfBaseA, 1);
     d += ",\"step_a\":"; cfgAppendNum(d, cvpfStepA, 1);
     d += ",\"rpm\":"; cfgAppendNum(d, cvpfRpmAtFit, 0);
+    d += ",\"drift_setup_pct\":"; cfgAppendNum(d, cvpfDriftSetupPct, 1);
+    d += ",\"drift_train_pct\":"; cfgAppendNum(d, cvpfDriftTrainPct, 1);
     d += ",\"batt_v\":"; cfgAppendNum(d, cvpfBattVAtFit, 3);
     d += ",\"soc\":"; cfgAppendNum(d, cvpfSocAtFit, 1);
     d += '}';

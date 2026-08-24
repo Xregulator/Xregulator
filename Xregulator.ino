@@ -971,6 +971,12 @@ int INADisconnected = 0;
 int BMP388Disconnected = 0;
 int WifiHeartBeat = 0;
 static uint32_t stateRevision = 0;  // used for UX in client interface improvement
+// Boot identity stamped into every SSE payload alongside its build-time millis(). A client caches
+// the last payload of each channel; when one channel stops arriving (schema gate rejecting it after
+// an OTA, a dropped reconnect) the cache silently keeps serving pre-flash values. Same sessionId +
+// a sane age proves a cached block belongs to this boot; a mismatch proves it does not. 31 bits so
+// it always fits a signed int on the way through SafeInt-shaped consumers.
+static uint32_t g_sessionId = 0;
 int VeTime = 0;                     // rolling
 int VeTime2 = 0;                    //session
 
@@ -1204,6 +1210,38 @@ float kneeFitA         = 0.0f;                  // fitted intercept a (% duty, t
 float kneeFitC         = 0.0f;                  // fitted slope C (% duty · RPM; onset = a + C/RPM)
 float kneeFitResidPct  = -1.0f;                 // worst-anchor fit residual (% duty), -1 = not fitted
 int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) of the worst residual
+
+// ── Gate-tuning capture: manual session logger + field sweeper ────────────────
+// Measures how much output actually rides on each of the four axes the health record book matches
+// on, so the admission gates can be sized from a measurement instead of from a closed-loop fit the
+// regulator contaminated. Spec: Working Markdown Docs/ALT_GATE_TUNING_CAPTURE_SPEC.md.
+// Implementation lives with the alt-health module in 7_functions.ino; the state is declared here so
+// the /get handlers (3_functions.ino) and the duty-override chain (6_functions.ino) can see it.
+volatile uint8_t altLogState   = 0;   // 0 IDLE, 1 RECORDING, 2 STOPPED, 3 FULL
+uint32_t altLogRows            = 0;   // rows captured this session
+float    altLogSecLeft         = 0;   // countdown: capacity remaining at the fixed 10 Hz rate (s)
+// Every button press is a REQUEST consumed on the control loop (altLogService), never an action
+// taken on the web task: allocation, freeing and the state machine all run on the one task that
+// also writes rows, so a Discard can never free the buffer out from under a row write.
+volatile bool    altLogStartReq = false, altLogStopReq = false, altLogClearReq = false;
+// The sweeper is a stimulus generator, not a test with a result: a continuous duty ramp up and back
+// down under the SAME duty-override path the field curve uses (GOV_BYPASS_SLEW + MANUAL PID). Up-and-
+// down is what cancels the field lag and decorrelates speed sag / case warming from the field axis.
+uint8_t  altSweepActive        = 0;   // 0 idle, 1 ramping up, 2 ramping down, 3 easing out
+volatile bool altSweepRequested = false;      // set by /get?altSweepStart
+volatile bool altSweepAbortRequested = false; // set by /get?altSweepCancel, and by the fast-OV cut
+float    altSweepRatePctS      = 1.0f;        // ramp rate (% duty per second)
+// How far short of a limit the ramp turns around. Panel controls, posted with the start request like
+// rate/from/to — see altSweepLimitNow() in 7_functions.ino for why a margin is needed at all.
+float    altSweepMarginA       = 10.0f;      // amps below every current limit
+float    altSweepMarginV       = 0.15f;      // volts below every voltage limit
+float    altSweepFromPct       = FIELDCURVE_DUTY_START;   // ramp floor (%)
+float    altSweepToPct         = 0.0f;        // ramp ceiling (%); 0 = resolve to the live field ceiling at start
+uint32_t altSweepLastEndMs     = 0;           // cooldown guard, same 2 s rule as the other field tests
+uint32_t altSweepReqMs         = 0;           // millis() of the start request — it expires (see altSweep_tick)
+bool     altSweepLimitRev      = false;       // this sweep turned around early, not at its commanded ceiling
+uint8_t  altSweepRevWhy        = 0;           // 0 not turned early, 1 a control limit, 2 the Reverse now button
+volatile bool altSweepReverseReq = false;     // set by /get?altSweepReverse — turn the up leg around now
 
 // ── Field de-energize time-constant test (runs inside commissioning stage 7) ──
 // Ramps the REAL current loop to the commissioned stabilize level, freezes the duty for a settled
@@ -1757,7 +1795,7 @@ enum GpsSource { GPS_NONE, GPS_NMEA, GPS_PHONE, GPS_MANUAL };
 GpsSource currentGpsSource = GPS_NONE;
 // Which source owns speed/course (SOGNMEA/COGNMEA). Selectable ONLY — phone speed is
 // never an automatic fallback (user decision 2026-08-21): speedSourceMode below picks
-// the owner outright, independent of gpsTimeSourceMode. Never GPS_MANUAL (typed
+// the owner outright, independent of timeSourceMode. Never GPS_MANUAL (typed
 // coordinates carry no speed). Published in CSV2 slot `currentSpeedSource`.
 GpsSource currentSpeedSource = GPS_NMEA;
 
@@ -1767,12 +1805,21 @@ GpsSource currentSpeedSource = GPS_NMEA;
 enum SpeedSourceMode { SPD_SRC_NMEA, SPD_SRC_PHONE };
 uint8_t speedSourceMode = SPD_SRC_NMEA;
 
-// User override for the GPS+time priority chain. Default GTS_AUTO runs the
-// freshness-arbitrated chain. The forced modes pin behaviour even if the
-// chosen source is stale (resolver still shows the value but skips MARK_FRESH,
-// so distance/smoothing know not to use it). Persisted in LittleFS Pattern B.
-enum GpsTimeSourceMode { GTS_AUTO, GTS_NMEA, GTS_PHONE, GTS_NTP };
-uint8_t gpsTimeSourceMode = GTS_AUTO;
+// Position and clock are SEPARATE settings (split 2026-08-24): a position fix is
+// personal data and a clock reading is not, so the owner can accept phone time —
+// the only time source that exists in AP mode — without surrendering position.
+// Default TSRC_AUTO runs the freshness-arbitrated chain. The forced modes pin
+// behaviour even if the chosen source is stale (resolver still shows the value but
+// skips MARK_FRESH, so distance/smoothing know not to use it). Persisted NVS Pattern B.
+enum TimeSourceMode { TSRC_AUTO, TSRC_NMEA, TSRC_PHONE, TSRC_NTP };
+uint8_t timeSourceMode = TSRC_AUTO;
+
+// Owner of latitude/longitude. GPS_SRC_AUTO takes NMEA when fresh and falls back to
+// the phone; GPS_SRC_PHONE pins the phone. No NTP member — NTP carries no position.
+// The client requests location permission ONLY when this is GPS_SRC_PHONE, the phone
+// owns speed, or Defer to Solar is on, so the default install never asks.
+enum GpsPositionSource { GPS_SRC_AUTO, GPS_SRC_NMEA, GPS_SRC_PHONE };
+uint8_t gpsPositionSource = GPS_SRC_AUTO;
 
 struct SensorWindow {
   // Battery voltage
@@ -2447,6 +2494,7 @@ const unsigned long THERMAL_UPDATE_INTERVAL = 10000;  // 10 seconds
 
 float WindingTempOffset = 50.0;  // User configurable winding temp offset (°F)
 uint8_t displayTempUnit = 0;     // 0 = °F, 1 = °C — display preference, no firmware math changes
+uint8_t displayVolUnit = 0;      // 0 = US gallons, 1 = litres — display preference; fuel table stays GPH x100 and the used-fuel totals stay litres
 
 // Console/alarm message formatting only — all control math stays °F-native.
 float dispTempF(float tF) {
@@ -2624,7 +2672,7 @@ uint32_t g_tauReleaseCount = 0;      // episodes where the tau timer elapsed aga
 int bmsLogic = 0;                     // if BMS is asked to turn the alternator on and off
 int bmsLogicLevelOff = 0;             // set to 0 if the BMS gives a low signal (<3V?) when no charging is desired
 bool chargingEnabled;                 // defined from other variables
-bool bmsSignalActive;                 // Read from GPIO34
+bool bmsSignalActive = false;         // Read from GPIO42 (live pin state, published on CSV4 for the Integrations status row)
 int AlarmActivate = 0;                // set to 1 to enable alarm conditions
 int TempAlarm = 190;                  // above this value, sound alarm
 int TempAlarmLow = 32;                // below this value, sound alarm (0 = disabled)
@@ -3198,7 +3246,7 @@ int      cvpfBufCount = 0;
 volatile bool cvPlantFitActive = false;   // master test flag (mutexes, D-term hold-off, idle-rest suppression)
 volatile bool cvpfCcActive = false;       // SETTLE/PILOT/HOLD drive the real current PID (branch in AdjustField); pulses own duty
 volatile uint8_t cvpfState = 0;           // 0 IDLE, 1 RUNNING, 2 DONE-OK, 3 ABORTED
-volatile uint8_t cvpfPhase = 0;           // 0 SETTLE, 1 PILOT/SIZE, 2 HOLD (practice run), 3 PULSES, 4 RELEASE (UI progress)
+volatile uint8_t cvpfPhase = 0;           // 0 SETTLE, 1 PILOT/SIZE, 2 HOLD (practice run), 3 REBASE (back to base, captures the floor duty), 4 PULSES, 5 RELEASE (UI progress)
 volatile bool cvpfReady = false;          // a run finished (ok or not) — poller shows result
 volatile bool cvpfOk    = false;          // fit produced a usable gain
 float    cvpfK        = 0.0f;             // V/A — measured ~0.6 s stiffness (= Ka; flat curve)
@@ -3209,7 +3257,7 @@ float    cvpfDI       = 0.0f;             // A — median per-edge settled curre
 float    cvpfSNR      = 0.0f;
 float    cvpfKp       = 0.0f, cvpfKi = 0.0f;   // display gains (recomputeCvGains is authoritative on Apply)
 float    cvpfHorizonS = 0.6f;             // s — the fixed ~0.6 s edge readout window; cvpfStartTest recomputes from CVPF_EDGE_V0/V1_MS (display only)
-uint8_t  cvpfWarn     = 0;                 // bit0 delivery bit1 SNR bit2 edges-dropped bit3 gap-drift bit4 OV-fallback
+uint8_t  cvpfWarn     = 0;                 // bit0 delivery bit1 SNR bit2 edges-dropped bit3 gap-drift bit4 OV-fallback bit5 engine-speed drift
 const char *cvpfAbortMsg = "";
 // phase-machine internals (init in cvpfStartTest, advanced in cvpf_tick)
 uint32_t cvpfPhaseStartMs = 0, cvpfSampleLastMs = 0, cvpfTestStartMs = 0;
@@ -3230,6 +3278,9 @@ float    cvpfSocAtFit = -1.0f;     // mean SOC% over the two middle pulse segmen
 double   cvpfRpmSum = 0.0, cvpfBattVSum = 0.0, cvpfSocSum = 0.0;   // accumulators, summed over the settled tail of the mid high+low segments
 uint32_t cvpfCondN = 0;            // condition samples accumulated (settled tails of segments 3 & 4 → ~1 s of stable level each)
 float    cvpfCapHeadroomA = 0.0f;  // A — alternator cap-table headroom at fit time (g_I_cap − cvpfBaseA); how much bigger a step the table allows
+float    cvpfRebaseRpm = 0.0f;     // RPM at REBASE exit — same base current as cvpfSettleRpm, so the pair reads drift with load sag cancelled
+float    cvpfDriftSetupPct = 0.0f; // signed % engine drift across setup (SETTLE exit -> REBASE exit, both at base current)
+float    cvpfDriftTrainPct = 0.0f; // signed % engine drift across the pulse train (first vs last base segment, both at base duty)
 
 // ── CV stress test (commissioning stage 8 / standalone from Tuning ▸ Stress Test) ──
 // Throttle-snap acceptance test: with the regulator running NORMALLY at idle (command = RPM
@@ -3901,7 +3952,8 @@ enum FieldEventReason : uint8_t {
   REASON_BATTERY_TOO_COLD,         // board temp (battery proxy) below MinChargeTempF — cold-charge lockout (opt-in, lithium protection)
   REASON_COMMISSION_REST,          // commissioning idle-rest hold between guided steps (not a fault)
   REASON_TACH_IMPLAUSIBLE,         // field driven hard, zero alternator output while tach claims running — open field drive (ON/OFF/wiring/gate-drive), dead alternator, or false RPM (tach noise)
-  REASON_SOLAR_PAUSE               // weather mode is resting the alternator on a strong solar forecast — deliberate, not a fault
+  REASON_SOLAR_PAUSE,              // weather mode is resting the alternator on a strong solar forecast — deliberate, not a fault
+  REASON_BMS_DISABLED              // the BMS on/off input is withholding permission — external command, not a fault
 };
 
 
@@ -3917,6 +3969,7 @@ struct TickSnapshot {
   bool chargingEnabled;
   bool manualMode;
   bool solarForecastPause;   // charging would be on; weather mode alone is holding it off
+  bool bmsBlocking;          // charging would be on; the BMS on/off input alone is holding it off
 
   bool tempDataVeryStale;
   bool ignoreTemperature;
@@ -5341,6 +5394,9 @@ void setup() {
   delay(100);
   Serial.println("\n\n=== SYSTEM STARTUP ===");
 
+  g_sessionId = esp_random() & 0x7FFFFFFFu;  // hardware RNG is up before WiFi; no NVS write per boot
+  Serial.printf("Telemetry session id: %u\n", (unsigned)g_sessionId);
+
   // Move mbedTLS handshake buffers off the fragmenting internal heap into PSRAM (see
   // mbedtlsPsramCalloc above). MUST run before the first TLS handshake (WiFi STA / any cloud call).
   if (mbedtls_platform_set_calloc_free(mbedtlsPsramCalloc, free) != 0) {
@@ -6346,6 +6402,10 @@ void loop() {
       if (gpio4IsLow) { pfHasPrev = false; inaResetIntervalBaseline(); }
       TIMED_CALL(ft_huntGov, runHuntGovernor());  // hunt-detector evaluation (self-gated to every 32 control ticks; never inside the control call)
       TIMED_CALL(ft_altHealth, altHealth_tick(millis()));
+      // Gate-tuning session logger: 10 Hz row writes, plus a per-pass accumulator that averages every
+      // fresh CH1 conversion into the row's raw-amps column. Called every pass (not from the fold) so a
+      // field-off stretch is logged as a field-off stretch instead of as a hole. Idle cost: one compare.
+      altLog_tick(millis());
       TIMED_CALL(ft_boatPerf, boatPerf_tick(millis()));   // Phase 3 boat performance (timing exposed via PerfLive registry)
       if (hardwarePresent == 1) drainIMUFifo();  // skip in fake mode — no hardware means 15ms I2C timeout per call floods the loop
 

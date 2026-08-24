@@ -295,6 +295,12 @@
     <!-- PROTECTIONS DISABLED banner (test-mode override) — reuses .lock-status-locked styling -->
     <div id="protections-banner" class="lock-status-locked" style="display:none;">⚠️ PROTECTIONS DISABLED FOR TUNING — RE-ENABLE BEFORE NORMAL USE ⚠️</div>
 
+    <!-- Charge-limit follow is ON but nothing is clamping (waiting / stale / untrusted). Survives
+         header collapse like the protections banner: a user who believes the BMS is the backstop
+         must not be able to minimize away the fact that it is not. Text set by updateDvccNotice(). -->
+    <div id="dvcc-banner" class="header-notice" style="display:none;"
+      onclick="goToDvccFollow()" title="Open Setup &rarr; Integrations &rarr; Charge-Limit Follow"></div>
+
     <!-- Settings Access — the button arms the firmware's 30-min settings write window
          (no password; LAN clients are trusted, this is an acknowledgment). The button's
          padlock styling is the ONLY locked-state indicator; the whole tier hides once armed. -->
@@ -533,7 +539,7 @@
                   style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin-bottom:10px;">
                   Physical Regulator Installation
                 </summary>
-                <!-- No mounting-alignment check here: the Level Zero button below measures and
+                <!-- No mounting-alignment check here: the Zero Now button below measures and
                      corrects residual mount tilt directly, so a perfectly square install is not
                      required. Gravity-vector "tilt" math can only detect acceleration, never
                      actual mounting angle. -->
@@ -544,7 +550,7 @@
                     Select how the regulator is mounted. Mount the device squarely with wires pointing
                     downward — the built-in accelerometer uses this orientation as its reference so it
                     can report accurate heel, pitch, and passage comfort metrics. (Small residual tilt is
-                    corrected by the Level Zero button below.)
+                    corrected by the Zero Now button below.)
                   </p>
 
                   <div class="pri-orientation-grid">
@@ -667,9 +673,9 @@
 
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Level Zero (<span id="imuZeroStatus_ID">not set</span>):</span>
+                      <span>Level offsets (<span id="imuZeroStatus_ID">none stored</span>):</span>
                       <span class="tooltip">ℹ️
-                        <span class="tooltip-box">With the boat at rest in calm water, press to record level. Corrects small mount tilt and gyro drift. Re-do anytime the device is remounted.</span>
+                        <span class="tooltip-box">Press Zero Now with the boat at rest in calm water. It stores the attitude the regulator is sitting at right now as the level reference — the heel and pitch offsets shown here, plus what the gyros read while still — so heel and pitch then read zero at that attitude. Whatever tilt the device is in at that moment is baked in permanently, so re-do it after any remount. Reading now underneath is the live heel and pitch with those offsets already applied — with the boat level and still, a good capture leaves it sitting near zero.</span>
                       </span>
                     </div>
                     <div class="form-input">
@@ -678,6 +684,7 @@
                            submitSimpleParam handles the /get fetch. -->
                       <button type="button" onclick="startImuZero()" class="btn-primary">Zero Now</button>
                       <button type="button" onclick="submitSimpleParam('ClearIMUZero', 1)" class="btn-secondary">Clear</button>
+                      <small>Reading now: <span id="imuLiveAttitude_ID">&mdash;</span></small>
                     </div>
                   </div>
                 </div>
@@ -1548,6 +1555,23 @@
                 </div>
 
                 <!-- Field Resistance -->
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Min RPM For Field (RPM) (<span id="MinRPMForField_echo">?</span>):</span>
+                    <span class="tooltip">
+                      ℹ️
+                      <span class="tooltip-box">Field is cut immediately when RPM falls below this threshold. Set to 0 to disable — not recommended; to run without a tach use Ignore RPM under Setup → System → Emergency Overrides.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="MinRPMForField" type="number" step="1" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -4083,10 +4107,10 @@
                 </div>
 
                 <hr />
-                <div class="form-row">
+                <div class="form-row" id="huntGovSetupRow">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Oscillation Damper (<span id="HuntGovEnable_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Watches for sustained slow hunting — a steady wobble in field drive, engine speed, and voltage, swinging about once a second, that some engine/alternator/belt combinations develop at low engine speed under heavy load. When it sees one while engine speed is holding steady, it makes a single test cut in the strength of the regulator's response (to the Damped Gain below) and measures the wobble again. If the wobble shrinks by at least the Required Improvement, that engine speed is saved as a trouble spot in a permanent map, and the reduced strength is applied whenever the engine is at that speed from then on — before any wobble appears — tapering back to full strength away from it. A wobble that keeps the fast voltage damper (the D-term) rhythmically switching direction is tested differently: the damper pauses the D-term first, and if that stops the wobble, the D-term alone is switched off across that trouble spot while everything else keeps full strength. If the wobble responds to neither test, the cause is outside the regulator (a cycling load, or the engine's own governor): full strength is restored and no new test runs for the Retest Cooldown. The map survives restarts; the Clear System button under Live Data ▸ Diag ▸ Oscillation Damper erases it, and it clears automatically when the system voltage class changes, engine speed is recalibrated, or the Alternator Health record is reset after a hardware swap. <strong>Off:</strong> full strength always; the map is kept but not applied.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Watches field drive for a slow wobble &mdash; 0.3 to 2&nbsp;Hz &mdash; while engine speed is steady, then tests one lever at a time: a single cut in the current loop's integral gain, or pausing the voltage damper (D-term). A change that measurably shrinks the wobble is kept and mapped to that engine speed. <strong>Off:</strong> full strength always; the learned map is kept but not applied.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4102,11 +4126,15 @@
                   </div>
                 </div>
 
+                <p style="margin:6px 0 0 0;">
+                  <a class="xnav-link" onclick="goToHuntDisplay()">Shortcut to the damper's status, speed map and episode record <span class="xnav-arrow">&rarr;</span></a>
+                </p>
+
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Damped Gain (% of PID Ki) (<span id="HuntCutPct_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">The strength the damper cuts to during a wobble test, and holds across a mapped trouble spot — as a percentage of the PID Ki you set. One large cut makes the pass/fail measurement unambiguous against normal noise. Lower holds the response softer inside trouble spots; higher gives up less response but makes a genuine improvement harder to tell from luck. Repeat episodes widen a trouble spot across speed; they never cut deeper than this.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">The strength the damper cuts to during a test, and holds across a mapped trouble spot, as a percentage of the PID Ki you set. Lower holds the response softer inside trouble spots; higher gives up less response but makes a real improvement harder to tell from luck. Repeat episodes widen a trouble spot across speed; they never cut deeper than this.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4120,7 +4148,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Required Improvement (%) (<span id="HuntVerifyPct_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How much the wobble must shrink — comparing averaged readings before and after the test cut — for the cut to be kept and mapped. Higher demands stronger proof, so fewer false trouble spots but a real one may take more episodes to confirm; lower accepts weaker evidence.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How much the wobble must shrink, before versus after the test cut, for the cut to be kept and mapped. Higher demands stronger proof &mdash; fewer false trouble spots, but a real one may take more episodes to confirm.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4134,7 +4162,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Pocket Edge Taper (% of speed) (<span id="HuntWingPct_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How far beyond each end of a mapped trouble spot the reduced strength tapers back to full, as a percentage of engine speed. Wider covers more of the neighborhood either side of proven wobble speeds; narrower confines the reduction to exactly where wobbles were verified.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How far beyond each end of a mapped trouble spot the reduced strength tapers back to full, as a percentage of engine speed. Wider covers more of the neighborhood either side of proven wobble speeds; narrower confines it to where wobbles were verified.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4148,7 +4176,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Retest Cooldown (min) (<span id="HuntCooldownMin_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How long the damper waits after a failed test before it will test again. A failed test means the wobble did not respond to the gain cut, so its cause is likely external — retesting immediately would only repeat the disturbance.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How long the damper waits after a failed test before testing again. A wobble that did not respond to the gain cut is probably external, so retesting immediately would only repeat the disturbance.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4162,7 +4190,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Speed Steadiness (%) (<span id="HuntSteadyPct_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How steady engine speed must hold, as a percentage of the speed where the wobble was first seen, through detection and the whole test. If speed drifts further than this before the verdict, the test is abandoned with nothing kept — a moving throttle is not hunting. The wobble's own speed ripple rides on a steady average and does not count against it.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How steady engine speed must hold, as a percentage of the speed where the wobble was first seen, through detection and the whole test. Drift beyond this abandons the test with nothing kept &mdash; a moving throttle is not hunting. The wobble's own speed ripple rides on a steady average and does not count against it.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4176,7 +4204,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Detection Confirm Scans (<span id="HuntQualifyScans_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How many consecutive detector scans — one every 1.6 seconds — must agree that a wobble is present, at a steady engine speed, before a test opens. Their average becomes the before-measurement the verdict is judged against. More scans means slower but surer detection; fewer means faster response with more risk of testing a passing disturbance. The 6.4-second analysis window each scan measures over is fixed — it is the minimum length that can resolve the slowest wobble frequency.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How many consecutive detector scans &mdash; one every 1.6 seconds &mdash; must agree a wobble is present, at steady engine speed, before a test opens. Their average becomes the before-measurement the verdict is judged against. More scans is slower but surer; fewer risks testing a passing disturbance.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4190,7 +4218,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Detection Amplitude (<span id="HuntTrigPct_echo">?</span>%):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How big the rhythmic swing in field drive has to be before a scan counts it as a wobble, measured as the percent of field duty moving at the wobble's own frequency. Below this the scan is ignored no matter how rhythmic it looks. Lower it if the regulator is visibly surging but the damper never reacts; raise it if tests keep opening on disturbances that are not hunting. There is no upper limit, and no lower limit worth naming — the same physical wobble moves roughly a quarter as much duty on a 48-volt bank as on a 12-volt one, so the useful value belongs to the installation. The separate requirement that the wobble stand well above the other frequency slots is what keeps broadband noise out, and it applies whatever this is set to.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">How big the rhythmic swing in field drive must be before a scan counts it as a wobble, as the percent of field duty moving at the wobble's own frequency. Lower it if the regulator is visibly surging but the damper never reacts; raise it if tests keep opening on disturbances that are not hunting. The same physical wobble moves roughly a quarter as much duty on a 48&nbsp;V bank as on a 12&nbsp;V one, so the useful value belongs to the installation.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5997,330 +6025,22 @@
           </div>
 
           <div class="checkpoint-param" data-checkpoints="c3">
-            <div class="checkpoint-param-chips"><span class="checkpoint-tag c3">C3</span> <span class="checkpoint-param-title">Charging System Health — Gates &amp; Tuning</span></div>
+            <div class="checkpoint-param-chips"><span class="checkpoint-tag c3">C3</span> <span class="checkpoint-param-title">Charging System Health &mdash; Gates &amp; Tuning</span></div>
             <div class="settings-card">
-<!-- Alternator Health — Steady-State Tuning (settings) -->
-              <div class="tuning-section">
-                <div style="font-size:12px;color:var(--text-muted);margin:6px 0;">
-                  All steady-state definitions are tunable (build it, then tune live). Values echo live.
-                </div>
-                <p class="card-group-title" style="margin:12px 0 4px;">Steady-State Detection</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How stable a reading must hold, and for how long, before a point is recordable. Bands are judged on smoothed signals (see the smoothing filter below), so size them for real operating-point movement, not sensor noise.</div>
-                <div class="form-row">
-                  <div class="form-label"><span>RPM band (RPM) (<span id="altRpmTol_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandRpm"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altRpmTol" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>RPM steady time (s) (<span id="altRpmSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandRpm"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altRpmSec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Field-duty band (%) (<span id="altDutyTolPct_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandDuty"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altDutyTolPct" type="number" step="0.1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Field-duty steady time (s) (<span id="altDutySec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandDuty"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altDutySec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Bus-voltage band (V) (<span id="altVbusTol_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandVbus"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altVbusTol" type="number" step="0.001" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Bus-voltage steady time (s) (<span id="altVbusSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandVbus"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altVbusSec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Temperature band (<span class="temp-unit-label">°F</span>) (<span id="altThermDegF_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandTemp"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'altThermDegF',true)">
-                      <input name="altThermDegF" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Temperature steady time, full (s) (<span id="altThermSec_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How long alternator temperature must hold steady before a run counts as a full steady run — the points that get the orange ring and that update the reference surface and the engine-hours trend. The This Session plot automatically uses half this time for its lighter "brief point" gate, so there is only one number to set.</span></span>
-                    <span class="sinfo" data-sinfo="altBandTemp"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altThermSec" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Trend bucket length (s) (<span id="altTrendBuckSec_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Engine-seconds per point on the % vs Engine-Hours trend. 3600 = one point per engine-hour (production). Set 600 to see points fill in every 10 minutes for testing.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altTrendBuckSec" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Trend sample spacing (s) (<span id="altTrendFeedSec_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Minimum spacing between full steady-run samples that feed a trend bucket. Throttles a long steady run so it contributes several spread-out samples rather than a flood.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altTrendFeedSec" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Trend min samples per bucket (<span id="altTrendMinSamp_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">A trend bucket needs at least this many full steady-run samples before it commits a point. A sparser bucket shows a gap instead of a single-reading artifact.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altTrendMinSamp" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Output-amps band (% of reading) (<span id="altAmpsTolPct_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">The alternator output itself must also hold steady before a point is recorded. The band scales with the reading so one setting works at low float current and full bulk current; the floor below takes over at low output.</span></span>
-                    <span class="sinfo" data-sinfo="altBandAmps"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altAmpsTolPct" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Output-amps band floor (A) (<span id="altAmpsFloorA_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandAmps"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altAmpsFloorA" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Output-amps steady time (s) (<span id="altAmpsSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altBandAmps"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altAmpsSec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Signal smoothing filter (s) (<span id="altEmaSec_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Strips control-loop dither and sensor jitter so the bands above can stay tight enough to reject real transients. 0 = off. Heavier than about 1 second starts hiding real movement.</span></span>
-                    <span class="sinfo" data-sinfo="altEmaSec"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altEmaSec" type="number" step="0.1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Minimum steady-run length (s) (<span id="altMinRunSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altMinRun"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altMinRunSec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <p class="card-group-title" style="margin:12px 0 4px;">Point Admission</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Minimum output before a steady point is admitted at all.</div>
-                <div class="form-row">
-                  <div class="form-label"><span>Admission: min amps (A) (<span id="altMinAmps_echo">?</span>):</span><span class="sinfo" data-sinfo="altAdmit"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altMinAmps" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Admission: min duty (%) (<span id="altMinDuty_echo">?</span>):</span><span class="sinfo" data-sinfo="altAdmit"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altMinDuty" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <p class="card-group-title" style="margin:12px 0 4px;">Curve Fitting</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How the best-ever surface is built from recorded points.</div>
-                <div class="form-row">
-                  <div class="form-label"><span>Safety margin (A) (<span id="altSafetyMargin_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altSafetyMargin" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Interpolation power (IDW) (<span id="altIdwPower_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altIdwPower" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Reference validity radius (<span id="altRefRadius_echo">?</span>):</span>
-                    <span class="sinfo" data-sinfo="altFit"></span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How close (in normalized axis units) the nearest recorded point must be for the health % to be trusted. Operating farther than this from all recorded points shows "no reference" instead of comparing against a guess, and the trend skips those readings. Larger = more coverage from sparse data, less honest far from support.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altRefRadius" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Prune neighbors (k, cloud) (<span id="altPruneK_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altPruneK" type="number" step="1" min="5" max="20" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Local fit stiffness (<span id="altRidgeFrac_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How strongly the local trend fit (the one-per-second health comparison) is held flat when the recorded points around the live point line up poorly. Higher = steadier but less responsive to real local slope; lower = follows the records more exactly but can wobble where data is thin. Default 0.10.</span></span>
-                    <span class="sinfo" data-sinfo="altFit"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altRidgeFrac" type="number" step="0.05" min="0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Learning-state risk threshold (<span id="altRiskThresh_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">How much could-be-wrong (as a fraction of the predicted output) is tolerated before the panel says "Learning this operating region" instead of showing a %. Raise to show numbers in more places at the cost of less trustworthy ones; lower to be stricter. Default 0.15 — values 0.10–0.20 classified the validation data identically.</span></span>
-                    <span class="sinfo" data-sinfo="altFit"></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altRiskThresh" type="number" step="0.05" min="0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <p class="card-group-title" style="margin:12px 0 4px;">High-Field Alert</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Independent safety net: flags low output despite high field drive, even where the health gauge is still learning.</div>
-                <div class="form-row">
-                  <div class="form-label"><span>Alert: field drive at least (% of Max Field) (<span id="altHiFieldPct_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altHiFieldPct" type="number" step="5" min="0" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Alert: output at or below (A) (<span id="altLowOutAmps_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altLowOutAmps" type="number" step="1" min="0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Alert: must persist (s) (<span id="altHiFieldSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField"></span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="altHiFieldSec" type="number" step="5" min="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <p class="card-group-title" style="margin:12px 0 4px;">Reference &amp; Data</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Choose which reference to grade against, pause or continue learning, back it up, simulate, or reset.</div>
+<!-- Alternator Health — Steady-State Tuning (settings). Groups collapse; the five steadiness
+     signals are one table (blank cells would post as 0, so dropEmpty guards every group form). -->
+              <div style="font-size:12px;color:var(--text-muted);margin:6px 0;">
+                All steady-state definitions are tunable (build it, then tune live). Values echo live.
+              </div>
+              <p style="margin:6px 0 10px;">
+                <a class="xnav-link" onclick="goToAltHealthDisplay()">Shortcut to the health gauge, session plot and trend <span class="xnav-arrow">&rarr;</span></a>
+              </p>
+              <details class="tuning-section" open>
+                <summary class="tuning-section-title">Reference &amp; Learning Mode</summary>
                 <div class="form-row">
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Reference source (<span id="alt-mode-label">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Which reference surface grades the live % and the trend. "My History" is what this device learned. "Uploaded File" is a borrowed surface from Load CSV — selecting it defaults Pause ON, but you can Continue to keep learning My History while graded against the uploaded one. Learning never modifies an uploaded surface.</span></span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Which reference surface grades the live % and the trend. "My History" is what this device learned. "Uploaded File" is a borrowed surface from Load CSV &mdash; selecting it defaults Pause ON, but you can Continue to keep learning My History while graded against the uploaded one. Learning never modifies an uploaded surface.</span></span>
                   </div>
                   <div class="form-input">
                     <div class="cap-mode-toggle">
@@ -6333,7 +6053,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Learning</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Pause / Continue learning into My History. Independent of the reference source — you can pause learning and still grade against either surface. Live display and the trend keep updating either way.</span></span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Pause / Continue learning into My History. Independent of the reference source &mdash; you can pause learning and still grade against either surface. Live display and the trend keep updating either way.</span></span>
                   </div>
                   <div class="form-input">
                     <div class="cap-mode-toggle">
@@ -6346,7 +6066,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Simulator</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Injects synthetic operating points for bench testing without a running engine, so the curve fills and the health trend visibly declines. Leave off for real use; simulated data is not saved.</span></span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Injects synthetic operating points for bench testing without a running engine, so the curve fills and the health trend visibly declines. Leave off for real use; simulated data is not saved.</span></span>
                   </div>
                   <div class="form-input">
                     <div class="cap-mode-toggle">
@@ -6355,21 +6075,241 @@
                     </div>
                   </div>
                 </div>
+              </details>
+              <details class="tuning-section" open>
+                <summary class="tuning-section-title">Steady-State Detection</summary>
+                <form action="/get" method="GET" target="hidden-form" onsubmit="return dropEmpty(this)">
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Signal smoothing filter (s) (<span id="altEmaSec_echo">?</span>):</span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Strips control-loop dither and sensor jitter so the bands below can stay tight enough to reject real transients. 0 = off. Heavier than about 1 second starts hiding real movement.</span></span><span class="sinfo" data-sinfo="altEmaSec"></span></div>
+                  <div class="form-input"><input name="altEmaSec" type="number" step="0.1" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Minimum steady-run length (s) (<span id="altMinRunSec_echo">?</span>):</span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How long an admitted steady stretch must last before it is banked as a run. Applies after every signal in the table below has settled.</span></span><span class="sinfo" data-sinfo="altMinRun"></span></div>
+                  <div class="form-input"><input name="altMinRunSec" type="number" step="0.5" /></div>
+                </div>
+                  <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+                    <input onclick="submitMessage()" type="submit" value="Save" class="btn-primary" />
+                  </div>
+                </form>
+                <p class="card-group-title" style="margin:16px 0 8px;">Per-signal bands</p>
+                <form action="/get" method="GET" target="hidden-form"
+                      onsubmit="return dropEmpty(this) &amp;&amp; convertTempFormIfNeeded(this,'altThermDegF',true)">
+                  <table class="learning-table c3-band-table">
+                    <thead>
+                      <tr>
+                        <th style="width:30%;">Signal</th>
+                        <th style="width:24%;">Band <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How far the reading may move and still count as steady. Judged on the smoothed signal, so size it for real operating-point movement, not sensor noise.</span></span></th>
+                        <th style="width:20%;">Floor <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Output amps only: its band is a percentage of the reading, so at low output it would collapse to nothing. This is the smallest band it may shrink to.</span></span></th>
+                        <th style="width:26%;">Steady for (s) <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How long the reading must stay inside its band before that signal counts as settled. All five must be settled at once.</span></span></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr><td class="c3-signal">Engine speed <span class="sinfo" data-sinfo="altBandRpm"></span><div class="c3-unit">RPM</div></td><td data-ss-label="RPM band (RPM)"><input name="altRpmTol" data-echo="altRpmTol" type="number" step="1" style="width:100%" /><span id="altRpmTol_echo" style="display:none">?</span></td><td class="c3-na">&mdash;</td><td data-ss-label="RPM steady time (s)"><input name="altRpmSec" data-echo="altRpmSec" type="number" step="0.5" style="width:100%" /><span id="altRpmSec_echo" style="display:none">?</span></td></tr>
+                      <tr><td class="c3-signal">Field duty <span class="sinfo" data-sinfo="altBandDuty"></span><div class="c3-unit">%</div></td><td data-ss-label="Field-duty band (%)"><input name="altDutyTolPct" data-echo="altDutyTolPct" type="number" step="0.1" style="width:100%" /><span id="altDutyTolPct_echo" style="display:none">?</span></td><td class="c3-na">&mdash;</td><td data-ss-label="Field-duty steady time (s)"><input name="altDutySec" data-echo="altDutySec" type="number" step="0.5" style="width:100%" /><span id="altDutySec_echo" style="display:none">?</span></td></tr>
+                      <tr><td class="c3-signal">Bus voltage <span class="sinfo" data-sinfo="altBandVbus"></span><div class="c3-unit">V</div></td><td data-ss-label="Bus-voltage band (V)"><input name="altVbusTol" data-echo="altVbusTol" type="number" step="0.001" style="width:100%" /><span id="altVbusTol_echo" style="display:none">?</span></td><td class="c3-na">&mdash;</td><td data-ss-label="Bus-voltage steady time (s)"><input name="altVbusSec" data-echo="altVbusSec" type="number" step="0.5" style="width:100%" /><span id="altVbusSec_echo" style="display:none">?</span></td></tr>
+                      <tr><td class="c3-signal">Temperature <span class="sinfo" data-sinfo="altBandTemp"></span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How long alternator temperature must hold steady before a run counts as a full steady run &mdash; the points that get the orange ring and that update the reference surface and the engine-hours trend. The This Session plot automatically uses half this time for its lighter "brief point" gate, so there is only one number to set.</span></span><div class="c3-unit"><span class="temp-unit-label">&deg;F</span></div></td><td data-ss-label="Temperature band"><input name="altThermDegF" data-echo="altThermDegF" type="number" step="0.5" style="width:100%" /><span id="altThermDegF_echo" style="display:none">?</span></td><td class="c3-na">&mdash;</td><td data-ss-label="Temperature steady time, full (s)"><input name="altThermSec" data-echo="altThermSec" type="number" step="1" style="width:100%" /><span id="altThermSec_echo" style="display:none">?</span></td></tr>
+                      <tr><td class="c3-signal">Output amps <span class="sinfo" data-sinfo="altBandAmps"></span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The alternator output itself must also hold steady before a point is recorded. The band scales with the reading so one setting works at low float current and full bulk current; the floor takes over at low output.</span></span><div class="c3-unit">% of reading</div></td><td data-ss-label="Output-amps band (% of reading)"><input name="altAmpsTolPct" data-echo="altAmpsTolPct" type="number" step="0.5" style="width:100%" /><span id="altAmpsTolPct_echo" style="display:none">?</span></td><td data-ss-label="Output-amps band floor (A)"><input name="altAmpsFloorA" data-echo="altAmpsFloorA" type="number" step="0.5" style="width:100%" /><span id="altAmpsFloorA_echo" style="display:none">?</span></td><td data-ss-label="Output-amps steady time (s)"><input name="altAmpsSec" data-echo="altAmpsSec" type="number" step="0.5" style="width:100%" /><span id="altAmpsSec_echo" style="display:none">?</span></td></tr>
+                    </tbody>
+                  </table>
+                  <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+                    <input onclick="submitMessage()" type="submit" value="Save bands" class="btn-primary" />
+                  </div>
+                </form>
+              </details>
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Engine-Hours Trend</summary>
+                <form action="/get" method="GET" target="hidden-form" onsubmit="return dropEmpty(this)">
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Trend bucket length (s) (<span id="altTrendBuckSec_echo">?</span>):</span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Nothing in this group changes whether a point is recorded &mdash; only how the trend buckets the points that were. Engine-seconds per point on the % vs Engine-Hours trend. 3600 = one point per engine-hour (production). Set 600 to see points fill in every 10 minutes for testing.</span></span></div>
+                  <div class="form-input"><input name="altTrendBuckSec" type="number" step="1" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Trend sample spacing (s) (<span id="altTrendFeedSec_echo">?</span>):</span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Minimum spacing between full steady-run samples that feed a trend bucket. Throttles a long steady run so it contributes several spread-out samples rather than a flood.</span></span></div>
+                  <div class="form-input"><input name="altTrendFeedSec" type="number" step="1" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Trend min samples per bucket (<span id="altTrendMinSamp_echo">?</span>):</span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">A trend bucket needs at least this many full steady-run samples before it commits a point. A sparser bucket shows a gap instead of a single-reading artifact.</span></span></div>
+                  <div class="form-input"><input name="altTrendMinSamp" type="number" step="1" /></div>
+                </div>
+                  <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+                    <input onclick="submitMessage()" type="submit" value="Save" class="btn-primary" />
+                  </div>
+                </form>
+              </details>
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Point Admission</summary>
+                <form action="/get" method="GET" target="hidden-form" onsubmit="return dropEmpty(this)">
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Admission: min amps (A) (<span id="altMinAmps_echo">?</span>):</span><span class="sinfo" data-sinfo="altAdmit"></span></div>
+                  <div class="form-input"><input name="altMinAmps" type="number" step="0.5" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Admission: min duty (%) (<span id="altMinDuty_echo">?</span>):</span><span class="sinfo" data-sinfo="altAdmit"></span></div>
+                  <div class="form-input"><input name="altMinDuty" type="number" step="0.5" /></div>
+                </div>
+                  <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+                    <input onclick="submitMessage()" type="submit" value="Save" class="btn-primary" />
+                  </div>
+                </form>
+              </details>
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Curve Fitting</summary>
+                <form action="/get" method="GET" target="hidden-form" onsubmit="return dropEmpty(this)">
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Safety margin (A) (<span id="altSafetyMargin_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit"></span></div>
+                  <div class="form-input"><input name="altSafetyMargin" type="number" step="0.5" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Interpolation power (IDW) (<span id="altIdwPower_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit"></span></div>
+                  <div class="form-input"><input name="altIdwPower" type="number" step="0.5" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Reference validity radius (<span id="altRefRadius_echo">?</span>):</span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How close (in normalized axis units) the nearest recorded point must be for the health % to be trusted. Operating farther than this from all recorded points shows "no reference" instead of comparing against a guess, and the trend skips those readings. Larger = more coverage from sparse data, less honest far from support.</span></span><span class="sinfo" data-sinfo="altFit"></span></div>
+                  <div class="form-input"><input name="altRefRadius" type="number" step="0.5" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Prune neighbors (k, cloud) (<span id="altPruneK_echo">?</span>):</span><span class="sinfo" data-sinfo="altFit"></span></div>
+                  <div class="form-input"><input name="altPruneK" type="number" step="1" min="5" max="20" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Local fit stiffness (<span id="altRidgeFrac_echo">?</span>):</span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How strongly the local trend fit (the one-per-second health comparison) is held flat when the recorded points around the live point line up poorly. Higher = steadier but less responsive to real local slope; lower = follows the records more exactly but can wobble where data is thin. Default 0.10.</span></span><span class="sinfo" data-sinfo="altFit"></span></div>
+                  <div class="form-input"><input name="altRidgeFrac" type="number" step="0.05" min="0" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Learning-state risk threshold (<span id="altRiskThresh_echo">?</span>):</span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How much could-be-wrong (as a fraction of the predicted output) is tolerated before the panel says "Learning this operating region" instead of showing a %. Raise to show numbers in more places at the cost of less trustworthy ones; lower to be stricter. Default 0.15 &mdash; values 0.10&ndash;0.20 classified the validation data identically.</span></span><span class="sinfo" data-sinfo="altFit"></span></div>
+                  <div class="form-input"><input name="altRiskThresh" type="number" step="0.05" min="0" /></div>
+                </div>
+                  <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+                    <input onclick="submitMessage()" type="submit" value="Save" class="btn-primary" />
+                  </div>
+                </form>
+              </details>
+              <details class="tuning-section">
+                <summary class="tuning-section-title">High-Field Alert</summary>
+                <form action="/get" method="GET" target="hidden-form" onsubmit="return dropEmpty(this)">
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Alert: field drive at least (% of Max Field) (<span id="altHiFieldPct_echo">?</span>):</span><span class="tooltip">&#8505;&#65039;<span class="tooltip-box">An independent safety net: it flags low output despite high field drive even where the health gauge is still learning and has no % to show.</span></span><span class="sinfo" data-sinfo="altHiField"></span></div>
+                  <div class="form-input"><input name="altHiFieldPct" type="number" step="5" min="0" max="100" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Alert: output at or below (A) (<span id="altLowOutAmps_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField"></span></div>
+                  <div class="form-input"><input name="altLowOutAmps" type="number" step="1" min="0" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;"><span>Alert: must persist (s) (<span id="altHiFieldSec_echo">?</span>):</span><span class="sinfo" data-sinfo="altHiField"></span></div>
+                  <div class="form-input"><input name="altHiFieldSec" type="number" step="5" min="1" /></div>
+                </div>
+                  <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+                    <input onclick="submitMessage()" type="submit" value="Save" class="btn-primary" />
+                  </div>
+                </form>
+              </details>
+              <details class="tuning-section" ontoggle="if(this.open) altCapSafetyOnPanelOpen();">
+                <summary class="tuning-section-title">Gate Tuning Capture</summary>
+                <div class="form-row">
+                  <div class="form-label">Safety
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The field sweeper drives the field directly, which switches out most of the regulator &mdash; the soft over-voltage clamps, the temperature loop, every current and voltage limit. Read this before running one. Recording on its own removes nothing.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <input type="button" value="What is NOT protected" class="btn-danger" onclick="altCapSafetyOpen()" />
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label">Recorder (<span id="altlog-state">idle</span>):
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">192 KB of memory is claimed when you press Record and released when you dump or discard, so it costs nothing the rest of the time. The buffer holds 19.3 minutes and never wraps: at capacity it stops and keeps every row, rather than quietly eating the beginning of a deliberate capture. A warning lands in the console with one minute left. A recording is fluid: press Record, then do whatever you like &mdash; a sweep, your own throttle, or just driving. The rows carry flag columns for all of it, so the file splits offline on what actually happened rather than on anything you had to press.</span></span>
+                    <span id="altlog-countdown" style="display:block;font-size:0.85em;opacity:0.75;font-weight:normal;margin-top:2px;font-variant-numeric:tabular-nums;">&mdash;</span>
+                  </div>
+                  <div class="form-input" style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <input type="button" id="altlog-record-btn" value="Record" class="btn-primary" onclick="altLogRecordPress()" />
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label">Field sweeper (<span id="altsweep-state">idle</span>):
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Ramps the field up and back down at a fixed rate, holding nothing else, so field moves independently of engine speed. Up and back down is what cancels the field's lag and separates the two things that drift one way through a sweep &mdash; engine speed sagging under load, and the case warming &mdash; from the field itself. It stands on its own: run it whenever you want to see what the machine does against field, with or without a recording running. Reverse now sends the up leg back down immediately, for anything the limit tests cannot see. AUTO mode only.</span></span>
+                    <span id="altsweep-note" style="display:block;font-size:0.85em;opacity:0.75;font-weight:normal;margin-top:2px;">turns around short of the first limit it approaches, and comes back down at the same rate</span>
+                  </div>
+                  <div class="form-input" style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <input type="button" id="altsweep-btn" value="Start sweep" class="btn-primary" onclick="altSweepPress()" />
+                    <input type="button" id="altsweep-rev-btn" value="Reverse now" class="btn-secondary" onclick="altSweepReversePress()" />
+                  </div>
+                </div>
                 <hr>
                 <div class="form-row">
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Reset / Start Over</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Clears the learned reference surface (My History), the entire % vs Engine-Hours trend (committed buckets AND the current partial hour), and the session stats, then restarts the engine-hour axis at zero and reverts the reference source to My History. Your tuning settings are kept. Do this after replacing the alternator, regulator, or drive belt. Cannot be undone.</span></span>
+                    <span>Sweep rate (% field per second):</span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Slower is more accurate and takes longer: the output lags the command by roughly the rate times the field time constant, and averaging the up and down legs cancels that lag only to the extent it is symmetric. 1 %/s over a 60-point span is about two minutes for the pair.</span></span>
                   </div>
-                  <div class="form-input">
-                    <input type="button" value="Reset / Start Over" class="btn-danger"
-                      onclick="if(!settingsUnlocked){xAlert('Please unlock settings first');return;} xConfirm('Clear My History, the whole % vs Engine-Hours trend (including the current partial hour) and the session stats, restart the engine-hour axis at 0, and revert the source to My History? Tuning settings are kept. Do this after replacing the alternator, regulator, or belt. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}})" />
+                  <div class="form-input"><input id="altsweep-rate" type="number" step="0.1" min="0.1" max="10" value="1.0" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Sweep up from (% field):</span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Where the up leg starts, and where the down leg ends. Set it below the onset knee so the sweep captures the region where output begins to build.</span></span>
+                  </div>
+                  <div class="form-input"><input id="altsweep-from" type="number" step="1" min="0" max="99" value="5" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Sweep up to (% field):</span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Where the up leg stops climbing and turns around. Capped at Max Field %, and it starts there. In practice the sweep usually turns around well before it, short of whichever current or voltage limit the machine approaches first.</span></span>
+                  </div>
+                  <div class="form-input"><input id="altsweep-to" type="number" step="1" min="1" max="99" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Turn around this far below a current limit (A):</span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Applies to the current cap for your engine speed, the battery current limit and a BMS current limit. The sweeper needs room because the layers that normally hold output off a limit are switched off while it runs, and the field is still building behind the ramp when it gets there. Never takes more than a quarter of the limit it is guarding, so a small cap at idle still leaves a usable sweep. 0 turns around on the limit itself.</span></span>
+                  </div>
+                  <div class="form-input"><input id="altsweep-margin-a" type="number" step="1" min="0" max="100" value="10" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Turn around this far below a voltage limit (V):</span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Applies to the charge-voltage target and a BMS voltage limit. Same reason as the current margin: nothing is holding the bus off the target during a sweep, so arriving exactly on it is how a run ends in an over-voltage cut &mdash; which throws away the down leg the measurement depends on. 0 turns around on the limit itself.</span></span>
+                  </div>
+                  <div class="form-input"><input id="altsweep-margin-v" type="number" step="0.01" min="0" max="2" value="0.15" /></div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label">Captured session
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Dump converts the recording to a CSV file with a header naming every gate setting that shaped it, hands it to you, and then frees the buffer. Do it after each run and press Record again &mdash; the campaign never has to fit in memory.</span></span>
+                  </div>
+                  <div class="form-input" style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <input type="button" id="altlog-dump-btn" value="Dump to file" class="btn-primary" onclick="altLogDumpPress()" />
+                    <input type="button" id="altlog-discard-btn" value="Discard" class="btn-danger" onclick="altLogDiscardPress()" />
                   </div>
                 </div>
-              </div><!-- END Alternator Health Tuning -->
+              </details>
+              <hr style="margin:14px 0 10px;">
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Reset / Start Over</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Clears the learned reference surface (My History), the entire % vs Engine-Hours trend (committed buckets AND the current partial hour), and the session stats, then restarts the engine-hour axis at zero and reverts the reference source to My History. Your tuning settings are kept. Do this after replacing the alternator, regulator, or drive belt. Cannot be undone.</span></span>
+                </div>
+                <div class="form-input">
+                  <input type="button" value="Reset / Start Over" class="btn-danger"
+                    onclick="if(!settingsUnlocked){xAlert('Please unlock settings first');return;} xConfirm('Clear My History, the whole % vs Engine-Hours trend (including the current partial hour) and the session stats, restart the engine-hour axis at 0, and revert the source to My History? Tuning settings are kept. Do this after replacing the alternator, regulator, or belt. This cannot be undone.').then(ok=>{if(ok){fetchWithTimeout(buildURL('/get?ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}})" />
+                </div>
+              </div>
             </div>
           </div>
-
           <div class="checkpoint-param" data-checkpoints="c4">
             <div class="checkpoint-param-chips"><span class="checkpoint-tag c4">C4</span></div>
 <div class="settings-card">
@@ -6496,6 +6436,94 @@
                 </div>
               </div>
             </details>
+
+          </div>
+
+          <!-- Fuel burn breakpoints. Firmware interpolates straight between the points and holds
+               the first/last value flat past the ends (fuelRate_GPH in 5_functions.ino), which is
+               exactly what drawFuelCurve() draws underneath. -->
+          <div class="settings-card">
+
+            <p class="card-group-title"><span>Fuel Consumption</span>
+              <span class="tooltip">ℹ️<span class="tooltip-box">Fuel burn rate at each engine speed. The regulator reads straight between the points you enter, and holds the first and last value flat beyond the ends of the table. Ten points maximum; leave trailing rows at zero to use fewer.</span></span>
+            </p>
+
+            <form action="/get" method="GET" target="hidden-form" id="fuel-table-form">
+              <div class="learning-table-container fuel-table-container">
+
+                <table class="learning-table fuel-table">
+                  <thead>
+                    <tr>
+                      <th>Engine Speed<span class="fuel-th-unit">RPM</span>
+                        <span class="tooltip">ℹ️<span class="tooltip-box">Engine speed breakpoint. Values must increase down the column. Leave trailing rows at 0 to use fewer than ten points.</span></span>
+                      </th>
+                      <th>Fuel Burn<span class="fuel-th-unit fuelflow-unit-label">gal/hr</span>
+                        <span class="tooltip">ℹ️<span class="tooltip-box">Burn rate at that engine speed. Measure it, or take it from the engine manufacturer's fuel curve.</span></span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody id="fuel-table-body">
+                    <tr class="fuel-table-row" id="fuelRow0">
+                      <td><input id="fuelTableRPM0_input" name="fuelTableRPM0" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH0_input" name="fuelTableGPH0" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                    <tr class="fuel-table-row" id="fuelRow1">
+                      <td><input id="fuelTableRPM1_input" name="fuelTableRPM1" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH1_input" name="fuelTableGPH1" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                    <tr class="fuel-table-row" id="fuelRow2">
+                      <td><input id="fuelTableRPM2_input" name="fuelTableRPM2" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH2_input" name="fuelTableGPH2" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                    <tr class="fuel-table-row" id="fuelRow3">
+                      <td><input id="fuelTableRPM3_input" name="fuelTableRPM3" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH3_input" name="fuelTableGPH3" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                    <tr class="fuel-table-row" id="fuelRow4">
+                      <td><input id="fuelTableRPM4_input" name="fuelTableRPM4" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH4_input" name="fuelTableGPH4" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                    <tr class="fuel-table-row" id="fuelRow5">
+                      <td><input id="fuelTableRPM5_input" name="fuelTableRPM5" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH5_input" name="fuelTableGPH5" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                    <tr class="fuel-table-row" id="fuelRow6">
+                      <td><input id="fuelTableRPM6_input" name="fuelTableRPM6" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH6_input" name="fuelTableGPH6" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                    <tr class="fuel-table-row" id="fuelRow7">
+                      <td><input id="fuelTableRPM7_input" name="fuelTableRPM7" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH7_input" name="fuelTableGPH7" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                    <tr class="fuel-table-row" id="fuelRow8">
+                      <td><input id="fuelTableRPM8_input" name="fuelTableRPM8" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH8_input" name="fuelTableGPH8" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                    <tr class="fuel-table-row" id="fuelRow9">
+                      <td><input id="fuelTableRPM9_input" name="fuelTableRPM9" type="number" min="0" max="10000" step="1"></td>
+                      <td><input id="fuelTableGPH9_input" name="fuelTableGPH9" type="number" min="0" max="200" step="0.01"></td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <div class="fuel-curve-wrap">
+                  <svg id="fuelCurveSvg" viewBox="0 0 320 110"></svg>
+                  <p class="fuel-curve-cap">Burn curve (<span class="fuelflow-unit-label">gal/hr</span>) as the regulator will read it</p>
+                </div>
+
+              </div>
+
+              <div style="margin-top: 12px; text-align: center;">
+                <span id="fuel-table-status" class="table-save-status" style="display: none;"></span>
+                <input type="submit" value="Save" id="fuel-table-save-button"
+                  onclick="return validateFuelTable() && submitMessage.call(this)" class="btn-primary">
+              </div>
+
+              <p style="margin-top: 12px; font-size: 12px; color: var(--text-muted); text-align: center; line-height: 1.5;">
+                Used to estimate fuel burned from engine RPM. Totals appear in
+                <strong>Cloud Features &rarr; Statistics</strong>.
+              </p>
+            </form>
 
           </div>
         </div>
@@ -7126,7 +7154,7 @@
                         <tr><td style="text-align:left;">300 A</td><td>333</td><td>0.333</td></tr>
                         <tr><td style="text-align:left;">500 A</td><td>200</td><td>0.2</td></tr>
                         <tr><td style="text-align:left;">1000 A</td><td>100</td><td>0.1</td></tr>
-                      </table></span></span>
+                      </table></span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -7137,45 +7165,6 @@
                 </div>
               </div>
 
-            </details>
-
-            <!-- BMS Integration Section -->
-            <details style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                BMS Integration</summary>
-
-              <div class="form-row">
-                <div class="form-label">Defer to BMS Control (<span id="bmsLogic_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <span class="toggle-label">No</span>
-                    <label class="switch">
-                      <input id="bmsLogic_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('bmsLogic_checkbox', 'bmsLogic', 'bmsLogic')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">Yes</span>
-                    <input id="bmsLogic" name="bmsLogic" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Charge on ___ BMS Signal (<span id="bmsLogicLevelOff_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <div class="cap-mode-toggle ab-seg" data-seg-for="bmsLogicLevelOff_checkbox">
-                      <button type="button" class="cap-mode-btn" data-checked="0" onclick="abSegClick(this)">Low</button>
-                      <button type="button" class="cap-mode-btn" data-checked="1" onclick="abSegClick(this)">High</button>
-                    </div>
-                    <input id="bmsLogicLevelOff_checkbox" type="checkbox" style="display:none;"
-                      onchange="if(handleUserToggle('bmsLogicLevelOff_checkbox', 'bmsLogicLevelOff', 'bmsLogicLevelOff')) { this.form.submit(); submitMessage(); }" />
-                    <input id="bmsLogicLevelOff" name="bmsLogicLevelOff" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
             </details>
 
             <!-- How It Works -->
@@ -7441,7 +7430,7 @@
                     <span class="toggle-label">Off</span>
                     <label class="switch">
                       <input id="weatherModeEnabled_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('weatherModeEnabled_checkbox', 'weatherModeEnabled', 'weatherModeEnabled')) { this.form.submit(); submitMessage(); }" />
+                        onchange="if(handleUserToggle('weatherModeEnabled_checkbox', 'weatherModeEnabled', 'weatherModeEnabled')) { this.form.submit(); submitMessage(); weatherModeToggled(this.checked); }" />
                       <span class="slider round"></span>
                     </label>
                     <span class="toggle-label">On</span>
@@ -8437,14 +8426,14 @@
             </details>
 
             <!-- Charge Coordination (DVCC-style BMS charge-limit follow) — shared across dialects -->
-            <details class="integ-section">
+            <details class="integ-section" id="dvccFollowSection">
               <summary class="integ-section-title">Charge-Limit Follow<span class="integ-badge">shared</span><span class="integ-state"><span id="integStateFollow">off</span></span></summary>
 
               <p class="integ-copy">Everything here applies to whichever dialect is selected above — Victron VE.Can or RV-C — and the status row shows what that dialect has decoded. Received limits are requests: they can only lower this regulator's own targets, never raise them, and every local protection stays fully in charge.</p>
 
               <div class="form-row">
                 <div class="form-label">Follow BMS Charge Limits (<span id="dvccEn_echo">?</span>):
-                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Obey the charge voltage and current limits (CVL/CCL) a battery management system or gateway publishes on the NMEA2000 port — the coordination Victron calls DVCC. Received limits are requests: they can only lower this regulator's own targets, never raise them, and every local protection stays fully in charge. A new authority must send steady, plausible values for the settling time before its limits apply. A current limit of 0 A is obeyed as "stop charging" — that is the battery's strongest command. While a lower BMS voltage limit is in control, the internal bulk/absorption/float progression pauses and resumes when the limit releases. Leave this off to simply watch the decoded limits below and confirm they match what your BMS or GX displays.</span></span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Obey the charge voltage and current limits (CVL/CCL) a battery management system or gateway publishes on the NMEA2000 port — the coordination Victron calls DVCC. Received limits are requests: they can only lower this regulator's own targets, never raise them, and every local protection stays fully in charge. A new authority must send steady, plausible values for the settling time before its limits apply. If no limits ever arrive, or the sender goes silent, this regulator falls back to its own targets and a warning strip appears at the top of the dashboard &mdash; charging is never left ungoverned, but the BMS is not the backstop it would be while following. A current limit of 0 A is obeyed as "stop charging" — that is the battery's strongest command. While a lower BMS voltage limit is in control, the internal bulk/absorption/float progression pauses and resumes when the limit releases. Leave this off to simply watch the decoded limits below and confirm they match what your BMS or GX displays.</span></span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
@@ -8570,6 +8559,61 @@
 
             </div><!-- /integ-group: Battery Charge-Limit Follow -->
 
+            <!-- Minimal BMS On/Off Control — the opto digital input (GPIO42) as a charge permission.
+                 Moved here from Battery > Charge Settings 2026-08-23. The Present/Absent labels are
+                 WIRE-level: bmsLogicLevelOff 0 = charge while the input is energized, which reads as
+                 a LOW pin at the ESP32 (opto inverts). Never relabel back to the pin's own logic. -->
+            <details class="integ-section">
+              <summary class="integ-section-title">Minimal BMS On/Off Control</summary>
+
+              <p class="integ-copy">One wire from a battery management system (BMS) that says charge, or don't &mdash; any BMS with a spare relay or a charge-enable output can drive it. The BMS applies 5 to 28 V to the BMS on/off wire (Cable 1, pin 16) and the regulator takes that as permission to charge.</p>
+
+              <p class="integ-copy">If your BMS or Victron GX also publishes charge limits on the CAN backbone, use Battery Charge Limits over CAN above as well: those limits taper the charge, this wire is a full stop. Both can be connected at once, and the stop wins.</p>
+
+              <div class="form-row">
+                <div class="form-label">Use BMS On/Off Signal (<span id="bmsLogic_echo">?</span>):</div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="bmsLogic_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('bmsLogic_checkbox', 'bmsLogic', 'bmsLogic')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="bmsLogic" name="bmsLogic" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Charge When Signal Is (<span id="bmsLogicLevelOff_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Present charges while your BMS applies 5 to 28 V and stops when the wire goes dead, so a cut or unplugged wire reads as stop. Absent inverts it, for a BMS whose output energizes to signal a fault.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <div class="cap-mode-toggle ab-seg" data-seg-for="bmsLogicLevelOff_checkbox">
+                      <button type="button" class="cap-mode-btn" data-checked="0" onclick="abSegClick(this)">Present</button>
+                      <button type="button" class="cap-mode-btn" data-checked="1" onclick="abSegClick(this)">Absent</button>
+                    </div>
+                    <input id="bmsLogicLevelOff_checkbox" type="checkbox" style="display:none;"
+                      onchange="if(handleUserToggle('bmsLogicLevelOff_checkbox', 'bmsLogicLevelOff', 'bmsLogicLevelOff')) { this.form.submit(); submitMessage(); }" />
+                    <input id="bmsLogicLevelOff" name="bmsLogicLevelOff" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Signal at Input (<span id="bmsSigWord_ID">?</span>):</div>
+                <div class="form-input">
+                  <span style="font-size: 14px;" id="bmsSigEffect_ID">-</span>
+                </div>
+              </div>
+
+            </details>
+
           </div>
         </div>
         <div id="settings-system" class="sub-tab-content">
@@ -8581,6 +8625,36 @@
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Data & Communication</summary>
 
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Time Source (<span id="timeSourceMode_echo">?</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">
+                      Where the clock comes from. This is the time only — position has its own
+                      setting under Setup &#9656; Boat, so the phone can set the clock without
+                      sharing where you are.<br>
+                      Auto: NMEA 2000 time when present, this phone next, internet time last.<br>
+                      NMEA only / Phone only / NTP time only: force one source.<br>
+                      In access-point mode the phone is the only clock available — there is no
+                      internet and usually no bus.
+                    </span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <select id="timeSourceMode" name="timeSourceMode"
+                      onchange="this.form.submit(); submitMessage();">
+                      <option value="0">Auto (recommended)</option>
+                      <option value="1">NMEA only</option>
+                      <option value="2">Phone only</option>
+                      <option value="3">NTP time only</option>
+                    </select>
+                  </form>
+                </div>
+              </div>
+
+              <hr />
               <div class="form-row">
                 <div class="form-label">Cloud Features (<span id="CloudFeatures_echo">?</span>):</div>
                 <div class="form-input">
@@ -8627,6 +8701,20 @@
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Display Preferences</summary>
 
+<div class="form-row">
+                <div class="form-label">Dark Mode:</div>
+                <div class="form-input">
+                  <span class="toggle-label">Off</span>
+                  <label class="switch">
+                    <input id="DarkMode_checkbox" type="checkbox"
+                      onchange="document.body.classList.toggle('dark-mode'); localStorage.setItem('darkMode', this.checked ? '1' : '0'); refreshAllPlotThemes(); updateAllStalenessStyles(); broadcastThemeToCloudIframes();" />
+                    <span class="slider round"></span>
+                  </label>
+                  <span class="toggle-label">On</span>
+                </div>
+              </div>
+
+              <hr />
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Temperature Units:</span>
@@ -8644,16 +8732,88 @@
                   </form>
                 </div>
               </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Fuel Volume Units:</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">Choose US gallons or litres for the fuel table, the live burn and economy readouts, and the fuel-used totals. Setting is saved on the device. The regulator stores fuel in its own units either way, so switching never changes a stored value.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="seg accent">
+                      <button type="button" id="volUnitGal_btn" class="on" onclick="setVolUnit(0)">gal</button>
+                      <button type="button" id="volUnitL_btn" onclick="setVolUnit(1)">L</button>
+                    </span>
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Dashboard Update Rate (ms) (<span id="webgaugesinterval_echo">?</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">How often the dashboard receives fresh sensor data, in milliseconds
+                      (default 100 ms ≈ 10/s). Affects the display only, not how the regulator controls the
+                      alternator.
+                      <br><br>
+                      <b>Advanced — not recommended.</b> Several display features assume the default rate; changing
+                      it has downstream effects (plot spacing, buffer windows) that may need firmware changes to
+                      track correctly. Leave at default unless you know why you're changing it.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="webgaugesinterval" type="number" step="10" min="50" max="2000" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Fast Channel Plot Sampling (<span id="battMaxMode_echo">?</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">Several signals are measured far faster than the dashboard send rate,
+                      so each sent point can only represent one instant of that window. This selects what that point
+                      reports: Average takes the mean of the window (smoothed, anti-aliased); Max reports the
+                      largest-magnitude sample so brief peaks and spikes are not missed. Max applies to the battery
+                      voltage, battery current, and alternator current traces and readouts; the other averaged
+                      channels stay on the mean either way.
+                      <br><br>
+                      <b>Diagnostic.</b> Max makes those readouts show the window peak rather than the present value,
+                      and it corrupts Voltage Control Autotuning — use Average for normal operation and commissioning.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <select name="battMaxMode">
+                      <option value="0">Average</option>
+                      <option value="1">Max</option>
+                    </select>
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
             </details>
 
-            <!-- Emergency & Troubleshooting Section -->
+            <!-- Emergency Overrides Section -->
             <details open style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Emergency & Troubleshooting</summary>
+                Emergency Overrides</summary>
 
               <div class="emergency-section-content">
                 <div class="emergency-section-title">⚠️ Caution!</div>
+                <div style="font-size: 12px; opacity: 0.85; margin: 0 0 12px;">These settings are dangerous and for expert use only.</div>
 
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -8734,7 +8894,7 @@
                     <span>Ignore RPM (<span id="IgnoreRPM_echo">0</span>):</span>
                     <span class="tooltip">
                       ℹ️
-                      <span class="tooltip-box">For emergency use only. Bypasses the RPM gate — field will be enabled regardless of RPM. Use if RPM sensor is absent or malfunctioning.</span>
+                      <span class="tooltip-box">For emergency use only. Bypasses the RPM gate (Min RPM For Field, under Setup → Alternator → Output Control) — field will be enabled regardless of RPM. Use if RPM sensor is absent or malfunctioning.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -8748,23 +8908,6 @@
                       <span class="toggle-label">Yes</span>
                       <input id="IgnoreRPM" name="IgnoreRPM" type="number" value=""
                         style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Min RPM For Field (RPM) (<span id="MinRPMForField_echo">?</span>):</span>
-                    <span class="tooltip">
-                      ℹ️
-                      <span class="tooltip-box">Field is cut immediately when RPM falls below this threshold. Set to 0 to disable (not recommended — use Ignore RPM instead).</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="MinRPMForField" type="number" step="1" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
@@ -8793,62 +8936,18 @@
                     </form>
                   </div>
                 </div>
+              </div>
+            </details>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Dashboard Update Rate (ms) (<span id="webgaugesinterval_echo">?</span>):</span>
-                    <span class="tooltip">
-                      ℹ️
-                      <span class="tooltip-box">How often the dashboard receives fresh sensor data, in milliseconds
-                        (default 100 ms ≈ 10/s). Affects the display only, not how the regulator controls the
-                        alternator.
-                        <br><br>
-                        <b>Advanced — not recommended.</b> Several display features assume the default rate; changing
-                        it has downstream effects (plot spacing, buffer windows) that may need firmware changes to
-                        track correctly. Leave at default unless you know why you're changing it.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="webgaugesinterval" type="number" step="10" min="50" max="2000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
+            <!-- Protection Actuation Tests Section -->
+            <details style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Protection Actuation Tests</summary>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Fast Channel Plot Sampling (<span id="battMaxMode_echo">?</span>):</span>
-                    <span class="tooltip">
-                      ℹ️
-                      <span class="tooltip-box">Several signals are measured far faster than the dashboard send rate,
-                        so each sent point can only represent one instant of that window. This selects what that point
-                        reports: Average takes the mean of the window (smoothed, anti-aliased); Max reports the
-                        largest-magnitude sample so brief peaks and spikes are not missed. Max applies to the battery
-                        voltage, battery current, and alternator current traces and readouts; the other averaged
-                        channels stay on the mean either way.
-                        <br><br>
-                        <b>Diagnostic.</b> Max makes those readouts show the window peak rather than the present value,
-                        and it corrupts Voltage Control Autotuning — use Average for normal operation and commissioning.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <select name="battMaxMode">
-                        <option value="0">Average</option>
-                        <option value="1">Max</option>
-                      </select>
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <details style="margin-top: 6px;">
-                <summary class="emergency-section-title" style="cursor: pointer; margin-bottom: 0;">Protection Actuation Tests</summary>
-                <div style="font-size: 12px; opacity: 0.85; margin: 10px 0;">Deliberately trigger a field collapse to reproduce an electrical fault in a controlled way. The normal Live Data plots, CSV, and Console capture the transient. One test runs at a time.</div>
+              <div class="emergency-section-content">
+                <div class="emergency-section-title">⚠️ Fires a real field collapse</div>
+                                <div style="font-size: 12px; opacity: 0.85; margin: 10px 0;">Deliberately trigger a field collapse to reproduce an electrical fault in a controlled way. The normal Live Data plots, CSV, and Console capture the transient. One test runs at a time.</div>
 
                 <div class="emergency-section-title" style="font-size: 14px;">1. Manual Bench Testing</div>
                 <div style="font-size: 12px; opacity: 0.85; margin-bottom: 8px;">For a manually-set field on the bench (Manual Field driving a power resistor). Hard-cuts the field you already set — no auto-energize. Turn Manual Field ON first; Ignore RPM is fine. In manual mode the regulator's own lockout is bypassed, so the cut duration below is what sets the off-time. Set the values, then press Fire.</div>
@@ -9009,32 +9108,17 @@
                     </form>
                   </div>
                 </div>
-                </details>
               </div>
             </details>
 
 
-            <!-- User Interface Section -->
+            <!-- Security & Maintenance Section -->
             <details open style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                User Interface</summary>
+                Security & Maintenance</summary>
 
-              <div class="form-row">
-                <div class="form-label">Dark Mode:</div>
-                <div class="form-input">
-                  <span class="toggle-label">Off</span>
-                  <label class="switch">
-                    <input id="DarkMode_checkbox" type="checkbox"
-                      onchange="document.body.classList.toggle('dark-mode'); localStorage.setItem('darkMode', this.checked ? '1' : '0'); refreshAllPlotThemes(); updateAllStalenessStyles(); broadcastThemeToCloudIframes();" />
-                    <span class="slider round"></span>
-                  </label>
-                  <span class="toggle-label">On</span>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
+<div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Switch Panel Override (<span id="SwitchControlOverride_echo">?</span>):</span>
                   <span class="tooltip">
@@ -9056,14 +9140,8 @@
                   </form>
                 </div>
               </div>
-            </details>
 
-            <!-- Security & Maintenance Section -->
-            <details open style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Security & Maintenance</summary>
-
+              <hr />
               <div class="form-row">
                 <div class="form-label">Lock Settings:</div>
                 <div class="form-input">
@@ -9129,6 +9207,73 @@
              here. The live polar/motoring display, the Sailing/Motoring toggle, the Learning
              switch and Download CSV stay on the Live Data side. -->
         <div id="settings-boatperformance" class="sub-tab-content">
+          <div class="settings-card">
+            <p class="card-group-title"><span>Position, Speed &amp; Course Sources</span>
+              <span class="tooltip">ℹ️<span class="tooltip-box">Where the regulator gets the boat's position, speed and course. The phone can stand in for a missing NMEA 2000 GPS. The clock has its own separate setting under Setup &rarr; System, so you can let the phone set the time without sharing position.</span></span>
+            </p>
+            <hr />
+
+            <div class="form-row">
+              <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                <span>Position Source (<span id="gpsPositionSource_echo">?</span>) — live: <span id="liveSourceIndicator">?</span>:</span>
+                <span class="tooltip">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Where latitude and longitude come from.<br>
+                    Auto: NMEA 2000 when present, this phone when the bus goes silent.<br>
+                    NMEA only: ignore the phone even if the bus is dead.<br>
+                    Phone only: ignore NMEA even when it is present.<br>
+                    Position drives distance logged, anchorage detection, and the solar forecast.<br>
+                    Auto arbitrates whatever arrives; the app only offers this phone's position once you pick
+                    Phone only here, choose Phone GPS for speed, or turn on Defer to Solar. Until then it is
+                    never asked for and never sent.<br>
+                    Forcing a stale source still shows its last value (greyed) so you can diagnose.<br>
+                    Note: a position typed manually in Setup &#9656; Solar overrides every option here until you clear it there.
+                  </span>
+                </span>
+              </div>
+              <div class="form-input">
+                <form action="/get" method="GET" target="hidden-form">
+                  <select id="gpsPositionSource" name="gpsPositionSource"
+                    onchange="gpsPositionSourceChanged(this)">
+                    <option value="0">Auto (recommended)</option>
+                    <option value="1">NMEA only</option>
+                    <option value="2">Phone only</option>
+                  </select>
+                </form>
+              </div>
+            </div>
+
+            <hr />
+            <div class="form-row">
+              <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                <span>Speed / Course Source (<span id="speedSourceMode_echo">?</span>):</span>
+                <span class="tooltip">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Which source owns speed over ground and course: the NMEA 2000 bus, or this
+                    app's phone GPS. The phone is never used automatically — only when selected
+                    here.<br>
+                    With Phone GPS selected, the app streams GPS fixes to the regulator about
+                    every 2 seconds, and keeps doing so with the app in the background or the
+                    screen locked. Battery drain is substantial with GPS running full-time.<br>
+                    Speed records set while Phone GPS is selected are flagged in cloud uploads
+                    and excluded from the speed leaderboard.
+                  </span>
+                </span>
+              </div>
+              <div class="form-input">
+                <form action="/get" method="GET" target="hidden-form">
+                  <select id="speedSourceMode" name="speedSourceMode"
+                    onchange="speedSourceModeChanged(this)">
+                    <option value="0">NMEA 2000</option>
+                    <option value="1">Phone GPS (this app)</option>
+                  </select>
+                </form>
+              </div>
+            </div>
+          </div>
+
           <div class="settings-card">
             <p class="card-group-title"><span>Performance Learning</span>
               <span class="tooltip">ℹ️<span class="tooltip-box">Settings for the best-ever boat-speed learning system. The live polar / motoring display is under Live Data &rarr; GPS/Travel/Wind.</span></span>
@@ -9373,100 +9518,6 @@
             </details>
           </div>
 
-          <div class="settings-card">
-
-            <p class="card-group-title">Fuel Consumption</p>
-
-            <div style="display: flex; justify-content: center; margin-top: 0;">
-              <form action="/get" method="GET" target="hidden-form" id="fuel-table-form">
-
-                <table class="learning-table fuel-table"
-                  style="max-width: 400px; border-collapse: collapse; width: 100%;">
-                  <thead>
-                    <tr>
-                      <th style="padding: 8px; width: 50%;">RPM</th>
-                      <th style="padding: 8px; width: 50%;">GPH</th>
-                    </tr>
-                  </thead>
-                  <tbody id="fuel-table-body">
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM0_input" name="fuelTableRPM0" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH0_input" name="fuelTableGPH0" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM1_input" name="fuelTableRPM1" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH1_input" name="fuelTableGPH1" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM2_input" name="fuelTableRPM2" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH2_input" name="fuelTableGPH2" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM3_input" name="fuelTableRPM3" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH3_input" name="fuelTableGPH3" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM4_input" name="fuelTableRPM4" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH4_input" name="fuelTableGPH4" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM5_input" name="fuelTableRPM5" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH5_input" name="fuelTableGPH5" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM6_input" name="fuelTableRPM6" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH6_input" name="fuelTableGPH6" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM7_input" name="fuelTableRPM7" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH7_input" name="fuelTableGPH7" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM8_input" name="fuelTableRPM8" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH8_input" name="fuelTableGPH8" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM9_input" name="fuelTableRPM9" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH9_input" name="fuelTableGPH9" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                  </tbody>
-                </table>
-
-                <div style="margin-top: 15px; text-align: center;">
-                  <span id="fuel-table-status" class="table-save-status" style="display: none;"></span>
-                  <input type="submit" value="Save" id="fuel-table-save-button"
-                    onclick="return validateFuelTable() && submitMessage.call(this)" class="btn-primary">
-                </div>
-
-                <p style="margin-top: 14px; font-size: 13px; color: #888; text-align: center; line-height: 1.5;">
-                  These values are used to estimate fuel burned based on engine RPM. Fuel consumption totals appear in
-                  <strong>Cloud Features → Statistics</strong>.
-                </p>
-              </form>
-            </div>
-
-          </div> <!-- CLOSE Engine settings-card -->
-
           <!-- Motion event thresholds (capsize / pitchpole / slam) -->
           <div class="settings-card">
 
@@ -9518,12 +9569,12 @@
   <div id="livedata" class="tab-content">
     <!-- Live Data Sub-tabs -->
     <div class="sub-tabs">
-      <button class="sub-tab active" onclick="showSubTab('livedata', 'alternator', event)">Alternator</button>
+      <button class="sub-tab" onclick="showSubTab('livedata', 'alternator', event)">Alternator</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'battery', event)">Battery</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'boatperformance', event)">Boat</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'weathersolar', event)">Weather</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'integrations', event)">Integrations</button>
-      <button class="sub-tab" onclick="showSubTab('livedata', 'diag', event)">Diag</button>
+      <button class="sub-tab active" onclick="showSubTab('livedata', 'diag', event)">Diag</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'protection', event)">Protection</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'esp32', event)">ESP32</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'console', event)">Console</button>
@@ -9645,11 +9696,11 @@
             <div class="dual-counter">
               <div class="dual-counter-row">
                 <span class="counter-label">Lifetime</span>
-                <span class="counter-value" id="AlternatorFuelUsed_AllTimeID">0</span><span>L</span>
+                <span class="counter-value" id="AlternatorFuelUsed_AllTimeID">0</span><span class="fuelvol-unit-label">gal</span>
               </div>
               <div class="dual-counter-row" style="position:relative;">
                 <span class="counter-label">Session</span>
-                <span class="counter-value" id="AlternatorFuelUsedID">0</span><span>L</span>
+                <span class="counter-value" id="AlternatorFuelUsedID">0</span><span class="fuelvol-unit-label">gal</span>
                 <form action="/get" method="GET" target="hidden-form"
                   style="position:absolute;left:100%;margin-left:8px;">
                   <input type="hidden" name="ResetFuelUsed" id="ResetFuelUsed" value="0" />
@@ -10475,8 +10526,8 @@
           <!-- Fuel: live flow (gal/hr) primary, economy (naut mi/gal) sub -->
           <div class="vital-tile">
             <div class="vt-label">Fuel</div>
-            <div class="vt-value"><span id="fuelGPHID">—</span> <span class="vt-unit">gal/hr</span></div>
-            <div class="vt-sub"><span id="fuelNMPGID">—</span> <span class="vt-unit">naut mi/gal</span></div>
+            <div class="vt-value"><span id="fuelGPHID">—</span> <span class="vt-unit fuelflow-unit-label">gal/hr</span></div>
+            <div class="vt-sub"><span id="fuelNMPGID">—</span> <span class="vt-unit fuelecon-unit-label">naut mi/gal</span></div>
           </div>
 
           <!-- VMG upwind + Leeway combined -->
@@ -10522,7 +10573,7 @@
           <div class="card">
             <p>Fuel Economy vs RPM (this session)
               <span class="tooltip">ℹ️
-                <span class="tooltip-box">Observed nautical miles per gallon at each RPM, this session only. A point is
+                <span class="tooltip-box">Observed <span class="fuelecon-unit-label">naut mi/gal</span> at each RPM, this session only. A point is
                   recorded only after RPM and boat speed hold steady for 40 s (so the boat has reached true steady
                   speed for that throttle), then the next 20 s of economy is averaged in. The peak is your most
                   efficient cruise RPM. Cleared on reboot, on Reset, or when the fuel table is edited.</span>
@@ -11173,11 +11224,11 @@
             <div class="dual-counter">
               <div class="dual-counter-row">
                 <span class="counter-label">Lifetime</span>
-                <span class="counter-value" id="EngineFuelUsed_AllTimeID">0</span><span>L</span>
+                <span class="counter-value" id="EngineFuelUsed_AllTimeID">0</span><span class="fuelvol-unit-label">gal</span>
               </div>
               <div class="dual-counter-row" style="position:relative;">
                 <span class="counter-label">Session</span>
-                <span class="counter-value" id="EngineFuelUsedID">0</span><span>L</span>
+                <span class="counter-value" id="EngineFuelUsedID">0</span><span class="fuelvol-unit-label">gal</span>
                 <form action="/get" method="GET" target="hidden-form"
                   style="position:absolute;left:100%;margin-left:8px;">
                   <input type="hidden" name="ResetEngineFuelUsed" id="ResetEngineFuelUsed" value="0" />
@@ -12578,12 +12629,7 @@
               <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Oscillation Damper
                   <span class="tooltip">ℹ️
-                    <span class="tooltip-box">The wobble detector that sits inline in the control loop. It
-                      records one field-drive sample per control tick and runs its frequency analysis only
-                      once every 32 ticks (~1.6 s), so almost every pass costs nothing and the worst pass is
-                      the analysis itself. It never writes flash — episode records are queued in memory and
-                      saved only once the field has been off for ten seconds. If this number is ever more
-                      than a fraction of a millisecond, something is wrong.</span>
+                    <span class="tooltip-box">Time the wobble detector spends inside the control loop. It samples once per control tick and runs its frequency analysis only every 32 ticks (~1.6&nbsp;s), so almost every pass costs nothing and the worst pass is the analysis itself. More than a fraction of a millisecond here means something is wrong.</span>
                   </span>
                 </div>
                 <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
@@ -13233,7 +13279,7 @@
       <!-- ── Shared fast-channel hardware + steady-state gates — feeds both C1 and C2 ── -->
 
       <!-- Charging System Health -->
-      <details class="diag-section" open>
+      <details class="diag-section" id="c3HealthCard" open>
         <summary class="diag-section-title">Charging System Health</summary>
 
         <div class="settings-card">
@@ -13473,24 +13519,27 @@
       </details>
 
 <!-- Oscillation Damper — hunt-governor live state (CSV1) + episode ledger (/huntledger.csv) -->
-      <details class="diag-section" ontoggle="if (this.open) fetchHuntLedger()">
+      <details class="diag-section" id="huntDamperCard" ontoggle="if (this.open) fetchHuntLedger()">
         <summary class="diag-section-title">Oscillation Damper</summary>
         <div class="settings-card">
-          <p style="font-size:0.8em;color:var(--text-muted);margin:0 0 10px 0;">
-            Some engine, alternator and belt combinations develop a slow wobble at low engine speed
-            under heavy load — a steady swing, somewhere between about a third of a cycle and two
-            cycles per second, in field drive, engine speed and voltage together. The damper watches
-            field drive for that wobble while engine speed is steady, makes a single test cut in the
-            current loop's integral gain, and keeps the cut only if the wobble measurably shrinks.
-            A verified cut is saved as a trouble spot on a permanent speed map: the reduced gain is
-            applied whenever the engine is at that speed — before any wobble appears — tapering back
-            to full gain away from it. The damper has a second lever: a wobble that keeps the
-            voltage damper (the D-term) rhythmically switching direction is tested by pausing the
-            D-term instead — if the wobble stops, the D-term is switched off at that speed and
-            everything else stays at full strength. A wobble that responds to neither lever is not
-            the regulator (a cycling load, or the engine's own governor) and full strength is
-            restored. The map survives restarts; Clear System below erases it.
-          </p>
+          <details style="margin:0 0 10px 0;">
+            <summary style="cursor:pointer;font-weight:bold;font-size:14px;padding:6px 0;border-bottom:2px solid var(--accent);margin-bottom:8px;">
+              How It Works</summary>
+            <div style="background:rgba(0,161,154,0.06);padding:12px;border-radius:var(--radius);border-left:4px solid var(--accent);margin:8px 0;line-height:1.5;color:var(--text-muted);font-size:0.85em;">
+              <p style="margin:0;">
+                Some engine, alternator and belt combinations develop a slow wobble, somewhere
+                between 0.3 and 2 Hz, in field drive, engine speed and voltage together. This damper
+                watches field drive for it while speed is steady, makes a single test cut in the
+                current loop's integral gain, and retains the cut (at that speed) only if the wobble
+                significantly shrinks.
+              </p>
+              <p style="margin:10px 0 0 0;">
+                The damper also has a second lever, for a wobble that keeps the voltage damper (the
+                D-term) rhythmically switching direction. This is tested by pausing the D-term
+                instead — if the wobble significantly reduces, the change is kept.
+              </p>
+            </div>
+          </details>
 
           <div class="metric-row telemetry-row" style="align-items:flex-start;">
             <span class="metric-label telemetry-label">Status
@@ -13519,11 +13568,8 @@
               </form>
             </div>
           </div>
-          <p style="font-size:0.74em;color:var(--text-muted);margin:2px 0 0 0;">
-            The adjustable parameters — Damped Gain (cut depth), Required Improvement (verify bar),
-            Pocket Edge Taper (speed width), Retest Cooldown, Speed Steadiness, Detection Confirm
-            Scans — are in Setup &#9656; Alternator &#9656; Tuning &#9656; Current &#9656; Controller Parameters,
-            next to the PID Ki this switch acts on.
+          <p style="margin:6px 0 0 0;">
+            <a class="xnav-link" onclick="goToHuntSettings()">Shortcut to the damper's settings <span class="xnav-arrow">&rarr;</span></a>
           </p>
           <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
           <div class="metric-row telemetry-row">
@@ -13551,7 +13597,10 @@
           </div>
           <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
           <div class="metric-row telemetry-row">
-            <span class="metric-label telemetry-label">Episodes on record</span>
+            <span class="metric-label telemetry-label">Episodes on record
+              <span class="tooltip">ℹ️
+                <span class="tooltip-box">Each entry says what the wobble was doing when the episode opened and when it closed: field swing is how far field drive was swinging, and gain left at is where the current loop's integral gain stood when the episode ended. The list survives restarts; it holds roughly the last hundred episodes, and once full it drops the oldest half. The raw file is served at <a id="hgRawLink" href="/huntledger" target="_blank" rel="noopener" style="color:#7ec8ff;">/huntledger</a>.</span></span>
+            </span>
             <span class="metric-value telemetry-value"><span id="hgEpisodeCount">—</span></span>
           </div>
           <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
@@ -13586,14 +13635,6 @@
           <div id="hgLedgerList" style="margin-top:12px;font-size:0.84em;">
             <div style="padding:6px 0;color:var(--text-muted);">—</div>
           </div>
-          <p style="font-size:0.74em;color:var(--text-muted);margin:10px 0 0 0;">
-            Field swing is how far field drive was swinging when the episode opened and when it
-            closed. Gain left at is where the current loop's integral gain stood when the episode
-            ended. The list survives restarts; it holds roughly the last hundred episodes, and once
-            full it drops the oldest half. The raw file is also served at
-            <a id="hgRawLink" href="/huntledger" target="_blank" rel="noopener">/huntledger</a>.
-          </p>
-
           <div style="display:flex;gap:10px;margin-top:8px;align-items:center;flex-wrap:wrap;">
             <button type="button" class="btn-secondary" onclick="fetchHuntLedger()">↺ Re-read episode record</button>
             <span style="font-size:0.74em;color:var(--text-muted);">Fetches the record again from the regulator, including episodes not yet saved to its flash. Reads only — nothing is changed, cleared, or restarted.</span>
@@ -14214,8 +14255,7 @@
         </div>
       </div>
     </div>
-  </div>
-  </div>
+  </div><!-- closes #livedata -->
 
 
   <!-- PLOTS SECTION WITH SUBTABS -->
@@ -14325,64 +14365,6 @@
           </div>
         </div>
 
-        <hr />
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>GPS / Time Source (<span id="gpsTimeSourceMode_echo">?</span>) — live: <span id="liveSourceIndicator">?</span>:</span>
-            <span class="tooltip">
-              ℹ️
-              <span class="tooltip-box">
-                Auto: NMEA wins when present, phone fills in when NMEA goes silent, NTP as last resort.<br>
-                NMEA only: ignore phone and NTP even if NMEA is dead.<br>
-                Phone only: ignore NMEA and NTP even if phone is offline.<br>
-                NTP time only: use internet time only; GPS still falls through Auto.<br>
-                Governs position and time. Speed and course have their own selector below.<br>
-                Forcing a stale source still shows its last value (greyed) so you can diagnose.<br>
-                Note: a position typed manually in Setup ▸ Solar overrides every option here until you clear it there.
-              </span>
-            </span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <select id="gpsTimeSourceMode" name="gpsTimeSourceMode"
-                onchange="this.form.submit(); submitMessage();">
-                <option value="0">Auto (recommended)</option>
-                <option value="1">NMEA only</option>
-                <option value="2">Phone only</option>
-                <option value="3">NTP time only</option>
-              </select>
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Speed / Course Source (<span id="speedSourceMode_echo">?</span>):</span>
-            <span class="tooltip">
-              ℹ️
-              <span class="tooltip-box">
-                Which source owns speed over ground and course: the NMEA 2000 bus, or this
-                app's phone GPS. The phone is never used automatically — only when selected
-                here.<br>
-                With Phone GPS selected, the app streams GPS fixes to the regulator about
-                every 2 seconds while it is open in the foreground; speed greys out when the
-                app stops posting. Continuous GPS use increases phone battery drain.<br>
-                Speed records set while Phone GPS is selected are flagged in cloud uploads
-                and excluded from the speed leaderboard.
-              </span>
-            </span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <select id="speedSourceMode" name="speedSourceMode"
-                onchange="speedSourceModeChanged(this)">
-                <option value="0">NMEA 2000</option>
-                <option value="1">Phone GPS (this app)</option>
-              </select>
-            </form>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -15292,6 +15274,60 @@
       <div id="socseed-body" style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; overflow-y:auto; flex:1; min-height:0;"></div>
     </div>
   </div><!-- END socseed-modal-overlay -->
+
+  <!-- Gate Tuning Capture safety notice: the field sweeper drives the field directly, which switches
+       out most of the regulator. Shown once per page load when the panel is opened, and any time from
+       the panel's own button. ALT_GATE_TUNING_CAPTURE_SPEC.md section 8. -->
+  <div id="altcap-safety-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9100; align-items:flex-start; justify-content:flex-start; overflow:auto; padding:20px; box-sizing:border-box;">
+    <div style="position:relative; margin:auto 0; background:#1e1e1e; color:#ddd; width:560px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); display:flex; flex-direction:column;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0;">
+        <span style="font-weight:600; font-size:13px; color:#fca5a5; letter-spacing:0.03em;">Gate Tuning Capture &mdash; What Protects You, And What Does Not</span>
+        <button onclick="altCapSafetyClose()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">&#10005;</button>
+      </div>
+      <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; overflow-y:auto; flex:1; min-height:0;">
+        <p style="margin:0 0 14px;"><strong>Recording on its own changes nothing.</strong> The logger only watches; the regulator runs exactly as it always does. Everything below is about the <strong>field sweeper</strong>, which takes the field away from the regulator and drives it directly.</p>
+
+        <div style="font-weight:700; color:#2ec4b6; margin:0 0 6px;">Still active while the sweeper runs</div>
+        <ul style="margin:0 0 16px; padding-left:20px;">
+          <li><strong>Hardware over-voltage.</strong> The INA228 alert pin cuts the field in hardware, with no software in the path.</li>
+          <li><strong>Alternator Hard Shutdown Voltage.</strong> Instant field cut the moment the bus crosses it, plus the lockout that follows.</li>
+          <li><strong>Group 0, the hardware overcurrent trip</strong> (if you have it enabled). Instant field cut.</li>
+          <li><strong>Critical alternator temperature.</strong> Instant field cut above the temperature limit plus its critical margin.</li>
+          <li><strong>Engine stopped, engine speed below minimum, or a tach reading the firmware does not believe.</strong> Instant field cut.</li>
+          <li><strong>Current sensor gone stale.</strong> Instant field cut.</li>
+          <li><strong>Max Field %.</strong> It is the sweep's only ceiling, and the ramp cannot be sent above it.</li>
+          <li><strong>The On/Off switch.</strong> It takes the field back from the sweeper on that tick and shuts it down exactly as it always does. So does a BMS opening, a solar-forecast pause, a fault or a lockout &mdash; and all of them end the sweep rather than pausing it.</li>
+          <li><strong>No other field test can start</strong> while the sweeper runs, and the sweeper cannot start while one is running.</li>
+          <li><strong>The sweeper turns itself around before it arrives</strong> &mdash; <span id="altcap-safety-margin-a">10</span> A short of the current cap for your engine speed, of the battery current limit and of a BMS current limit; <span id="altcap-safety-margin-v">0.15</span> V short of the charge-voltage target or a BMS voltage limit; and at the alternator temperature limit itself. It then ramps straight back down at the same rate. Both margins are set in the panel; at 0 it turns around on the limit itself.</li>
+        </ul>
+
+        <div style="font-weight:700; color:#fca5a5; margin:0 0 6px;">Switched off while the sweeper runs</div>
+        <ul style="margin:0 0 16px; padding-left:20px;">
+          <li><strong>The Group 1 and Group 2 over-voltage current clamps.</strong> These are the soft pull-backs that normally stop the bus ever reaching the hard ceiling. During a sweep only the hard cut is left.</li>
+          <li><strong>Current-overshoot trim and load-dump detection.</strong></li>
+          <li><strong>The temperature loop.</strong> It normally holds the alternator case about 7 &deg;F below your temperature limit by quietly reducing output. It does not run during a sweep: the field stays where the ramp puts it while the alternator heats, and nothing eases off until the hard cut at the limit.</li>
+          <li><strong>Every current and voltage limit stops being a limit.</strong> The charge-voltage target, the current cap for your engine speed, the battery current limit and any BMS limit only tell the sweeper when to turn around. Nothing holds output to them.</li>
+          <li><strong>Min Field % and the learned minimum-field knee.</strong> The ramp starts below them on purpose.</li>
+          <li><strong>The field slew-rate limiter.</strong> The sweep rate is the only thing setting how fast the field moves.</li>
+          <li><strong>The charge-stage machine</strong> &mdash; bulk, absorption, float, the warm-up ramp, the Hi/Lo glide and Maintain Mode.</li>
+          <li><strong>The "what is limiting output" readout.</strong> It goes blank for the whole run, because there is no limiter in the loop to report. The header reads TUNING SWEEP instead.</li>
+        </ul>
+
+        <div style="font-weight:700; color:#2ec4b6; margin:0 0 6px;">Ways to stop it</div>
+        <ul style="margin:0 0 16px; padding-left:20px;">
+          <li><strong>Stop sweep</strong> ends the run and eases the field back out.</li>
+          <li><strong>Reverse now</strong> sends the up leg back down immediately, at the same rate.</li>
+          <li><strong>The On/Off switch, or anything that turns charging off.</strong> Ends the run, and shuts the field down on the normal ramp.</li>
+        </ul>
+
+        <p style="margin:0 0 16px; color:#bbb;">Run the sweeper with the engine at a steady speed and somebody able to see the alternator.</p>
+
+        <div style="display:flex; justify-content:flex-end;">
+          <button onclick="altCapSafetyClose()" style="background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; border:none; border-radius:5px; padding:7px 16px; cursor:pointer; font-size:0.95em;">Understood</button>
+        </div>
+      </div>
+    </div>
+  </div><!-- END altcap-safety-overlay -->
 
   <!-- Scheduled-restart warning banner (visible during the 10-min countdown window) -->
   <div id="restart-countdown-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9000;

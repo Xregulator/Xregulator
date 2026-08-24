@@ -1389,23 +1389,98 @@ a.btn-secondary {
   font-size: 14px;
 }
 
-/* Fuel table row striping + shared table save feedback */
+/* Fuel table + shared table save feedback */
 
+/* Two-column fuel table. It carries .learning-table too, so the header rule, focus ring,
+   spinner suppression and dark-mode colours all come from there; the rules below only undo
+   what is specific to the five-column cap table and widen the inputs to suit two columns. */
 .fuel-table {
+  table-layout: fixed;
+  width: 100%;
+  margin: 0;
+}
+
+/* The cap table pins its five columns with !important widths — override for two. */
+.fuel-table th:nth-child(1),
+.fuel-table td:nth-child(1),
+.fuel-table th:nth-child(2),
+.fuel-table td:nth-child(2) {
+  width: 50% !important;
+}
+
+.fuel-table th { padding: 7px 8px; }
+.fuel-table td { padding: 4px 8px; }
+
+.fuel-table input[type="number"] {
+  width: 100%;
+  max-width: 118px;
+  padding: 5px 8px;
+  font-size: 13px;
+  text-align: center;
+}
+
+/* Centred block rather than stretched across the 600px settings card. */
+.fuel-table-container {
+  max-width: 380px;
   margin: 0 auto;
 }
 
-.fuel-table-row {
+/* Flat rows with hairline rules, as the cap table reads. The :not() guard stops these
+   flattening the live-RPM tint, which is set by the later-but-equal-specificity active rule. */
+.fuel-table-row:not(.fuel-table-row-active) {
+  background-color: transparent;
+}
+
+.fuel-table-row:hover:not(.fuel-table-row-active) {
   background-color: var(--bg-light);
 }
 
-.fuel-table-row-dark {
-  background-color: #e9e9e9;
+/* Row bracketing live engine RPM. Own class, not .learning-table-row-active, because
+   updateLearningTableHighlight() clears that one document-wide on every CSV2 frame. */
+.fuel-table-row-active {
+  background: rgba(0, 120, 255, 0.18);
+  font-weight: 600;
 }
 
-.fuel-table-row:hover,
-.fuel-table-row-dark:hover {
-  background-color: var(--card-light);
+.fuel-table-row-active input[type="number"] {
+  border-color: var(--accent);
+}
+
+/* Unit tag on its own line under the column name */
+.fuel-th-unit {
+  display: block;
+  font-weight: 600;
+  font-size: 10px;
+  opacity: 0.6;
+  letter-spacing: 0.02em;
+}
+
+/* Burn-curve preview: draws the same interpolation the firmware runs, so a mistyped
+   breakpoint shows as a kink instead of hiding in the column of numbers. */
+.fuel-curve-wrap {
+  margin-top: 10px;
+  padding: 8px 10px 4px;
+  border-top: 1px solid var(--border);
+}
+
+.fuel-curve-wrap svg {
+  display: block;
+  width: 100%;
+  height: 110px;
+}
+
+/* Curve parts are themed here rather than in drawFuelCurve(), so a dark-mode flip
+   recolours the drawing with no redraw. */
+.fuel-curve-wrap .fc-grid { stroke: var(--border); stroke-width: 1; }
+.fuel-curve-wrap .fc-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.fuel-curve-wrap .fc-dot  { fill: var(--accent); }
+.fuel-curve-wrap .fc-lbl  { font-size: 9px; fill: var(--text-muted); }
+
+.fuel-curve-cap {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  margin: 2px 0 0;
 }
 
 .table-save-status {
@@ -1429,17 +1504,18 @@ a.btn-secondary {
   background-color: #eefbf9 !important;
 }
 
-.dark-mode .fuel-table-row {
-  background-color: #1f1f1f;
+/* .learning-table hardcodes a black 2px header rule, which is invisible on the dark header. */
+.dark-mode .fuel-table thead tr,
+.dark-mode .fuel-table th {
+  border-bottom-color: #5a5a5a;
 }
 
-.dark-mode .fuel-table-row-dark {
-  background-color: #2a2a2a;
+.dark-mode .fuel-table-row:not(.fuel-table-row-active) {
+  background-color: transparent;
 }
 
-.dark-mode .fuel-table-row:hover,
-.dark-mode .fuel-table-row-dark:hover {
-  background-color: #333333;
+.dark-mode .fuel-table-row:hover:not(.fuel-table-row-active) {
+  background-color: #2b2b2b;
 }
 
 .dark-mode .table-save-status {
@@ -1617,13 +1693,13 @@ a.btn-secondary {
 }
 
 /* ── Header minimize / collapse (all widths; state in localStorage header_collapsed) ──
-   Collapsed = header shrinks to the one-line #header-collapsed-strip. The strip and the
-   protections banner are the only survivors, so a live PROTECTIONS-DISABLED warning is
-   never hidden by minimizing. Metric text uses inherit so it follows the header's
-   light/dark colour without a separate dark-mode rule. */
+   Collapsed = header shrinks to the one-line #header-collapsed-strip. The strip and the two
+   safety banners are the only survivors, so a live PROTECTIONS-DISABLED warning or an
+   unfollowed-BMS-limit warning is never hidden by minimizing. Metric text uses inherit so it
+   follows the header's light/dark colour without a separate dark-mode rule. */
 #header-collapsed-strip { display: none; }
 .permanent-header.header-collapsed { padding: 0; gap: 0; }
-.permanent-header.header-collapsed > *:not(#header-collapsed-strip):not(#protections-banner) { display: none; }
+.permanent-header.header-collapsed > *:not(#header-collapsed-strip):not(#protections-banner):not(#dvcc-banner) { display: none; }
 .permanent-header.header-collapsed #header-collapsed-strip {
   container-type: inline-size;   /* fields below reveal against THIS width */
   display: flex;
@@ -2169,6 +2245,29 @@ a.btn-secondary {
   text-align: center;
 }
 
+/* Header safety notice strip — amber caution, one tier below the red PROTECTIONS DISABLED
+   banner. Wraps rather than clipping: the text names the cause and the consequence, and on a
+   phone that is three lines. Clickable (jumps to the card that owns it). */
+.header-notice {
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 2px 0 6px;
+  padding: 5px 10px;
+  color: #8a5c00;
+  background: rgba(255, 179, 0, 0.14);
+  border: 1px solid rgba(255, 179, 0, 0.55);
+  border-radius: 6px;
+  text-align: center;
+  white-space: normal;
+  cursor: pointer;
+}
+
+.header-notice b {
+  font-weight: 900;
+  letter-spacing: 0.02em;
+}
+
 /* Unlock Settings — the only locked-state indicator now that the red "Settings are Locked"
    line is gone, so it is deliberately heavier than a stock .btn-primary. Must stay visually
    identical to #hcs-unlock (the collapsed strip's "Tap to unlock"). */
@@ -2326,6 +2425,12 @@ a.btn-secondary {
 
 .dark-mode .lock-status-locked {
   color: #ff6666 !important;
+}
+
+.dark-mode .header-notice {
+  color: #ffc75a;
+  background: rgba(255, 179, 0, 0.10);
+  border-color: rgba(255, 179, 0, 0.40);
 }
 
 .dark-mode .wm-rest {
@@ -3296,6 +3401,19 @@ hr {
   outline: 2px solid #35d6c7;
   border-radius: 4px;
   animation: cap-first-row-flash 1.2s ease-in-out 0s 4;
+}
+
+/* Vessel Info banner while the save chain waits on the device (SoC-seed poll, then the
+   /exportConfig NVS walk). Infinite because the wait has no known end — it stops when the
+   next screen opens. Colours are set inline by vesselNextStepNote(); this only rings the box. */
+@keyframes vessel-wait-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(35, 169, 156, 0.55); }
+  50%      { box-shadow: 0 0 0 6px rgba(35, 169, 156, 0.10); }
+}
+
+.vessel-wait-busy {
+  outline: 2px solid #23a99c;
+  animation: vessel-wait-pulse 1.4s ease-in-out infinite;
 }
 
 /* Loading-dot animation for cloud registration check banner */
@@ -6087,3 +6205,12 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
 .dark-mode .ss-pull { background: #2a2a2a; border-color: #444; }
 .ss-pull.ss-ready { background: var(--accent); border-color: var(--accent); color: #ffffff; }
 .ss-pull .ss-icon { width: 20px; height: 20px; }
+
+/* C3 band matrix — the five steadiness signals as one table (Setup > Alternator > Diag > C3).
+   Grid, inputs and dark-mode handling all come from .learning-table; these rules only cover the
+   signal column, its unit sub-label, and the Floor cells that only output amps uses. */
+.c3-band-table td { padding: 6px 5px; vertical-align: middle; }
+.c3-band-table th:first-child { text-align: left; }
+.c3-band-table td.c3-signal { font-size: 12.5px; font-weight: 600; text-align: left; }
+.c3-band-table td.c3-na { color: var(--text-muted); text-align: center; }
+.c3-unit { font-size: 10px; font-weight: 400; color: var(--text-muted); margin-top: 2px; }

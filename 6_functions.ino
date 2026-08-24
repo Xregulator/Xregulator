@@ -212,6 +212,7 @@ void recomputeCcGains() {
 // needs a lower bar for the same physical hunt. Bench measurement 08-21 (pidlog_20260821_212919):
 // a real 0.70 Hz idle hunt read 0.39–0.62% peak-bin duty against the old fixed 0.5, so only 2 of 6
 // scans qualified and HuntQualifyScans in a row never happened — the miss this setting exists for.
+// KNOWN GAP (2026-08-22, unstudied): this bar is NOT class-scaled x12/V like every other duty-domain knob, so on a 24/36/48V install the same physical wobble may never reach it and the damper never fires at all — needs study before trusting v2 above 12V. See HUNT_GOVERNOR_V2_SPEC.md "Higher-voltage installs".
 #define HG_TRIG_RATIO 3.0f       // peak vs median of other bins — rejected a 2.22% broadband load transient amplitude alone would have flagged
 #define HG_TRIG_D_FRAC 0.3f      // relaxed duty bar for a D-attributed scan, as a FRACTION of HuntTrigPct (0.3 x 0.5 = the 0.15 the D lever was built against): the D-driven mode lives in VOLTS and its duty amplitude can sit below the quiet-log floor (08-21: 0.27% duty, 0.33 V p-p). Safe below the 0.4 quiet median ONLY because the kdTrim alternation requirement is the real gate — a quiet log has no alternations. Proportional, not fixed: a fixed 0.15 would become STRICTER than the standard bar the moment HuntTrigPct is set below it
 // Qualify-scan count is the HuntQualifyScans setting (default 3): consecutive hunt+steady scans to
@@ -279,7 +280,7 @@ void huntGovObserve(float dutyApplied, bool closedLoopOk) {
                 || TuningMode || CVTuningMode || batteryHealthTestActive
                 || systemIDActive || fieldCurveActive || fieldCutActive
                 || cvPlantFitActive || resTestActive || cvStressActive
-                || protTestActive || (ManualFieldToggle == 1)
+                || protTestActive || (altSweepActive != 0) || (ManualFieldToggle == 1)
                 || spDev > fmaxf(3.0f, 0.04f * (float)AlternatorNominalAmps);
   if (contam) hgContamTick = hgTick;
 }
@@ -920,9 +921,11 @@ void applyCcOutputLimits() {
   currentPID.SetOutputLimits((double)MinDuty, (double)ccDutyCeiling());
 }
 
-// applyNominalVoltageChange — single entry point for a system-voltage class change (12/24/36/48 V),
-// triggered from the Vessel Info save (SYSTEM_VOLTAGE_CLASS is the sole source of truth). Call AFTER
-// setting SYSTEM_VOLTAGE_CLASS = newV. When the class actually changes it persists the new class to NVS
+// applyNominalVoltageChange — single entry point for a system-voltage class change (12/24/36/48 V).
+// Two callers: the Vessel Info save, and applyImportConfig when an imported/pushed payload carries a
+// different class (SYSTEM_VOLTAGE_CLASS is the sole source of truth). On the import path it runs BEFORE
+// the manifest loop, so a full export's own values then overwrite the conversion key by key while a
+// one-key class push keeps it. Call AFTER setting SYSTEM_VOLTAGE_CLASS = newV. When the class actually changes it persists the new class to NVS
 // (NK_BatteryVoltage), then rescales the PERSISTED
 // charge-voltage profile by newV/oldV (Bulk/Float/Absorption/Rebulk/Target/Charged/alarms), the
 // volt-domain protection/helper margins and V/s rates (OV margins, disagreement threshold, iExcess
@@ -1331,6 +1334,17 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
       fieldCurveAbortFollowOn = (uint8_t)reason;
     }
     fieldCurveAbortRequested = true;
+  }
+  // Gate-tuning field sweep rides the same override path. Ending it at the cut is the point: the rows
+  // logged past an over-voltage cut are the protection's response, not the field-vs-output relation
+  // the sweep is measuring, and at a high state of charge the cut is the EXPECTED way a sweep ends.
+  if (altSweepActive != 0 && !altSweepAbortRequested) {
+    altSweepAbortRequested = true;
+    altSweepActive = 0;   // drop the banner and the test-busy interlock NOW, not whenever the lockout
+                          // clears and altSweep_tick is next reached — the run is over either way
+    altSweepLastEndMs = tick.nowMs;
+    queueConsoleMessageF("Field sweep: ABORTED — protection fired (%s) at %.1f%% field",
+                         reasonToString(reason), preCutDuty);
   }
   // Field de-energize τ test rides the same override path — latch the abort identically. The tick that
   // consumes the flag is gated out during the fault lockout, so without the latch the test would resume
@@ -3013,8 +3027,8 @@ void AdjustFieldLearnMode() {
     switch (newSysMode) {
       case SYS_MODE_OFF:
         enter_sys_off();
-        queueConsoleMessage("Charging disabled");
-        serialPrintlnNB("Charging disabled");
+        queueConsoleMessage(tick.bmsBlocking ? "Charging disabled - BMS on/off signal" : "Charging disabled");
+        serialPrintlnNB(tick.bmsBlocking ? "Charging disabled - BMS on/off signal" : "Charging disabled");
         break;
       case SYS_MODE_MANUAL:
         enter_sys_manual();
@@ -3071,6 +3085,24 @@ void AdjustFieldLearnMode() {
     fieldCollapseTime = 0;
   }
   uint32_t aflM3 = micros();  // end of section 3: CH1 gate + stage/governor/mode transitions
+
+  // ── Gate-tuning field sweep: end it whenever the field leaves normal AUTO ──────────────────────
+  // The sweeper commands duty through the override chain, which lives in the normal AUTO body below.
+  // Leaving normal AUTO — the On/Off switch, a BMS opening, a lockout, a fault, or a flip to manual —
+  // returns before that chain runs, so the field is handed straight back to the shutdown ramp (or to
+  // the manual duty) and goes off exactly as it always does. The sweeper cannot hold it on.
+  // What does NOT happen by itself is the sweep ENDING: altSweep_tick just stops being called, so
+  // without this it would resume mid-ramp the instant normal running returned — a field ramp starting
+  // with nobody pressing anything, the same hazard the 30 s start-request expiry exists to prevent.
+  // Tear it down here instead, which also drops the TUNING SWEEP banner on the same tick.
+  if (altSweepActive != 0 && (!isNormalMode || mode == MODE_NORMAL_MANUAL)) {
+    queueConsoleMessageF("Field sweep: ended (%s) — the field is back under the normal control path",
+                         reasonToString(reason));
+    altSweepActive = 0;
+    altSweepLastEndMs = millis();
+    altSweepAbortRequested = true;   // resets altSweep_tick's static phase on the next normal tick
+  }
+
   // ========== NON-NORMAL MODE: SHUTDOWN / FAULT HANDLING ==========
   // NOTE: pidLog_tick() is NOT called in the shutdown/fault path.
   if (!isNormalMode) {
@@ -3166,6 +3198,10 @@ void AdjustFieldLearnMode() {
   // CV plant-fit pulse train (Step 7 of the wizard display) — same mutex family. SETTLE/PILOT/HOLD return false (the
   // cvpfCcActive branch below drives the current PID); the abrupt PULSES/RELEASE own duty here.
   sysIDRunning = cvpf_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
+  // Gate-tuning field sweeper (ALT_GATE_TUNING_CAPTURE_SPEC.md §8) — same mutex family and the same
+  // duty-override + bumpless-resume path as the field curve. Continuous ramp up and back down; the
+  // session logger records what it produces.
+  sysIDRunning = altSweep_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
   // CV stress test (commissioning stage 8) — same mutex family but a PURE OBSERVER: the normal
   // loop runs exactly as fielded (table/Lo/thermal command chain untouched) and this tick only
   // confirms tracking, counts protection events, and grades the recovery.
@@ -4629,7 +4665,8 @@ void AdjustFieldLearnMode() {
               // Held off while any step/probe test owns the field (a mid-probe trim corrupts plant fits)
               // and under cvHelpersEnabled so OFF gives clean symmetric PI for tuning.
               bool fitProbeActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
-                                    resTestActive || batteryHealthTestActive || cvPlantFitActive;
+                                    resTestActive || batteryHealthTestActive || cvPlantFitActive ||
+                                    (altSweepActive != 0);
               if (cvHelpersEnabled && !fitProbeActive
                   && (CvKdArmV <= 0.0f || (voltageTargetSlewed - g_cvKdFiltV) < CvKdArmV)) {
                 float slopeExcess = 0.0f;
@@ -4993,7 +5030,8 @@ void AdjustFieldLearnMode() {
         {
           float kWd = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
           bool fitProbeActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
-                                resTestActive || batteryHealthTestActive || cvPlantFitActive;
+                                resTestActive || batteryHealthTestActive || cvPlantFitActive ||
+                                (altSweepActive != 0);
           if (!voltageControlActive || !cvWindDownEnable || fitProbeActive ||
               (CVTuningMode != 0) || g_autoTestActive) {
             cvWindDownActive = false;  // tests/probes drive targets deliberately; idle exit clears like the other trackers
@@ -6075,6 +6113,7 @@ const char *reasonToString(FieldEventReason r) {
     case REASON_COMMISSION_REST: return "Commissioning idle (field resting)";
     case REASON_TACH_IMPLAUSIBLE: return "TACH_IMPLAUSIBLE";
     case REASON_SOLAR_PAUSE: return "SOLAR_PAUSE";
+    case REASON_BMS_DISABLED: return "BMS_OFF";
 
     default: return "UNKNOWN";
   }
@@ -6183,7 +6222,8 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   }
 
   // Priority 1a: Disabled (user control - always show this reason if off)
-  if (!tick.chargingEnabled) return tick.solarForecastPause ? REASON_SOLAR_PAUSE : REASON_CHARGING_DISABLED;
+  if (!tick.chargingEnabled) return tick.solarForecastPause ? REASON_SOLAR_PAUSE
+                                    : (tick.bmsBlocking ? REASON_BMS_DISABLED : REASON_CHARGING_DISABLED);
 
   // Priority 1.5: Fast over-voltage — absolute ceiling, above the manual bypass and ungated.
   // Mirrors selectFieldControlMode PRIORITY 1.5. Live voltage → immediate cut + adaptive lockout.
@@ -6458,16 +6498,18 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // Charging enabled (with BMS and weather mode overrides)
   bool chargingEnabledLocal = (Ignition == 1 && OnOff == 1);
 
+  // GPIO42 = BMSLogic opto (U16); inverted — the phototransistor pulls the pin low when the
+  // external 5-28 V signal is present. Read every tick even with bmsLogic off: the Integrations
+  // status row is how an installer verifies the wiring BEFORE handing the wire any authority.
+  bmsSignalActive = !digitalRead(42);
+  bool bmsPermits = true;
   if (bmsLogic == 1) {
-    // GPIO42 = BMSLogic opto (U16); inverted — the phototransistor pulls the pin low when the
-    // external 5-28 V signal is present.
-    bool bmsSignalActiveLocal = !digitalRead(42);
-    if (bmsLogicLevelOff == 0) {
-      chargingEnabledLocal = chargingEnabledLocal && bmsSignalActiveLocal;
-    } else {
-      chargingEnabledLocal = chargingEnabledLocal && !bmsSignalActiveLocal;
-    }
+    bmsPermits = (bmsLogicLevelOff == 0) ? bmsSignalActive : !bmsSignalActive;
+    chargingEnabledLocal = chargingEnabledLocal && bmsPermits;
   }
+  // Sole-cause flag for the OFF reason word — true only while the BMS is the one thing saying no,
+  // so a key-off or a finished charge cycle keeps its own (more useful) reason.
+  tick.bmsBlocking = !bmsPermits && (Ignition == 1 && OnOff == 1) && !inIdleStage;
   // Idle stage (UseFloat=0, post-absorption): battery is full, stop charging.
   // Rebulk logic in updateChargingStage() still runs and clears inIdleStage when
   // voltage sags or discharge current threshold is hit — chargingEnabled recovers
@@ -6596,6 +6638,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
                          fieldCurveRequested || systemIDRequested || fieldCutRequested ||
                          (protTestActive != 0) || protTestRequested ||
                          resTestActive || batteryHealthTestActive || cvPlantFitActive || cvStressActive ||
+                         (altSweepActive != 0) || altSweepRequested ||
                          TuningMode || CVTuningMode || faCommissionGate;
     tick.commissioningResting = (commissionState == 1) && dialogAlive && !anyTestActive;
   }
@@ -6696,7 +6739,8 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   {
     bool sweepDrivingField = (fieldCurveActive != 0) || (systemIDActive != 0) || (fieldCutActive != 0)
                              || fieldCurveRequested || systemIDRequested || fieldCutRequested
-                             || fieldCutCcActive || (protTestActive != 0) || protTestCcActive;
+                             || fieldCutCcActive || (protTestActive != 0) || protTestCcActive
+                             || (altSweepActive != 0) || altSweepRequested;
     bool tachLieNow = TachLieEnable && chargingEnabledLocal && !tick.manualMode && !tick.ignoreRPM
                       && !sweepDrivingField
                       && !tick.currentDataStale
