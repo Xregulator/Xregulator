@@ -1526,6 +1526,15 @@ const int MAX_SAFE_FREQUENCY = 25000;  // Below core loss and EMI concerns
 // duty to it across the open-loop paths (manual/limp/fault) too on >12V banks. The user-visible Max
 // Field box IS the cap; set it to 99 for full duty. A duty-RATIO proxy (no field-current sensor).
 float MaxDuty = 99.0;
+// Max Field Volts — the same ceiling expressed as physical field volts instead of a duty ratio, so it
+// can be typed from the alternator's datasheet. Field makers reuse one 12V winding across their 24/48V
+// models, so the winding in a high-voltage alternator may still be a 12V part. ccDutyCeiling() enforces
+// whichever of this and MaxDuty binds first; this term solves against the MEASURED bus every tick, so it
+// hands duty back as the bank sags where the class-scaled MaxDuty cannot. Thermal (I^2R) limit only —
+// the field is switched, so the winding still sees full bus volts on every on-edge whatever the cap.
+// Derived from duty x battery volts, not sensed at the field: true field volts run above it by the
+// battery-to-alternator cable drop. Hardcoded default is a 12V value, class-scaled on first creation.
+float MaxFieldVolts = 15.0;
 float MinDuty = 1.0;       // field-duty floor: inner-PID outMin + soft-clamp decay floor. Compile-time default only — overwritten from NVS (voltage-scaled) at boot; per-RPM onset floor lives in rpmMinDutyTable.
 float ManualDutyTarget = 4.0f;  // manual-mode field duty %, 0.01 resolution (open-loop plant tests need sub-1% steps)
 int InvertAltAmps = 0;     // change sign of alternator amp reading
@@ -2636,9 +2645,11 @@ uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not c
 // demanding nothing is designed behavior, not a lie (2026-07-28: a flat 25% bar sat below the ~27%
 // commissioned idle floor and false-cut three CV re-entries). A phantom always has the loop demanding
 // current — the bus is low and nothing charges it — with duty wound far above the floor. The headroom
-// fraction inherits voltage-class scaling for free: rpmMinDuty and MaxDuty both already carry it
-// (~99% MaxDuty @12V scales to ~25% @48V, where any flat bar goes blind).
-#define TACH_LIE_HEADROOM_FRAC 0.15f  // arm bar = rpmMinDuty + this fraction of (MaxDuty - rpmMinDuty)
+// fraction inherits voltage-class scaling for free: rpmMinDuty and the field ceiling both already carry
+// it (~99% ceiling @12V scales to ~25% @48V, where any flat bar goes blind). The span is taken from
+// ccDutyCeiling(), not raw MaxDuty, so a Max Field Volts cap lowers the bar with the reachable duty
+// instead of parking it above anything the loop can command.
+#define TACH_LIE_HEADROOM_FRAC 0.15f  // arm bar = rpmMinDuty + this fraction of (ccDutyCeiling() - rpmMinDuty)
 #define TACH_LIE_MAX_AMPS 2.0f       // |alternator amps| below this = no output; commanded amps above this = loop demanding
 #define TACH_LIE_DWELL_MS 3000       // condition must persist this long — outlasts ramp/settling transients
 #define TACH_LIE_RELEASE_BLANK_MS 6000  // no rev-up release decision until the LM2907 settles post-cut: covers the ~40 ms collapse spike (~570 ms after cut, observed) and the full ~4.6 s re-bias interval (doc figure)
@@ -5113,6 +5124,8 @@ int n2kTempInstance = 4;
 int n2kTempSource = 3;      // tN2kTempSource; 3 = Engine Room (no Alternator source exists in the standard set)
 int n2kChgrEnable = 1;      // 127507 charger status
 int n2kChgrInstance = 0;
+int n2kChgrCfgEnable = 1;   // 127510 charger configuration — the only place field drive % reaches the bus (its ChargeCurrentLimit field)
+int n2kChgrMode = 0;        // tN2kChargerMode published by both charger PGNs: 0 Standalone, 1 Primary, 2 Secondary — a label only, never a control input
 int n2kEngRpmEnable = 0;    // 127488 engine RPM (off: conflicts with a real engine gateway on the same instance)
 int n2kEngInstance = 0;
 int n2kEngDynEnable = 0;    // 127489 engine dynamic (alternator voltage + warning bits)
@@ -5121,7 +5134,7 @@ uint32_t n2kTxCount = 0;      // frames/messages accepted by SendMsg since Reset
 uint32_t n2kTxDropCount = 0;  // SendMsg failures (TX queue + retry ring full — normal when no bus is attached)
 int n2kSrcAddrLive = -1;      // claimed source address; -1 = not claimed / listen-only
 uint8_t n2kAddrPending = 255;    // address-claim result awaiting NVS persist (255 = none) — flushed field-off only, per the no-flash-in-control-path rule
-const unsigned long N2kTransmitMessages[] PROGMEM = { 127488UL, 127489UL, 127506UL, 127507UL, 127508UL, 127513UL, 130312UL, 0 };
+const unsigned long N2kTransmitMessages[] PROGMEM = { 127488UL, 127489UL, 127506UL, 127507UL, 127508UL, 127510UL, 127513UL, 130312UL, 0 };
 // Mirrors NMEA2000Handlers[] so the library's 126464 RX PGN list is truthful (spec §8).
 // RV-C DGNs are deliberately absent: they are not N2K PGNs — they arrive via the fork's raw-RX tap.
 const unsigned long N2kReceiveMessages[] PROGMEM = { 126720UL, 126992UL, 127245UL, 127250UL, 127257UL, 127506UL, 127508UL, 127513UL, 128259UL, 128267UL, 129026UL, 129029UL, 129540UL, 130306UL, 0 };
@@ -5180,6 +5193,39 @@ volatile bool dvccCapPause = false;   // /dvccCapture (async_tcp task) sets whil
 // Set/read of dvccCapPause and of the head/count pair happens under this spinlock, and so does
 // the tap's slot write - that is what makes the pause handshake safe across the two cores.
 static portMUX_TYPE dvccCapMux = portMUX_INITIALIZER_UNLOCKED;
+// ===== Bus node identity roster (spec section 15) =====
+// A followed limit is uninterpretable without the identity of the node that published it: a GX
+// rewrites a managed battery's numbers per battery brand, so "40 A at 55 V from addr 35" is an
+// anecdote until we know what addr 35 is. Filled PASSIVELY from PGN 60928 (NAME) and 126996
+// (product information) - with transmit off we can never REQUEST either, so this collects only
+// what the bus volunteers: node power-up claims, plus the broadcast answers to any MFD's own
+// device scan. Hearing nothing is a normal outcome on a bus that booted before us, not a fault.
+// Roster reads/writes are guarded by dvccCapMux (shared with the capture ring - never nested).
+struct DvccNode {
+  uint32_t unique;     // NAME unique number (21-bit)
+  uint32_t lastMs;     // millis() of the last identity frame from this address; also the eviction key
+  uint16_t mfg;        // NAME manufacturer code (358 = Victron, 2046 = open/unregistered)
+  uint16_t prodCode;   // 126996 product code
+  uint16_t vicProdId;  // Victron VREG 0x0100 product id, if this node ever broadcasts one
+  uint8_t addr;
+  uint8_t func;        // NAME device function
+  uint8_t cls;         // NAME device class
+  uint8_t devInst;     // NAME device instance byte (lower 3 bits + upper 5 bits, as sent)
+  uint8_t sysInst;     // NAME system instance
+  uint8_t haveName;    // 60928 seen
+  uint8_t haveProd;    // 126996 seen
+  char model[24];      // 126996 strings, truncated and trailing-space trimmed
+  char sw[16];
+  char serial[16];
+};
+#define DVCC_NODE_N 24
+DvccNode *dvccNodes = nullptr;  // ps_malloc'd in initDvccCapture()
+uint8_t dvccNodeCount = 0;
+uint16_t dvccAuthMfg = 0;   // identity of whoever currently holds dvccRxSrcAddr (0 = never heard)
+uint16_t dvccAuthProd = 0;  // its 126996 product code, else its Victron VREG product id, else 0
+void dvccCopyPlainText(char *dst, size_t dstSz, const char *src);
+void dvccNoteName(uint8_t src, const unsigned char *d, int len);
+void dvccNoteProductInfo(const tN2kMsg &N2kMsg);
 void initDvccCapture();
 void dvccTick();
 void dvccRawFrameTap(unsigned long id, unsigned char len, const unsigned char *buf);

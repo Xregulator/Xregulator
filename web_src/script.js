@@ -1038,6 +1038,9 @@ const CSV2_FIELDS = [
     "n183ChecksumErrs",        // NMEA 0183 sentences that failed checksum
     "ft_ReadNMEA0183_win",     // NMEA 0183 drain worst µs (window)
     "ft_ReadNMEA0183_ses",     // NMEA 0183 drain worst µs (session)
+    "fieldDutyCeil",           // enforced field-duty ceiling x100: lower of Max Field % and the Max Field Volts term
+    "dvccAuthMfg",             // NAME manufacturer code of the node publishing the charge limits (358 = Victron; 0 = never heard)
+    "dvccAuthProd",            // its product code (126996), else its Victron VREG product id, else 0
     "sessionId",               // device boot identity, same in every channel this boot
     "sendMs",                  // device millis() when this payload was BUILT (CSV2 sends one pass later)
 ];
@@ -1049,6 +1052,9 @@ const N2K_TEMP_SOURCE_NAMES = ["Sea", "Outside", "Inside", "Engine Room", "Main 
     "Bait Well", "Refrigeration", "Heating System", "Dew Point", "Apparent Wind Chill",
     "Theoretical Wind Chill", "Heat Index", "Freezer", "Exhaust Gas", "Shaft Seal"];
 
+// tN2kChargerMode display names (index = wire code) — carried by both charger PGNs, label only.
+const N2K_CHARGER_MODE_NAMES = ["Standalone", "Primary", "Secondary"];
+
 const FT_BLAME_NAMES = [
     "Analog Inputs", "VE Direct", "Alt Control", "Derived Metrics",
     "Alarms", "Battery SOC", "Log Dashboard", "System Health",
@@ -1056,7 +1062,7 @@ const FT_BLAME_NAMES = [
     "CH1 Stats", "WiFi Send", "WiFi Check", "Time Sync",
     "Sensor History", "Upload Buffered", "Config Payload",
     "LT Ring Flush", "Ripple Flush", "Fast Alt Drain", "Fault Detector",
-    "Zero-Drift Log", "Batt Health Save", "Knee Save", "N2K TX", "DVCC Brain",
+    "Zero-Drift Log", "Batt Health Save", "Keep-Alive Save", "N2K TX", "DVCC Brain",
     "N2K RX", "NMEA 0183",
 ];
 
@@ -1335,7 +1341,7 @@ try { altTrendYManual = JSON.parse(localStorage.getItem('altTrendY') || 'null');
 
 function fetchAltSchema(){ return fetch(buildURL('/altschema')).then(r=>r.json()).then(j=>{ altSchema=j; }).catch(()=>{}); }
 
-// ===== Automatic Min% Learning ("knee tracker") =====
+// ===== Tachometer Keep-Alive — Automatic Learning (firmware "knee tracker", knee*/kneeLearn* keys) =====
 // Polls /kneeLearnState and fills the echo labels, knob input placeholders, and the per-RPM
 // status table. State flows through this endpoint, not CSV, so there is no CSV plumbing.
 function _kneeSetEcho(id, txt){ const e = document.getElementById(id); if (e) e.textContent = txt; }
@@ -1350,18 +1356,18 @@ function fetchKneeLearnState(){
         _kneeSetEcho('kneeLearnEnable_echo', on ? 'On' : 'Off');
         const cb = document.getElementById('kneeLearnEnable_checkbox');
         if (cb) cb.checked = on;
-        // While learning owns the Min% column, lock the 10 cells so manual edits can't be silently
+        // While learning owns the Keep-Alive column, lock the 10 cells so manual edits can't be silently
         // stomped; release them (and the hint) otherwise.
         const owns = on;
         for (let i = 0; i < 10; i++) {
             const mi = document.getElementById('rpmMinDutyTable' + i + '_input');
             if (!mi) continue;
             mi.disabled = owns;
-            mi.title = owns ? 'Managed by Automatic Min% Learning — turn it off below to edit by hand' : '';
+            mi.title = owns ? 'Managed by Automatic Keep-Alive Learning — turn it off below to edit by hand' : '';
         }
         const mhint = document.getElementById('minduty-managed-hint');
         if (mhint) mhint.style.display = owns ? '' : 'none';
-        // Prompt to run the wizard's Min% floor step while nothing is calibrated yet.
+        // Prompt to run the wizard's Keep-Alive Floor step while nothing is calibrated yet.
         const anyFrozen = Array.isArray(j.bins) && j.bins.some(b => Number(b.frozen) === 1);
         const chint = document.getElementById('minpct-cal-hint');
         if (chint) chint.style.display = anyFrozen ? 'none' : '';
@@ -1414,7 +1420,7 @@ function fetchKneeLearnState(){
 }
 async function resetKneeLearn(){
     if (!settingsUnlocked) { xAlert("Please unlock settings first"); return; }
-    if (!await xConfirm("Reset all learned Min% floors to factory defaults?")) return;
+    if (!await xConfirm("Reset all learned tachometer keep-alive floors to factory defaults?")) return;
     const params = new URLSearchParams({ ResetKneeLearn: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(()=>{ setTimeout(fetchKneeLearnState, 400); })
@@ -2037,7 +2043,7 @@ function exportConfigDownload(){
 let _cfgDiffResolve=null,_cfgDiffIncoming=null;
 const _CFG_TABLE_LABELS={rpmPoints:'RPM Breakpoints',capTable:'Current Cap Table — Normal (A)',
   capPowerTable:'Power Cap Table — Normal (W)',capTableLo:'Current Cap Table — Low (A)',
-  capPowerTableLo:'Power Cap Table — Low (W)',minDutyTable:'Min Field Duty Floors (%)'};
+  capPowerTableLo:'Power Cap Table — Low (W)',minDutyTable:'Tachometer Keep-Alive Floors (%)'};
 function cfgDiffClose(apply){
   const inc=_cfgDiffIncoming;
   if(apply && inc){
@@ -3518,6 +3524,8 @@ const CSV3_FIELDS = [
     "n2kTempSource",                 // tN2kTempSource code (3 = Engine Room)
     "n2kChgrEnable",
     "n2kChgrInstance",
+    "n2kChgrCfgEnable",              // 127510 charger configuration, carries field drive % (0/1)
+    "n2kChgrMode",                   // tN2kChargerMode label: 0 Standalone, 1 Primary, 2 Secondary
     "n2kEngRpmEnable",
     "n2kEngInstance",
     "n2kEngDynEnable",
@@ -3541,6 +3549,7 @@ const CSV3_FIELDS = [
     "NMEA0183Invert",                // NMEA 0183 polarity: 0 RS-232-level talker, 1 TTL-level talker
     "displayVolUnit",                // fuel volume display preference: 0 US gallons, 1 litres
     "gpsPositionSource",             // 0=auto, 1=NMEA, 2=Phone — position only; the clock is timeSourceMode
+    "MaxFieldVolts",                 // field-volt cap x10; the ceiling it produces is CSV2 fieldDutyCeil
     "sessionId",                     // device boot identity, same in every channel this boot
     "sendMs",                        // device millis() when this settings echo was built; event-driven with a 60 s fallback
 ];
@@ -3919,15 +3928,25 @@ async function postPhoneFix(loc) {
     }
 }
 
-// True when the owner has switched on something that actually consumes this phone's
-// position: Defer to Solar (forecast needs coordinates), phone-forced position source,
-// or phone as the speed/course owner. All three arrive on the CSV3 settings echo. Until
-// one is on, the app neither asks for location nor sends any, so a default install runs
-// its whole life without a location prompt.
+// The boat already knows where it is, so the phone has nothing to add. currentGpsSource
+// rides CSV2: 1 = NMEA 2000 GPS live, 3 = coordinates the owner typed in Setup > Solar.
+// Unknown (no CSV2 heard yet) counts as known — never read location on a guess.
+function boatPositionAlreadyKnown() {
+    const src = Number(window.currentGpsSource);
+    if (!Number.isFinite(src)) return true;
+    return src === 1 || src === 3;
+}
+
+// True when this phone's position is actually of use to the regulator right now. Backup is
+// the DEFAULT (opted in), so this is normally true on a boat with no GPS of its own and
+// false on a boat that has one — the phone is never read when the bus already answers the
+// question. Selecting "NMEA 2000 only" is the opt-out and makes this false always.
 function phonePositionWanted() {
-    return Number(window.weatherModeEnabled) === 1
-        || Number(window.gpsPositionSource) === 2
-        || Number(window.speedSourceMode) === 1;
+    if (Number(window.speedSourceMode) === 1) return true;   // phone owns speed/course outright
+    const src = Number(window.gpsPositionSource);
+    if (src === 2) return true;                              // phone forced as the position source
+    if (src === 0 && !boatPositionAlreadyKnown()) return true;  // backup, and the boat has nothing
+    return false;                                            // NMEA 2000 only — owner opted out
 }
 
 // Ask for location, in context, at the moment the owner switches on a feature that needs
@@ -3962,20 +3981,51 @@ async function requestPhoneLocationPermission(whyLine) {
 // NMEA GPS of its own to supply them. Called from the toggle's onchange after it submits.
 async function weatherModeToggled(isOn) {
     if (!isOn) return;
-    if (Number(window.currentGpsSource) === 1) return;   // boat's own NMEA GPS already supplies coordinates
+    if (boatPositionAlreadyKnown()) return;   // boat's own GPS (or typed coordinates) already answers this
+    if (Number(window.gpsPositionSource) === 1) {
+        // Owner opted the phone out of position entirely, so the forecast has no coordinates
+        // to work from and would silently never run. Say so instead of asking for location.
+        await xAlert('The solar forecast needs the boat\'s position, and this boat has no GPS ' +
+                     'of its own. Set Setup > Boat > Position Source to use this phone as a ' +
+                     'backup, or type coordinates in Setup > Solar.', 'No position available');
+        return;
+    }
     await requestPhoneLocationPermission(
         'The solar forecast is looked up for your position. X Regulator can take it from this ' +
         'phone when the boat has no GPS of its own. It goes only to your regulator.');
 }
 
-// Position source selector. Only "Phone only" consumes this phone's location, so only that
-// choice asks. Auto arbitrates whatever arrives and never triggers a prompt on its own.
+// Backup position is on by default, so the app has to ask for authorization at some point.
+// It asks HERE — the first time this phone actually reaches a regulator — and never at
+// launch: at launch nothing has explained why, and a reviewer running the app with no
+// hardware would meet an unexplained prompt before seeing the product. On this path a
+// reviewer in demo mode never connects, so no prompt is ever raised for them.
+// Fires once per install; the flag survives app restarts but not a delete.
+async function maybeAskLocationOnFirstConnect() {
+    if (!IS_CAPACITOR || DEMO_MODE) return;
+    try { if (localStorage.getItem('locPermAsked') === '1') return; } catch (e) { return; }
+    if (Number(window.gpsPositionSource) === 1) return;   // owner already chose NMEA 2000 only
+    try { localStorage.setItem('locPermAsked', '1'); } catch (e) { }
+    await requestPhoneLocationPermission(
+        'X Regulator can use this phone as a backup GPS for your boat, so distance run, ' +
+        'anchorages and the solar forecast still work when the boat has no GPS of its own. ' +
+        'Position goes to your regulator on your local network. You can turn this off under ' +
+        'Setup > Boat > Position Source.');
+}
+
+// Position source selector. Both modes that can read this phone ask for authorization if it
+// isn't already held; "NMEA 2000 only" is the opt-out and asks nothing. A refusal at the
+// system alert reverts the dropdown rather than leaving a setting that cannot work.
 async function gpsPositionSourceChanged(sel) {
-    if (Number(sel.value) === 2) {
+    const v = Number(sel.value);
+    if (v === 0 || v === 2) {
         const ok = await requestPhoneLocationPermission(
-            'X Regulator will send this phone\'s position to your regulator, so it can log ' +
-            'distance run and anchorages without a GPS on the NMEA 2000 bus. It goes only to ' +
-            'your regulator on your local network.');
+            v === 2
+              ? 'X Regulator will use this phone as the boat\'s position source, ignoring NMEA 2000. ' +
+                'Position goes to your regulator on your local network.'
+              : 'X Regulator will use this phone as a backup position source when the boat\'s own ' +
+                'GPS is unavailable, so distance run, anchorages and the solar forecast keep working. ' +
+                'Position goes to your regulator on your local network.');
         if (!ok) { sel.value = String(window.gpsPositionSource ?? 0); return; }
     }
     sel.form.submit();
@@ -4567,7 +4617,7 @@ function initializeEventSource() {
         // These poll the ESP32, and AsyncTCP preempts the control loop, so only poll while the panel is
         // actually rendered. The cursor resets on hide, so re-opening a tab fetches at once rather than
         // waiting out one period — fresher on arrival than the old always-on timers.
-        // fetchKneeLearnState also disables the Min% cells when learning is on, so it must run once at
+        // fetchKneeLearnState also disables the Keep-Alive cells when learning is on, so it must run once at
         // connect, not on the first visible tick — otherwise the cells look editable, and Chrome silently
         // drops the rest of your keystrokes when the disable lands on the input you are typing into.
         if (!window._kneeTimer)    { fetchKneeLearnState(); window._kneeTimer = pollWhenVisible(fetchKneeLearnState, 'kneeLearnEnable_checkbox', 4000); }
@@ -7224,6 +7274,8 @@ function updateAllEchosOptimized(data) {
         { key: 'n2kTempSource', id: 'n2kTempSource_echo', transform: v => (N2K_TEMP_SOURCE_NAMES[v] ?? v) },
         { key: 'n2kChgrEnable', id: 'n2kChgrEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'n2kChgrInstance', id: 'n2kChgrInstance_echo', transform: v => v },
+        { key: 'n2kChgrCfgEnable', id: 'n2kChgrCfgEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kChgrMode', id: 'n2kChgrMode_echo', transform: v => (N2K_CHARGER_MODE_NAMES[v] ?? v) },
         { key: 'n2kEngRpmEnable', id: 'n2kEngRpmEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'n2kEngInstance', id: 'n2kEngInstance_echo', transform: v => v },
         { key: 'n2kEngDynEnable', id: 'n2kEngDynEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
@@ -7279,6 +7331,7 @@ function updateAllEchosOptimized(data) {
         { key: 'InvertBattAmps', id: 'InvertBattAmps_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'BatteryShuntPresent', id: 'BatteryShuntPresent_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'MaxDuty', id: 'MaxDuty_echo', transform: v => v },
+        { key: 'MaxFieldVolts', id: 'MaxFieldVolts_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'MinDuty', id: 'MinDuty_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'FieldResistance', id: 'FieldResistance_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'FieldResistance', id: 'FieldResistance_echo_fldamps',  transform: v => (v / 100).toFixed(2) },
@@ -7556,6 +7609,7 @@ function updateAllEchosOptimized(data) {
         { key: 'speedSourceMode',       name: 'speedSourceMode' },
         { key: 'UseFloat',              name: 'UseFloat' },
         { key: 'n2kTempSource',         name: 'n2kTempSource' },
+        { key: 'n2kChgrMode',           name: 'n2kChgrMode' },
         { key: 'dvccSrcType',           name: 'dvccSrcType' },
     ]);
     selectSyncs.forEach(({ key, name }) => {
@@ -13400,6 +13454,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("n2kAltEnable_checkbox", data.n2kAltEnable, "n2kAltEnable");
         updateCheckbox("n2kAltTempEnable_checkbox", data.n2kAltTempEnable, "n2kAltTempEnable");
         updateCheckbox("n2kChgrEnable_checkbox", data.n2kChgrEnable, "n2kChgrEnable");
+        updateCheckbox("n2kChgrCfgEnable_checkbox", data.n2kChgrCfgEnable, "n2kChgrCfgEnable");
         updateCheckbox("n2kEngRpmEnable_checkbox", data.n2kEngRpmEnable, "n2kEngRpmEnable");
         updateCheckbox("n2kEngDynEnable_checkbox", data.n2kEngDynEnable, "n2kEngDynEnable");
         updateCheckbox("n2kEngBitsEnable_checkbox", data.n2kEngBitsEnable, "n2kEngBitsEnable");
@@ -13452,6 +13507,7 @@ function updateTogglesFromData(data) {
         if (data.weatherModeEnabled !== undefined) window.weatherModeEnabled = Number(data.weatherModeEnabled);
         if (data.gpsPositionSource  !== undefined) window.gpsPositionSource  = Number(data.gpsPositionSource);
         if (data.speedSourceMode    !== undefined) window.speedSourceMode    = Number(data.speedSourceMode);
+        maybeAskLocationOnFirstConnect();   // self-latching; needs gpsPositionSource, so it waits for this echo
         updateFloatVisibility();
 
 
@@ -13830,13 +13886,13 @@ async function confirmVoltageRescale(oldV, newV) {
         + dline('Duty ramp rate', 'DutyRampRate_echo', '%/s') + '\n'
         + dline('Slow duty ramp rate', 'DutySlowRampRate_echo', '%/s') + '\n\n'
         + 'IT ALSO ERASES THESE, and they cannot be recovered:\n'
-        + '  - Your commissioned Min Field % floor table, and the learning behind it. It goes back '
-        + 'to the flat 1% default and the Min Field floor step has to be run again.\n'
+        + '  - Your commissioned tachometer keep-alive floor table, and the learning behind it. It goes back '
+        + 'to the flat 1% default and the Keep-Alive Floor step has to be run again.\n'
         + '  - Learned oscillation-damper engine-speed ranges.\n\n'
         + 'Protection margins and tuning-helper thresholds (overvoltage trip margins, sensor '
         + 'disagreement threshold, target ramp rates, voltage-damper arm and deadband thresholds, '
         + 'CV test wave amplitude, and similar voltage-referenced bands) rescale with the new voltage, '
-        + 'and field-duty bands (knee margin and step, alternator-health steadiness bands and duty '
+        + 'and field-duty bands (keep-alive onset margin and probe step, alternator-health steadiness bands and duty '
         + 'floor) rescale inversely. Voltage-loop gains are unaffected: the stored battery stiffness '
         + 'is rescaled with the bank precisely so the loop behaves the same per cell.\n\n'
         + 'It rescales from the CURRENT values, so if you already entered real ' + newV
@@ -14360,9 +14416,9 @@ window.addEventListener("load", function () {
             return false;
         }
 
-        // Changing an RPM breakpoint re-keys every learned Min% floor to the wrong RPM, so the
+        // Changing an RPM breakpoint re-keys every learned keep-alive floor to the wrong RPM, so the
         // firmware wipes the knee tracker. Warn first — if the user is only editing Cap (A)/(kW)
-        // or Min% cells, no breakpoint moved and this never fires.
+        // or Keep-Alive cells, no breakpoint moved and this never fires.
         const markPending = () => {
             dirtyInputs.forEach(id => {
                 const el = document.getElementById(id);
@@ -14390,8 +14446,8 @@ window.addEventListener("load", function () {
             const form = e.target;
             xConfirm(
                 'You changed an RPM breakpoint.\n\n' +
-                'The learned Min% floors were measured at the old RPMs, so they will be CLEARED — ' +
-                're-run the Min% floor calibration from the Automatic Min% Learning card.\n\n' +
+                'The learned keep-alive floors were measured at the old RPMs, so they will be CLEARED — ' +
+                're-run the Keep-Alive Floor calibration from the Tachometer Keep-Alive card.\n\n' +
                 'Save this change?').then(ok => {
                     if (ok) { markPending(); form.submit(); }
                 });
@@ -15871,6 +15927,26 @@ window.addEventListener("load", function () {
                 set2('n2kRxSoc_ID', (data.n2kRxSoc === undefined || soc < 0) ? '—' : soc + ' %');
             })();
 
+            // Field Ceiling — Setup → the read-only row under the two field caps. Naming which cap is
+            // binding is the whole point of the row: the Max Field (%) box stopped being the sole
+            // enforced ceiling when Max Field Volts arrived, so without this the loop obeys a bound
+            // neither box shows. Compared with a tolerance because the volts term is a filtered
+            // quotient and lands a hair off an integer Max Field %.
+            (function () {
+                const el = document.getElementById('fieldDutyCeil_echo');
+                if (!el || data.fieldDutyCeil === undefined) return;
+                const ceil = Number(data.fieldDutyCeil) / 100;
+                if (!Number.isFinite(ceil) || ceil < 0) return;
+                el.textContent = ceil.toFixed(1);
+                const src = document.getElementById('fieldDutyCeil_source');
+                if (src) {
+                    const maxDuty = Number(document.getElementById('MaxDuty')?.value);
+                    const txt = (Number.isFinite(maxDuty) && ceil < maxDuty - 0.05)
+                        ? 'set by Max Field Volts' : 'set by Max Field (%)';
+                    if (src.textContent !== txt) src.textContent = txt;
+                }
+            })();
+
             // NMEA 0183 link health — Live Data → Integrations. The two counters are the whole point:
             // they prove the port, the baud and the polarity are right regardless of whether any
             // sentence type is understood. Values ride CSV2, staleness comes from TS.
@@ -15914,7 +15990,13 @@ window.addEventListener("load", function () {
                 set2('dvccCvl_ID', num(data.dvccRxCvl, 100, 2, ' V'));
                 set2('dvccCcl_ID', num(data.dvccRxCcl, 10, 1, ' A'));
                 const src = Number(data.dvccRxSrcAddr);
-                set2('dvccSrc_ID', (src === 255 || !isFinite(src)) ? '—' : ('addr ' + src));
+                // Identity of the publisher, collected passively from PGN 60928 / 126996. Often
+                // absent (nothing can be requested with transmit off), so every part is optional.
+                const authMfg = Number(data.dvccAuthMfg || 0);
+                const authProd = Number(data.dvccAuthProd || 0);
+                const authWho = authMfg === 358 ? 'Victron' : authMfg === 2046 ? 'open mfr code' : authMfg > 0 ? 'mfr ' + authMfg : '';
+                const authTxt = 'addr ' + src + (authWho ? ' \u00b7 ' + authWho : '') + (authProd ? ' \u00b7 product ' + authProd : '');
+                set2('dvccSrc_ID', (src === 255 || !isFinite(src)) ? '—' : authTxt);
                 const ages = window.sensorAges || {};
                 const age = Number(ages.dvcc ?? 999999);
                 const op = (age > 20000) ? '0.5' : '';
@@ -16823,6 +16905,7 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("n2kAltEnable_checkbox").checked = (document.getElementById("n2kAltEnable").value === "1");
     document.getElementById("n2kAltTempEnable_checkbox").checked = (document.getElementById("n2kAltTempEnable").value === "1");
     document.getElementById("n2kChgrEnable_checkbox").checked = (document.getElementById("n2kChgrEnable").value === "1");
+    document.getElementById("n2kChgrCfgEnable_checkbox").checked = (document.getElementById("n2kChgrCfgEnable").value === "1");
     document.getElementById("n2kEngRpmEnable_checkbox").checked = (document.getElementById("n2kEngRpmEnable").value === "1");
     document.getElementById("n2kEngDynEnable_checkbox").checked = (document.getElementById("n2kEngDynEnable").value === "1");
     document.getElementById("n2kEngBitsEnable_checkbox").checked = (document.getElementById("n2kEngBitsEnable").value === "1");
@@ -21330,7 +21413,7 @@ function placeLeftPanel(panel) {
     panel.style.left = GAP + 'px';
     const h = panel.offsetHeight;
     // Vertical centering is re-evaluated on every render, so a step whose body grows and shrinks
-    // between runs (Min% Floor: tables and charts appear, then collapse while a run is active) made
+    // between runs (Keep-Alive Floor: tables and charts appear, then collapse while a run is active) made
     // the whole panel hop up and down. Once placed, hold the top while the panel still fits fully
     // on-screen; _holdTop is cleared on phase entry / open so a new step re-centers normally.
     const cur = parseFloat(panel.style.top);
@@ -22716,7 +22799,7 @@ function computeActionableDisturbance() {
 // existing SystemID / tuning-sweep / matrix endpoints; the operator only holds or
 // slowly changes engine speed when prompted — the regulator drives the field.
 // ============================================================================
-const CX_PHASES = ['Prep', 'Field curve', 'Current Control Autotuning', 'Verify Current Control', 'Disturbances', 'Fault Threshold Autotuning', 'Voltage Control Autotuning', 'Min% Floor & Field Decay', 'Stress Test'];
+const CX_PHASES = ['Prep', 'Field curve', 'Current Control Autotuning', 'Verify Current Control', 'Disturbances', 'Fault Threshold Autotuning', 'Voltage Control Autotuning', 'Keep-Alive Floor & Field Decay', 'Stress Test'];
 // Per-phase caption for the permanent RPM strip — the throttle instruction for THE CURRENT screen.
 // Phases 2/3 (CC sweep, Verify) are speed-referenced: commissionRender swaps in "hold near N RPM"
 // with the upstream step's actual speed (cxRpmRefFor) once one is known; these strings are the
@@ -22801,7 +22884,7 @@ let cxPlan = [true, true, true, true, true, true, true, true, true];
 // Verify(3)+CV plant fit(6); Verify(3) → CV plant fit(6); Disturbances(4) → Thresholds(5).
 // CV plant fit(6) measures the current→voltage plant, downstream of the whole inner current loop.
 // The Stress Test(8) verdict grades the tuned CV loop, so any retune upstream of it (1/2/3/6) stales it.
-// Min% floor + Field decay(7) is independent — nothing feeds it, it feeds nothing; it runs late so
+// Keep-Alive floor + Field decay(7) is independent — nothing feeds it, it feeds nothing; it runs late so
 // the engine is warm. Tach alignment (RPMScalingFactor/PulleyRatio) is set on a pre-wizard screen,
 // not a stage. (Mirrors commissionDependentsMask() in the firmware.)
 const CX_DEPENDENTS = { 1: [2, 3, 6, 8], 2: [3, 6, 8], 3: [6, 8], 4: [5], 6: [8] };
@@ -22818,7 +22901,7 @@ const CX_MANUAL_LOC = [
     'Alternator ripple map. Not measured when skipped — check the ripple plot under Protections; the over-current trip lines will use your existing/default ripple.',
     'Over-current trip floor and ceiling. Set them under Protections ▸ Over-current.',
     'Voltage-loop gains (CV Kp/Ki). Leave CV gain mode on Auto (safe defaults) or set them under Tuning ▸ Voltage Control.',
-    'Per-RPM Min% duty floor and the field drain time. Set the floor in the RPM table\'s Min % column (Setup ▸ Alternator) and the drain time under Protections ▸ Field Drain Time, or re-run this step.',
+    'Per-RPM tachometer keep-alive floor and the field drain time. Set the floor in the RPM table\'s Keep-Alive (%) column (Setup ▸ Alternator) and the drain time under Protections ▸ Field Drain Time, or re-run this step.',
     'Diagnostic verdict only — no settings are written and it does not block COMMISSIONED. Run it any time from Setup ▸ Alternator ▸ Tuning ▸ Stress Test.',
 ];
 
@@ -23080,7 +23163,7 @@ function cxBulkV() { const v = getEchoNumber('BulkVoltage_echo'); return (v > 0)
 function cxHardV() { const v = getEchoNumber('AlternatorHardShutdownV_echo'); return (v > 0) ? v : NaN; }
 
 // The one true protection statement, per phase. The open-loop / test-current phases — Field curve (1),
-// Plant fit (2), Verify (3), CV plant fit (6), Min% floor + drain (7) — are guarded only by the fast OV cut +
+// Plant fit (2), Verify (3), CV plant fit (6), Keep-Alive floor + drain (7) — are guarded only by the fast OV cut +
 // INA228 backstop; the disturbance map (4) and threshold review (5) run under full normal protection.
 // Per-phase protection statement (plain text — the footer wrapper lives in commissionRender).
 function cxSafetyText(phase) {
@@ -23092,7 +23175,7 @@ function cxSafetyText(phase) {
   if (isNaN(hv)) ov = 'the Alternator Hard Shutdown Voltage';
   else if (!isNaN(bv) && bv > 0) ov = 'Bulk ' + bv.toFixed(2) + ' V + ' + (hv - bv).toFixed(2) + ' = ' + hv.toFixed(2) + ' V (Alternator Hard Shutdown Voltage)';
   else ov = hv.toFixed(2) + ' V (Alternator Hard Shutdown Voltage)';
-  // Open-loop / test-current steps (Field curve, Plant fit, Verify, CV plant fit, Min% floor
+  // Open-loop / test-current steps (Field curve, Plant fit, Verify, CV plant fit, Keep-Alive floor
   // onset ramp + field-drain cuts) run with only the fast over-voltage hard-shutdown live; the
   // rest run under full normal protection.
   const openLoop = (phase >= 1 && phase <= 3) || phase === 6 || phase === 7;
@@ -23123,7 +23206,9 @@ function cxFinePrint(phase) {
     case 4: return 'Maps the current ripple your engine, belt and alternator produce at each engine speed. Stop as soon as the worst-ripple speed is pinned down and no unswept gap could hide a bigger peak. Measurement only — this step sets no thresholds.' + cxDocLink('step-5-disturbances');
     case 5: return 'Sets the over-current trip line a safety margin above the ripple measured in the last step, and the voltage-rise tolerance the same way. These are the live protection settings — editing here writes them immediately.' + cxDocLink('step-6-fault-threshold-autotuning');
     case 6: return 'Fires short field pulses and reads the settled voltage change against the current change to measure how stiff the battery is (millivolts per amp). The voltage-loop gains follow from that number. Keep all other battery loads constant during the test.' + cxDocLink('step-7-voltage-control-autotuning');
-    case 7: return 'Two measurements at each held speed: the lowest field drive that produces any output (the Min% floor), and how fast output dies away after a protection cut. The field sits at its cut floor during the decay runs, so they cannot over-volt.' + cxDocLink('step-8-min-floor-field-decay');
+    // Doc anchor keeps its original slug — the docs page carries a legacy <a id> so links from
+    // already-shipped firmware still land on the section after the rename.
+    case 7: return 'Two measurements at each held speed: the lowest field drive that produces any output (the tachometer keep-alive floor), and how fast output dies away after a protection cut. The field sits at its cut floor during the decay runs, so they cannot over-volt.' + cxDocLink('step-8-min-floor-field-decay');
     case 8: return 'Parks the bus at a voltage target the alternator can definitely reach; your throttle snap then pushes it over and the over-voltage protection fires. Graded on how many times it clamps, how long recovery takes, and whether it settles afterward. It writes no settings, and it ends itself.' + cxDocLink('step-9-stress-test');
     default: return '';
   }
@@ -23170,7 +23255,7 @@ function cxShowTab(main, sub) {
     const el = firstPlot ? document.getElementById(firstPlot) : null;
     // Laid out => its main tab, sub-tab and (for Tuning) alt-panel are ALL already the active ones.
     // Re-selecting them anyway costs a window.scrollTo(0,0) inside showSubTab/showTuningPanel — the
-    // page snaps to the top and the scrollIntoView below drags it back down. The Min% Floor step
+    // page snaps to the top and the scrollIntoView below drags it back down. The Keep-Alive Floor step
     // calls this twice per held speed (onset sweep, then the drain run auto-starts), so that
     // top-and-back-down lurch happened six times in a row.
     const showing = !!el && el.offsetParent !== null;
@@ -23546,7 +23631,7 @@ function cxRpmAlignNum(v) {
 // Naming what dies is the point; a tooltip is not consent. Shared with the Setup ▸ Engine field.
 const RPM_SCALE_WIPE_MSG =
     'Rescaling the engine-RPM axis discards everything measured against the old one:\n\n'
-    + '• Min% floor table and knee learning\n'
+    + '• Tachometer keep-alive floor table and its learning\n'
     + '• Overheat history\n'
     + '• Resonance and ripple maps, and the reference waveforms\n'
     + '• Alternator health record book and its engine-hour trend\n'
@@ -23829,7 +23914,7 @@ function cxFieldApply(run = false) {
         .catch(e => xAlert('Apply failed: ' + e));
 }
 
-// ── Step 8 · Min% floor — GUIDED onset-knee sweeps at 3 DESCENDING RPMs → Min% column ──
+// ── Step 8 · Keep-Alive floor — GUIDED onset sweeps at 3 DESCENDING RPMs → Keep-Alive column ──
 // Runs near the END of the wizard (CX_PHASES index 7, right before the Stress Test) so the engine is fully
 // warm from the earlier steps before the first hold at maximum working RPM. Independent of every
 // other stage (nothing feeds it, it feeds nothing).
@@ -23862,7 +23947,7 @@ function cxRenderKnee(b) {
     // Full intro only on the very first screen of the step; once anything is captured or running it
     // collapses to one line — the progress dots and the per-speed card carry the instructions there.
     const intro = 'In this step you\'ll hold three speeds, starting at your highest ' +
-        'working speed now that the engine is warm. At each speed the regulator first searches for the onset knee ' +
+        'working speed now that the engine is warm. At each speed the regulator first searches for the onset point ' +
         '(where the field begins to produce an output current), then cuts the field once and times how long the output takes to drain.';
     let body = (!anchors.length && !cx.kneeRunning && !cx.fdRunning)
         ? '<p style="font-size:15px;line-height:1.5;">' + intro + '</p>'
@@ -23903,7 +23988,7 @@ function cxRenderKnee(b) {
         if (cx.kneeAbort) {
             // No RPM-table advice here: the onset sweep stops at the first amps, so it never walks
             // the bank up to the table limit the way the saturation ramp does.
-            body += cxRampAbortHtml('Automatic current sweep stopped', cx.kneeAbort, cx.kneeAbortInfo, 'Min% knee', 'Record', false);
+            body += cxRampAbortHtml('Automatic current sweep stopped', cx.kneeAbort, cx.kneeAbortInfo, 'keep-alive onset', 'Record', false);
         } else if (cx.kneeNoOnset) {
             body += '<div style="margin:10px 0;padding:8px 10px;background:#3a3322;border:1px solid #a85;border-radius:6px;color:#f0a500;">' +
                 (cx.kneeCeilLimited
@@ -23949,7 +24034,7 @@ function cxRenderKnee(b) {
         body += cxFdMarkup();
         if (cx.kneeApplied) {
             // Applied: drop the Apply button entirely; advance is the one primary action.
-            body += '<div style="margin-top:6px;"><span style="color:#5a5;">Applied — Min% column filled' + (cx.fdApplied ? ' and field drain stored' : '') + '.</span></div>' +
+            body += '<div style="margin-top:6px;"><span style="color:#5a5;">Applied — Keep-Alive column filled' + (cx.fdApplied ? ' and field drain stored' : '') + '.</span></div>' +
                 '<div style="margin-top:12px;">' + cxNextBtn(true) + ' <button onclick="cxKneeRestart()" class="btn-secondary btn-sm">Start over</button></div>';
         } else {
             body += '<div style="margin-top:12px;">' +
@@ -24010,7 +24095,7 @@ function cxKneeCancel() {
     cxGet('cancelKneeSweep=1').catch(() => { });
     cxStopPoll(); cx.kneeRunning = false; commissionRender();
 }
-// Single Apply for the whole stage: the firmware fits the Min% column across the anchors
+// Single Apply for the whole stage: the firmware fits the Keep-Alive column across the anchors
 // (applyKneeCurve, onset = a + C/RPM), then one request stores the drain-vs-RPM result — the
 // fieldDecayTauMs handler flattens any old line first and the endpoint params in the SAME request
 // commission the new one (see the /get handler ordering in 3_functions.ino).
@@ -24714,7 +24799,7 @@ function cxCVPlantApply() {
         .catch(e => xAlert('Apply failed: ' + e));
 }
 
-// ── Field drain measurement (runs per speed inside the Min% Floor & Field Decay stage) ────────
+// ── Field drain measurement (runs per speed inside the Keep-Alive Floor & Field Decay stage) ────────
 // One firmware "field cut" per held speed: the real current loop ramps to the commissioned
 // stabilize level (at idle, to whatever the alternator makes there), duty freezes 5 s, the field
 // steps to MinDuty (the real over-voltage clamp floor) for 4 s, and the decay is fitted on the
@@ -26961,7 +27046,7 @@ const COMMISSION_STEPS = [
     { name: 'Disturbances', desc: 'Map the worst over-current the field can actually react to.' },
     { name: 'Fault Threshold Autotuning', desc: 'Set the over-current trip points above that disturbance floor.' },
     { name: 'Voltage Control Autotuning', desc: 'Measure how stiff the battery is and set the voltage-loop gains from it.' },
-    { name: 'Min% Floor & Field Decay', desc: 'Find the lowest field that still makes current, and time how fast output dies after a cut.' },
+    { name: 'Keep-Alive Floor & Field Decay', desc: 'Find the lowest field that still makes current, and time how fast output dies after a cut.' },
     { name: 'Stress Test', desc: 'Fire the over-voltage protection with a throttle snap and grade the recovery.' },
 ];
 let cxLastState = 0;   // remembered from the last CSV3 frame, for the clear/restart confirm text
@@ -30860,7 +30945,7 @@ function usageElText(el) {
     if (el.tagName === 'INPUT') return (el.value || '').trim();
     const src = (el.querySelector('.tab-label-full') || el).cloneNode(true);
     src.querySelectorAll('.tooltip, .sinfo, .tooltip-box, [id$="_echo"]').forEach(n => n.remove());
-    // "(  )" leftovers from removed echo spans, e.g. "Margin Below Knee (%) ()"
+    // "(  )" leftovers from removed echo spans, e.g. "Margin Below Onset (%) ()"
     return src.textContent.replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
 }
 // Page keys are sub-tab content ids ("<main>-<sub>") or a main-tab content id (the load

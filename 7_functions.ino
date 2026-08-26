@@ -692,7 +692,7 @@ float altPruneK       = 6.0f;    // cloud prune neighbor count (echoed; applied 
 float altRidgeFrac    = 0.10f;   // LWLR ridge fraction (× slope-block trace/NAXIS) — fit stability vs slope fidelity
 float altRiskThresh   = 0.15f;   // classifier risk above which an in-radius point shows "learning" instead of a %
 // High-field-low-output alert thresholds (independent safety net — see altHealth_tick):
-float altHiFieldPct   = 80.0f;   // high-drive threshold as % of the live field ceiling (MaxDuty), so it works on 24/36/48V compressed spans
+float altHiFieldPct   = 80.0f;   // high-drive threshold as % of the live field ceiling (ccDutyCeiling), so it works on 24/36/48V compressed spans
 float altLowOutAmps   = 10.0f;   // output at/below this counts as low (A)
 float altHiFieldSec   = 30.0f;   // both conditions must persist this long before the alert fires (s)
 
@@ -2140,7 +2140,8 @@ void altFrontInit() {
   // axisScale ≈ the span of each axis that moves output a comparable amount (rationale + rebalance
   // history: ALT_HEALTH_LWLR_ENGINE_SPEC.md). MUST match AXIS_SCALE in the update-alt-health edge fn
   // — the Vbus scale is class-aware there via the payload's sysV field (excitation needs no scaling:
-  // it is physical field volts, and the MaxDuty class scaling keeps its range identical on any bank).
+  // it is physical field volts, and the class scaling of the field ceiling keeps its range identical
+  // on any bank).
   altFront2.axisScale[0] = 25.0f;   // RPM
   altFront2.axisScale[1] = 0.10f;   // excitation (temp-normalized field volts). 2026-08-21 sensitivity study:
                                     // the old 0.2 cell spanned ~2.3% field ≈ ~5% output at measured g≈2 —
@@ -2249,8 +2250,9 @@ void altHealth_tick(uint32_t nowMs) {
   // unlearned territory where the gauge says "learning"). Self-clears when either condition lifts.
   {
     static uint32_t hiFieldSinceMs = 0;
-    // altHiFieldPct reads as % of the live field ceiling (MaxDuty), not absolute duty — absolute
-    // 80% is unreachable on 24/36/48V banks where the ceiling is ~50/33/25%, deadening the alert.
+    // altHiFieldPct reads as % of the live field ceiling (ccDutyCeiling: the lower of Max Field % and
+    // the Max Field Volts term), not absolute duty — absolute 80% is unreachable on 24/36/48V banks
+    // where the ceiling is ~50/33/25%, deadening the alert.
     bool cond = foldFresh && altLiveValid
                 && altLive_duty >= altHiFieldPct * (ccDutyCeiling() / 100.0f) && altLive_amps <= altLowOutAmps;
     if (!cond) {
@@ -5273,8 +5275,10 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     // there instead of marching stepDuty up into a frozen-duty region that records flat/false amps and a
     // bogus curve. If the amp target isn't reached by then, we flag fieldCurveCeilingLimited so the
     // dashboard can tell the user to raise Max Field % and re-run for the full curve.
+    // Taken through ccDutyCeiling() so a Max Field Volts cap stops the ramp too — it clamps applied duty
+    // in setDutyPercent identically, so a raw MaxDuty read here would walk into that same frozen region.
     float effDutyCeil = FIELDCURVE_DUTY_MAX;
-    if (MaxDuty < effDutyCeil) effDutyCeil = MaxDuty;
+    if (ccDutyCeiling() < effDutyCeil) effDutyCeil = ccDutyCeiling();
     dutyOut = stepDuty;
 
     // Accumulate amps (and RPM, for the onset knee) only over the settled second half of the dwell.
@@ -5589,17 +5593,19 @@ bool altSweep_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     altSweepRequested = false;
     altSweepAbortRequested = false;
 
-    // Max Field % is the ONLY ceiling. The field curve additionally stops at FIELDCURVE_DUTY_MAX,
-    // but that is its own knee-search bound, not a field limit — carrying it here would have meant a
-    // second, lower cap the panel could not name and the user could not look up. Reaching MaxDuty is
-    // nothing new: governor_apply clamps every duty the regulator commands to it on every tick.
-    float dutyCeil = MaxDuty;
+    // The two field caps are the ONLY ceilings: Max Field % and Max Field Volts, whichever binds first
+    // (ccDutyCeiling). Both are named on the panel and both are lookupable, which is what the earlier
+    // "only MaxDuty" rule was protecting — unlike FIELDCURVE_DUTY_MAX, which the field curve stops at
+    // as its own knee-search bound and which is deliberately still NOT carried here. Reaching the
+    // ceiling is nothing new: governor_apply clamps every duty the regulator commands to it every tick.
+    float dutyCeil = ccDutyCeiling();
     fromDuty = constrain(altSweepFromPct, 0.0f, dutyCeil);
     toDuty   = (altSweepToPct <= 0.0f) ? dutyCeil : constrain(altSweepToPct, 0.0f, dutyCeil);
     ratePctS = constrain(altSweepRatePctS, 0.1f, 10.0f);
     if (toDuty - fromDuty < 1.0f) {
-      queueConsoleMessageF("Field sweep: refused — span %.1f%%→%.1f%% is under 1%% after clamping to Max Field %% (%.0f%%)",
-                           fromDuty, toDuty, dutyCeil);
+      queueConsoleMessageF("Field sweep: refused — span %.1f%%→%.1f%% is under 1%% after clamping to the field ceiling %.1f%% (set by %s)",
+                           fromDuty, toDuty, dutyCeil,
+                           (dutyCeil < MaxDuty - 0.05f) ? "Max Field Volts" : "Max Field %");
       return false;
     }
     curDuty = fromDuty;

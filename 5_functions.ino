@@ -546,6 +546,16 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
     if ((dvccEn == 1 || NMEA2KData == 1) && dvccSrcType == 0) VictronVreg126720(N2kMsg);
     return;
   }
+  // Who is on the bus (spec §15): PGN 60928 NAME + 126996 product information. Same pre-gate
+  // placement and gate as the VREG carrier above — a capture is uninterpretable without the
+  // publisher's identity, and identity has to accumulate during the follow-off observe window.
+  // Passive only: with transmit off neither PGN can be requested. These two fall through rather
+  // than returning, so verbose logging and the handler-table scan behave exactly as before.
+  if (N2kMsg.PGN == 60928UL && (dvccEn == 1 || NMEA2KData == 1)) {
+    dvccNoteName((uint8_t)N2kMsg.Source, N2kMsg.Data, N2kMsg.DataLen);
+  } else if (N2kMsg.PGN == 126996UL && (dvccEn == 1 || NMEA2KData == 1)) {
+    dvccNoteProductInfo(N2kMsg);
+  }
   // Receive toggle off: drop bus data here. ParseMessages may still be running purely to service
   // the transmit node's protocol layer (address claim, heartbeat), which the library handles
   // before this handler — the user's "receive off" must still mean no nav/battery data flows in.
@@ -618,6 +628,119 @@ static void dvccClearDecodeState() {
 void initDvccCapture() {
   dvccCapRing = (DvccCapEntry *)ps_malloc(sizeof(DvccCapEntry) * DVCC_CAP_N);
   if (!dvccCapRing) queueConsoleMessage("DVCC: capture ring PSRAM alloc failed (diagnostics only - follow unaffected)");
+  dvccNodes = (DvccNode *)ps_malloc(sizeof(DvccNode) * DVCC_NODE_N);
+  if (dvccNodes) memset(dvccNodes, 0, sizeof(DvccNode) * DVCC_NODE_N);
+  else queueConsoleMessage("DVCC: node roster PSRAM alloc failed (capture loses sender identity - follow unaffected)");
+}
+
+// Copy free text into a fixed slot for the capture file: pad spaces trimmed, anything outside
+// printable ASCII replaced. Two untrusted sources go through it — the 126996 strings a bus node
+// sends, and the owner-typed battery make/model — and the capture is line-oriented, so a newline
+// or control character reaching it unfiltered would forge header lines.
+void dvccCopyPlainText(char *dst, size_t dstSz, const char *src) {
+  size_t n = 0;
+  for (; src[n] != 0 && n + 1 < dstSz; n++) {
+    char c = src[n];
+    dst[n] = (c >= 32 && c <= 126) ? c : '?';
+  }
+  while (n > 0 && dst[n - 1] == ' ') n--;
+  dst[n] = 0;
+}
+
+// Roster slot for a bus address: allocates on first sight, and once full evicts the node heard
+// longest ago. Callers hold dvccCapMux. Returns an INDEX, not a pointer — the Arduino
+// preprocessor hoists its generated prototype above the struct definition in Xregulator.ino,
+// so a function returning DvccNode* does not compile here.
+static int dvccNodeSlot(uint8_t addr) {
+  if (!dvccNodes) return -1;
+  for (uint8_t i = 0; i < dvccNodeCount; i++)
+    if (dvccNodes[i].addr == addr) return (int)i;
+  uint8_t k;
+  if (dvccNodeCount < DVCC_NODE_N) {
+    k = dvccNodeCount++;
+  } else {
+    k = 0;
+    for (uint8_t i = 1; i < DVCC_NODE_N; i++)
+      if ((int32_t)(dvccNodes[i].lastMs - dvccNodes[k].lastMs) < 0) k = i;
+  }
+  memset(&dvccNodes[k], 0, sizeof(DvccNode));
+  dvccNodes[k].addr = addr;
+  return (int)k;
+}
+
+// PGN 60928 ISO Address Claim. The 8 NAME bytes, little-endian:
+//   [0..3] u32: bits 0-20 unique number, bits 21-31 manufacturer code
+//   [4] device instance (lower 3 bits | upper 5 bits)   [5] device function
+//   [6] bit 0 reserved, bits 1-7 device class
+//   [7] bit 7 arbitrary-address-capable, bits 4-6 industry group, bits 0-3 system instance
+void dvccNoteName(uint8_t src, const unsigned char *d, int len) {
+  if (!dvccNodes || len < 8) return;
+  uint32_t lo = (uint32_t)d[0] | ((uint32_t)d[1] << 8) | ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
+  uint32_t now = millis();
+  portENTER_CRITICAL(&dvccCapMux);
+  int k = dvccNodeSlot(src);
+  if (k >= 0) {
+    // A different NAME on the same address means the node moved or was replaced. The 126996
+    // strings sitting in this slot belong to the previous occupant — dropping them is what stops
+    // a capture from naming the wrong device after an address-claim reshuffle.
+    if (dvccNodes[k].haveName && (dvccNodes[k].unique != (lo & 0x1FFFFFUL) || dvccNodes[k].mfg != (uint16_t)(lo >> 21))) {
+      dvccNodes[k].prodCode = 0;
+      dvccNodes[k].vicProdId = 0;
+      dvccNodes[k].model[0] = dvccNodes[k].sw[0] = dvccNodes[k].serial[0] = 0;
+      dvccNodes[k].haveProd = 0;
+    }
+    dvccNodes[k].unique = lo & 0x1FFFFFUL;
+    dvccNodes[k].mfg = (uint16_t)(lo >> 21);
+    dvccNodes[k].devInst = d[4];
+    dvccNodes[k].func = d[5];
+    dvccNodes[k].cls = (uint8_t)(d[6] >> 1);
+    dvccNodes[k].sysInst = (uint8_t)(d[7] & 0x0F);
+    dvccNodes[k].haveName = 1;
+    dvccNodes[k].lastMs = now;
+  }
+  portEXIT_CRITICAL(&dvccCapMux);
+}
+
+// PGN 126996 Product Information - fast-packet, so it arrives here already reassembled by the core
+// library. The model string is what actually names a node ("Cerbo GX", "Lynx Smart BMS 500"), and
+// the software version is what says which Venus release's DVCC behaviour a capture was taken under.
+void dvccNoteProductInfo(const tN2kMsg &N2kMsg) {
+  if (!dvccNodes) return;
+  unsigned short n2kVer = 0, prodCode = 0;
+  unsigned char cert = 0, loadEq = 0;
+  char model[33] = { 0 }, sw[33] = { 0 }, modelVer[33] = { 0 }, serial[33] = { 0 };
+  if (!ParseN2kPGN126996(N2kMsg, n2kVer, prodCode, sizeof(model), model, sizeof(sw), sw,
+                         sizeof(modelVer), modelVer, sizeof(serial), serial, cert, loadEq)) return;
+  uint32_t now = millis();
+  portENTER_CRITICAL(&dvccCapMux);
+  int k = dvccNodeSlot((uint8_t)N2kMsg.Source);
+  if (k >= 0) {
+    dvccNodes[k].prodCode = prodCode;
+    dvccCopyPlainText(dvccNodes[k].model, sizeof(dvccNodes[k].model), model);
+    dvccCopyPlainText(dvccNodes[k].sw, sizeof(dvccNodes[k].sw), sw);
+    dvccCopyPlainText(dvccNodes[k].serial, sizeof(dvccNodes[k].serial), serial);
+    dvccNodes[k].haveProd = 1;
+    dvccNodes[k].lastMs = now;
+  }
+  portEXIT_CRITICAL(&dvccCapMux);
+}
+
+// CSV2 identity of the address the limits are currently arriving from. Called from dvccTick ahead
+// of the follow gate: the observe-before-enable workflow needs it while follow is still off.
+static void dvccAuthIdentityRefresh() {
+  uint16_t mfg = 0, prod = 0;
+  if (dvccNodes && dvccRxSrcAddr != 255) {
+    portENTER_CRITICAL(&dvccCapMux);
+    for (uint8_t i = 0; i < dvccNodeCount; i++) {
+      if (dvccNodes[i].addr != dvccRxSrcAddr) continue;
+      mfg = dvccNodes[i].mfg;
+      prod = dvccNodes[i].prodCode ? dvccNodes[i].prodCode : dvccNodes[i].vicProdId;
+      break;
+    }
+    portEXIT_CRITICAL(&dvccCapMux);
+  }
+  dvccAuthMfg = mfg;
+  dvccAuthProd = prod;
 }
 
 static void dvccCaptureFrame(unsigned long id, unsigned char len, const unsigned char *buf) {
@@ -768,6 +891,22 @@ static bool dvccVicHandleReg(uint16_t vreg, const unsigned char *p, int len, uin
     if (!dvccVicAcceptSender(src)) return true;
     uint8_t atc = (uint8_t)((p[0] >> 2) & 0x03);
     dvccVicCut = (atc >= 2) || (p[0] == 2);
+  } else if (vreg == 0x0100) {  // VE_REG_PRODUCT_ID — identity only, never a limit
+    // Deliberately falls through as UNRECOGNIZED (return false): the caller uses the return value
+    // to decide whether to retry the frame under the other VREG framing, and identity must never
+    // cost us a limit decode on a frame whose id only coincidentally reads as 0x0100.
+    if (len >= 2 && dvccNodes) {
+      uint16_t pid = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+      uint32_t now = millis();
+      portENTER_CRITICAL(&dvccCapMux);
+      int k = dvccNodeSlot(src);
+      if (k >= 0) {
+        dvccNodes[k].vicProdId = pid;
+        dvccNodes[k].lastMs = now;
+      }
+      portEXIT_CRITICAL(&dvccCapMux);
+    }
+    return false;
   } else {
     return false;
   }
@@ -852,6 +991,7 @@ void dvccTick() {
   uint32_t now = millis();
   if ((uint32_t)(now - lastTickMs) < 1000UL) return;
   lastTickMs = now;
+  dvccAuthIdentityRefresh();
 
   static uint32_t lastSeenCount = 0;
   static uint32_t settleStartMs = 0;
@@ -990,6 +1130,15 @@ tN2kChargeState n2kChargeStateFromStage(uint8_t stage) {
   }
 }
 
+// Labelling only — both charger PGNs carry it; nothing in the control path reads it.
+tN2kChargerMode n2kChargerModeSetting() {
+  switch (n2kChgrMode) {
+    case 1: return N2kCM_Primary;
+    case 2: return N2kCM_Secondary;
+    default: return N2kCM_Standalone;
+  }
+}
+
 // The alternator temperature the alarm engine uses: TempSource picks OneWire vs thermistor,
 // -99 is the thermistor's disconnected sentinel. NAN = no usable reading. Same 20s freshness
 // test as the stale alarm / temp-stale field cut — without it a sensor that dies mid-run
@@ -1025,11 +1174,12 @@ void nmea2kTransmitTick() {
                    SLOT_ALT_DC,
                    SLOT_TEMP,
                    SLOT_CHGR,
+                   SLOT_CHGRCFG,
                    SLOT_ENG_RAPID,
                    SLOT_ENG_DYN,
                    SLOT_BATTCFG,
                    SLOT_N };
-  static const uint32_t ivl[SLOT_N] = { 1500, 1500, 1500, 1500, 2000, 1500, 100, 500, 15000 };  // ms, NMEA-recommended rates
+  static const uint32_t ivl[SLOT_N] = { 1500, 1500, 1500, 1500, 2000, 1500, 1500, 100, 500, 15000 };  // ms, NMEA-recommended rates
   static uint32_t nextDue[SLOT_N];
   static bool seeded = false;
   // Per-stream SIDs: each 127508+127506 pair shares one (ties the pair to the same sample set)
@@ -1105,8 +1255,21 @@ void nmea2kTransmitTick() {
         if (n2kChgrEnable == 1) {
           lastChgState = n2kChargeStateFromStage(getChargeStageDisplayCode());
           SetN2kChargerStatus(N2kMsg, (unsigned char)n2kChgrInstance, (unsigned char)n2kBattInstance,
-                              lastChgState, N2kCM_Standalone,
+                              lastChgState, n2kChargerModeSetting(),
                               (OnOff == 1) ? N2kOnOff_On : N2kOnOff_Off);
+          composed = true;
+        }
+        break;
+      case SLOT_CHGRCFG:
+        if (n2kChgrCfgEnable == 1) {
+          // ChargeCurrentLimit is the field the one integrated alternator regulator (Wakespeed,
+          // venus#779) puts field drive % in — 1 %/bit, so it is the whole carrier for the number.
+          unsigned char fieldPct = isfinite(dutyCycle) ? (unsigned char)lroundf(constrain(dutyCycle, 0.0f, 100.0f))
+                                                       : N2kUInt8NA;
+          SetN2kChargerConf(N2kMsg, (unsigned char)n2kChgrInstance, (unsigned char)n2kBattInstance,
+                            (OnOff == 1) ? N2kOnOff_On : N2kOnOff_Off, fieldPct,
+                            N2kCA_3State, n2kChargerModeSetting(), N2kBT_NotAvailable,
+                            N2kOnOff_Off, N2kOnOff_Off, 0);
           composed = true;
         }
         break;

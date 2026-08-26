@@ -679,6 +679,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "MaximumAllowedBatteryAmps", NK_MaximumAllowedBatteryAmps, 1 },
   { "MaxTableValue", NK_MaxTableValue, 1 },
   { "MaxDuty", NK_MaxDuty, 1 },
+  { "MaxFieldVolts", NK_MaxFieldVolts, 1 },
   { "MinDuty", NK_MinDuty, 1 },
   { "AlternatorHardShutdownV", NK_AlternatorHardShutdownV, 1 },
   { "MinRPMForField", NK_MinRPMForField, 1 },
@@ -911,6 +912,8 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "n2kTempSource", NK_n2kTempSrc, 1 },
   { "n2kChgrEnable", NK_n2kChgrEn, 1 },
   { "n2kChgrInstance", NK_n2kChgrInst, 1 },
+  { "n2kChgrCfgEnable", NK_n2kChgrCfgEn, 1 },
+  { "n2kChgrMode", NK_n2kChgrMode, 1 },
   { "n2kEngRpmEnable", NK_n2kEngRpmEn, 1 },
   { "n2kEngInstance", NK_n2kEngInst, 1 },
   { "n2kEngDynEnable", NK_n2kEngDynEn, 1 },
@@ -1529,7 +1532,7 @@ int applyImportConfig(const char *body) {
     // stage clear is left to do here; applyImportTables still runs last, so an imported table wins.
     if (classChanged) {
       commissionClearStage(7);
-      queueConsoleMessage("IMPORT WARNING: battery voltage class changed - charge profile, protection trips and field-duty limits converted to the new class; learned Min% field floors reset and learned oscillation speed ranges cleared; recommissioning recommended");
+      queueConsoleMessage("IMPORT WARNING: battery voltage class changed - charge profile, protection trips and field-duty limits converted to the new class; learned tachometer keep-alive floors reset and learned oscillation speed ranges cleared; recommissioning recommended");
     }
   }
   // Registry knobs — generic import mirroring the export side.

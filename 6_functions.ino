@@ -903,12 +903,64 @@ void runHuntGovernor() {
   }
 }
 
-// ccDutyCeiling — the upper duty bound the CC loop is allowed to reach. This is simply MaxDuty (Max
-// Field %), which is the REAL per-bus cap: its default is scaled down on higher-voltage banks
-// (~50%@24V, 25%@48V) and rescaled on a voltage change, so the user-visible Max Field box IS the cap
-// the loop respects — no hidden ×12/Vbatt. A user wanting full duty just sets Max Field to 99.
+// Derived duty ceiling from Max Field Volts, refreshed by updateFieldVoltCeiling() below. Held in a
+// global rather than solved inside ccDutyCeiling() because that function is called from the tight
+// paths and must stay a cheap read, and because the PID's output limits are pushed on a deadband
+// (see updateFieldVoltCeiling) — every reader has to see the same value the PID was last told.
+static float g_fieldVoltDutyCeil = 99.0f;
+static float g_fieldVoltBusFilt  = 0.0f;   // slow-filtered bus volts the ceiling is solved against; 0 = not yet seeded
+static bool  g_fieldVoltFloored  = false;  // one-shot console warn latch for the MinDuty collision below
+
+// ccDutyCeiling — the upper duty bound the CC loop is allowed to reach: the lower of the two field
+// caps. MaxDuty (Max Field %) is the REAL per-bus duty cap — its default is scaled down on
+// higher-voltage banks (~50%@24V, 25%@48V) and rescaled on a voltage change, so the user-visible Max
+// Field box IS the cap the loop respects, no hidden ×12/Vbatt. g_fieldVoltDutyCeil is Max Field Volts
+// solved against the measured bus, which is the same limit in the units on the alternator datasheet.
+// A user wanting full duty sets Max Field to 99 AND leaves Max Field Volts above the bank's absorb
+// voltage (its class-scaled default already is, so the volts term is inert until deliberately lowered).
+// Everything that asks "how high may duty go" must come through here — a raw MaxDuty read silently
+// skips the volts cap. MaxDuty itself stays the persisted setting and the class-scaling target.
 float ccDutyCeiling() {
-  return MaxDuty;
+  return fminf(MaxDuty, g_fieldVoltDutyCeil);
+}
+
+// updateFieldVoltCeiling — re-solve the volts cap into duty against the measured bus, once per control
+// tick. Called from buildTickSnapshot so it leads every consumer in the same tick.
+//
+// The bus is filtered (2s) for two reasons: the cap must not chase ripple or a load-dump transient into
+// the actuator, and pushing SetOutputLimits is not free — it re-clamps the live output AND the
+// integrator, which is the wanted anti-windup on a discrete ceiling change but would make the ceiling
+// a moving actuator if done at tick rate. Hence the 0.5-point deadband: the PID only hears about a
+// ceiling that actually moved.
+void updateFieldVoltCeiling(float busV, float dtSec) {
+  if (!(busV > 1.0f) || isnan(busV)) return;           // sensor dropout: hold the last ceiling rather than open the cap
+  if (g_fieldVoltBusFilt <= 0.0f) g_fieldVoltBusFilt = busV;   // seed on first valid reading, no ramp-in
+  else {
+    float a = constrain(dtSec / 2.0f, 0.0f, 1.0f);
+    g_fieldVoltBusFilt += a * (busV - g_fieldVoltBusFilt);
+  }
+
+  float derived = 100.0f * MaxFieldVolts / g_fieldVoltBusFilt;
+
+  // Floor at MinDuty. Below it the [MinDuty, ceiling] range inverts and the per-RPM onset floors
+  // collapse unsatisfiable — the same silent failure applyNominalVoltageChange guards against on a
+  // class change. A volts cap that low is a misconfiguration, so say so once rather than fail quietly.
+  if (derived < MinDuty) {
+    derived = MinDuty;
+    if (!g_fieldVoltFloored) {
+      g_fieldVoltFloored = true;
+      queueConsoleMessageF("Max Field Volts (%.1fV) is below the field floor at this bus voltage (%.1fV) — field ceiling pinned to Min Field %.2f%%. Raise Max Field Volts.",
+                           MaxFieldVolts, g_fieldVoltBusFilt, MinDuty);
+    }
+  } else {
+    g_fieldVoltFloored = false;
+  }
+  if (derived > 99.0f) derived = 99.0f;   // matches the bootstrap-refresh cap in setDutyPercent
+
+  if (fabsf(derived - g_fieldVoltDutyCeil) > 0.5f) {
+    g_fieldVoltDutyCeil = derived;
+    if (pidInitialized) applyCcOutputLimits();   // PID entry calls applyCcOutputLimits itself, so a pre-init move is not lost
+  }
 }
 
 // applyCcOutputLimits — set the inner current PID's output bounds to [MinDuty, ccDutyCeiling()]. Making
@@ -928,7 +980,7 @@ void applyCcOutputLimits() {
 // one-key class push keeps it. Call AFTER setting SYSTEM_VOLTAGE_CLASS = newV. When the class actually changes it persists the new class to NVS
 // (NK_BatteryVoltage), then rescales the PERSISTED
 // charge-voltage profile by newV/oldV (Bulk/Float/Absorption/Rebulk/Target/Charged/alarms), the
-// volt-domain protection/helper margins and V/s rates (OV margins, disagreement threshold, iExcess
+// volt-domain protection/helper margins and V/s rates (OV margins, Max Field Volts, disagreement threshold, iExcess
 // arm margin, fast-rise headroom, CV D-term arm/deadband thresholds, target ramps, rest-settle gate, CV wave
 // amplitude, alt-health Vbus band), re-derives
 // the hard-shutdown trip (newBulk + 0.5×class) and refreshes the INA228 hardware OV limit. Writing the
@@ -957,6 +1009,7 @@ void applyNominalVoltageChange(int oldV, int newV) {
     ChargedVoltage_Scaled = (int)lroundf(ChargedVoltage_Scaled * ratio);
     VoltageAlarmHigh      *= ratio;
     VoltageAlarmLow       *= ratio;
+    MaxFieldVolts         *= ratio;   // Max Field Volts: volt-domain, NOT the duty-domain group below
     // Headroom scales with class so the OV ladder keeps its order (G2 clamp at target+OvMeasMarginV
     // < G1 predictive at target+OvPredMarginV < the hard cuts) — all per-cell-equivalent. A class
     // change re-derives the CONSERVATIVE Bulk+0.5 fallback, discarding any commissioned
@@ -1024,6 +1077,7 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_ChargedVoltage, String(ChargedVoltage_Scaled).c_str());
     settingWrite(NK_VoltageAlarmHigh, String(VoltageAlarmHigh, 2).c_str());
     settingWrite(NK_VoltageAlarmLow, String(VoltageAlarmLow, 2).c_str());
+    settingWrite(NK_MaxFieldVolts, String(MaxFieldVolts, 1).c_str());
     settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
     settingWrite(NK_OvMeasMarginV, String(OvMeasMarginV, 3).c_str());
     settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
@@ -1072,7 +1126,7 @@ void applyNominalVoltageChange(int oldV, int newV) {
         nvs_close(nvs_h);
       }
     }
-    queueConsoleMessageF("System voltage %dV -> %dV: Min Field %% floors reset to the 1%% default and knee learning cleared (old floors were %dV-referenced and can exceed the new %d%% Max Field cap). Re-run the Min%% floor step.",
+    queueConsoleMessageF("System voltage %dV -> %dV: tachometer keep-alive floors reset to the 1%% default and their learning cleared (old floors were %dV-referenced and can exceed the new %d%% Max Field cap). Re-run the Keep-Alive Floor step.",
                          oldV, newV, oldV, MaxDuty);
     huntMapClearAll("system voltage class changed");  // pockets learned on the old class describe a different alternator
     updateINA228OvervoltageThreshold();
@@ -1146,11 +1200,11 @@ float governor_apply(float lastAppliedDuty, float requestDutyFloat, int gmode,
                      float effectiveMinDuty, bool writeToHardware, float dtSec) {
 
   float hardMin = MinDuty;
-  float hardMax = MaxDuty;
+  float hardMax = ccDutyCeiling();
 
   // Dynamic bounds (RPM minimum, etc.)
   float dynMin = effectiveMinDuty;
-  float dynMax = MaxDuty;
+  float dynMax = ccDutyCeiling();
 
   // Effective bounds: most restrictive
   // For shutdown (effectiveMinDuty=0), allow going below MinDuty
@@ -5594,6 +5648,13 @@ void setDutyPercent(float percent) {
   if (SYSTEM_VOLTAGE_CLASS > 12 && percent > MaxDuty) {
     percent = MaxDuty;
   }
+  // Max Field Volts arm of the same net, deliberately NOT class-gated: a winding can be under-rated
+  // for its own 12V bank, and the volts cap sits inert at its class-scaled default, so applying it on
+  // 12V costs nothing until the installer lowers it on purpose. Reads the derived global directly
+  // rather than ccDutyCeiling() so the MaxDuty gate above keeps its own class condition.
+  if (percent > g_fieldVoltDutyCeil) {
+    percent = g_fieldVoltDutyCeil;
+  }
 
   uint32_t duty = (uint32_t)((((1UL << pwmResolution) - 1) * percent) / 100.0f);
 
@@ -6486,6 +6547,9 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   tick.ibv = IBV;
   tick.currentBatteryVoltage = getBatteryVoltage();
 
+  // Re-solve the Max Field Volts ceiling before any consumer of ccDutyCeiling() runs this tick.
+  updateFieldVoltCeiling(tick.currentBatteryVoltage, (float)dt_ms / 1000.0f);
+
   tick.batteryCurrentA = Bcur;
 
   tick.rpmMinDuty = getMinimumFieldForRPM(RPM);
@@ -6746,7 +6810,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
                       && !tick.currentDataStale
                       && RPM >= (float)MinRPMForField
                       && setpointLimited > TACH_LIE_MAX_AMPS
-                      && dutyCycle >= tick.rpmMinDuty + TACH_LIE_HEADROOM_FRAC * fmaxf(0.0f, MaxDuty - tick.rpmMinDuty)
+                      && dutyCycle >= tick.rpmMinDuty + TACH_LIE_HEADROOM_FRAC * fmaxf(0.0f, ccDutyCeiling() - tick.rpmMinDuty)
                       && fabsf(MeasuredAmps) < TACH_LIE_MAX_AMPS;
     if (tachLieNow) {
       if (tachLieSinceMs == 0) tachLieSinceMs = currentMillis;

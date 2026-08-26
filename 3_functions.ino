@@ -684,8 +684,11 @@ enum Csv2Index {
   CSV2_n183ChecksumErrs,  // NMEA 0183 sentences that failed checksum — climbs on wrong polarity or a noisy line
   CSV2_ft_ReadNMEA0183_win,  // NMEA 0183 drain worst us (window) — the 0.5 ms control-loop budget check
   CSV2_ft_ReadNMEA0183_ses,  // NMEA 0183 drain worst us (session)
+  CSV2_fieldDutyCeil,     // enforced field-duty ceiling ×100 — ccDutyCeiling(), the lower of Max Field % and the Max Field Volts term. Neither setting alone tells a log which cap was binding
+  CSV2_dvccAuthMfg,       // NAME manufacturer code of the node publishing the limits (358 = Victron, 2046 = open code; 0 = identity never heard)
+  CSV2_dvccAuthProd,      // its 126996 product code, else its Victron VREG 0x0100 product id, else 0
 
-  CSV2_sessionId,         // boot identity — matches CSV1_sessionId while this cached block is from the live run
+  CSV2_sessionId,    // boot identity — matches CSV1_sessionId while this cached block is from the live run
   CSV2_sendMs,            // millis() when this payload was BUILT (CSV2 builds one pass and sends the next)
 
   CSV2_FIELD_COUNT // enum position is authoritative — never hand-count; CSV payload specifier count must equal this +1
@@ -1096,6 +1099,8 @@ enum Csv3Index {
   CSV3_n2kTempSource,          // tN2kTempSource code (3 = Engine Room)
   CSV3_n2kChgrEnable,          // 127507 charger status (0/1)
   CSV3_n2kChgrInstance,
+  CSV3_n2kChgrCfgEnable,       // 127510 charger configuration, carries field drive % (0/1)
+  CSV3_n2kChgrMode,            // tN2kChargerMode label: 0 Standalone, 1 Primary, 2 Secondary
   CSV3_n2kEngRpmEnable,        // 127488 engine RPM (0/1)
   CSV3_n2kEngInstance,
   CSV3_n2kEngDynEnable,        // 127489 engine dynamic (0/1)
@@ -1120,6 +1125,7 @@ enum Csv3Index {
   CSV3_displayVolUnit,         // fuel volume display preference: 0 US gallons, 1 litres
 
   CSV3_gpsPositionSource,      // 0=auto, 1=NMEA-forced, 2=phone-forced (position only; the clock is CSV3_timeSourceMode)
+  CSV3_MaxFieldVolts,          // field-volt cap (x10). The enforced ceiling it produces is CSV2_fieldDutyCeil — voltage-dependent, so it lives on the 5s channel, not here
   CSV3_sessionId,              // boot identity — matches CSV1_sessionId while this cached block is from the live run
   CSV3_sendMs,                 // millis() when this settings echo was built. CSV3 is event-driven with a 60 s
                                // fallback, so an age much past ~60 s means the echo stopped arriving and every
@@ -2665,7 +2671,7 @@ void setupServer() {
     memcpy(snap, dvccCapRing + start, (size_t)run * sizeof(DvccCapEntry));
     if (run < cnt) memcpy(snap + run, dvccCapRing, (size_t)(cnt - run) * sizeof(DvccCapEntry));
     dvccCapPause = false;
-    size_t cap = (size_t)cnt * 44 + 64;
+    size_t cap = (size_t)cnt * 44 + 4352;  // + header: run stamp, authority, node roster, battery record, the not-the-battery's-number note
     char *buf = (char *)ps_malloc(cap);
     if (!buf) {
       free(snap);
@@ -2673,6 +2679,57 @@ void setupServer() {
       return;
     }
     size_t n = 0;
+    // Header first. Hex frames alone are an anecdote: what makes them generalisable is who
+    // published them and under which firmware. The roster is copied out of PSRAM under the lock
+    // and formatted unlocked — snprintf must never run inside the critical section.
+    char authTxt[24];
+    if (dvccRxSrcAddr == 255) snprintf(authTxt, sizeof(authTxt), "none heard yet");
+    else snprintf(authTxt, sizeof(authTxt), "addr %u", (unsigned)dvccRxSrcAddr);
+    n += (size_t)snprintf(buf + n, cap - n,
+                          "# Xregulator DVCC capture - fw %s - uptime %lu ms - %u frames\n"
+                          "# dialect %s - RV-C instance filter %d - follow state %u - authority %s\n"
+                          "# nodes heard passively (PGN 60928 NAME / 126996 product info). Hearing nothing is\n"
+                          "# normal with transmit off: neither PGN can be requested, so this is only what the\n"
+                          "# bus volunteered while we were listening.\n"
+                          "# addr  mfg func class   unique  prod vprod  model | sw | serial\n",
+                          FIRMWARE_VERSION, (unsigned long)millis(), (unsigned)cnt,
+                          dvccSrcType == 1 ? "RV-C" : "Victron VE.Can", dvccInst, (unsigned)dvccState, authTxt);
+    DvccNode *nsnap = (DvccNode *)ps_malloc(sizeof(DvccNode) * DVCC_NODE_N);
+    uint8_t nodeCnt = 0;
+    if (nsnap && dvccNodes) {
+      portENTER_CRITICAL(&dvccCapMux);
+      nodeCnt = dvccNodeCount;
+      if (nodeCnt) memcpy(nsnap, dvccNodes, sizeof(DvccNode) * (size_t)nodeCnt);
+      portEXIT_CRITICAL(&dvccCapMux);
+    }
+    for (uint8_t i = 0; i < nodeCnt && n + 160 < cap; i++) {
+      const DvccNode &nd = nsnap[i];
+      n += (size_t)snprintf(buf + n, cap - n, "# %4u %4u %4u %5u %08lX %5u %5u  %s | %s | %s\n",
+                            (unsigned)nd.addr, (unsigned)nd.mfg, (unsigned)nd.func, (unsigned)nd.cls,
+                            (unsigned long)nd.unique, (unsigned)nd.prodCode, (unsigned)nd.vicProdId,
+                            nd.model, nd.sw, nd.serial);
+    }
+    if (nodeCnt == 0) n += (size_t)snprintf(buf + n, cap - n, "# (no identity frames heard)\n");
+    if (nsnap) free(nsnap);
+    // The battery behind a GX is on the GX's other CAN port and never reaches our bus, so the one
+    // fact that makes these numbers generalisable is the owner's own record of what battery this
+    // is. Stamped from Vessel Info rather than asked for in the covering email, which is the half
+    // that gets forgotten. Sanitised on the way out: the stored strings pre-date any input filter.
+    char battTxt[80], battChem[24];
+    dvccCopyPlainText(battTxt, sizeof(battTxt), BATTERY_MAKE_MODEL.c_str());
+    dvccCopyPlainText(battChem, sizeof(battChem), BATTERY_TYPE.c_str());
+    if (battTxt[0]) {
+      n += (size_t)snprintf(buf + n, cap - n, "# battery on this boat: %s | %s | %d Ah | %u V\n",
+                            battTxt, battChem[0] ? battChem : "chemistry not set",
+                            BatteryCapacity_Ah, (unsigned)SYSTEM_VOLTAGE_CLASS);
+    } else {
+      n += (size_t)snprintf(buf + n, cap - n,
+                            "# battery on this boat: NOT RECORDED - fill in Setup - Vessel Information, or send\n"
+                            "# the battery make and model along with this capture.\n");
+    }
+    n += (size_t)snprintf(buf + n, cap - n,
+                          "# NOTE: a limit published by a Victron GX is Victron's own computed number, not the\n"
+                          "# battery's - it is rewritten per battery brand, which is why the line above matters.\n");
     for (uint16_t i = 0; i < cnt && n + 44 < cap; i++) {
       const DvccCapEntry &e = snap[i];
       n += (size_t)snprintf(buf + n, cap - n, "%lu %08lX %u ", (unsigned long)e.ms, (unsigned long)e.id, (unsigned)e.len);
@@ -4219,25 +4276,25 @@ void setupServer() {
                          : cvStressActive ? "CV stress test"
                          : (altSweepActive != 0) ? "Gate-tuning field sweep" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
-        queueConsoleMessage("Min% knee: start blocked — only allowed in AUTO mode");
+        queueConsoleMessage("Keep-alive onset: start blocked — only allowed in AUTO mode");
       } else if (busy != nullptr) {
-        queueConsoleMessageF("Min%% knee: start blocked — %s is active", busy);
+        queueConsoleMessageF("Keep-alive onset: start blocked — %s is active", busy);
       } else if ((millis() - fieldCurveLastEndMs) > 2000UL) {
-        fieldCurveOnsetMode = true;  // onset-stop sweep (Min% floor)
+        fieldCurveOnsetMode = true;  // onset-stop sweep (tachometer keep-alive floor)
         fieldCurveRequested = true;
         fieldCurveResultsReady = false;
         fieldCurveAbortRequested = false;
         fieldCurveAbortReason = 0; fieldCurveAbortMsg[0] = '\0';  // clear prior abort latch
         fieldCurveAbortFollowOn = 0; fieldCurveAbortVolts = 0.0f; fieldCurveAbortDuty = 0.0f;
-        queueConsoleMessage("Min% knee: sweep requested via web UI");
+        queueConsoleMessage("Keep-alive onset: sweep requested via web UI");
       } else {
-        queueConsoleMessage("Min% knee: start ignored (cooldown)");
+        queueConsoleMessage("Keep-alive onset: start ignored (cooldown)");
       }
     }
     if (request->hasParam("cancelKneeSweep")) {
       foundParameter = true;
       fieldCurveAbortRequested = true;
-      queueConsoleMessage("Min% knee: abort requested via web UI");
+      queueConsoleMessage("Keep-alive onset: abort requested via web UI");
     }
 
     // ── Gate-tuning capture: session logger + field sweeper (ALT_GATE_TUNING_CAPTURE_SPEC.md) ──
@@ -4315,9 +4372,9 @@ void setupServer() {
     if (request->hasParam("addKneeAnchor")) {
       foundParameter = true;
       if (kneeSweepKneeDuty <= 0.0f) {
-        queueConsoleMessage("Min% knee: no sweep result to commit");
+        queueConsoleMessage("Keep-alive onset: no sweep result to commit");
       } else if (kneeAnchorN >= KNEE_ANCHOR_MAX) {
-        queueConsoleMessage("Min% knee: anchor list full");
+        queueConsoleMessage("Keep-alive onset: anchor list full");
       } else {
         kneeAnchorRPM[kneeAnchorN] = kneeSweepRPM;
         kneeAnchorDuty[kneeAnchorN] = kneeSweepKneeDuty;
@@ -4330,7 +4387,7 @@ void setupServer() {
           if (kneeFitModel(a, C, resid, wi)) { kneeFitA = a; kneeFitC = C; kneeFitResidPct = resid; kneeFitWorstIdx = wi; }
           else { kneeFitResidPct = -1.0f; kneeFitWorstIdx = -1; }
         }
-        queueConsoleMessageF("Min%% knee: anchor %d committed (%.1f%% @ %.0f RPM, %.0fF)",
+        queueConsoleMessageF("Keep-alive onset: anchor %d committed (%.1f%% @ %.0f RPM, %.0fF)",
                              kneeAnchorN, kneeSweepKneeDuty, kneeSweepRPM, kneeSweepTempF);
       }
     }
@@ -4338,12 +4395,12 @@ void setupServer() {
       foundParameter = true;
       kneeAnchorN = 0;
       kneeFitResidPct = -1.0f; kneeFitWorstIdx = -1; kneeFitA = 0.0f; kneeFitC = 0.0f;
-      queueConsoleMessage("Min% knee: anchors cleared");
+      queueConsoleMessage("Keep-alive onset: anchors cleared");
     }
     if (request->hasParam("applyKneeCurve")) {
       foundParameter = true;
       if (!kneeCurveApply())
-        queueConsoleMessage("Min% knee: need at least 3 anchors to fit a curve");
+        queueConsoleMessage("Keep-alive onset: need at least 3 anchors to fit a curve");
     }
 
     // ── Auto-commissioning: Phase-2 relaxed matrix gate ─────────────────────
@@ -5003,6 +5060,17 @@ void setupServer() {
       }
       queueConsoleMessageF("Max Duty updated to: %d%%", MaxDuty);
     }
+    if (request->hasParam("MaxFieldVolts")) {
+      foundParameter = true;
+      inputMessage = request->getParam("MaxFieldVolts")->value();
+      MaxFieldVolts = constrain(inputMessage.toFloat(), 0.5f, 60.0f);
+      settingWrite(NK_MaxFieldVolts, String(MaxFieldVolts, 1).c_str());
+      // Force an immediate re-solve rather than waiting for the tick filter to drift the derived
+      // ceiling past its 0.5-point deadband: a large dtSec collapses the bus filter onto the present
+      // reading, so the new cap is enforced on the next duty write, not up to 2s later.
+      updateFieldVoltCeiling(getBatteryVoltage(), 999.0f);
+      queueConsoleMessageF("Max Field Volts updated to: %.1fV (field ceiling now %.1f%%)", MaxFieldVolts, ccDutyCeiling());
+    }
     if (request->hasParam("MinDuty")) {
       foundParameter = true;
       inputMessage = request->getParam("MinDuty")->value();
@@ -5011,7 +5079,7 @@ void setupServer() {
       if (pidInitialized) {
         applyCcOutputLimits();
       }
-      queueConsoleMessageF("Min Duty updated to: %.2f%%", MinDuty);
+      queueConsoleMessageF("Min Field (tachometer keep-alive) updated to: %.2f%%", MinDuty);
     }
     if (request->hasParam("LimpHome")) {
       foundParameter = true;
@@ -5133,6 +5201,18 @@ void setupServer() {
       inputMessage = request->getParam("n2kChgrInstance")->value();
       n2kChgrInstance = constrain(inputMessage.toInt(), 0, 252);
       settingWrite(NK_n2kChgrInst, String(n2kChgrInstance).c_str());
+    }
+    if (request->hasParam("n2kChgrCfgEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kChgrCfgEnable")->value();
+      settingWrite(NK_n2kChgrCfgEn, inputMessage.c_str());
+      n2kChgrCfgEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kChgrMode")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kChgrMode")->value();
+      n2kChgrMode = constrain(inputMessage.toInt(), 0, 2);  // tN2kChargerMode: Standalone/Primary/Secondary
+      settingWrite(NK_n2kChgrMode, String(n2kChgrMode).c_str());
     }
     if (request->hasParam("n2kEngRpmEnable")) {
       foundParameter = true;
@@ -6305,8 +6385,8 @@ void setupServer() {
       // re-measured at the new breakpoints instead of silently re-applied at shifted RPMs.
       if (rpmPointChanged) {
         kneeLearnResetDefaults();   // zero floors/knees, unfreeze, drop rpmMinDutyTable to 0
-        commissionClearStage(7);    // Min% floor + Field decay stage now stale (demotes a commissioned device to in-progress)
-        queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor step");
+        commissionClearStage(7);    // Keep-alive floor + Field decay stage now stale (demotes a commissioned device to in-progress)
+        queueConsoleMessage("Learning: RPM breakpoints changed — keep-alive floors cleared, re-run the Keep-Alive Floor step");
       }
 
       pendingSaveUserTableEdits = true;  // deferred to Core 1 to avoid SSE gap
@@ -6343,7 +6423,7 @@ void setupServer() {
       if (ptsChanged) {
         kneeLearnResetDefaults();
         commissionClearStage(7);
-        queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor step");
+        queueConsoleMessage("Learning: RPM breakpoints changed — keep-alive floors cleared, re-run the Keep-Alive Floor step");
       }
       saveBothCapTables(hiA, hiW, loA, loW);   // synchronous: NVS fresh before any following HiLow read
       learningTableUpdated = true;
@@ -9382,6 +9462,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,"   // +4 NMEA 0183: sentences, checksum errors, drain worst us window/session
+                               "%d,"            // +1 enforced field-duty ceiling (x100)
+                               "%d,%d,"         // +2 DVCC authority identity: NAME manufacturer code, product code
                                "%u,%u\n",       // +2: sessionId, sendMs
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -9970,6 +10052,9 @@ void SendWifiData() {
                                (int)n183ChecksumErrCount,
                                SafeInt(ft_ReadNMEA0183.worstWindow),
                                SafeInt(ft_ReadNMEA0183.worstSession),
+                               SafeInt(ccDutyCeiling(), 100),
+                               (int)dvccAuthMfg,
+                               (int)dvccAuthProd,
                                (unsigned)g_sessionId,   // CSV2_sessionId
                                (unsigned)millis());     // CSV2_sendMs — build time; the send happens one pass later
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
@@ -10043,12 +10128,13 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,"   // damper detection bar (x100) + 2 NMEA 0183: baud, polarity
                                "%d,"         // displayVolUnit
                                "%d,"         // gpsPositionSource
+                               "%d,"         // MaxFieldVolts (x10)
                                "%u,%u\n",    // +2: sessionId, sendMs
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -10421,6 +10507,8 @@ void SendWifiData() {
                                SafeInt(n2kTempSource),
                                SafeInt(n2kChgrEnable),
                                SafeInt(n2kChgrInstance),
+                               SafeInt(n2kChgrCfgEnable),
+                               SafeInt(n2kChgrMode),
                                SafeInt(n2kEngRpmEnable),
                                SafeInt(n2kEngInstance),
                                SafeInt(n2kEngDynEnable),
@@ -10444,6 +10532,7 @@ void SendWifiData() {
                                (int)NMEA0183Invert,
                                SafeInt(displayVolUnit),
                                (int)gpsPositionSource,
+                               SafeInt(MaxFieldVolts, 10),
                                (unsigned)g_sessionId,   // CSV3_sessionId
                                (unsigned)millis());     // CSV3_sendMs
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {

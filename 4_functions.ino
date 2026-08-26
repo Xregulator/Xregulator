@@ -1279,6 +1279,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     n2kChgrInstance = settingRead(NK_n2kChgrInst).toInt();
   }
+  if (!settingExists(NK_n2kChgrCfgEn)) {
+    settingWrite(NK_n2kChgrCfgEn, String(n2kChgrCfgEnable).c_str());
+  } else {
+    n2kChgrCfgEnable = settingRead(NK_n2kChgrCfgEn).toInt();
+  }
+  if (!settingExists(NK_n2kChgrMode)) {
+    settingWrite(NK_n2kChgrMode, String(n2kChgrMode).c_str());
+  } else {
+    n2kChgrMode = settingRead(NK_n2kChgrMode).toInt();
+  }
   if (!settingExists(NK_n2kEngRpmEn)) {
     settingWrite(NK_n2kEngRpmEn, String(n2kEngRpmEnable).c_str());
   } else {
@@ -1593,6 +1603,17 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_MaxDuty, String(MaxDuty).c_str());
   } else {
     MaxDuty = settingRead(NK_MaxDuty).toInt();
+  }
+  if (!settingExists(NK_MaxFieldVolts)) {
+    // Max Field Volts is a VOLT-domain seed (×seedVScale → 15/30/45/60), the opposite domain from
+    // MaxDuty above: it is physical field volts, not a duty ratio. Nominal class × 1.25 sits above any
+    // bank's absorb voltage, so the derived ceiling lands over 99% and the volts cap is inert at its
+    // default on every class — identical behavior to before it existed. It binds only once an installer
+    // enters the winding's rated voltage from the alternator datasheet.
+    MaxFieldVolts *= seedVScale;
+    settingWrite(NK_MaxFieldVolts, String(MaxFieldVolts, 1).c_str());
+  } else {
+    MaxFieldVolts = settingRead(NK_MaxFieldVolts).toFloat();
   }
   if (!settingExists(NK_MinDuty)) {
     // Float field floor, first-creation scaled ×(12/SYSTEM_VOLTAGE_CLASS) like MaxDuty so the same
