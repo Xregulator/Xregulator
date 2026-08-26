@@ -1010,6 +1010,7 @@ void applyNominalVoltageChange(int oldV, int newV) {
     VoltageAlarmHigh      *= ratio;
     VoltageAlarmLow       *= ratio;
     MaxFieldVolts         *= ratio;   // Max Field Volts: volt-domain, NOT the duty-domain group below
+    altSweepMarginV       *= ratio;   // sweep turnaround margin: volt-domain, RAM-only (posted per run)
     // Headroom scales with class so the OV ladder keeps its order (G2 clamp at target+OvMeasMarginV
     // < G1 predictive at target+OvPredMarginV < the hard cuts) — all per-cell-equivalent. A class
     // change re-derives the CONSERVATIVE Bulk+0.5 fallback, discarding any commissioned
@@ -7334,7 +7335,12 @@ float getMinimumFieldForRPM(float rpm) {
   }
   // The scalar "Min Field %" hard-floors every non-zero table value (a cell can raise the floor,
   // never pull it below MinDuty). The zero sentinel above is the one exception.
-  return fmaxf(floorV, MinDuty);
+  floorV = fmaxf(floorV, MinDuty);
+  // The field ceiling (Max Field % / Max Field Volts) is enforced in hardware by setDutyPercent, so a
+  // floor promised above it cannot be delivered — without this cap the governor resolves the inverted
+  // bounds to the floor and lastAppliedDuty (telemetry, PID bumpless reseed, the hunt observer) reports
+  // a duty the PWM is silently clamping away. Concede the floor to the ceiling so believed == actual.
+  return fminf(floorV, ccDutyCeiling());
 }
 float getCapCurrentForRPM(float rpm) {
   return interpolateRPMTable(rpm, rpmCapCurrentTable);

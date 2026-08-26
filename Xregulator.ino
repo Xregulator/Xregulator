@@ -1228,13 +1228,16 @@ volatile bool    altLogStartReq = false, altLogStopReq = false, altLogClearReq =
 // down under the SAME duty-override path the field curve uses (GOV_BYPASS_SLEW + MANUAL PID). Up-and-
 // down is what cancels the field lag and decorrelates speed sag / case warming from the field axis.
 uint8_t  altSweepActive        = 0;   // 0 idle, 1 ramping up, 2 ramping down, 3 easing out
+// True only during the constant-rate ramp itself — the ease-in/out transitions move duty far faster
+// than the ramp rate, so their rows must not carry the sweep flag the offline fit splits on.
+bool     altSweepMeasuredLeg   = false;
 volatile bool altSweepRequested = false;      // set by /get?altSweepStart
 volatile bool altSweepAbortRequested = false; // set by /get?altSweepCancel, and by the fast-OV cut
 float    altSweepRatePctS      = 1.0f;        // ramp rate (% duty per second)
 // How far short of a limit the ramp turns around. Panel controls, posted with the start request like
 // rate/from/to — see altSweepLimitNow() in 7_functions.ino for why a margin is needed at all.
 float    altSweepMarginA       = 10.0f;      // amps below every current limit
-float    altSweepMarginV       = 0.15f;      // volts below every voltage limit
+float    altSweepMarginV       = 0.15f;      // volts below every voltage limit (12V value; ×class/12 at boot and on class change)
 float    altSweepFromPct       = FIELDCURVE_DUTY_START;   // ramp floor (%)
 float    altSweepToPct         = 0.0f;        // ramp ceiling (%); 0 = resolve to the live field ceiling at start
 uint32_t altSweepLastEndMs     = 0;           // cooldown guard, same 2 s rule as the other field tests

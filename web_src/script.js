@@ -1746,7 +1746,9 @@ function altSweepMargins() {
         const v = parseFloat((document.getElementById(id) || {}).value);
         return isFinite(v) && v >= 0 ? v : dflt;
     };
-    return { a: num('altsweep-margin-a', 10), v: num('altsweep-margin-v', 0.15) };
+    // The volt margin is class-scaled (0.15 V is a 12V value); the amp margin is class-invariant.
+    const k = (parseInt(window._nominalStored, 10) || 12) / 12;
+    return { a: num('altsweep-margin-a', 10), v: num('altsweep-margin-v', 0.15 * k) };
 }
 
 function altSweepEchoMargins() {
@@ -1804,7 +1806,16 @@ async function altLogDumpPress() {
     }
     const ts = getLogTimestamp(), sfx = getLogNameSuffix();
     deliverFile(`altgate_${ts}${sfx}.csv`, altLogToCsv(d), 'text/csv');
-    fetchWithTimeout(buildURL('/get?altLogClear=1'), {}, 5000).catch(() => {});
+    // The clear is arm-gated on the device (the dump itself is not), and a 19-min recording plus a
+    // drive routinely outlives the 30-min arm window — a 403 resolves the fetch, so it has to be
+    // checked or the buffer silently stays held and the next Record warns about "un-dumped" rows.
+    try {
+        const r = await fetchWithTimeout(buildURL('/get?altLogClear=1'), {}, 5000);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch (err) {
+        xAlert('CSV saved, but the device buffer was NOT cleared (' + err + ' — the settings unlock ' +
+               'likely expired during the session). Unlock settings and press Discard to free it.');
+    }
 }
 
 function altSweepReversePress() {
@@ -1901,6 +1912,8 @@ function altLogToCsv(d) {
     L.push('# sweepRevEarly=1 means that sweep turned around early — a control limit or Reverse now — not at its ceiling.');
     L.push('# There is no segment column: a recording is fluid. Split on the flag columns (sweep, sweepDown,');
     L.push('# manual, fieldOn) and on dt_ms, which carry every transition the device can actually see.');
+    L.push('# sweep=1 marks only the constant-rate ramp legs: the ease-in/out transitions at the ends of a');
+    L.push('# run move duty far faster than the ramp rate and are deliberately NOT flagged as sweep rows.');
     L.push('t_s,dt_ms,rpm,fieldPct,vbus,tempF,tSlope_Fmin,amps,ampsRaw,fieldOn,manual,sweep,sweepDown,protection,eligible,steady,sweepRevEarly');
     let t = 0;   // first row is t=0: time is relative to the start of the file
     for (let i = 0; i < d.rows.length; i++) {
@@ -2671,10 +2684,15 @@ function altSessionPush(){
 // leaves a hole the stream never backfills. The device keeps the same 5 s series in PSRAM and
 // serves it at /altsess.csv; pull it on first connect and after any feed gap, then keep appending
 // live on top. Firmware without the route returns 404 -> the old browser-only behaviour.
-let altSessHistState = 0;      // 0 = never fetched, 1 = in flight, 2 = have it
+let altSessHistState = 0;      // 0 = never fetched (or retrying), 1 = in flight, 2 = have it / gave up
+let altSessHistTries = 0;      // failed attempts — a transient error right at page open must not be terminal
+let altSessHistNextTryMs = 0;  // backoff gate for state-0 retries
 function altSessMaybeRecover(){
   if (altSessHistState === 1) return;                       // already fetching
-  if (altSessHistState === 0){ altSessFetchHistory(); return; }   // fresh page / reload
+  if (altSessHistState === 0){                              // fresh page / reload, or a retry after a failure
+    if (Date.now() >= altSessHistNextTryMs) altSessFetchHistory();
+    return;
+  }
   // Refetch whenever OUR newest dot is stale. Dots are pushed every ALT_SESS_DT_S for as long as
   // events arrive, so this measures the actual hole in the series rather than guessing from event
   // timing — any interruption that cost us a dot trips it, and filling the hole clears it.
@@ -2683,7 +2701,12 @@ function altSessMaybeRecover(){
 }
 function altSessFetchHistory(){
   altSessHistState = 1;
-  fetch(buildURL('/altsess.csv')).then(r => r.ok ? r.text() : '').then(txt => {
+  fetch(buildURL('/altsess.csv')).then(r => {
+    if (r.status === 404) { altSessHistState = 2; return null; }   // firmware without the route — old behaviour, never retry
+    if (!r.ok) throw new Error('http ' + r.status);
+    return r.text();
+  }).then(txt => {
+    if (txt === null) return;
     let nowMs = null; const rows = [];
     for (const ln of txt.split('\n')){
       if (!ln) continue;
@@ -2695,19 +2718,35 @@ function altSessFetchHistory(){
                   fieldPct:+c[6], tempF:+c[7], vbus:+c[8], tSlope:+c[9],
                   state:+c[10], ring:+c[11] });
     }
-    if (nowMs !== null && rows.length) altSessAdoptHistory(rows, Date.now() - nowMs);
+    if (nowMs !== null && rows.length) altSessAdoptHistory(rows, nowMs);
     altSessHistState = 2;
-  }).catch(() => { altSessHistState = 2; });
+    altSessHistTries = 0;
+  }).catch(() => {
+    // Transient failure (device busy, hiccup right at page open): back to state 0 with a growing
+    // backoff so the next AltLive events retry — a single terminal failure here would lose the
+    // pre-open history for the whole session, since live pushes keep the newest dot fresh and the
+    // state-2 staleness trigger then never fires.
+    altSessHistTries++;
+    altSessHistState = (altSessHistTries < 5) ? 0 : 2;
+    altSessHistNextTryMs = Date.now() + 5000 * altSessHistTries;
+  });
 }
-function altSessAdoptHistory(rows, offMs){
+function altSessAdoptHistory(rows, nowMs){
   const src = altLive.source|0;                          // active reference surface, effectively per-session
+  const wallMs = Date.now();                             // pairs with the header's nowMs=millis() stamp
   const D = [];
-  let prevTMs = -1;
+  let prevTMs = null;
   for (const r of rows){
-    if (r.tMs <= prevTMs) continue;                      // a push overwrote the oldest slot mid-stream
+    // Both the ordering test and the wall-clock mapping go through uint32 device-millis arithmetic
+    // (>>> 0) so a ring that straddles the ~49.7-day millis() wrap still adopts cleanly — raw
+    // comparison would fling pre-wrap rows 49.7 days into the future and drop every post-wrap row.
+    if (prevTMs !== null){
+      const fwd = (r.tMs - prevTMs) >>> 0;
+      if (fwd === 0 || fwd >= 0x80000000) continue;      // a push overwrote the oldest slot mid-stream
+    }
     prevTMs = r.tMs;
     const graded = (r.state === 0 || r.state === 1);
-    D.push({ t: (r.tMs + offMs) / 1000,
+    D.push({ t: (wallMs - ((nowMs - r.tMs) >>> 0)) / 1000,
              m: graded && r.state === 0 ? r.pct : null,
              e: graded && r.state === 1 ? r.pct : null,
              g: graded ? 0 : 1,
@@ -4016,9 +4055,13 @@ async function maybeAskLocationOnFirstConnect() {
 // Position source selector. Both modes that can read this phone ask for authorization if it
 // isn't already held; "NMEA 2000 only" is the opt-out and asks nothing. A refusal at the
 // system alert reverts the dropdown rather than leaving a setting that cannot work.
+// Capacitor only: the setting is DEVICE-global while the permission is THIS-client, so a plain
+// browser (where requestPhoneLocationPermission returns false unconditionally) must still submit —
+// otherwise a laptop can never select Backup or Phone, including switching back after an opt-out;
+// the phone app aboard raises its own prompt when it actually starts posting.
 async function gpsPositionSourceChanged(sel) {
     const v = Number(sel.value);
-    if (v === 0 || v === 2) {
+    if ((v === 0 || v === 2) && IS_CAPACITOR) {
         const ok = await requestPhoneLocationPermission(
             v === 2
               ? 'X Regulator will use this phone as the boat\'s position source, ignoring NMEA 2000. ' +
@@ -4188,10 +4231,15 @@ async function speedSourceModeChanged(sel) {
         if (!ok) { sel.value = '0'; return; }
         // Ask for authorization here rather than at launch: this is the moment the feature
         // is switched on, which is what guideline 5.1.1(ii) and the HIG both want.
-        const granted = await requestPhoneLocationPermission(
-            'X Regulator needs this phone\'s location to use it as the vessel speed source. ' +
-            'Speed and course go to your regulator on your local network.');
-        if (!granted) { sel.value = '0'; return; }
+        // Capacitor only — the setting is device-global while the permission is this-client's,
+        // so a browser must still submit (its own geolocation prompt fires when posting starts,
+        // and the foreground-only bullet above already told the user the browser tradeoff).
+        if (IS_CAPACITOR) {
+            const granted = await requestPhoneLocationPermission(
+                'X Regulator needs this phone\'s location to use it as the vessel speed source. ' +
+                'Speed and course go to your regulator on your local network.');
+            if (!granted) { sel.value = '0'; return; }
+        }
     }
     sel.form.submit();
     submitMessage();
@@ -15940,7 +15988,10 @@ window.addEventListener("load", function () {
                 el.textContent = ceil.toFixed(1);
                 const src = document.getElementById('fieldDutyCeil_source');
                 if (src) {
-                    const maxDuty = Number(document.getElementById('MaxDuty')?.value);
+                    // The echo span, NOT getElementById('MaxDuty') — that resolves to the legacy
+                    // hidden input at the bottom of index.html, which nothing populates (always "0",
+                    // so the volts branch could never be reached). Same idiom as altSweepSyncCeiling.
+                    const maxDuty = parseFloat(getField('MaxDuty_echo'));
                     const txt = (Number.isFinite(maxDuty) && ceil < maxDuty - 0.05)
                         ? 'set by Max Field Volts' : 'set by Max Field (%)';
                     if (src.textContent !== txt) src.textContent = txt;
@@ -21501,6 +21552,14 @@ function applyClassScaledInputAttrs() {
     if (md) md.step = (k === 3) ? 'any' : r(1 / k);
     const cw = document.querySelector('input[name="cvWaveAmplitudeV"]');
     if (cw) { cw.min = r(0.05 * k); cw.max = r(2.0 * k); cw.step = r(0.05 * k); }
+    // Sweep turnaround volt margin: volt-domain, so its default and ceiling are 12V values. Prefill
+    // only while the box still holds the markup default — this can re-run and must never stomp a
+    // typed margin. (The amp margin is class-invariant, so it is not here.)
+    const smv = document.getElementById('altsweep-margin-v');
+    if (smv) {
+        smv.max = r(2 * k);
+        if (k !== 1 && smv.value === '0.15' && document.activeElement !== smv) smv.value = r(0.15 * k);
+    }
     // D-term deadband + slope ceiling (V/s), arm window (V), target ramp rates (V/s) and the
     // wind-down stop margin (V) are WYSIWYG per-bus (scale ×class), so their input bounds must
     // too, else a 24/36/48 V user is capped at the 12 V ceiling. Kd/cap are NOT here — Kd is
@@ -28924,6 +28983,7 @@ window.addEventListener('load', function () {
   const NBINS = 18;                 // must match firmware FUELCURVE_BINS
   const DEFAULT_TOP = 4500;         // fallback x-scale until firmware reports the configured top RPM
   let plot = null;
+  let resizeObs = null;             // one live observer across destroy/rebuild — see make()
   let yManual = null;               // [min,max] typed on the plot; null = auto-fit
   try { yManual = JSON.parse(localStorage.getItem('fuelCurveYRange')) || null; } catch (e) { }
 
@@ -28947,8 +29007,11 @@ window.addEventListener('load', function () {
       legend: { show: false }
     };
     plot = new uPlot(opts, [[0], [null]], el);
-    const ro = new ResizeObserver(() => { if (plot) plot.setSize({ width: plotFitWidth(el, 600), height: 300 }); });
-    ro.observe(el);
+    // Store and disconnect across rebuilds: plot.destroy() (unit flip) does not stop an anonymous
+    // observer, so each gal<->L toggle would stack one more, all firing setSize on every resize.
+    if (resizeObs) resizeObs.disconnect();
+    resizeObs = new ResizeObserver(() => { if (plot) plot.setSize({ width: plotFitWidth(el, 600), height: 300 }); });
+    resizeObs.observe(el);
 
     // Auto checkbox (top-right) — same convention as the other plots. No lock button:
     // this is an RPM-domain curve that redraws on new fuel data, not a streaming

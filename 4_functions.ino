@@ -935,6 +935,10 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   // a firmware update introducing a new setting).
   const float seedVScale = (float)SYSTEM_VOLTAGE_CLASS / 12.0f;
   const float seedDScale = 12.0f / (float)SYSTEM_VOLTAGE_CLASS;
+  // RAM-only volt-domain knob (posted with each sweep start, never NVS): its hardcoded default is a
+  // 12V value like every seed below, and 0.15 V at 48 V is a quarter of the per-cell margin while the
+  // sweep bypasses every soft protection layer — so scale it once here (runs once, at boot).
+  altSweepMarginV *= seedVScale;
   if (!settingExists(NK_BulkVoltage)) {
     BulkVoltage *= seedVScale;
     settingWrite(NK_BulkVoltage, String(BulkVoltage).c_str());
@@ -1613,7 +1617,15 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     MaxFieldVolts *= seedVScale;
     settingWrite(NK_MaxFieldVolts, String(MaxFieldVolts, 1).c_str());
   } else {
+    // A garbage NVS string (hand-edited export imported raw, or a bad admin push) parses to 0.0,
+    // which pins the field ceiling at MinDuty and effectively kills charging. Enforce the web
+    // handler's [0.5, 60] window here too, and fall back to the inert class default rather than
+    // the window edge — a 0.5 V ceiling is still a dead field.
     MaxFieldVolts = settingRead(NK_MaxFieldVolts).toFloat();
+    if (!(MaxFieldVolts >= 0.5f && MaxFieldVolts <= 60.0f)) {
+      MaxFieldVolts = 1.25f * (float)SYSTEM_VOLTAGE_CLASS;
+      settingWrite(NK_MaxFieldVolts, String(MaxFieldVolts, 1).c_str());
+    }
   }
   if (!settingExists(NK_MinDuty)) {
     // Float field floor, first-creation scaled ×(12/SYSTEM_VOLTAGE_CLASS) like MaxDuty so the same

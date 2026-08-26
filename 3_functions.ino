@@ -4330,7 +4330,8 @@ void setupServer() {
       if (request->hasParam("marginA"))
         altSweepMarginA = constrain(request->getParam("marginA")->value().toFloat(), 0.0f, 100.0f);
       if (request->hasParam("marginV"))
-        altSweepMarginV = constrain(request->getParam("marginV")->value().toFloat(), 0.0f, 2.0f);
+        altSweepMarginV = constrain(request->getParam("marginV")->value().toFloat(),
+                                    0.0f, 2.0f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       const char *busy = (systemIDActive != 0) ? "Plant Delay test"
                          : TuningMode ? "Current tuning"
                          : CVTuningMode ? "Voltage tuning"
@@ -4350,7 +4351,11 @@ void setupServer() {
       } else if (busy != nullptr) {
         queueConsoleMessageF("Field sweep: start blocked — %s is active", busy);
       } else if ((millis() - altSweepLastEndMs) > 2000UL) {
-        altSweepAbortRequested = false;
+        // Deliberately does NOT clear altSweepAbortRequested: after an external teardown
+        // (protection cut / leaving AUTO) the tick's static phase is still mid-ramp, and only the
+        // latch makes the next normal tick reset it. Clearing it here would let a Start pressed
+        // before that tick resume the stale ramp as an instant field step. altSweep_tick consumes
+        // a stale latch itself: the abort gate resets phase first, then phase 0 starts this request.
         altSweepReqMs = millis();
         altSweepRequested = true;
       } else {

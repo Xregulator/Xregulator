@@ -1097,7 +1097,9 @@ static bool     altEligibleNow = false;   // detector eligibility, exported from
 // disconnect cleanly).
 // (the request flags themselves live in Xregulator.ino — the /get handlers are compiled before this file)
 static volatile bool altLogDlBusy = false;
-static uint32_t altLogDlStartMs = 0;
+static volatile uint32_t altLogDlStartMs = 0;   // refreshed on every chunk the TCP stack pulls, so the
+                                                // 30 s escape fires only when the transfer truly stalls —
+                                                // a slow-but-live link must keep holding Discard back
 static inline bool altLogDlActive() {
   return altLogDlBusy && ((uint32_t)(millis() - altLogDlStartMs) < 30000u);
 }
@@ -1225,7 +1227,7 @@ void altLog_tick(uint32_t nowMs) {
   bool manualNow = (sysMode == SYS_MODE_MANUAL);
   if (!gpio4IsLow)                 fl |= 0x01;
   if (manualNow)                   fl |= 0x02;
-  if (altSweepActive != 0)         fl |= 0x04;
+  if (altSweepActive != 0 && altSweepMeasuredLeg) fl |= 0x04;   // constant-rate ramp only, never the eases
   if (altSweepActive == 2)         fl |= 0x08;   // down leg
   if (ctrlLimiter == 6)            fl |= 0x10;   // a protection is binding or a recovery window is open
   if (altEligibleNow)              fl |= 0x20;
@@ -1348,6 +1350,10 @@ void altLogBinSend(AsyncWebServerRequest *request) {
     "application/octet-stream",
     [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
       if (st.done) return 0;
+      altLogDlStartMs = millis();   // progress = alive; see altLogDlActive()
+      // If the 30 s escape did lapse during a stall and a Clear freed the blocks, end the stream
+      // instead of reading a null block (all three are freed together).
+      if (!altLogBlk[0]) { st.done = true; altLogDlBusy = false; return 0; }
       size_t written = 0;
       while (written < maxLen) {
         if (st.hdrPos < (int)sizeof(AltLogHdr)) {
@@ -5574,6 +5580,7 @@ bool altSweep_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     // Stop-sweep press arrives here with the run still marked live, so only that one announces.
     if (altSweepActive != 0) queueConsoleMessage("Field sweep: aborted");
     altSweepActive = 0;
+    altSweepMeasuredLeg = false;
     altSweepLastEndMs = millis();
     phase = 0;
     return false;
@@ -5616,6 +5623,7 @@ bool altSweep_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     altSweepReverseReq = false;   // a press from before this run must not turn the new one around
     lastRampMs = nowMs;
     altSweepActive = 1;
+    altSweepMeasuredLeg = false;
     // Ease from the live operating duty to the ramp floor over FIELDCURVE_EASE_MS. Under
     // GOV_BYPASS_SLEW an un-eased entry is an instant step in either direction, so ease both ways.
     easeFromDuty = lastAppliedDuty;
@@ -5631,6 +5639,7 @@ bool altSweep_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     if (frac >= 1.0f) {
       dutyOut = curDuty;
       lastRampMs = nowMs;      // ramp clock starts only once the field has arrived
+      altSweepMeasuredLeg = true;
       phase = 2;
       return true;
     }
@@ -5679,6 +5688,7 @@ bool altSweep_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       easeFromDuty = curDuty;
       easeStartMs = nowMs;
       altSweepActive = 3;
+      altSweepMeasuredLeg = false;
       phase = 3;
       queueConsoleMessage("Field sweep: complete — easing the field out");
     }

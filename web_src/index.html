@@ -6149,10 +6149,13 @@
                   <table class="learning-table c3-band-table">
                     <thead>
                       <tr>
-                        <th style="width:30%;">Signal</th>
-                        <th style="width:24%;">Band <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How far the reading may move and still count as steady. Judged on the smoothed signal, so size it for real operating-point movement, not sensor noise.</span></span></th>
-                        <th style="width:20%;">Floor <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Output amps only: its band is a percentage of the reading, so at low output it would collapse to nothing. This is the smallest band it may shrink to.</span></span></th>
-                        <th style="width:26%;">Steady for (s) <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How long the reading must stay inside its band before that signal counts as settled. All five must be settled at once.</span></span></th>
+                        <!-- Column widths live in styles.css (.c3-band-table nth-child !important) — the
+                             .learning-table base pins its columns with !important pixels, so inline
+                             widths here are dead on arrival. -->
+                        <th>Signal</th>
+                        <th>Band <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How far the reading may move and still count as steady. Judged on the smoothed signal, so size it for real operating-point movement, not sensor noise.</span></span></th>
+                        <th>Floor <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Output amps only: its band is a percentage of the reading, so at low output it would collapse to nothing. This is the smallest band it may shrink to.</span></span></th>
+                        <th>Steady for (s) <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How long the reading must stay inside its band before that signal counts as settled. All five must be settled at once.</span></span></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -14764,7 +14767,6 @@
     <input id="AmpSensorRange" style="display:none;" value="0" />
     <input id="ShuntResistanceMicroOhm" style="display:none;" value="0" />
     <input id="MaxDuty" style="display:none;" value="0" />
-    <input id="MaxFieldVolts" style="display:none;" value="0" />
     <input id="MinDuty" style="display:none;" value="0" />
     <input id="FieldResistance" style="display:none;" value="0" />
     <input id="maxPoints" style="display:none;" value="0" />

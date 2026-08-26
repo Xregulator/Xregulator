@@ -1469,6 +1469,13 @@ static void cfgImportNoteChanged(const char *name) {
   *cfgImportChangedNames += name;
 }
 
+// Params renamed across releases: import matches keys by the CURRENT manifest name only, so a blob
+// exported under an old name would silently drop that setting with no IMPORT WARNING. One row per
+// rename. The NVS key stays the same across a rename — only the JSON param name moves.
+static const struct { const char *now; const char *legacy; } CFG_PARAM_ALIASES[] = {
+  { "timeSourceMode", "gpsTimeSourceMode" },   // 2026-08-24 position/time split
+};
+
 int applyImportConfig(const char *body) {
   if (!body) return -1;
   const char *cfg = strstr(body, "\"config\"");
@@ -1511,7 +1518,14 @@ int applyImportConfig(const char *body) {
     if (CONFIG_MANIFEST[i].tier == 3) continue;   // export-only: this device's own history, never adopted
     if (cfgClassBad && strcmp(CONFIG_MANIFEST[i].param, "BatteryVoltage") == 0) continue;
     String val;
-    if (cfgJsonExtract(cfg, CONFIG_MANIFEST[i].param, val)) {
+    bool found = cfgJsonExtract(cfg, CONFIG_MANIFEST[i].param, val);
+    if (!found) {
+      for (size_t a = 0; a < sizeof(CFG_PARAM_ALIASES) / sizeof(CFG_PARAM_ALIASES[0]); a++) {
+        if (strcmp(CFG_PARAM_ALIASES[a].now, CONFIG_MANIFEST[i].param) == 0
+            && cfgJsonExtract(cfg, CFG_PARAM_ALIASES[a].legacy, val)) { found = true; break; }
+      }
+    }
+    if (found) {
       if (settingWrite(CONFIG_MANIFEST[i].nvsKey, val.c_str())) {
         applied++;
         cfgImportNoteChanged(CONFIG_MANIFEST[i].param);
@@ -1596,7 +1610,9 @@ bool bhStartTest() {
   if (!bhSamples || !bhResults){ bhAbortReason = "buffers unallocated";      return false; }
   if (RPM < 100)               { bhAbortReason = "engine not running";       return false; }
   if (sysMode != SYS_MODE_AUTO){ bhAbortReason = "must be in AUTO mode";     return false; }   // generator only runs in the AUTO control path
-  if (TuningMode || CVTuningMode || systemIDActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || resTestActive || cvStressActive || protTestActive || (altSweepActive != 0)) { bhAbortReason = "another test active"; return false; }
+  // altSweepRequested too: a sweep start is two-stage (the HTTP press arms the request, the next
+  // control tick promotes it to altSweepActive), so active alone leaves a one-tick window.
+  if (TuningMode || CVTuningMode || systemIDActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || resTestActive || cvStressActive || protTestActive || (altSweepActive != 0) || altSweepRequested) { bhAbortReason = "another test active"; return false; }
   if (BatteryCurrentSource != 0 || !HAS_BATT_SHUNT){ bhAbortReason = "needs INA228 battery shunt"; return false; }
   if (bhNumEdges < 3) bhNumEdges = 3;
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
@@ -2157,7 +2173,7 @@ bool cvpfStartTest(float diMaxReq) {
   if (!cvpfBuf)                 { cvpfAbortMsg = "buffer unallocated";     return false; }
   if (RPM < 100)                { cvpfAbortMsg = "engine not running";     return false; }
   if (sysMode != SYS_MODE_AUTO) { cvpfAbortMsg = "must be in AUTO mode";   return false; }
-  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvStressActive || protTestActive || (altSweepActive != 0)) {
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvStressActive || protTestActive || (altSweepActive != 0) || altSweepRequested) {
     cvpfAbortMsg = "another test active"; return false;
   }
   cvpfBufCount = 0; cvpfSampleLastMs = 0;
@@ -2203,8 +2219,10 @@ void cvpfAbort(const char *reason) {
 void cvpfServiceCompletion() {
   if (cvpfState != 1) return;
   if (!cvPlantFitActive) { cvpfProcess(); cxLedgerLogCvpf(); return; }   // tick machine finished the RELEASE phase
-  // Worst case: settle timeout + pilot + two hold timeouts (OV re-size) + 9 segments + slack.
+  // Worst case: settle timeout + pilot + two hold timeouts (OV re-size) + REBASE at its full budget
+  // (fall-rate ramp of the largest boosted step, plus its settle allowance) + 9 segments + slack.
   uint32_t budget = CVPF_SETTLE_TIMEOUT_MS + CVPF_T_PILOT_MS + 2 * CVPF_HOLD_TIMEOUT_MS
+                    + CVPF_REBASE_SETTLE_MS + (uint32_t)(1000.0f * CVPF_DI_MAX_CEIL / TEST_ENTRY_RATE_A)
                     + 9 * CVPF_PULSE_SEG_MS + 8000;
   if (millis() - cvpfTestStartMs > budget) cvpfAbort("timed out (engine stopped or left AUTO?)");
 }
@@ -2315,7 +2333,7 @@ bool cvStressStartTest() {
   if (cvStressActive)           { cvStressAbortMsg = "already running";      return false; }
   if (RPM < 100)                { cvStressAbortMsg = "engine not running";   return false; }
   if (sysMode != SYS_MODE_AUTO) { cvStressAbortMsg = "must be in AUTO mode"; return false; }
-  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || protTestActive || (altSweepActive != 0)) {
+  if (TuningMode || CVTuningMode || systemIDActive || batteryHealthTestActive || resTestActive || fieldCurveActive || fieldCutActive || cvPlantFitActive || protTestActive || (altSweepActive != 0) || altSweepRequested) {
     cvStressAbortMsg = "another test active"; return false;
   }
   if (millis() - cvsLastEndMs < 2000UL) { cvStressAbortMsg = "cooling down — retry in a moment"; return false; }
