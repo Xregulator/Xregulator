@@ -258,9 +258,15 @@ static bool    altHiFieldAlert = false;    // high-field-low-output alert (indep
 // operating-point drift, not raw loop dither / sensor jitter (which the filter strips):
 // Band widths are sized by each axis's measured output sensitivity (Alt_Health_Dev_Summary.md §3):
 // output smear from a band = band × dI/dx, and the four add in quadrature.
-float altDutyTolPct    = 0.4f;   // field-duty band (% points, filtered; raw CV dither ~3 p-p). 1.76 A/pt — dominates the smear budget
-                                 // (back to the July-9 sensitivity-derived 0.4; the July-14 0.3 squeeze starves emits under the 8 s continuity rule)
-float altRpmTol        = 30.0f;  // RPM band (filtered; raw idle jitter ~50 p-p). 0.004 A/RPM at cruise but 0.045 below the ~1200 knee — do NOT widen on the cruise number
+float altDutyTolPct    = 0.4f;   // field-duty band (% points, filtered; raw CV dither ~3 p-p). 2.52 A/pt measured OPEN-loop at idle
+                                 // 2026-08-27 (the 1.76 closed-loop fit was low) — dominates the smear budget, but a record stores the
+                                 // 2 s MEAN duty and MEAN amps, which co-move down the true line, so within-run wander partly self-cancels.
+                                 // Also the dominant blocker (sole-block 30% of ticks at quiet idle): do NOT re-tighten — the July-14
+                                 // 0.3 squeeze starved emits
+float altRpmTol        = 20.0f;  // RPM band (filtered; raw idle jitter ~50 p-p). Open-loop measured 2026-08-27: 0.044 A/rpm at idle
+                                 // (0.006-0.008 at cruise revs) — 30 admitted 1.3 A = 7% of idle output, 20 admits 4.7%; quiet-idle
+                                 // p90 3 s range was 19 rpm so admission cost is small. Do NOT widen on the cruise number; the real
+                                 // fix is a regime-dependent band (campaign deliverable)
 float altVbusTol       = 0.20f;  // bus-voltage band (V, filtered). |dI/dV| < 1.8 and sign-unstable across fits — output cost is near zero
 // Admission floors:
 float altMinAmps = 2.0f;
@@ -889,8 +895,10 @@ typedef struct {
   uint32_t events[OV_HIST_BINS];  // entries into this band (band-occupancy rising edge; low bins run large from CV ripple — expected, timeMs is the ripple-robust metric)
   uint32_t softExceedCount;       // rising edge: filtered V crossed target + OvMeasMarginV (Group-2 soft cap actually engaged)
   uint32_t swHardCutCount;        // rising edge: REASON_FAST_OVERVOLTAGE (SW hard cut, raw/per-tick)
-  uint32_t inaCutCount;           // rising edge: REASON_INA_OVERVOLTAGE (INA228 ~1s-avg latched cut — software-failed-to-protect backstop)
+  uint32_t inaCutCount;           // rising edge: REASON_INA_OVERVOLTAGE (INA228 averaged-compare latched cut — software-failed-to-protect backstop)
   uint32_t kdEventCount;          // rising edge: CV D-term engagement episodes (trim after ≥1s quiet) — pre-protection, counts saves not trips
+  uint32_t tierLowCutCount;       // rising edge: REASON_OV_TIER_LOW (timed cut, LOW tier)
+  uint32_t tierMidCutCount;       // rising edge: REASON_OV_TIER_MID (timed cut, MID tier)
   uint32_t magic;
 } OvTelemetry;  // ~392 B; RTC slow RAM has ample room (black box is the only other user)
 // Size + bin count folded into the magic so a layout change self-invalidates (no migration —
@@ -1237,7 +1245,9 @@ float    altSweepRatePctS      = 1.0f;        // ramp rate (% duty per second)
 // How far short of a limit the ramp turns around. Panel controls, posted with the start request like
 // rate/from/to — see altSweepLimitNow() in 7_functions.ino for why a margin is needed at all.
 float    altSweepMarginA       = 10.0f;      // amps below every current limit
-float    altSweepMarginV       = 0.15f;      // volts below every voltage limit (12V value; ×class/12 at boot and on class change)
+float    altSweepMarginV       = 0.20f;      // volts below every voltage limit (12V value; ×class/12 at boot and on class change).
+                                             // 0.15 + the 250 ms confirm lost both 2026-08-27 float-stage sweeps: the bank's
+                                             // acceptance knee ran >=1.2 V/s and the hard cut fired ~1.5 s after turnaround
 float    altSweepFromPct       = FIELDCURVE_DUTY_START;   // ramp floor (%)
 float    altSweepToPct         = 0.0f;        // ramp ceiling (%); 0 = resolve to the live field ceiling at start
 uint32_t altSweepLastEndMs     = 0;           // cooldown guard, same 2 s rule as the other field tests
@@ -1417,13 +1427,14 @@ float ChargingVoltageTarget = 0;                 // This becomes active target �
                                                  // ChargingVoltageTargetReq by the slew in AdjustFieldLearnMode).
 float ChargingVoltageTargetReq = 0;              // Instantaneous DESIRED target (set each tick by stage logic /
                                                  // TargetVoltageMode / MaintainMode). ChargingVoltageTarget ramps to it.
-float VoltageHardwareLimit = BulkVoltage + 0.3;  // boot placeholder; updateINA228OvervoltageThreshold() derives the real limit (lithium: Bulk + 0.3×class, else: tracks AlternatorHardShutdownV)
+float VoltageHardwareLimit = 14.3f;  // boot placeholder — persisted user setting (NVS), seeded/loaded in InitSystemSettings; updateINA228OvervoltageThreshold() programs the INA228 ALERT comparator from it. Top rung of the OV ladder: sits ABOVE the software instant cut (AlternatorHardShutdownV) as the electrical backstop, 0.2 V x class/12 below the battery's BMS charge-disconnect voltage.
 bool inBulkStage = true;
 
 // System voltage class (12/24/36/48V) lives in SYSTEM_VOLTAGE_CLASS (set from Vessel Info). It is the sole
 // source of truth: the CV/CC gain normalization, knee/slew scaling, duty ceiling, and the boot SoC
 // anchor's OCV brackets (seedSocFromVoltage) all scale by it, and a class change (via /saveVesselInfo →
-// applyNominalVoltageChange) rescales the charge-voltage profile + hard-shutdown trip.
+// applyNominalVoltageChange) rescales the charge-voltage profile + the whole OV ladder (tier margins,
+// software cut, INA228 hardware limit).
 
 enum ChargeStageDisplayCode : uint8_t {
   CHARGE_STAGE_NONE = 0,
@@ -1514,7 +1525,7 @@ void n183ClearHeading();          // defined in 5_functions; the master-switch h
 // ── HARD OVER-CURRENT PROTECTION ─────────────────────────────
 // "Group 0" in UI = hardware overcurrent trip; HardOCEnable is its group toggle (ignores the global protections flag)
 float HardOCTripAmps = 160.0f;   // derived: MaxTableValue + 10A — recomputed at boot and on MaxTableValue change, not persisted
-uint32_t HardOCDebounceMs = 20;  // user-adjustable, persisted in NVS
+uint32_t HardOCDebounceMs = 40;  // user-adjustable, persisted in NVS (provisioned devices keep their stored value). 40 ms is free noise robustness: a BMS charge-overcurrent trip holds >= 0.5 s, so nothing races this debounce
 bool HardOCEnable = true;        // Group 0 enable — gates the last-resort trip; survives the global protections toggle, so OFF removes the final over-current backstop
 uint32_t hardOCStartMs = 0;
 const int pwmPin = 14;  // field PWM pin
@@ -2715,9 +2726,10 @@ unsigned long FIELD_COLLAPSE_DELAY = 30000;  // ms
 // Lockout period after temperature or voltage-disagreement faults.
 // RPM-too-low is NOT a fault — it's a normal idle/engine-stop state — so it gets its own short
 // lockout instead of borrowing the 30s fault cooldown. Lets charging resume ~immediately on engine
-// restart. Fast over-voltage (software hard cut) uses the adaptive nextFastOvLockoutMs ladder
-// (0.5s escalating to 10s) so a transient blip doesn't cost a 30s outage; the remaining faults
-// (OT, voltage disagreement) keep FIELD_COLLAPSE_DELAY. Not user-adjustable by design.
+// restart. Fast over-voltage (software hard cut) and the timed OV tiers use the adaptive
+// nextFastOvLockoutMs ladder (0.5s escalating to 10s) so a transient blip doesn't cost a 30s
+// outage — a persistent cause escalates regardless of which OV rung catches it; the remaining
+// faults (OT, voltage disagreement) keep FIELD_COLLAPSE_DELAY. Not user-adjustable by design.
 unsigned long RPM_RECOVERY_DELAY = 500;  // ms — short by design: while the engine sits stopped this cooldown re-arms every window (see 6_functions runShutdownPath), so on restart you wait out whatever remains of the current window before the field re-engages. Keep it small so that residual wait is short.
 // Delay applied to the CURRENTLY-armed lockout, set at arm time (RPM_RECOVERY_DELAY for the RPM gate,
 // else FIELD_COLLAPSE_DELAY). The remaining/clear/inLockout checks read this, not the constant.
@@ -3804,6 +3816,15 @@ int   OutputPIDMA_N   = 2;      // Output current PID — MA window size (1–10
 float TdPred         = 0.045f;  // Group 1 lookahead horizon (s)
 float OvMeasMarginV  = 0.100f;  // Group 2 measured-voltage trigger margin above target (V)
 float OvPredMarginV  = 0.150f;  // Group 1 prediction trigger margin above target (V)
+// --- Timed OV cut tiers (target-relative, dwell-debounced field cuts on the G2 filtered bus) ---
+// Sized so every sustained violation is cut inside 0.4 s — a BMS charge disconnect needs >= 0.5 s
+// (survey floor) and ~100 ms of that budget is field de-energization. Dwells are absolute time,
+// never class-scaled; margins are volt-domain (x class/12 at seed and class change). Dwell 0 = tier off.
+float    OvTierLoMarginV  = 0.10f;  // LOW tier trip line, V above target (rides the Group 2 shed line)
+uint32_t OvTierLoDwellMs  = 400;    // LOW tier continuous dwell (ms)
+float    OvTierMidMarginV = 0.20f;  // MID tier trip line, V above target
+uint32_t OvTierMidDwellMs = 150;    // MID tier continuous dwell (ms)
+volatile uint8_t g_ovTierTrip = 0;  // latched tier violation: 0 none, 1 LOW, 2 MID — set in the FAST OV block, read by the reason/mode arbiters, clears when the filtered bus drops back under the tier line
 float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed into Vpred. dt-aware: alpha = dt/(TC+dt).
 // --- iExcess current supervisor (EMA / leaky-integral detector) ---
 // Detection = time-averaged current excess over command (an EMA of the signed deviation),
@@ -3837,13 +3858,13 @@ float FastSetpointRiseRate = 8.0f;       // multiplier on normal setpoint rise s
 uint32_t FastSetpointRiseWindowMs = 5000; // hard upper bound (ms) on how long the fast-rise window stays open after any protection releases
 float FastSetpointRiseHeadroomV = 0.2f;  // V below ChargingVoltageTarget at which fast-rise is allowed; gate closes once IBV climbs into target - this margin
 // --- Test-mode protection override ---
-// User-controlled flag (per test page). When TRUE (default) G1, G2, the G3 iExcess
-// over-current detector (alternator), the G4 battery current limit, and AlternatorHardShutdownV all fire
-// normally. When FALSE the user has disabled them so step-tests can characterise the
-// plant without protection layers fighting the test. NOT persisted — resets to TRUE
-// (enabled) on every boot. Load Dump (the G5 battery rate-of-change tiers),
-// INA228 hardware OV, and the hardware OC trip (MaxTableValue+10) stay active
-// regardless of this flag.
+// User-controlled flag (per test page). When TRUE (default) G1, G2, the timed OV cut tiers
+// (OvTierLo/Mid), the G3 iExcess over-current detector (alternator), and the G4 battery current
+// limit all fire normally. When FALSE the user has disabled them so step-tests can characterise
+// the plant without protection layers fighting the test. NOT persisted — resets to TRUE
+// (enabled) on every boot. The absolute rungs stay active regardless of this flag:
+// AlternatorHardShutdownV (software instant cut), INA228 hardware OV, Load Dump (the G5
+// battery rate-of-change tiers), and the hardware OC trip (MaxTableValue+10).
 bool testProtectionsEnabled = true;
 bool commissionProtBackup   = true;  // saved value of testProtectionsEnabled at commissionStart; restored on done/abort. Commissioning forces protections ON for its run so a stray manual "off" from the tuning-tab sliders can't weaken the wizard's steps (the manual sliders are scoped to manual tuning only).
 // --- CV loop runtime state ---
@@ -3967,7 +3988,9 @@ enum FieldEventReason : uint8_t {
   REASON_COMMISSION_REST,          // commissioning idle-rest hold between guided steps (not a fault)
   REASON_TACH_IMPLAUSIBLE,         // field driven hard, zero alternator output while tach claims running — open field drive (ON/OFF/wiring/gate-drive), dead alternator, or false RPM (tach noise)
   REASON_SOLAR_PAUSE,              // weather mode is resting the alternator on a strong solar forecast — deliberate, not a fault
-  REASON_BMS_DISABLED              // the BMS on/off input is withholding permission — external command, not a fault
+  REASON_BMS_DISABLED,             // the BMS on/off input is withholding permission — external command, not a fault
+  REASON_OV_TIER_LOW,              // timed OV cut, LOW tier — filtered bus held above target + OvTierLoMarginV for OvTierLoDwellMs (AUTO/CV only)
+  REASON_OV_TIER_MID               // timed OV cut, MID tier — filtered bus held above target + OvTierMidMarginV for OvTierMidDwellMs (AUTO/CV only)
 };
 
 
@@ -4102,17 +4125,16 @@ uint32_t TempSustainedTimeout = 120000;  // ms - WARNING temp sustained this lon
 
 // --- Voltage Thresholds ---
 // AlternatorHardShutdownV: absolute battery voltage above which the alternator field is cut
-// and the adaptive fast-OV lockout starts. This is the only software-layer hard OV shutdown;
-// below it sit the Group 1/2/3 throttling protections AND the INA228 hardware ALERT (chemistry
-// branch in updateINA228OvervoltageThreshold: lithium BulkVoltage + 0.3 V, else equal to this
-// value; chip's averaged value, BUSOL polled every 250ms). Value is chemistry-specific via the
-// commissioning proposal: lithium Bulk + 0.5 (just below the BMS disconnect; software owns fast
-// transients the chip's averaging + 250ms poll can miss, leaving G2's filtered clamp room to
-// win a blip without any GPIO4 cut — 2026-07-12: +0.31V blip peaks at a 14.4 bulk target hit
-// the old +0.3 line inside the G2 filter lag); AGM/flooded 16.0 V absolute ×(V/12) (lead-acid
-// damage is time-integrated, indifferent to brief bounded spikes — the ceiling protects the DC
-// loads' published continuous ratings instead, 2026-07-13).
-float AlternatorHardShutdownV = 14.4f;    // V — absolute hard-shutdown threshold; this 14.4 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with the conservative BulkVoltage + 0.5 V fallback (13.9 Bulk + 0.5 × class/12 → 14.4/28.8/43.2/57.6 V at 12/24/36/48 V); the chemistry-specific value (AGM/flooded 16 V absolute) arrives via the commissioning proposal.
+// instantly (raw per-tick, all modes incl. MANUAL) and the adaptive fast-OV lockout starts.
+// Its place in the OV ladder: above it sits ONLY the INA228 hardware ALERT (VoltageHardwareLimit,
+// the electrical backstop for a hung MCU) — software always gets first shot; below it sit the
+// timed OV cut tiers (OvTierLo/Mid, dwell-debounced field cuts) and the Group 1/2/3 throttling
+// protections. Guidance: hardware rung 0.2 V x class/12 below the battery's BMS
+// charge-disconnect voltage, this software cut 0.1 x class/12 under the hardware rung; the
+// chemistry-specific values arrive via the battery-defaults proposal (AGM/flooded get an
+// absolute ceiling sized to the DC loads' continuous ratings — lead-acid damage is
+// time-integrated, indifferent to brief bounded spikes).
+float AlternatorHardShutdownV = 14.2f;    // V — absolute software instant-cut threshold; in-RAM boot placeholder only. First-boot init in 4_functions.ino seeds it as VoltageHardwareLimit − 0.1 × class/12 (after the hardware rung's own chemistry-aware seed); provisioned devices keep their NVS value.
 float VoltageDisagreeThreshold = 0.15f;   // V difference between BatteryV and IBV for disagreement detection
 uint32_t VoltageDisagreeTimeout = 10000;  // ms - sustained disagreement this long triggers warning
 uint32_t VoltageDisagreeCriticalTimeoutMs = 3000;
@@ -4190,7 +4212,7 @@ float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 10
 float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
 // Low charge-rate factory default, as a fraction of the Normal cap table. Seeds capTableLo
 // and is the fallback whenever that blob is missing; a user-edited Low table overrides it.
-#define LOW_MODE_CAP_FRACTION 0.5f
+#define LOW_MODE_CAP_FRACTION 0.33f
 
 // ===== CAP POWER TABLE =====
 // Alternative cap expressed in kW instead of amps (active only when capLimitMode=1).
@@ -4734,7 +4756,7 @@ int rollCsv(int idx, int scale) {   // CSV2 emitter — ROLL_EMPTY sentinel when
 enum FastOvCapReason : uint8_t {
   CAP_REASON_NONE     = 0,  // cap at fastOvBaseCap — no protection bound
   CAP_REASON_KHARD_G1 = 1,  // Group 1 predictive KHard (Vpred)
-  CAP_REASON_KHARD_G2 = 2,  // Group 2 measured KHard / hysteresis hold (IBV)
+  CAP_REASON_KHARD_G2 = 2,  // Group 2 measured KHard, rising-gated shed (filtered IBV)
   CAP_REASON_IEXCESS  = 3,  // iExcess supervisor (near-target / CV regime)
   CAP_REASON_LOADDUMP = 4,  // load-dump cutoff
   CAP_REASON_IEXCESS_BULK = 5,  // iExcess BULK sub-mode (current-control phase, vs ceiling)
@@ -4784,6 +4806,12 @@ bool  g_iExcessArmedWin = false;    // detector armed at any tick this frame (pe
 float LoadDumpDtThresh1 = 7000.0f;  // A/s — tier 1: fires on a SINGLE sample above this (hard-switched FET disconnects)
 float LoadDumpDtThresh  = 5000.0f;  // A/s — tier 2: fires when TWO consecutive samples both exceed this; noise ceiling ~354 A/s consecutive
 float LoadDumpDtThresh3 = 5000.0f;  // A/s — tier 3: fires when THREE consecutive samples all exceed this (slow relay-contact disconnects)
+// Per-tier consecutive-sample counts (user settings). Time to act = N x INA fast-mode cadence (~5 ms).
+// At default thresholds tier 3 is redundant (same threshold as tier 2, more samples — tier 2 always
+// fires first); it becomes meaningful only with a lower tier-3 threshold. Deliberate — do not "fix".
+int LoadDumpN1 = 1;
+int LoadDumpN2 = 2;
+int LoadDumpN3 = 3;
 volatile bool g_loadDumpActive = false;
 uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor/D/slew) 2=saturated 3=bleeding 4=bumpless 5=target wind-down
 uint32_t g_loadDumpCount = 0;
@@ -4793,6 +4821,8 @@ uint32_t g_iExcessCount = 0;
 uint32_t g_inaOVCount = 0;
 uint32_t g_hardOCCount = 0;
 uint32_t g_voltSpikeCount = 0;
+uint32_t g_ovTierLowCount = 0;  // timed OV cut, LOW tier (session; lifetime twin in g_ovTel)
+uint32_t g_ovTierMidCount = 0;  // timed OV cut, MID tier (session; lifetime twin in g_ovTel)
 uint32_t g_voltDisagreeCritCount = 0;
 uint32_t g_voltDisagreeWarnCount = 0;
 uint32_t g_voltImplausibleCount = 0;

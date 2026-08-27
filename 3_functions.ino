@@ -687,6 +687,8 @@ enum Csv2Index {
   CSV2_fieldDutyCeil,     // enforced field-duty ceiling ×100 — ccDutyCeiling(), the lower of Max Field % and the Max Field Volts term. Neither setting alone tells a log which cap was binding
   CSV2_dvccAuthMfg,       // NAME manufacturer code of the node publishing the limits (358 = Victron, 2046 = open code; 0 = identity never heard)
   CSV2_dvccAuthProd,      // its 126996 product code, else its Victron VREG 0x0100 product id, else 0
+  CSV2_ovTierLowCount,    // timed OV cut, LOW tier — session rising-edge counter (lifetime twin in ov_telemetry)
+  CSV2_ovTierMidCount,    // timed OV cut, MID tier — session rising-edge counter
 
   CSV2_sessionId,    // boot identity — matches CSV1_sessionId while this cached block is from the live run
   CSV2_sendMs,            // millis() when this payload was BUILT (CSV2 builds one pass and sends the next)
@@ -1126,6 +1128,14 @@ enum Csv3Index {
 
   CSV3_gpsPositionSource,      // 0=auto, 1=NMEA-forced, 2=phone-forced (position only; the clock is CSV3_timeSourceMode)
   CSV3_MaxFieldVolts,          // field-volt cap (x10). The enforced ceiling it produces is CSV2_fieldDutyCeil — voltage-dependent, so it lives on the 5s channel, not here
+  CSV3_OvTierLoMarginV,        // timed OV cut LOW-tier margin above target (V, %.3f)
+  CSV3_OvTierLoDwellMs,        // timed OV cut LOW-tier continuous dwell (ms; 0 = tier off)
+  CSV3_OvTierMidMarginV,       // timed OV cut MID-tier margin above target (V, %.3f)
+  CSV3_OvTierMidDwellMs,       // timed OV cut MID-tier continuous dwell (ms; 0 = tier off)
+  CSV3_VoltageHardwareLimit,   // INA228 hardware shutdown voltage (x100) — top OV-ladder rung, user setting
+  CSV3_LoadDumpN1,             // load-dump tier 1 consecutive-sample count (time to act = N x ~5 ms)
+  CSV3_LoadDumpN2,             // load-dump tier 2 consecutive-sample count
+  CSV3_LoadDumpN3,             // load-dump tier 3 consecutive-sample count
   CSV3_sessionId,              // boot identity — matches CSV1_sessionId while this cached block is from the live run
   CSV3_sendMs,                 // millis() when this settings echo was built. CSV3 is event-driven with a 60 s
                                // fallback, so an age much past ~60 s means the echo stopped arriving and every
@@ -3746,7 +3756,7 @@ void setupServer() {
     ENGINE_MAKE = doc["engine_make"].as<String>();
     ENGINE_HP = doc["engine_hp"];
     // System voltage is the sole source of truth for the 12/24/36/48V class. On a change, rescale the
-    // whole charge-voltage profile + re-derive the hard-shutdown trip + the INA228 OV limit + both
+    // whole charge-voltage profile + both absolute OV rungs (software cut, INA228 hardware limit) + both
     // control loops' normalized gains (CV and CC). The dashboard warns the user before submitting.
     int oldBatteryVoltage = SYSTEM_VOLTAGE_CLASS;
     int newBatteryVoltage = doc["battery_voltage"] | (int)SYSTEM_VOLTAGE_CLASS;
@@ -3760,9 +3770,8 @@ void setupServer() {
     BatteryCapacity_Ah = constrain((int)(doc["battery_capacity_ah"] | BatteryCapacity_Ah), 1, 100000);
     PeukertRatedCurrent_A = BatteryCapacity_Ah / 20.0f;  // /get derives this on write; import must too
     BATTERY_TYPE = doc["battery_type"].as<String>();
-    // The INA228 OV rule is chemistry-dependent (lithium bulk+0.3, else = AlternatorHardShutdownV),
-    // so a chemistry-only change (class unchanged → applyNominalVoltageChange skipped) must re-derive.
-    updateINA228OvervoltageThreshold();
+    // Chemistry no longer moves the INA228 limit — VoltageHardwareLimit is a persisted user
+    // setting; the chemistry-specific value arrives via the battery-defaults proposal.
     // Voltage/capacity/chemistry all move the CV plant gain the commissioning fit measured, so the stored
     // tune no longer describes this bank. Only nag once a pass has actually been finished (epoch stamped).
     if (CommissionEpoch > 0 && (newBatteryVoltage != oldBatteryVoltage
@@ -4873,7 +4882,6 @@ void setupServer() {
       inputMessage = request->getParam("BulkVoltage")->value();
       settingWrite(NK_BulkVoltage, inputMessage.c_str());
       BulkVoltage = inputMessage.toFloat();
-      updateINA228OvervoltageThreshold();  // important!  update the hardware overvoltage limit provided by INA228
     }
     // NOTE: system voltage (12/24/36/48V) is NOT a /get setting — it lives in Vessel Info and the whole
     // class-change rescale (charge profile, hard-shutdown, INA228 OV, normalized CV/CC gains) runs in
@@ -5849,6 +5857,24 @@ void setupServer() {
       LoadDumpDtThresh3 = inputMessage.toFloat();
       settingWrite(NK_LoadDumpDtThresh3, String(LoadDumpDtThresh3).c_str());
     }
+    if (request->hasParam("LoadDumpN1")) {
+      foundParameter = true;
+      inputMessage = request->getParam("LoadDumpN1")->value();
+      LoadDumpN1 = constrain(inputMessage.toInt(), 1, 10);
+      settingWrite(NK_LoadDumpN1, String(LoadDumpN1).c_str());
+    }
+    if (request->hasParam("LoadDumpN2")) {
+      foundParameter = true;
+      inputMessage = request->getParam("LoadDumpN2")->value();
+      LoadDumpN2 = constrain(inputMessage.toInt(), 1, 10);
+      settingWrite(NK_LoadDumpN2, String(LoadDumpN2).c_str());
+    }
+    if (request->hasParam("LoadDumpN3")) {
+      foundParameter = true;
+      inputMessage = request->getParam("LoadDumpN3")->value();
+      LoadDumpN3 = constrain(inputMessage.toInt(), 1, 10);
+      settingWrite(NK_LoadDumpN3, String(LoadDumpN3).c_str());
+    }
     if (request->hasParam("SocSeedAck")) {
       foundParameter = true;
       inputMessage = request->getParam("SocSeedAck")->value();
@@ -6173,7 +6199,7 @@ void setupServer() {
       if (testProtectionsEnabled) {
         queueConsoleMessage("PROTECTIONS ENABLED — all protection layers restored");
       } else {
-        queueConsoleMessage("PROTECTIONS DISABLED for tuning — G1/G2 over-voltage + G3 iExcess over-current bypassed; fast-OV hard-cut (AlternatorHardShutdownV), G4 load-dump/battery-current limit, INA228, and hardware OC remain active");
+        queueConsoleMessage("PROTECTIONS DISABLED for tuning — G1/G2 over-voltage, timed OV cut tiers + G3 iExcess over-current bypassed; fast-OV hard-cut (AlternatorHardShutdownV), G4 load-dump/battery-current limit, INA228, and hardware OC remain active");
       }
     }
     if (request->hasParam("TuningMode")) {
@@ -7212,13 +7238,33 @@ void setupServer() {
       TempSustainedTimeout = temp;
       queueConsoleMessageF("Temp sustained timeout set to: %d seconds", inputMessage.toInt());
     }
-    if (request->hasParam("AlternatorHardShutdownV")) {
+    // Both OV-ladder rungs can arrive in ONE request (battery-defaults proposal, Other-chemistry
+    // prep), so read both first and enforce the ladder order ONCE — clamping one at a time
+    // against the value being replaced would corrupt a joint move in either direction. The
+    // hardware rung is the anchor; the software cut must sit strictly below it (0.05 x class/12
+    // guard band) so software always gets first shot.
+    bool swRungPresent = request->hasParam("AlternatorHardShutdownV");
+    bool hwRungPresent = request->hasParam("VoltageHardwareLimit");
+    if (swRungPresent || hwRungPresent) {
       foundParameter = true;
-      inputMessage = request->getParam("AlternatorHardShutdownV")->value();
-      settingWrite(NK_AlternatorHardShutdownV, inputMessage.c_str());
-      AlternatorHardShutdownV = inputMessage.toFloat();
-      updateINA228OvervoltageThreshold();  // non-lithium INA228 limit tracks this value — never leave it stale
-      queueConsoleMessageF("Alternator hard-shutdown voltage set to: %.2fV (absolute)", AlternatorHardShutdownV);
+      float reqSw = swRungPresent ? request->getParam("AlternatorHardShutdownV")->value().toFloat()
+                                  : AlternatorHardShutdownV;
+      float reqHw = hwRungPresent ? constrain(request->getParam("VoltageHardwareLimit")->value().toFloat(), 10.0f, 70.0f)
+                                  : VoltageHardwareLimit;
+      float swMax = reqHw - 0.05f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
+      bool swClamped = reqSw > swMax;
+      AlternatorHardShutdownV = swClamped ? swMax : reqSw;
+      VoltageHardwareLimit = reqHw;
+      settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
+      if (hwRungPresent) {
+        settingWrite(NK_VoltageHardwareLimit, String(VoltageHardwareLimit, 2).c_str());
+        updateINA228OvervoltageThreshold();  // reprogram the comparator immediately — never leave it stale
+        queueConsoleMessageF("Hardware shutdown voltage set to: %.2fV (INA228 ALERT, absolute)", VoltageHardwareLimit);
+      }
+      if (swClamped)
+        queueConsoleMessageF("Alternator hard-shutdown clamped to %.2fV — must stay below the Hardware Shutdown Voltage (%.2fV)", AlternatorHardShutdownV, VoltageHardwareLimit);
+      else if (swRungPresent)
+        queueConsoleMessageF("Alternator hard-shutdown voltage set to: %.2fV (absolute)", AlternatorHardShutdownV);
     }
     // "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
     if (request->hasParam("HardOCDebounceMs")) {
@@ -7470,6 +7516,36 @@ void setupServer() {
       OvPredMarginV = constrain(inputMessage.toFloat(), 0.050f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f), 1.000f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
       settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
       queueConsoleMessageF("Group 1 prediction trigger margin set to: %.0f mV", OvPredMarginV * 1000.0f);
+    }
+    if (request->hasParam("OvTierLoMarginV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OvTierLoMarginV")->value();
+      OvTierLoMarginV = constrain(inputMessage.toFloat(), 0.020f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f), 2.000f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
+      settingWrite(NK_OvTierLoMarginV, String(OvTierLoMarginV, 3).c_str());
+      queueConsoleMessageF("Timed OV cut LOW-tier margin set to: %.0f mV above target", OvTierLoMarginV * 1000.0f);
+    }
+    if (request->hasParam("OvTierLoDwellMs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OvTierLoDwellMs")->value();
+      OvTierLoDwellMs = (uint32_t)constrain(inputMessage.toInt(), 0, 5000);
+      settingWrite(NK_OvTierLoDwellMs, String(OvTierLoDwellMs).c_str());
+      if (OvTierLoDwellMs == 0) queueConsoleMessage("Timed OV cut LOW tier DISABLED (dwell 0)");
+      else queueConsoleMessageF("Timed OV cut LOW-tier dwell set to: %ums", OvTierLoDwellMs);
+    }
+    if (request->hasParam("OvTierMidMarginV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OvTierMidMarginV")->value();
+      OvTierMidMarginV = constrain(inputMessage.toFloat(), 0.020f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f), 2.000f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f));
+      settingWrite(NK_OvTierMidMarginV, String(OvTierMidMarginV, 3).c_str());
+      queueConsoleMessageF("Timed OV cut MID-tier margin set to: %.0f mV above target", OvTierMidMarginV * 1000.0f);
+    }
+    if (request->hasParam("OvTierMidDwellMs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OvTierMidDwellMs")->value();
+      OvTierMidDwellMs = (uint32_t)constrain(inputMessage.toInt(), 0, 5000);
+      settingWrite(NK_OvTierMidDwellMs, String(OvTierMidDwellMs).c_str());
+      if (OvTierMidDwellMs == 0) queueConsoleMessage("Timed OV cut MID tier DISABLED (dwell 0)");
+      else queueConsoleMessageF("Timed OV cut MID-tier dwell set to: %ums", OvTierMidDwellMs);
     }
     if (request->hasParam("DvdtTC")) {
       foundParameter = true;
@@ -8892,6 +8968,8 @@ void setupServer() {
     g_inaOVCount = 0;
     g_hardOCCount = 0;
     g_voltSpikeCount = 0;
+    g_ovTierLowCount = 0;
+    g_ovTierMidCount = 0;
     g_voltDisagreeCritCount = 0;
     g_voltDisagreeWarnCount = 0;
     g_voltImplausibleCount = 0;
@@ -8919,10 +8997,12 @@ void setupServer() {
     int off = snprintf(buf, cap,
                        "{\"bulk\":%.2f,\"k\":%.2f,\"bins_fine\":%d,\"bins_coarse\":%d,"
                        "\"fine_width_12v\":0.2,\"coarse_width_12v\":1.0,"
-                       "\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"kd\":%lu,\"events\":[",
+                       "\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"kd\":%lu,"
+                       "\"tier_low\":%lu,\"tier_mid\":%lu,\"events\":[",
                        BulkVoltage, (float)SYSTEM_VOLTAGE_CLASS / 12.0f, OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS,
                        (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
-                       (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.kdEventCount);
+                       (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.kdEventCount,
+                       (unsigned long)g_ovTel.tierLowCutCount, (unsigned long)g_ovTel.tierMidCutCount);
     for (int i = 0; i < OV_HIST_BINS && off > 0 && off < (int)cap; i++)
       off += snprintf(buf + off, cap - off, "%s%lu", i ? "," : "", (unsigned long)g_ovTel.events[i]);
     if (off > 0 && off < (int)cap) off += snprintf(buf + off, cap - off, "],\"time_ms\":[");
@@ -9469,6 +9549,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,"   // +4 NMEA 0183: sentences, checksum errors, drain worst us window/session
                                "%d,"            // +1 enforced field-duty ceiling (x100)
                                "%d,%d,"         // +2 DVCC authority identity: NAME manufacturer code, product code
+                               "%d,%d,"         // +2 timed OV cut session counters: LOW tier, MID tier
                                "%u,%u\n",       // +2: sessionId, sendMs
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -10060,6 +10141,8 @@ void SendWifiData() {
                                SafeInt(ccDutyCeiling(), 100),
                                (int)dvccAuthMfg,
                                (int)dvccAuthProd,
+                               SafeInt(g_ovTierLowCount),   // CSV2_ovTierLowCount
+                               SafeInt(g_ovTierMidCount),   // CSV2_ovTierMidCount
                                (unsigned)g_sessionId,   // CSV2_sessionId
                                (unsigned)millis());     // CSV2_sendMs — build time; the send happens one pass later
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
@@ -10140,6 +10223,9 @@ void SendWifiData() {
                                "%d,"         // displayVolUnit
                                "%d,"         // gpsPositionSource
                                "%d,"         // MaxFieldVolts (x10)
+                               "%.3f,%d,%.3f,%d,"  // timed OV tiers: LOW margin (V), LOW dwell (ms), MID margin (V), MID dwell (ms)
+                               "%d,"         // VoltageHardwareLimit (x100)
+                               "%d,%d,%d,"   // load-dump consecutive-sample counts N1/N2/N3
                                "%u,%u\n",    // +2: sessionId, sendMs
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -10538,6 +10624,14 @@ void SendWifiData() {
                                SafeInt(displayVolUnit),
                                (int)gpsPositionSource,
                                SafeInt(MaxFieldVolts, 10),
+                               OvTierLoMarginV,             // CSV3_OvTierLoMarginV (%.3f)
+                               SafeInt(OvTierLoDwellMs),    // CSV3_OvTierLoDwellMs
+                               OvTierMidMarginV,            // CSV3_OvTierMidMarginV (%.3f)
+                               SafeInt(OvTierMidDwellMs),   // CSV3_OvTierMidDwellMs
+                               SafeInt(VoltageHardwareLimit, 100),  // CSV3_VoltageHardwareLimit
+                               SafeInt(LoadDumpN1),
+                               SafeInt(LoadDumpN2),
+                               SafeInt(LoadDumpN3),
                                (unsigned)g_sessionId,   // CSV3_sessionId
                                (unsigned)millis());     // CSV3_sendMs
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {

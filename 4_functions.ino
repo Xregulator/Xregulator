@@ -1512,6 +1512,23 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     LoadDumpDtThresh3 = settingRead(NK_LoadDumpDtThresh3).toFloat();
   }
+  // Constrained at boot (not just in the /get handler): the config-import path writes NVS raw,
+  // and N = 0 makes the detector's `count >= N` true on EVERY sample — a permanent load-dump latch.
+  if (!settingExists(NK_LoadDumpN1)) {
+    settingWrite(NK_LoadDumpN1, String(LoadDumpN1).c_str());
+  } else {
+    LoadDumpN1 = constrain(settingRead(NK_LoadDumpN1).toInt(), 1, 10);
+  }
+  if (!settingExists(NK_LoadDumpN2)) {
+    settingWrite(NK_LoadDumpN2, String(LoadDumpN2).c_str());
+  } else {
+    LoadDumpN2 = constrain(settingRead(NK_LoadDumpN2).toInt(), 1, 10);
+  }
+  if (!settingExists(NK_LoadDumpN3)) {
+    settingWrite(NK_LoadDumpN3, String(LoadDumpN3).c_str());
+  } else {
+    LoadDumpN3 = constrain(settingRead(NK_LoadDumpN3).toInt(), 1, 10);
+  }
   // A live test must NEVER auto-resume after a reboot — force OFF on boot, ignoring any stored value (write back only if it was stuck on).
   CVTuningMode = 0;
   if (settingExists(NK_CVTuningMode) && settingRead(NK_CVTuningMode).toInt() != 0) settingWrite(NK_CVTuningMode, "0");
@@ -2382,22 +2399,44 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     TempSustainedTimeout = settingRead(NK_TempSustainedTimeout).toInt();
   }
-  // AlternatorHardShutdownV — absolute hard-shutdown voltage threshold.
-  // First-boot default auto-scales as BulkVoltage + 0.5 V (headroom per-cell-scaled by class) —
-  // the conservative fallback for a device with no chemistry chosen. The chemistry-specific
-  // value arrives via the commissioning proposal (lithium keeps Bulk + 0.5, just below the BMS
-  // disconnect; AGM/flooded get 16.0 V absolute ×class — protects DC loads, not the battery).
-  // +0.5 (raised from +0.3, 2026-07-12) buys transient runway above G2's filtered clamp: a blip
-  // at the bulk target peaks ~+0.31V inside the G2 filter lag, so the old line cut on events the
-  // soft layer would have absorbed. Sustained OV is still caught by the INA228 averaged
-  // comparator (updateINA228OvervoltageThreshold: lithium Bulk + 0.3, else equal to this value).
-  // Once written, the value is treated as user-set; a later system-class change re-derives it
-  // in applyNominalVoltageChange.
+  // Over-voltage ladder absolute rungs. Both are persisted user settings; the two instant cuts
+  // chain top-down from the battery's BMS charge-disconnect voltage (guidance: hardware limit
+  // 0.2 V x class/12 below the BMS floor, software cut 0.1 x class/12 below the hardware limit) so
+  // software always gets first shot and the INA228 pin is purely the electrical backstop.
+  // VoltageHardwareLimit — INA228 ALERT comparator threshold (instant, electrical).
+  // First-boot seed is chemistry-aware (lithium 14.3 x class/12 — 0.2 under the surveyed BMS trip
+  // floor; else 16.0 x class/12 — protects DC loads, not the battery); the commissioning proposal
+  // refines it. Seeded BEFORE AlternatorHardShutdownV so the software-cut fallback can chain from it.
+  if (!settingExists(NK_VoltageHardwareLimit)) {
+    VoltageHardwareLimit = (batteryIsLithium() ? 14.3f : 16.0f) * seedVScale;
+    settingWrite(NK_VoltageHardwareLimit, String(VoltageHardwareLimit, 2).c_str());
+  } else {
+    VoltageHardwareLimit = settingRead(NK_VoltageHardwareLimit).toFloat();
+  }
+  // AlternatorHardShutdownV — software instant cut (absolute, all modes, raw per-tick).
+  // First-boot fallback rides one rung under the hardware limit. Once written, the value is
+  // treated as user-set; a later system-class change rescales both rungs x ratio in
+  // applyNominalVoltageChange (chain-preserving).
   if (!settingExists(NK_AlternatorHardShutdownV)) {
-    AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
+    AlternatorHardShutdownV = VoltageHardwareLimit - 0.1f * seedVScale;
     settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
   } else {
     AlternatorHardShutdownV = settingRead(NK_AlternatorHardShutdownV).toFloat();
+  }
+  // Ladder-order coherence at boot. The /get handler enforces sw < hw on every write, but a
+  // device upgrading from the pre-ladder firmware boots with its old NVS software cut (lithium
+  // Bulk + 0.5 = 14.4) ABOVE the freshly seeded hardware rung (14.3) — a silently inverted
+  // ladder where the INA228 pin fires first. Same rule as the handler: the hardware rung is the
+  // anchor; the software cut is clamped 0.05 x class/12 under it and persisted. Also repairs an
+  // inverted pair arriving through the config-import path (applyImportConfig writes NVS raw).
+  {
+    float swMax = VoltageHardwareLimit - 0.05f * seedVScale;
+    if (AlternatorHardShutdownV > swMax) {
+      AlternatorHardShutdownV = swMax;
+      settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
+      queueConsoleMessageF("Alternator hard-shutdown lowered to %.2fV at boot — must stay below the Hardware Shutdown Voltage (%.2fV)",
+                           AlternatorHardShutdownV, VoltageHardwareLimit);
+    }
   }
   if (!settingExists(NK_HardOCDebounceMs)) {
     settingWrite(NK_HardOCDebounceMs, String(HardOCDebounceMs).c_str());
@@ -2619,6 +2658,29 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
   } else {
     OvPredMarginV = settingRead(NK_OvPredMarginV).toFloat();
+  }
+  // Timed OV tier margins are volt-domain (x class at seed); dwells are absolute time, never scaled.
+  if (!settingExists(NK_OvTierLoMarginV)) {
+    OvTierLoMarginV *= seedVScale;
+    settingWrite(NK_OvTierLoMarginV, String(OvTierLoMarginV, 3).c_str());
+  } else {
+    OvTierLoMarginV = settingRead(NK_OvTierLoMarginV).toFloat();
+  }
+  if (!settingExists(NK_OvTierLoDwellMs)) {
+    settingWrite(NK_OvTierLoDwellMs, String(OvTierLoDwellMs).c_str());
+  } else {
+    OvTierLoDwellMs = (uint32_t)settingRead(NK_OvTierLoDwellMs).toInt();
+  }
+  if (!settingExists(NK_OvTierMidMarginV)) {
+    OvTierMidMarginV *= seedVScale;
+    settingWrite(NK_OvTierMidMarginV, String(OvTierMidMarginV, 3).c_str());
+  } else {
+    OvTierMidMarginV = settingRead(NK_OvTierMidMarginV).toFloat();
+  }
+  if (!settingExists(NK_OvTierMidDwellMs)) {
+    settingWrite(NK_OvTierMidDwellMs, String(OvTierMidDwellMs).c_str());
+  } else {
+    OvTierMidDwellMs = (uint32_t)settingRead(NK_OvTierMidDwellMs).toInt();
   }
   if (settingExists(NK_DvdtTC)) {
     DvdtTC = constrain(settingRead(NK_DvdtTC).toFloat(), 5.0f, 500.0f);

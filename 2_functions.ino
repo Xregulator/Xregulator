@@ -204,6 +204,9 @@ bool fsRemove(const char *path) {
 #define NK_LoadDumpDtThresh1 "LoadDmpDtThrsh1"
 #define NK_LoadDumpDtThresh3 "LoadDmpDtThrsh3"
 #define NK_LoadDumpEnable "LoadDumpEnable"
+#define NK_LoadDumpN1 "LoadDumpN1"
+#define NK_LoadDumpN2 "LoadDumpN2"
+#define NK_LoadDumpN3 "LoadDumpN3"
 #define NK_LogAllLearningEvents "LgAllLrnngEvnts"
 #define NK_LongitudeManual "LongitudeManual"
 #define NK_LongitudeNMEA "LongitudeNMEA"
@@ -235,6 +238,10 @@ bool fsRemove(const char *path) {
 #define NK_OvGroup2Enable "OvGroup2Enable"
 #define NK_OvMeasMarginV "OvMeasMarginV"
 #define NK_OvPredMarginV "OvPredMarginV"
+#define NK_OvTierLoMarginV "OvTierLoMargV"
+#define NK_OvTierLoDwellMs "OvTierLoMs"
+#define NK_OvTierMidMarginV "OvTierMidMargV"
+#define NK_OvTierMidDwellMs "OvTierMidMs"
 #define NK_PIDTrackingGain "PIDTrackingGain"
 #define NK_TachLieEnable "TachLieEnable"
 #define NK_PITCHPOLE_THRESHOLD_DEG "PITCHPOLETHRESH"
@@ -423,6 +430,7 @@ bool fsRemove(const char *path) {
 #define NK_VMGTargetBearing "VMGTargetBrg"
 #define NK_VoltageAlarmHigh "VoltageAlarmHgh"
 #define NK_VoltageAlarmLow "VoltageAlarmLow"
+#define NK_VoltageHardwareLimit "VoltHwLimitV"
 #define NK_VoltageDisagreeThreshold "VltgDsgrThrshld"
 #define NK_VoltageDisagreeTimeout "VoltageDisgrTmt"
 #define NK_VoltageFilterTC "VoltageFilterTC"
@@ -3474,10 +3482,12 @@ bool buildConfigPayload() {
   // time_ms as decimal strings (uint64 dwell is beyond JS 53-bit integers). After a true power cut
   // the struct zeroes and the next snapshot reports lower values — edge fn overwrites as-is, accepted.
   offset += snprintf(configPayloadBuffer + offset, cfgRemain(offset),
-    ",\"ov_telemetry\":{\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"kd\":%lu,\"bulk\":%.2f,\"k\":%.2f,"
+    ",\"ov_telemetry\":{\"soft\":%lu,\"sw_hard\":%lu,\"ina\":%lu,\"kd\":%lu,"
+    "\"tier_low\":%lu,\"tier_mid\":%lu,\"bulk\":%.2f,\"k\":%.2f,"
     "\"bins_fine\":%d,\"bins_coarse\":%d,\"events\":[",
     (unsigned long)g_ovTel.softExceedCount, (unsigned long)g_ovTel.swHardCutCount,
     (unsigned long)g_ovTel.inaCutCount, (unsigned long)g_ovTel.kdEventCount,
+    (unsigned long)g_ovTel.tierLowCutCount, (unsigned long)g_ovTel.tierMidCutCount,
     BulkVoltage, (float)SYSTEM_VOLTAGE_CLASS / 12.0f,
     OV_HIST_FINE_BINS, OV_HIST_COARSE_BINS);
   for (int i = 0; i < OV_HIST_BINS; i++)

@@ -681,7 +681,9 @@ float altTrendMinSamp   = 2.0f;     // MIN_SAMPLES — a bucket needs ≥ this m
 // Output-steadiness band (5th criterion: the measured amps themselves must hold steady — directly
 // guards what gets recorded, letting the input bands stay tight) + detector signal conditioning:
 float altAmpsTolPct   = 2.5f;    // output-amps band, % of the filtered reading — backstop sitting above the ~1.9% p-p the four input bands can pass
-float altAmpsFloorA   = 1.0f;    // output-amps band floor (A) — governs below ~40 A where ripple dominates
+float altAmpsFloorA   = 0.5f;    // output-amps band floor (A) — governs below ~20 A (2.5% takes over above). Was 1.0,
+                                 // halved 2026-08-27: measured steady 3 s amps range at quiet idle was 0.35 A median /
+                                 // 0.42 A p90, and 1.0 A let a "steady" record hide 13% of output at a 7.5 A cell
 float altAmpsSec      = 3.0f;    // output-amps steady time (s)
 float altEmaSec       = 0.5f;    // EMA time constant (s) on detector inputs RPM/duty/Vbus/amps (0 = off)
 float altMinRunSec    = 2.0f;    // minimum steady-run length to emit a point (s)
@@ -5520,7 +5522,7 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 // and a ~0.7 s field lag behind it is how a sweep ends in a protection cut, and a cut throws away the
 // down leg the lag cancellation depends on. These margins buy back the overshoot the missing soft
 // layers would have absorbed.
-// Both margins are panel controls (altSweepMarginA / altSweepMarginV, defaults 10 A and 0.15 V),
+// Both margins are panel controls (altSweepMarginA / altSweepMarginV, defaults 10 A and 0.20 V),
 // posted with the start request exactly like rate/from/to.
 // No temperature margin, on the user's call. Case temperature moves on a thermal time constant, not
 // a field one: it cannot overshoot the way current and bus volts do behind the ramp's ~0.7 s field
@@ -5562,9 +5564,13 @@ static const char *altSweepLimitNow() {
                                                                            return "alternator temperature limit";
   return nullptr;
 }
-#define ALTSWEEP_LIMIT_CONFIRM_MS 250u   // a limit must hold this long to turn the ramp around — current
-                                         // ripple touching a cap for one sample is not the machine
-                                         // arriving at it, and at 1 %/s this costs 0.25% of duty
+#define ALTSWEEP_LIMIT_CONFIRM_MS 0u     // reverse on the FIRST sample at a limit. Was 250 ms (ripple
+                                         // debounce), but the failure costs are asymmetric: a ripple-early
+                                         // reversal just shortens the sweep (bit 7 marks it), while a late
+                                         // one at a steep battery acceptance knee ends in a hard OV cut and
+                                         // loses the down leg — measured 2026-08-27, both float-stage sweeps
+                                         // cut ~1.5 s after turnaround with the bus running >=1.2 V/s, where
+                                         // 250 ms alone cost 0.3 V of the 0.15 V margin
 
 bool altSweep_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint8_t  phase = 0;        // 0 idle, 1 ease-in, 2 ramp, 3 ease-out

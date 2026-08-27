@@ -980,10 +980,10 @@ void applyCcOutputLimits() {
 // one-key class push keeps it. Call AFTER setting SYSTEM_VOLTAGE_CLASS = newV. When the class actually changes it persists the new class to NVS
 // (NK_BatteryVoltage), then rescales the PERSISTED
 // charge-voltage profile by newV/oldV (Bulk/Float/Absorption/Rebulk/Target/Charged/alarms), the
-// volt-domain protection/helper margins and V/s rates (OV margins, Max Field Volts, disagreement threshold, iExcess
-// arm margin, fast-rise headroom, CV D-term arm/deadband thresholds, target ramps, rest-settle gate, CV wave
-// amplitude, alt-health Vbus band), re-derives
-// the hard-shutdown trip (newBulk + 0.5×class) and refreshes the INA228 hardware OV limit. Writing the
+// volt-domain protection/helper margins and V/s rates (OV margins incl. the timed-tier trip lines, Max Field Volts,
+// disagreement threshold, iExcess arm margin, fast-rise headroom, CV D-term arm/deadband thresholds, target ramps,
+// rest-settle gate, CV wave amplitude, alt-health Vbus band), rescales both absolute OV rungs
+// (AlternatorHardShutdownV, VoltageHardwareLimit) x ratio and reprograms the INA228 comparator. Writing the
 // class and the rescaled profile to NVS in the SAME call (synchronously) keeps them atomic — a reboot
 // mid-change can never strand the overvoltage trips at the wrong voltage. It always re-derives
 // both control loops' normalized gains. It also rescales the field-duty knobs (knee margin/step/
@@ -1012,14 +1012,16 @@ void applyNominalVoltageChange(int oldV, int newV) {
     MaxFieldVolts         *= ratio;   // Max Field Volts: volt-domain, NOT the duty-domain group below
     altSweepMarginV       *= ratio;   // sweep turnaround margin: volt-domain, RAM-only (posted per run)
     // Headroom scales with class so the OV ladder keeps its order (G2 clamp at target+OvMeasMarginV
-    // < G1 predictive at target+OvPredMarginV < the hard cuts) — all per-cell-equivalent. A class
-    // change re-derives the CONSERVATIVE Bulk+0.5 fallback, discarding any commissioned
-    // chemistry-specific value (AGM/flooded 16 V absolute): the class change flags re-commissioning
-    // anyway, and the fallback is always at or below the proposal. The INA228 limit re-derives from
-    // this in updateINA228OvervoltageThreshold below (lithium Bulk+0.3, else equal to this value).
-    AlternatorHardShutdownV = BulkVoltage + 0.5f * ((float)newV / 12.0f);
+    // < the timed tiers < the absolute cuts) — all per-cell-equivalent. The two absolute rungs
+    // scale x ratio like every other volt-domain setting (chain-preserving: software cut stays the
+    // same per-cell distance under the INA228 rung); updateINA228OvervoltageThreshold below
+    // reprograms the comparator from the scaled VoltageHardwareLimit.
+    AlternatorHardShutdownV   *= ratio;
+    VoltageHardwareLimit      *= ratio;
     OvMeasMarginV             *= ratio;
     OvPredMarginV             *= ratio;
+    OvTierLoMarginV           *= ratio;  // timed-tier trip lines are volt-domain; dwells are absolute time — never scaled
+    OvTierMidMarginV          *= ratio;
     dvccCvlMin                *= ratio;  // DVCC plausible-CVL window is volt-domain
     dvccCvlMax                *= ratio;
     VoltageDisagreeThreshold  *= ratio;
@@ -1080,8 +1082,11 @@ void applyNominalVoltageChange(int oldV, int newV) {
     settingWrite(NK_VoltageAlarmLow, String(VoltageAlarmLow, 2).c_str());
     settingWrite(NK_MaxFieldVolts, String(MaxFieldVolts, 1).c_str());
     settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
+    settingWrite(NK_VoltageHardwareLimit, String(VoltageHardwareLimit, 2).c_str());
     settingWrite(NK_OvMeasMarginV, String(OvMeasMarginV, 3).c_str());
     settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
+    settingWrite(NK_OvTierLoMarginV, String(OvTierLoMarginV, 3).c_str());
+    settingWrite(NK_OvTierMidMarginV, String(OvTierMidMarginV, 3).c_str());
     settingWrite(NK_dvccCvlMin, String(dvccCvlMin, 2).c_str());
     settingWrite(NK_dvccCvlMax, String(dvccCvlMax, 2).c_str());
     settingWrite(NK_VoltageDisagreeThreshold, String(VoltageDisagreeThreshold, 2).c_str());
@@ -1325,12 +1330,16 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
   // masking the gate that just fired would re-energize the field on a real stall or against a lying
   // tach for the length of the window.
   if (reason != REASON_RPM_TOO_LOW && reason != REASON_TACH_IMPLAUSIBLE) g_lastFieldCutMs = tick.nowMs;
-  // Fast OV: arm the adaptive cooldown lockout (nextFastOvLockoutMs ladder, not FIELD_COLLAPSE_DELAY).
-  // applyImmediateCut returns before runShutdownPath's lockout-arm ever runs, so set it here.
-  if (reason == REASON_FAST_OVERVOLTAGE && fieldCollapseTime == 0) {
+  // Fast OV and the timed OV tiers: arm the adaptive cooldown lockout (nextFastOvLockoutMs
+  // ladder, not FIELD_COLLAPSE_DELAY) — one shared ladder so a persistent cause escalates
+  // regardless of which OV rung catches it. applyImmediateCut returns before runShutdownPath's
+  // lockout-arm ever runs, so set it here.
+  if ((reason == REASON_FAST_OVERVOLTAGE || reason == REASON_OV_TIER_LOW || reason == REASON_OV_TIER_MID)
+      && fieldCollapseTime == 0) {
     fieldCollapseTime = tick.nowMs;
     activeCollapseDelay = nextFastOvLockoutMs(tick.nowMs);
-    queueConsoleMessageF("Fast-OV lockout %.1fs (adaptive: 0.5s-10s ladder, resets after 60s clean)",
+    queueConsoleMessageF("%s lockout %.1fs (adaptive: 0.5s-10s ladder, resets after 60s clean)",
+                         (reason == REASON_FAST_OVERVOLTAGE) ? "Fast-OV" : "Timed-OV",
                          activeCollapseDelay / 1000.0f);
   }
   // Tach-lie: same pattern — arm the escalating lockout here, latch the trip RPM so the
@@ -1652,7 +1661,9 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
   if ((mode == MODE_CRITICAL_RAMP || mode == MODE_WARNING_RAMP_AND_LOCKOUT) && fieldCollapseTime == 0) {
     fieldCollapseTime = tick.nowMs;
     activeCollapseDelay = (reason == REASON_RPM_TOO_LOW)       ? RPM_RECOVERY_DELAY
-                        : (reason == REASON_FAST_OVERVOLTAGE)  ? nextFastOvLockoutMs(tick.nowMs)
+                        : (reason == REASON_FAST_OVERVOLTAGE
+                           || reason == REASON_OV_TIER_LOW
+                           || reason == REASON_OV_TIER_MID)    ? nextFastOvLockoutMs(tick.nowMs)
                         : (reason == REASON_TACH_IMPLAUSIBLE)  ? nextTachLieLockoutMs(tick.nowMs)
                                                                : FIELD_COLLAPSE_DELAY;
     if (reason == REASON_TACH_IMPLAUSIBLE) { tachLieTripRpm = RPM; tachLieLockoutArmed = true; }
@@ -2748,6 +2759,8 @@ void AdjustFieldLearnMode() {
     static float dvdt = 0.0f;
     static bool ovActive = false;
     static float ibvFilt = 0.0f;
+    static uint32_t tierLoSinceMs = 0;   // timed OV tiers: first tick the filtered bus held above that tier's line (0 = below)
+    static uint32_t tierMidSinceMs = 0;
 
     g_fastOvHardActive = false;
     g_fastOvVpred = IBV;
@@ -2833,9 +2846,41 @@ void AdjustFieldLearnMode() {
         fastOvClampActive = true;
         g_fastOvHardActive = true;
       }
+
+      // ── Timed OV cut tiers (LOW/MID) ──────────────────────────────────────
+      // Sustained-violation field cuts on the same filtered bus as G2 (ripple-honest, slewed-
+      // target-relative). Trip = held CONTINUOUSLY above target + margin for the tier's dwell;
+      // any tick below the line resets that tier's timer — no hysteresis, so ripple crests
+      // crossing momentarily reset rather than accumulate, and a commanded target drop glides
+      // the trip lines with the reference. Dwells are sized so every sustained violation is cut
+      // inside 0.4 s: a BMS charge disconnect needs >= 0.5 s and ~100 ms of the budget is field
+      // de-energization. Gates are identical to G1/G2 (tests/tuning/zero-output stand-down),
+      // so MANUAL keeps instant-only protection and the absolute rungs stay always-on. Dwell 0
+      // disables that tier. Both timers run independently; whichever expires first cuts, via
+      // the reason arbiter (REASON_OV_TIER_LOW/MID -> shouldImmediatelyCutGPIO4 immediate cut +
+      // the SAME adaptive fast-OV lockout ladder, so a persistent cause escalates regardless of
+      // which rung catches it). The g_ovTierTrip latch clears once the filtered bus is back
+      // under that tier's line — after a cut the bus falls and the condition drops.
+      {
+        bool tierGate = testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && !altZeroOutput;
+        bool loAbove  = tierGate && OvTierLoDwellMs  > 0 && ibvFilt > ChargingVoltageTarget + OvTierLoMarginV;
+        bool midAbove = tierGate && OvTierMidDwellMs > 0 && ibvFilt > ChargingVoltageTarget + OvTierMidMarginV;
+        if (loAbove)  { if (tierLoSinceMs  == 0) tierLoSinceMs  = currentMillis; } else tierLoSinceMs  = 0;
+        if (midAbove) { if (tierMidSinceMs == 0) tierMidSinceMs = currentMillis; } else tierMidSinceMs = 0;
+        if (!gpio4IsLow) {  // a cut can remove nothing while the field is already electrically off
+          // MID checked first: if both dwells expire on the same tick the higher rung names the cut.
+          if (midAbove && (uint32_t)(currentMillis - tierMidSinceMs) >= OvTierMidDwellMs) g_ovTierTrip = 2;
+          else if (loAbove && (uint32_t)(currentMillis - tierLoSinceMs) >= OvTierLoDwellMs) g_ovTierTrip = 1;
+        }
+        if (g_ovTierTrip == 1 && !loAbove)  g_ovTierTrip = 0;
+        if (g_ovTierTrip == 2 && !midAbove) g_ovTierTrip = 0;
+      }
     } else {
       ovActive = false;  // !voltageControlActive (idle only — MaintainMode sets voltageControlActive=true)
       ibvFilt = IBV;     // track raw while idle so CV entry starts the level filter from the live bus
+      tierLoSinceMs = 0;
+      tierMidSinceMs = 0;
+      g_ovTierTrip = 0;
     }
   }
 
@@ -4067,10 +4112,11 @@ void AdjustFieldLearnMode() {
         }
 
         // ── Load dump detection — dBcur/dt positive spike in CV mode ─────────────────
-        // Three-tier cascade: N=1 above LoadDumpDtThresh1, N=2 above LoadDumpDtThresh, N=3 above LoadDumpDtThresh3.
-        // INA228 noise is alternating-sign (high/low/high/low) — two consecutive same-direction crossings
-        // cannot be measurement noise. Tier 1 catches hard-switched FET disconnects; tiers 2/3 catch
-        // relay-contact events spread over multiple samples.
+        // Three-tier cascade: LoadDumpN1 consecutive samples above LoadDumpDtThresh1, LoadDumpN2 above
+        // LoadDumpDtThresh, LoadDumpN3 above LoadDumpDtThresh3 (counts are user settings; time to act =
+        // N x the ~5 ms INA fast-mode cadence). INA228 noise is alternating-sign (high/low/high/low) —
+        // two consecutive same-direction crossings cannot be measurement noise. Tier 1 catches
+        // hard-switched FET disconnects; tiers 2/3 catch relay-contact events spread over multiple samples.
         // Gate: LoadDumpEnable (Group 5 toggle — the only disarm; global protections toggle does not apply),
         // voltageControlActive (= !inIdleStage; bulk/absorption/float/TVMode/MaintainMode) and fast INA228 reads active (5ms cadence).
         // On detection: snaps cv_I = 0 on rising edge and collapses setpointLimited + fastOvCurrentCap to 0.
@@ -4100,7 +4146,7 @@ void AdjustFieldLearnMode() {
             } else {
               ldCount3 = 0;
             }
-            bool ldNow = (ldCount1 >= 1) || (ldCount2 >= 2) || (ldCount3 >= 3);
+            bool ldNow = (ldCount1 >= LoadDumpN1) || (ldCount2 >= LoadDumpN2) || (ldCount3 >= LoadDumpN3);
             if (ldNow) {
               fastOvCurrentCap = 0.0f;
               capReasonTick = CAP_REASON_LOADDUMP;  // hard cutoff — always the binding cap
@@ -6176,6 +6222,8 @@ const char *reasonToString(FieldEventReason r) {
     case REASON_TACH_IMPLAUSIBLE: return "TACH_IMPLAUSIBLE";
     case REASON_SOLAR_PAUSE: return "SOLAR_PAUSE";
     case REASON_BMS_DISABLED: return "BMS_OFF";
+    case REASON_OV_TIER_LOW: return "OV_TIER_LOW";
+    case REASON_OV_TIER_MID: return "OV_TIER_MID";
 
     default: return "UNKNOWN";
   }
@@ -6206,6 +6254,14 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
   // PRIORITY 2: MANUAL MODE (UNRESTRICTED - bypasses all safeties when user wants manual control)
   if (tick.manualMode) {
     return MODE_NORMAL_MANUAL;
+  }
+
+  // PRIORITY 2.1: TIMED OV TIERS — sustained-violation cut latched by the FAST OV block
+  // (detector is AUTO/CV-gated like G1/G2, so this is below MANUAL by construction; the latch
+  // clears once the filtered bus drops back under the tier line). Immediate cut + adaptive
+  // fast-OV lockout via shouldImmediatelyCutGPIO4. Must mirror selectFieldEventReason.
+  if (g_ovTierTrip != 0) {
+    return MODE_WARNING_RAMP_AND_LOCKOUT;
   }
 
   // PRIORITY 3: RPM GATE (field must be cut when engine is not running)
@@ -6294,6 +6350,10 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   // Priority 2: Manual mode
   if (tick.manualMode) return REASON_MANUAL_MODE;
 
+  // Priority 2.1: Timed OV tiers — mirrors selectFieldControlMode. MID before LOW (higher rung).
+  if (g_ovTierTrip == 2) return REASON_OV_TIER_MID;
+  if (g_ovTierTrip == 1) return REASON_OV_TIER_LOW;
+
   // Priority 3: RPM gate
   if (tick.rpmBelowMinimum) return REASON_RPM_TOO_LOW;
 
@@ -6345,6 +6405,14 @@ void updateProtectionCounters(FieldEventReason reason) {
       case REASON_FAST_OVERVOLTAGE:
         g_voltSpikeCount++;  // reuses the OV-spike counter (REASON_VOLTAGE_SPIKE retired)
         g_ovTel.swHardCutCount++;  // lifetime twin (RTC) of the session counter
+        break;
+      case REASON_OV_TIER_LOW:
+        g_ovTierLowCount++;
+        g_ovTel.tierLowCutCount++;  // lifetime twin (RTC) of the session counter
+        break;
+      case REASON_OV_TIER_MID:
+        g_ovTierMidCount++;
+        g_ovTel.tierMidCutCount++;  // lifetime twin (RTC) of the session counter
         break;
       case REASON_VOLTAGE_SPIKE: g_voltSpikeCount++; break;
       case REASON_VOLTAGE_DISAGREE_CRITICAL: g_voltDisagreeCritCount++; break;
@@ -6440,6 +6508,8 @@ void updateFieldTelemetry(float duty, float voltage, float fieldResistance) {
  */
 bool shouldImmediatelyCutGPIO4(FieldEventReason reason) {
   if (reason == REASON_FAST_OVERVOLTAGE) return true;   // absolute OV ceiling — instant cut in every mode
+  if (reason == REASON_OV_TIER_LOW) return true;        // timed OV tiers — dwell already served in the detector; the cut itself is immediate
+  if (reason == REASON_OV_TIER_MID) return true;
   if (reason == REASON_INA_OVERVOLTAGE) return true;
   if (reason == REASON_HARD_OVERCURRENT) return true;
   if (reason == REASON_RPM_TOO_LOW) return true;
@@ -6494,6 +6564,8 @@ bool shouldCutGPIO4AfterSettle(FieldEventReason reason, uint32_t nowMs, float ap
   switch (reason) {
     // Fast-responding faults: cut if fault persists after ramp-down
     case REASON_FAST_OVERVOLTAGE:   // normally cut immediately; defensive if it ever reaches settle
+    case REASON_OV_TIER_LOW:        // timed tiers: same defensive settle backstop
+    case REASON_OV_TIER_MID:
     case REASON_VOLTAGE_SPIKE:
     case REASON_VOLTAGE_DISAGREE_WARNING:
     case REASON_VOLTAGE_IMPLAUSIBLE:

@@ -3403,19 +3403,6 @@ hr {
   animation: cap-first-row-flash 1.2s ease-in-out 0s 4;
 }
 
-/* Vessel Info banner while the save chain waits on the device (SoC-seed poll, then the
-   /exportConfig NVS walk). Infinite because the wait has no known end — it stops when the
-   next screen opens. Colours are set inline by vesselNextStepNote(); this only rings the box. */
-@keyframes vessel-wait-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(35, 169, 156, 0.55); }
-  50%      { box-shadow: 0 0 0 6px rgba(35, 169, 156, 0.10); }
-}
-
-.vessel-wait-busy {
-  outline: 2px solid #23a99c;
-  animation: vessel-wait-pulse 1.4s ease-in-out infinite;
-}
-
 /* Loading-dot animation for cloud registration check banner */
 .cloud-loading-dot {
   display: inline-block;
@@ -5366,6 +5353,18 @@ input:checked+.slider:before {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
   gap: 10px;
+}
+#alt-panel-protections .protections-subhead {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #666;
+  margin: 4px 2px -2px;
+}
+body.dark-mode #alt-panel-protections .protections-subhead {
+  color: #9aa7a7;
 }
 #alt-panel-protections .protections-cards.empty {
   display: none;

@@ -899,19 +899,10 @@
                                   rise. In <b>Amps</b> mode, this is calculated for reference only.</span></span></th>
                             <th>Keep-Alive<br>(%) <span class="tooltip">ℹ️<span
                                   class="tooltip-box">Tachometer keep-alive floor: the lowest field duty cycle (%) the
-                                  regulator will hold at this engine speed, even when the controls want less. Holding a
-                                  little field keeps the alternator's stator energized, which is what a stator-driven
-                                  tachometer reads &mdash; and what the regulator's own engine-speed input reads too. It
-                                  also parks the field just under the point where output current starts, so the loop
-                                  responds immediately instead of crawling up through a dead zone. Only tachometers
-                                  driven from the alternator are affected; an engine with its own crank or flywheel
-                                  speed sensor is not. Above your highest commissioned speed the floor is forced to 0 on
-                                  purpose, so the field can always shut fully off at speed &mdash; a 0 cell means no
-                                  floor there. Never below the flat Min Field % setting. Edit these cells by
-                                  hand only while Automatic Learning (card below) is off. When it is on, the
-                                  learner owns this column — filling and maintaining the values and adjusting them
-                                  to the live alternator temperature each tick — and the cells are locked so a
-                                  manual edit cannot be silently overwritten. Turn learning off to edit by hand.</span></span>
+                                  regulator will hold at this engine speed, even when the controls otherwise want less.
+                                  Holding a little field keeps the alternator's stator lightly energized, which keeps
+                                  the RPM signal alive. Edit these cells by hand only while Automatic Learning (card
+                                  below) is off.</span></span>
                               <span id="minduty-managed-hint" class="learning-info-label"
                                     style="display:none; font-weight:400;">auto</span></th>
                           </tr>
@@ -1175,11 +1166,10 @@
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
                           <span><b>Tachometer Keep-Alive &mdash; Automatic Learning</b>
                             <span class="tooltip">ℹ️<span class="tooltip-box">When
-                                  on, the regulator learns — for each RPM range — the field level where the alternator
-                                  just begins to make current (the onset), and automatically keeps the Keep-Alive (%)
-                                  column a set margin below it. It learns only during light-load moments (full battery),
-                                  never while charging hard. The Keep-Alive (%) cells above update on their own; you can
-                                  still turn this off and edit them by hand.</span></span>
+                                  on, the regulator learns the field level at each speed where the alternator just
+                                  begins to make output current (the onset), and automatically keeps the Keep-Alive (%)
+                                  column a small margin below it. The Keep-Alive (%) cells above update on their own by
+                                  default, or, you can still turn this off and edit by hand.</span></span>
                           </span>
                         </div>
                       </div>
@@ -2499,13 +2489,15 @@
                 <div class="protections-intro">
                   <p data-intro="cl">When measured alternator current exceeds the safe limit for the debounce duration, the trip fires. Set <strong>Command Limit</strong> to the lowest safe maximum on the <strong>alternator side</strong> of the system — alternator continuous rating, mechanical belt drive capacity, fuse ratings, and wiring limits. Whichever is lowest. Battery acceptance is handled separately by the Group 4 <strong>Battery Charge Current Limit</strong>. The trip threshold is automatically 10 A above Command Limit.</p>
                   <p data-intro="g1">Predicts where battery voltage will be a fraction of a second from now: <strong>predicted = measured + Prediction Horizon × voltage rise rate</strong>. Engages when the prediction exceeds the active charge target by more than the <strong>Group 1 Trigger Margin</strong>. <strong>dvdt EMA TC</strong> sets how much the rise rate is smoothed before prediction — larger TC means smoother but laggier. <strong>Group 1 Enable</strong> (in the Enable section above) turns the whole layer off.</p>
-                  <p data-intro="g2">Engages when measured battery voltage exceeds the active charge target by more than the <strong>Group 2 Trigger Margin</strong>. <strong>Group 2 Enable</strong> (in the Enable section above) turns the whole layer off.</p>
+                  <p data-intro="g2">Engages when measured battery voltage exceeds the active charge target by more than the <strong>Group 2 Trigger Margin</strong>. <strong>Group 2 Enable</strong> (in the Enable section above) turns the whole layer off. Above this proportional shed sits the <strong>Over-Voltage Ladder</strong> card: two timed cut tiers that fire only when the filtered voltage stays over their trip lines continuously for their set time to act, then the absolute software and hardware instant cuts.</p>
                   <p data-intro="g3">Watches <strong>alternator</strong> output current. Two regimes, split at the <strong>Strict Over-Current Band</strong> below the active voltage target. <strong>Near the target — the voltage-limited (CV) phase</strong>: engages when the time-averaged current rises above the moving current <strong>setpoint</strong> by more than the <strong>Detection Threshold</strong> — the sloped trip line set by <strong>Slope</strong> and <strong>CV base</strong> below. <strong>Below the band — the current-limited (bulk / CC) phase</strong>: the looser <strong>Detection Threshold (Bulk)</strong> takes over — the same line raised by <strong>CC offset</strong> and judged against the commanded <strong>ceiling</strong> instead of the moving setpoint, so normal speed-up ramps toward the ceiling don't false-trip. Both thresholds are bounded by the <strong>Threshold Floor / Ceiling</strong> (amps); <strong>Averaging Time Constant</strong> sets how heavily the current is smoothed before each comparison, and <strong>Release Hysteresis</strong> sets the re-arm point.</p>
                   <p data-intro="g4"><strong>Battery Charge Current Limit</strong> is a ceiling, not a trip: the commanded alternator current is capped at the limit plus the measured house-load draw, so the battery never sees more than the set amps no matter what the loads are doing. It needs the INA228 battery shunt and is off when set to 0.</p>
-                  <p data-intro="g5"><strong>Load Dump</strong> catches a battery disconnect under charge (a load dump) — FET-disconnect or load-drop events: three tiered thresholds on the <em>rate-of-change</em> of battery current — <strong>Tier 1</strong> fires when one sample exceeds its threshold, <strong>Tier 2</strong> when two consecutive do, <strong>Tier 3</strong> when three consecutive do. Unlike the over-current detectors, Load Dump stays armed even when test protections are disabled — only the <strong>Group 5 Enable</strong> toggle in the Enable section disarms it.</p>
+                  <p data-intro="g5"><strong>Load Dump</strong> catches a battery disconnect under charge (a load dump) — FET-disconnect or load-drop events: three tiered thresholds on the <em>rate-of-change</em> of battery current, each firing when its set number of <strong>consecutive samples</strong> all exceed its threshold. Fewer samples act faster on a single spike; more samples reject noise but wait longer — each tier's effective time to act (samples × the ~5 ms battery-current sampling interval) is shown under its sample count. Unlike the over-current detectors, Load Dump stays armed even when test protections are disabled — only the <strong>Group 5 Enable</strong> toggle in the Enable section disarms it.</p>
                 </div>
 
                 <div class="protections-cards">
+
+                  <div class="protections-subhead" data-groups="cl g3">Alternator</div>
 
                   <!-- "Group 0" in UI = hardware overcurrent trip; HardOCEnable is its group toggle (ignores the global protections flag) -->
                   <article class="protections-param" data-groups="cl">
@@ -2534,69 +2526,6 @@
                       <div class="protections-edit-row">
                         <input name="HardOCDebounceMs" type="number" step="1" min="0" max="999999" />
                         <span class="protections-unit">ms</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g1">
-                    <div class="protections-name">
-                      <span class="protections-tag g1">G1</span>
-                      OvPredMargin — Group 1 Trigger Margin (V) (<span id="OvPredMarginV_echo">?</span>)
-                      <span class="sinfo" data-sinfo="ovG1"></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <div class="protections-edit-row">
-                        <input name="OvPredMarginV" type="number" step="0.01" min="0.05" max="1.0" />
-                        <span class="protections-unit">V</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g1">
-                    <div class="protections-name">
-                      <span class="protections-tag g1">G1</span>
-                      TdPred — Prediction Horizon (s) (<span id="TdPred_echo">?</span>)
-                      <span class="tooltip">ℹ️<span class="tooltip-box">Larger horizon = engages earlier on a fast rise, but more sensitive to rate-of-rise noise. Used only by Group 1.</span></span>
-                      <span class="sinfo" data-sinfo="ovG1"></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <div class="protections-edit-row">
-                        <input name="TdPred" type="number" step="0.005" min="0.01" max="0.3" />
-                        <span class="protections-unit">s</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g1">
-                    <div class="protections-name">
-                      <span class="protections-tag g1">G1</span>
-                      dvdt EMA TC (ms) (<span id="DvdtTC_echo">?</span>)
-                      <span class="tooltip">ℹ️<span class="tooltip-box">Larger = smoother but slower to react; smaller = faster but noisier. Too low lets measurement noise cause false trips, so reduce it gradually.</span></span>
-                      <span class="sinfo" data-sinfo="DvdtTC"></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <div class="protections-edit-row">
-                        <input name="DvdtTC" type="number" step="1" min="5" max="500" />
-                        <span class="protections-unit">ms</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g2">
-                    <div class="protections-name">
-                      <span class="protections-tag g2">G2</span>
-                      Trip Margin Above Target (OvMeasMargin) (V) (<span id="OvMeasMarginV_echo">?</span>)
-                      <span class="tooltip">ℹ️<span class="tooltip-box">Group 2 trips when the filtered battery voltage exceeds the charge target by this margin, then drops the field to its floor until the voltage falls back to target — self-releasing, no lockout. Lower = engages sooner. Set it above the worst filtered-signal ripple you see while holding target, so ordinary fluctuation can't trip it. On lead-acid and AGM it can sit wider, since brief voltage excursions don't harm those chemistries; lithium is kept tight because it tolerates overvoltage poorly. Rescales automatically with the system voltage set in Vessel Info. Does not affect the iExcess detectors (Group 3) — see their own Strict Over-Current Band.</span></span>
-                      <span class="sinfo" data-sinfo="ovG2"></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <div class="protections-edit-row">
-                        <input name="OvMeasMarginV" type="number" step="0.005" min="0.02" max="2" />
-                        <span class="protections-unit">V</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -2789,6 +2718,154 @@
                     </form>
                   </article>
 
+                  <div class="protections-subhead" data-groups="g1 g2 g4 g5">Battery / Bus</div>
+
+                  <article class="protections-param" data-groups="g1">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span>
+                      OvPredMargin — Group 1 Trigger Margin (V) (<span id="OvPredMarginV_echo">?</span>)
+                      <span class="sinfo" data-sinfo="ovG1"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="OvPredMarginV" type="number" step="0.01" min="0.05" max="1.0" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span>
+                      TdPred — Prediction Horizon (s) (<span id="TdPred_echo">?</span>)
+                      <span class="tooltip">ℹ️<span class="tooltip-box">Larger horizon = engages earlier on a fast rise, but more sensitive to rate-of-rise noise. Used only by Group 1.</span></span>
+                      <span class="sinfo" data-sinfo="ovG1"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="TdPred" type="number" step="0.005" min="0.01" max="0.3" />
+                        <span class="protections-unit">s</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1">
+                    <div class="protections-name">
+                      <span class="protections-tag g1">G1</span>
+                      dvdt EMA TC (ms) (<span id="DvdtTC_echo">?</span>)
+                      <span class="tooltip">ℹ️<span class="tooltip-box">Larger = smoother but slower to react; smaller = faster but noisier. Too low lets measurement noise cause false trips, so reduce it gradually.</span></span>
+                      <span class="sinfo" data-sinfo="DvdtTC"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="DvdtTC" type="number" step="1" min="5" max="500" />
+                        <span class="protections-unit">ms</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g2">
+                    <div class="protections-name">
+                      <span class="protections-tag g2">G2</span>
+                      Trip Margin Above Target (OvMeasMargin) (V) (<span id="OvMeasMarginV_echo">?</span>)
+                      <span class="tooltip">ℹ️<span class="tooltip-box">Group 2 trips when the filtered battery voltage exceeds the charge target by this margin, then drops the field to its floor until the voltage falls back to target — self-releasing, no lockout. Lower = engages sooner. Set it above the worst filtered-signal ripple you see while holding target, so ordinary fluctuation can't trip it. On lead-acid and AGM it can sit wider, since brief voltage excursions don't harm those chemistries; lithium is kept tight because it tolerates overvoltage poorly. Rescales automatically with the system voltage set in Vessel Info. Does not affect the iExcess detectors (Group 3) — see their own Strict Over-Current Band. The low timed cut tier in the Over-Voltage Ladder card rides this same line: the proportional shed gets the whole low-tier time to act to resolve the excursion before the field is cut.</span></span>
+                      <span class="sinfo" data-sinfo="ovG2"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="OvMeasMarginV" type="number" step="0.005" min="0.02" max="2" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g1 g2">
+                    <div class="protections-name">
+                      Over-Voltage Ladder
+                      <span class="tooltip">ℹ️<span class="tooltip-box">The battery-voltage cut rungs, in the order they engage. Below them sits the Group 2 proportional shed (its Trip Margin card is above), which caps current without cutting the field. The two timed cut tiers ride above it: an excursion that stays over a tier's trip line continuously for that tier's time to act cuts the field, with the same escalating re-enable lockout as the instant cut. Brief transients get time to be resolved by the shed — no cut, nothing felt at the engine — while anything sustained is cut well before a battery protection circuit (BMS) could open its charge path. Above the timed tiers sit two absolute instant rungs: the software hard shutdown, then the hardware shutdown (a comparator inside the shunt monitor chip that cuts the field electrically, with no processor involvement — the backstop if software hangs). Keep the order: low tier at or above the shed margin, mid tier above it, software shutdown above both, hardware shutdown on top.</span></span>
+                    </div>
+
+                    <div class="protections-name" style="margin-top:8px;">
+                      Timed Cut LOW — Margin Above Target (V) (<span id="OvTierLoMarginV_echo">?</span>)
+                      <span class="sinfo" data-sinfo="ovTierLo"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="OvTierLoMarginV" type="number" step="0.005" min="0.02" max="8" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                    <hr />
+                    <div class="protections-name">
+                      Timed Cut LOW — Time to Act (ms) (<span id="OvTierLoDwellMs_echo">?</span>)
+                      <span class="tooltip">ℹ️<span class="tooltip-box">How long the filtered battery voltage must stay continuously above the low-tier trip line before the field is cut. Any dip back under the line restarts the clock. 0 disables this tier.</span></span>
+                      <span class="sinfo" data-sinfo="ovTierLo"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="OvTierLoDwellMs" type="number" step="10" min="0" max="5000" />
+                        <span class="protections-unit">ms</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                    <hr />
+                    <div class="protections-name">
+                      Timed Cut MID — Margin Above Target (V) (<span id="OvTierMidMarginV_echo">?</span>)
+                      <span class="sinfo" data-sinfo="ovTierMid"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="OvTierMidMarginV" type="number" step="0.005" min="0.02" max="8" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                    <hr />
+                    <div class="protections-name">
+                      Timed Cut MID — Time to Act (ms) (<span id="OvTierMidDwellMs_echo">?</span>)
+                      <span class="tooltip">ℹ️<span class="tooltip-box">How long the filtered battery voltage must stay continuously above the mid-tier trip line before the field is cut — a faster response to a larger excursion than the low tier. Any dip back under the line restarts the clock. 0 disables this tier.</span></span>
+                      <span class="sinfo" data-sinfo="ovTierMid"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="OvTierMidDwellMs" type="number" step="10" min="0" max="5000" />
+                        <span class="protections-unit">ms</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                    <hr />
+                    <div class="protections-name">
+                      Alternator Hard Shutdown Voltage (V) (<span id="AlternatorHardShutdownV_echo">?</span>)
+                      <span class="tooltip">ℹ️<span class="tooltip-box">Absolute battery voltage at which the field is cut instantly — armed in every mode, including manual, comparing the raw per-tick sample so it catches fast excursions the filtered tiers ride through. The re-enable lockout is adaptive: short for an isolated event, escalating if the cut keeps re-firing, resetting after a minute without one. Set it 0.1 V (times the system-voltage class over 12) below the Hardware Shutdown Voltage, so software always acts before the hardware backstop.</span></span>
+                      <span class="sinfo" data-sinfo="hardShutdownV"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="AlternatorHardShutdownV" type="number" step="0.01" min="1" max="99" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                    <hr />
+                    <div class="protections-name">
+                      Hardware Shutdown Voltage (V) (<span id="VoltageHardwareLimit_echo">?</span>)
+                      <span class="tooltip">ℹ️<span class="tooltip-box">The top rung: a voltage comparator inside the battery shunt monitor chip (INA228) whose alert pin cuts the field electrically, with no processor involvement — the backstop if software ever hangs. It should never be the rung that fires; a nonzero hardware-trip count on the Diagnostics panel is worth reporting. Set it 0.2 V (times the system-voltage class over 12) below your battery's BMS charge-disconnect voltage (the highest-cell trip voltage times the cell count) so a hung regulator is still disconnected before the BMS opens the charge path under load. For lead-acid and AGM there is no BMS in the picture — place it where connected DC equipment becomes the limiting factor.</span></span>
+                      <span class="sinfo" data-sinfo="hwShutdownV"></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="VoltageHardwareLimit" type="number" step="0.01" min="10" max="70" />
+                        <span class="protections-unit">V</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
                   <article class="protections-param req-batt-current" data-groups="g4">
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
@@ -2819,6 +2896,19 @@
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
+                    <hr />
+                    <div class="protections-name">
+                      Tier 1 — Consecutive Samples (<span id="LoadDumpN1_echo">?</span>)
+                      <span class="sinfo" data-sinfo="loadDump"></span>
+                      <span id="LoadDumpN1_tta" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">time to act: —</span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="LoadDumpN1" type="number" step="1" min="1" max="10" />
+                        <span class="protections-unit">samples</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
                   </article>
 
                   <article class="protections-param req-batt-current" data-groups="g5">
@@ -2835,6 +2925,19 @@
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
+                    <hr />
+                    <div class="protections-name">
+                      Tier 2 — Consecutive Samples (<span id="LoadDumpN2_echo">?</span>)
+                      <span class="sinfo" data-sinfo="loadDump"></span>
+                      <span id="LoadDumpN2_tta" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">time to act: —</span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="LoadDumpN2" type="number" step="1" min="1" max="10" />
+                        <span class="protections-unit">samples</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
                   </article>
 
                   <article class="protections-param req-batt-current" data-groups="g5">
@@ -2848,6 +2951,20 @@
                       <div class="protections-edit-row">
                         <input name="LoadDumpDtThresh3" type="number" step="100" min="300" max="5000" />
                         <span class="protections-unit">A/s</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                    <hr />
+                    <div class="protections-name">
+                      Tier 3 — Consecutive Samples (<span id="LoadDumpN3_echo">?</span>)
+                      <span class="tooltip">ℹ️<span class="tooltip-box">At the shipped thresholds tier 3 shares tier 2's threshold while requiring more samples, so tier 2 always fires first and tier 3 is a spare. It becomes meaningful when its threshold is set lower than tier 2's — a slower but larger cumulative event.</span></span>
+                      <span class="sinfo" data-sinfo="loadDump"></span>
+                      <span id="LoadDumpN3_tta" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">time to act: —</span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="protections-edit-row">
+                        <input name="LoadDumpN3" type="number" step="1" min="1" max="10" />
+                        <span class="protections-unit">samples</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -5182,7 +5299,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Target voltage slew limiter (<span id="vTgtRampEnable_echo">?</span>):</span>
                     <span class="tooltip">ℹ️
-                      <span class="tooltip-box">Master switch for the voltage-target slew in <strong>normal operation</strong>. <strong>On</strong> (default): the active charge target moves at the up / down rates above instead of stepping, so a stage transition or new setpoint glides. <strong>Off:</strong> the target changes instantly (old behaviour). The important one is the down rate — an instant target drop trips over-voltage and hard-cuts the field. Leave On for normal use. The manual CV test ignores this — its slew is set by the slew mode in the Voltage Step Generator; commissioning / automated tests ignore it too. Protections and absolute backstops are independent of this and always instant.</span>
+                      <span class="tooltip-box">Master switch for the voltage-target slew in <strong>normal operation</strong>. <strong>On</strong> (default): the active charge target moves at the up / down rates above instead of stepping, so a stage transition or new setpoint glides. <strong>Off:</strong> the target changes instantly (old behaviour). The important one is the down rate — an instant target drop trips over-voltage and hard-cuts the field. Leave On for normal use. The manual CV test ignores this — its slew is set by the slew mode in the Voltage Step Generator; commissioning / automated tests ignore it too. Protections and absolute backstops are independent of this and act on their own timing: instant for the absolute cuts, a held dwell for the timed tiers.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -6269,20 +6386,14 @@
                   </div>
                 </form>
               </details>
-              <details class="tuning-section" ontoggle="if(this.open) altCapSafetyOnPanelOpen();">
+              <details class="tuning-section" id="altCapSection">
                 <summary class="tuning-section-title">Gate Tuning Capture</summary>
-                <div class="form-row">
-                  <div class="form-label">Safety
-                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The field sweeper drives the field directly, which switches out most of the regulator &mdash; the soft over-voltage clamps, the temperature loop, every current and voltage limit. Read this before running one. Recording on its own removes nothing.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <input type="button" value="What is NOT protected" class="btn-danger" onclick="altCapSafetyOpen()" />
-                  </div>
-                </div>
-                <hr>
+                <p style="margin:6px 0 10px;">
+                  <a class="xnav-link" onclick="goToLivePlots()">Go to Plots <span class="xnav-arrow">&rarr;</span></a>
+                </p>
                 <div class="form-row">
                   <div class="form-label">Recorder (<span id="altlog-state">idle</span>):
-                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">192 KB of memory is claimed when you press Record and released when you dump or discard, so it costs nothing the rest of the time. The buffer holds 19.3 minutes and never wraps: at capacity it stops and keeps every row, rather than quietly eating the beginning of a deliberate capture. A warning lands in the console with one minute left. A recording is fluid: press Record, then do whatever you like &mdash; a sweep, your own throttle, or just driving. The rows carry flag columns for all of it, so the file splits offline on what actually happened rather than on anything you had to press.</span></span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">This only watches and records &mdash; the regulator runs as it always does. 192 KB of memory is claimed when you press Record and released when you dump or discard, so it costs nothing the rest of the time. The buffer holds 19.3 minutes and never wraps: at capacity it stops and keeps every row, rather than quietly eating the beginning of a deliberate capture. A warning lands in the console with one minute left. A recording is fluid: press Record, then do whatever you like &mdash; a sweep, your own throttle, or just driving. The rows carry flag columns for all of it, so the file splits offline on what actually happened rather than on anything you had to press.</span></span>
                     <span id="altlog-countdown" style="display:block;font-size:0.85em;opacity:0.75;font-weight:normal;margin-top:2px;font-variant-numeric:tabular-nums;">&mdash;</span>
                   </div>
                   <div class="form-input" style="display:flex;gap:6px;flex-wrap:wrap;">
@@ -6292,8 +6403,11 @@
                 <hr>
                 <div class="form-row">
                   <div class="form-label">Field sweeper (<span id="altsweep-state">idle</span>):
-                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Ramps the field up and back down at a fixed rate, holding nothing else, so field moves independently of engine speed. Up and back down is what cancels the field's lag and separates the two things that drift one way through a sweep &mdash; engine speed sagging under load, and the case warming &mdash; from the field itself. It stands on its own: run it whenever you want to see what the machine does against field, with or without a recording running. Reverse now sends the up leg back down immediately, for anything the limit tests cannot see. AUTO mode only.</span></span>
-                    <span id="altsweep-note" style="display:block;font-size:0.85em;opacity:0.75;font-weight:normal;margin-top:2px;">turns around short of the first limit it approaches, and comes back down at the same rate</span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Takes the field away from the regulator and drives it directly: ramps up and back down at a fixed rate, holding nothing else, so field moves independently of engine speed. Up and back down is what cancels the field's lag and separates the two things that drift one way through a sweep &mdash; engine speed sagging under load, and the case warming &mdash; from the field itself. It stands on its own: run it whenever you want to see what the machine does against field, with or without a recording running. AUTO mode only.</span></span>
+                    <span style="display:flex;gap:14px;flex-wrap:wrap;font-size:0.85em;font-weight:normal;opacity:0.85;margin-top:3px;">
+                      <span style="display:inline-flex;align-items:center;white-space:nowrap;">What&rsquo;s Active<span class="tooltip">&#8505;&#65039;<span class="tooltip-box"><strong>Still active while a sweep runs:</strong> hardware over-voltage &mdash; the INA228 alert pin cuts the field in hardware, with no software in the path; Alternator Hard Shutdown Voltage, and the lockout that follows; the timed over-voltage cut tiers &mdash; a hold over a tier's trip line for its time to act still cuts the field and ends the sweep; Group 0, the hardware overcurrent trip; critical alternator temperature; engine speed; current sensor freshness; Max Field %; the On/Off switch.<br><br><strong>Switched off while a sweep runs:</strong> the Group 1 and Group 2 over-voltage current clamps; current-overshoot trim and load-dump detection; the temperature loop; every current and voltage limit &mdash; they only say when to turn around, nothing holds output to them; Min Field % and the learned tachometer keep-alive floors; the field slew-rate limiter; the charge-stage machine.</span></span></span>
+                      <span style="display:inline-flex;align-items:center;white-space:nowrap;">Ways to stop it<span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Stop sweep ends the run and eases the field back out. Reverse now sends the up leg back down immediately, at the same rate. The On/Off switch, or anything that turns charging off, ends the run too.</span></span></span>
+                    </span>
                   </div>
                   <div class="form-input" style="display:flex;gap:6px;flex-wrap:wrap;">
                     <input type="button" id="altsweep-btn" value="Start sweep" class="btn-primary" onclick="altSweepPress()" />
@@ -6306,7 +6420,10 @@
                     <span>Sweep rate (% field per second):</span>
                     <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Slower is more accurate and takes longer: the output lags the command by roughly the rate times the field time constant, and averaging the up and down legs cancels that lag only to the extent it is symmetric. 1 %/s over a 60-point span is about two minutes for the pair.</span></span>
                   </div>
-                  <div class="form-input"><input id="altsweep-rate" type="number" step="0.1" min="0.1" max="10" value="1.0" /></div>
+                  <div class="form-input" style="gap:8px;">
+                    <input id="altsweep-rate" type="number" step="0.1" min="0.1" max="10" value="1.0" />
+                    <input type="button" value="Set" class="btn-primary" onclick="altSweepSetParam('altsweep-rate', this)" />
+                  </div>
                 </div>
                 <hr>
                 <div class="form-row">
@@ -6314,7 +6431,10 @@
                     <span>Sweep up from (% field):</span>
                     <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Where the up leg starts, and where the down leg ends. Set it below the onset knee so the sweep captures the region where output begins to build.</span></span>
                   </div>
-                  <div class="form-input"><input id="altsweep-from" type="number" step="1" min="0" max="99" value="5" /></div>
+                  <div class="form-input" style="gap:8px;">
+                    <input id="altsweep-from" type="number" step="1" min="0" max="99" value="5" />
+                    <input type="button" value="Set" class="btn-primary" onclick="altSweepSetParam('altsweep-from', this)" />
+                  </div>
                 </div>
                 <hr>
                 <div class="form-row">
@@ -6322,7 +6442,10 @@
                     <span>Sweep up to (% field):</span>
                     <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Where the up leg stops climbing and turns around. Capped at Max Field %, and it starts there. In practice the sweep usually turns around well before it, short of whichever current or voltage limit the machine approaches first.</span></span>
                   </div>
-                  <div class="form-input"><input id="altsweep-to" type="number" step="1" min="1" max="99" /></div>
+                  <div class="form-input" style="gap:8px;">
+                    <input id="altsweep-to" type="number" step="1" min="1" max="99" />
+                    <input type="button" value="Set" class="btn-primary" onclick="altSweepSetParam('altsweep-to', this)" />
+                  </div>
                 </div>
                 <hr>
                 <div class="form-row">
@@ -6330,7 +6453,10 @@
                     <span>Turn around this far below a current limit (A):</span>
                     <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Applies to the current cap for your engine speed, the battery current limit and a BMS current limit. The sweeper needs room because the layers that normally hold output off a limit are switched off while it runs, and the field is still building behind the ramp when it gets there. Never takes more than a quarter of the limit it is guarding, so a small cap at idle still leaves a usable sweep. 0 turns around on the limit itself.</span></span>
                   </div>
-                  <div class="form-input"><input id="altsweep-margin-a" type="number" step="1" min="0" max="100" value="10" /></div>
+                  <div class="form-input" style="gap:8px;">
+                    <input id="altsweep-margin-a" type="number" step="1" min="0" max="100" value="10" />
+                    <input type="button" value="Set" class="btn-primary" onclick="altSweepSetParam('altsweep-margin-a', this)" />
+                  </div>
                 </div>
                 <hr>
                 <div class="form-row">
@@ -6338,7 +6464,36 @@
                     <span>Turn around this far below a voltage limit (V):</span>
                     <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Applies to the charge-voltage target and a BMS voltage limit. Same reason as the current margin: nothing is holding the bus off the target during a sweep, so arriving exactly on it is how a run ends in an over-voltage cut &mdash; which throws away the down leg the measurement depends on. 0 turns around on the limit itself.</span></span>
                   </div>
-                  <div class="form-input"><input id="altsweep-margin-v" type="number" step="0.01" min="0" max="2" value="0.15" /></div>
+                  <div class="form-input" style="gap:8px;">
+                    <input id="altsweep-margin-v" type="number" step="0.01" min="0" max="2" value="0.20" />
+                    <input type="button" value="Set" class="btn-primary" onclick="altSweepSetParam('altsweep-margin-v', this)" />
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Min Field (%) (<span id="MinDuty_echo_gate">?</span>):</span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">A duplicate of Min Field (%) in Setup &rarr; Alternator &rarr; Field Control &mdash; one setting, reachable from both places, because a capture session spends its time moving this floor. It is the minimum field held anywhere while the alternator is enabled, which is what keeps a stator-driven tachometer alive. A sweep ignores it; everything else, including a recording of ordinary driving, obeys it.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="MinDuty" type="number" step="1" min="0" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Manual Field PWM (%) (<span id="ManualDutyTarget_echo_gate">?</span>):</span>
+                    <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">A duplicate of Manual Field PWM (%) in Setup &rarr; Alternator &rarr; Field Control &mdash; one setting, reachable from both places, because a capture session spends its time parking the field by hand. It is the duty applied straight to the field winding while Manual mode is on, and has no effect while it is off. Manual mode bypasses most thermal, voltage and current protections, and the sweeper needs AUTO &mdash; a sweep and a held manual field are alternatives, never both at once.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="ManualDutyTarget" type="number" step="0.01" min="0" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
                 </div>
                 <hr>
                 <div class="form-row">
@@ -6943,27 +7098,12 @@
               </summary>
 
               <p style="font-size: 12px; color: var(--text-muted); margin: 8px 0 12px 0; line-height: 1.5;">
-                Battery-side protections that ramp the field down or cut it entirely when a battery-safety limit is exceeded.
-                These thresholds sit above the four control-loop throttling protections (Setup → Alternator → Protections)
-                and a separate hardware overvoltage backup (needs no configuration).
+                Sensor cross-checks that stop charging when the two voltage readings disagree, plus the shared
+                shutdown-timing knobs (fault lockout duration, settle time before the field is cut). The over-voltage
+                cut thresholds — the timed cut tiers, the Alternator Hard Shutdown Voltage, and the Hardware Shutdown
+                Voltage — live together in the Over-Voltage Ladder card under Setup → Alternator → Protections → Detection.
               </p>
 
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Alternator Hard Shutdown Voltage (V) (<span id="AlternatorHardShutdownV_echo">?</span>):</span>
-                  <span class="tooltip">ℹ️
-                    <span class="tooltip-box">Absolute battery voltage at which the alternator is force-shutdown: field is ramped to 0, GPIO4 is cut, and a cooldown lockout begins before charging can resume. The lockout is adaptive — 0.5 s for an isolated event, escalating toward 10 s if the cut keeps re-firing, and resetting after a minute without one. This is the only software-layer hard overvoltage shutdown — below it sit the Group 1/2/3 throttling protections (Voltage tab) which keep charging while trimming current, and a separate hardware overvoltage backup that uses a slow-averaged voltage to catch sustained overvoltage (for lithium it sits between the bulk target and this cut; for other chemistries it tracks this setting exactly — see the console log on boot for the programmed threshold). Where to set it depends on chemistry. Lithium: just below the battery protection circuit's (BMS) disconnect voltage, so the alternator stops before the BMS opens the contactor. Flooded/AGM: brief bounded excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), so the ceiling is placed to protect connected DC electronics from sustained high voltage instead — the commissioning battery-defaults proposal fills in the recommended value per chemistry. Changing the system voltage class later re-derives a conservative value; re-run the battery-defaults proposal afterward to restore the chemistry-specific one.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="AlternatorHardShutdownV" type="number" step="0.01" min="1" max="99" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Voltage Disagree Threshold (V) (<span id="VoltageDisagreeThreshold_echo">?</span>):</span>
@@ -13263,7 +13403,7 @@
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">INA228 OV Events
             <span class="tooltip">ℹ️
-              <span class="tooltip-box">Rising-edge count: the shunt monitor's hardware alert pin fired (INA228 ALERT — its ~1 s averaged bus voltage crossed the hardware limit: Bulk + 0.3 V for lithium, equal to the Alternator Hard Shutdown Voltage for other chemistries). Hardware cuts the field electrically before software runs. Should be zero under normal operation — the software cut acts first.</span>
+              <span class="tooltip-box">Rising-edge count: the shunt monitor's hardware alert pin fired (INA228 ALERT — its averaged bus voltage crossed the Hardware Shutdown Voltage). Hardware cuts the field electrically with no processor involvement. Should be zero under normal operation — the Hardware Shutdown Voltage sits above every software rung, so software always acts first; a nonzero count means software failed to protect.</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="inaOVCountID">?</span></span>
@@ -13279,10 +13419,26 @@
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">Voltage Spike Events
             <span class="tooltip">ℹ️
-              <span class="tooltip-box">Rising-edge count: measured battery voltage exceeded BulkVoltage + spike margin. Field ramps down and cuts after settle. Occasional events during RPM transients are acceptable.</span>
+              <span class="tooltip-box">Rising-edge count: raw per-tick battery voltage exceeded the Alternator Hard Shutdown Voltage (software instant cut, armed in every mode). Field cut immediately with an adaptive re-enable lockout. Should be zero — sustained approaches are resolved earlier by the timed cut tiers.</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="voltSpikeCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Timed OV Cuts (Low Tier)
+            <span class="tooltip">ℹ️
+              <span class="tooltip-box">Rising-edge count: the filtered battery voltage held above the voltage target plus the low-tier margin continuously for the low-tier time to act. Field cut immediately with the same adaptive lockout as the other overvoltage cuts. This tier resolves a bus stuck just above the proportional-shed line — occasional events mean the shed layer could not bring the bus down in time.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="ovTierLowCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Timed OV Cuts (Mid Tier)
+            <span class="tooltip">ℹ️
+              <span class="tooltip-box">Rising-edge count: the filtered battery voltage held above the voltage target plus the mid-tier margin continuously for the mid-tier time to act. A faster response to a larger excursion than the low tier; same immediate cut and adaptive lockout. Should be rare — the low tier or the proportional shed usually resolves the event first.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="ovTierMidCountID">?</span></span>
         </div>
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">Volt Disagree Critical Events
@@ -13436,6 +13592,9 @@
           <input type="button" value="Health Settings &amp; Reset" class="btn-secondary"
             onclick="goToDiagSettings('c3')"
             title="Jump to Setup &rarr; Alternator &rarr; Diag with the Charging System Health card showing: steady-state gates, curve-fit knobs, reference source, Pause / Continue learning, and Reset / Start Over. Reset needs settings unlocked." />
+          <input type="button" value="Gate Tuning Capture" class="btn-secondary"
+            onclick="goToGateTuningCapture()"
+            title="Jump to Setup &rarr; Alternator &rarr; Diag with the Gate Tuning Capture panel open: the recorder, the field sweeper and its turnaround margins, Min and Manual Field %, and the CSV dump. Running a sweep needs settings unlocked." />
           <input type="file" id="alt-load-file" accept=".csv,text/csv,text/plain" style="display:none;" onchange="altUploadCsvFile(this)" />
         </span>
         </div>
@@ -13954,6 +14113,20 @@
               <span class="sinfo" data-sinfo="ovtSoft"></span>
             </span>
             <span class="metric-value telemetry-value"><span id="ovtSoftCount">—</span></span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+          <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Timed Cuts (Low Tier)
+              <span class="sinfo" data-sinfo="ovTierLo"></span>
+            </span>
+            <span class="metric-value telemetry-value"><span id="ovtTierLowCount">—</span></span>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+          <div class="metric-row telemetry-row">
+            <span class="metric-label telemetry-label">Timed Cuts (Mid Tier)
+              <span class="sinfo" data-sinfo="ovTierMid"></span>
+            </span>
+            <span class="metric-value telemetry-value"><span id="ovtTierMidCount">—</span></span>
           </div>
           <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
           <div class="metric-row telemetry-row">
@@ -15207,6 +15380,29 @@
     </div>
   </div><!-- END battdef-modal-overlay -->
 
+  <!-- Between-screens wait box (first Vessel Info save chain). The device work between two setup
+       screens - the SoC-seed poll, the /exportConfig NVS walk, the prerequisites write - leaves the
+       page looking finished, and a note under the Save button is nowhere anyone is looking. This
+       keeps a black box on screen so the wait reads as the next step in the same sequence.
+       Shown/hidden only by vesselNextStepWait(); the close X appears only on the stall escalation. -->
+  <div id="nextstep-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9250; align-items:flex-start; justify-content:flex-start; overflow:auto; padding:20px; box-sizing:border-box;">
+    <div style="position:relative; margin:auto 0; background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span id="nextstep-title" style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Loading the Next Step</span>
+        <button id="nextstep-close-btn" onclick="vesselNextStepWait(false)" style="display:none; background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">&#10005;</button>
+      </div>
+      <div style="padding:22px 20px 20px; text-align:center;">
+        <div id="nextstep-dots" style="color:#35d6c7; line-height:1; margin-bottom:14px;">
+          <span class="cloud-loading-dot" style="background:currentColor; width:10px; height:10px; margin:0 3px;"></span>
+          <span class="cloud-loading-dot" style="background:currentColor; width:10px; height:10px; margin:0 3px;"></span>
+          <span class="cloud-loading-dot" style="background:currentColor; width:10px; height:10px; margin:0 3px;"></span>
+        </div>
+        <p id="nextstep-head" style="margin:0 0 8px; font-size:15px; font-weight:700; color:#e8e8e8; line-height:1.4;">Setting up &mdash; the next screen opens by itself.</p>
+        <p id="nextstep-sub" style="margin:0; font-size:13px; color:#a8a8a8; line-height:1.5;">Regulator busy &mdash; wait a few seconds and stay on this page</p>
+      </div>
+    </div>
+  </div><!-- END nextstep-modal-overlay -->
+
   <!-- Maintenance-restart acknowledgement: first Vessel Info save only, after the SoC popup and
        before the Commissioning Prerequisites screen. Static body; maintAckClose() resolves the
        save-chain promise. -->
@@ -15336,13 +15532,13 @@
     </div>
   </div><!-- END rpmcap-modal-overlay -->
 
-  <!-- Engine-speed (tach) alignment — first-install only, between the Prerequisites screen and the
+  <!-- Tachometer Calibration (engine-speed alignment) — first-install only, between the Prerequisites screen and the
        commissioning wizard (commPrepFinish → openRpmAlign → openCommissionModal). Needs the engine
        running; body rendered by rpmAlignRender(); tach settings are written live as edited. -->
   <div id="rpmalign-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9200; align-items:flex-start; justify-content:flex-start; overflow:auto; padding:20px; box-sizing:border-box;">
     <div style="position:relative; margin:auto 0; background:#1e1e1e; color:#ddd; width:480px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); display:flex; flex-direction:column;">
       <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
-        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Engine Speed Alignment</span>
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Tachometer Calibration</span>
         <button onclick="rpmAlignCancel()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
       </div>
       <div id="rpmalign-body" style="padding:14px 16px; overflow-y:auto; flex:1; min-height:0;"></div>
@@ -15363,60 +15559,6 @@
       <div id="socseed-body" style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; overflow-y:auto; flex:1; min-height:0;"></div>
     </div>
   </div><!-- END socseed-modal-overlay -->
-
-  <!-- Gate Tuning Capture safety notice: the field sweeper drives the field directly, which switches
-       out most of the regulator. Shown once per page load when the panel is opened, and any time from
-       the panel's own button. ALT_GATE_TUNING_CAPTURE_SPEC.md section 8. -->
-  <div id="altcap-safety-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9100; align-items:flex-start; justify-content:flex-start; overflow:auto; padding:20px; box-sizing:border-box;">
-    <div style="position:relative; margin:auto 0; background:#1e1e1e; color:#ddd; width:560px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); display:flex; flex-direction:column;">
-      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0;">
-        <span style="font-weight:600; font-size:13px; color:#fca5a5; letter-spacing:0.03em;">Gate Tuning Capture &mdash; What Protects You, And What Does Not</span>
-        <button onclick="altCapSafetyClose()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">&#10005;</button>
-      </div>
-      <div style="padding:18px 20px 20px; font-size:0.92em; line-height:1.5; overflow-y:auto; flex:1; min-height:0;">
-        <p style="margin:0 0 14px;"><strong>Recording on its own changes nothing.</strong> The logger only watches; the regulator runs exactly as it always does. Everything below is about the <strong>field sweeper</strong>, which takes the field away from the regulator and drives it directly.</p>
-
-        <div style="font-weight:700; color:#2ec4b6; margin:0 0 6px;">Still active while the sweeper runs</div>
-        <ul style="margin:0 0 16px; padding-left:20px;">
-          <li><strong>Hardware over-voltage.</strong> The INA228 alert pin cuts the field in hardware, with no software in the path.</li>
-          <li><strong>Alternator Hard Shutdown Voltage.</strong> Instant field cut the moment the bus crosses it, plus the lockout that follows.</li>
-          <li><strong>Group 0, the hardware overcurrent trip</strong> (if you have it enabled). Instant field cut.</li>
-          <li><strong>Critical alternator temperature.</strong> Instant field cut above the temperature limit plus its critical margin.</li>
-          <li><strong>Engine stopped, engine speed below minimum, or a tach reading the firmware does not believe.</strong> Instant field cut.</li>
-          <li><strong>Current sensor gone stale.</strong> Instant field cut.</li>
-          <li><strong>Max Field %.</strong> It is the sweep's only ceiling, and the ramp cannot be sent above it.</li>
-          <li><strong>The On/Off switch.</strong> It takes the field back from the sweeper on that tick and shuts it down exactly as it always does. So does a BMS opening, a solar-forecast pause, a fault or a lockout &mdash; and all of them end the sweep rather than pausing it.</li>
-          <li><strong>No other field test can start</strong> while the sweeper runs, and the sweeper cannot start while one is running.</li>
-          <li><strong>The sweeper turns itself around before it arrives</strong> &mdash; <span id="altcap-safety-margin-a">10</span> A short of the current cap for your engine speed, of the battery current limit and of a BMS current limit; <span id="altcap-safety-margin-v">0.15</span> V short of the charge-voltage target or a BMS voltage limit; and at the alternator temperature limit itself. It then ramps straight back down at the same rate. Both margins are set in the panel; at 0 it turns around on the limit itself.</li>
-        </ul>
-
-        <div style="font-weight:700; color:#fca5a5; margin:0 0 6px;">Switched off while the sweeper runs</div>
-        <ul style="margin:0 0 16px; padding-left:20px;">
-          <li><strong>The Group 1 and Group 2 over-voltage current clamps.</strong> These are the soft pull-backs that normally stop the bus ever reaching the hard ceiling. During a sweep only the hard cut is left.</li>
-          <li><strong>Current-overshoot trim and load-dump detection.</strong></li>
-          <li><strong>The temperature loop.</strong> It normally holds the alternator case about 7 &deg;F below your temperature limit by quietly reducing output. It does not run during a sweep: the field stays where the ramp puts it while the alternator heats, and nothing eases off until the hard cut at the limit.</li>
-          <li><strong>Every current and voltage limit stops being a limit.</strong> The charge-voltage target, the current cap for your engine speed, the battery current limit and any BMS limit only tell the sweeper when to turn around. Nothing holds output to them.</li>
-          <li><strong>Min Field % and the learned tachometer keep-alive floors.</strong> The ramp starts below them on purpose.</li>
-          <li><strong>The field slew-rate limiter.</strong> The sweep rate is the only thing setting how fast the field moves.</li>
-          <li><strong>The charge-stage machine</strong> &mdash; bulk, absorption, float, the warm-up ramp, the Hi/Lo glide and Maintain Mode.</li>
-          <li><strong>The "what is limiting output" readout.</strong> It goes blank for the whole run, because there is no limiter in the loop to report. The header reads TUNING SWEEP instead.</li>
-        </ul>
-
-        <div style="font-weight:700; color:#2ec4b6; margin:0 0 6px;">Ways to stop it</div>
-        <ul style="margin:0 0 16px; padding-left:20px;">
-          <li><strong>Stop sweep</strong> ends the run and eases the field back out.</li>
-          <li><strong>Reverse now</strong> sends the up leg back down immediately, at the same rate.</li>
-          <li><strong>The On/Off switch, or anything that turns charging off.</strong> Ends the run, and shuts the field down on the normal ramp.</li>
-        </ul>
-
-        <p style="margin:0 0 16px; color:#bbb;">Run the sweeper with the engine at a steady speed and somebody able to see the alternator.</p>
-
-        <div style="display:flex; justify-content:flex-end;">
-          <button onclick="altCapSafetyClose()" style="background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; border:none; border-radius:5px; padding:7px 16px; cursor:pointer; font-size:0.95em;">Understood</button>
-        </div>
-      </div>
-    </div>
-  </div><!-- END altcap-safety-overlay -->
 
   <!-- Scheduled-restart warning banner (visible during the 10-min countdown window) -->
   <div id="restart-countdown-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9000;

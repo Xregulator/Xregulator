@@ -2904,8 +2904,11 @@ void CheckAlarms() {
   // The ALERT pin pulls GPIO4 low electrically the instant the bus crosses VoltageHardwareLimit —
   // before any software runs. This block only manages the software latch that keeps the field
   // suppressed until the condition is confirmed cleared, plus the messaging around it.
-  // SLOW_ALERT is SET, so the comparison uses the averaged ADC value (~1054 ms, 128-sample) rather
-  // than instantaneous reads — a single noise spike cannot assert ALERT.
+  // SLOW_ALERT is SET, so the comparison uses the averaged ADC value rather than instantaneous
+  // reads — a single noise spike cannot assert ALERT. The averaging window follows the chip mode:
+  // ~4.3 ms (4-sample) in fast charging mode, ~1054 ms (128-sample) with the field off — so while
+  // charging the pin is a near-instant electrical cut. A transparent-mode pin blip that clears
+  // before the 250 ms BUSOL status poll still cuts the field but is never logged here.
   // New-event detection is throttled to 5 s (I2C cost); the 3 s / 10 s latch checks run every 250 ms.
 
   if (INADisconnected == 0) {
@@ -3019,7 +3022,7 @@ void CheckAlarms() {
           queueConsoleMessageF(
             "INA228 HARDWARE ALERT PIN FIRED: busV(avg)=%.3fV limit=%.3fV | "
             "GPIO4 was cut electrically by ALERT pin before this message. "
-            "SLOW_ALERT active: trigger used ~1054ms averaged value (128 samples). "
+            "SLOW_ALERT active: trigger used the chip's averaged value (~4.3ms in fast charging mode). "
             "SW latch engaged. Disagreement check suppressed for %ds.",
             busV, VoltageHardwareLimit,
             INA_OV_DISAGREE_SUPPRESS_MS / 1000);
@@ -3572,15 +3575,16 @@ void updateINA228OvervoltageThreshold() {
     return;
   }
 
-  // Lithium: one rung BELOW the software fast cut — this compare uses the chip's averaged value
-  // and a 250ms BUSOL poll, so it owns SUSTAINED overvoltage at bulk + 0.3 while the raw per-tick
-  // software cut owns fast transients at bulk + 0.5 (2026-07-12 split). AGM/flooded/other: same
-  // ceiling as the software cut (chemistry-specific absolute via commissioning, 16.0 V at 12 V;
-  // bulk + 0.5 fallback if never commissioned). At one voltage the pair stays complementary
-  // (raw per-tick vs ~1s average) and the INA228 becomes the software-failed-to-protect /
-  // MCU-hang backstop that should read ~0 trips normally (2026-07-13 chemistry split).
-  if (batteryIsLithium()) VoltageHardwareLimit = BulkVoltage + 0.3f * ((float)SYSTEM_VOLTAGE_CLASS / 12.0f);
-  else VoltageHardwareLimit = AlternatorHardShutdownV;
+  // Programs the ALERT comparator from VoltageHardwareLimit — a persisted user setting (top rung
+  // of the OV ladder), no derivation. Guidance: 0.2 V x class/12 below the battery's BMS
+  // charge-disconnect voltage, one rung ABOVE the software instant cut (AlternatorHardShutdownV),
+  // so software gets first shot at every rung and the pin is purely the electrical MCU-hang /
+  // software-failed-to-protect backstop (~0 trips normally). The compare uses the chip's averaged
+  // value (SLOWALERT); while the field is on the chip runs fast mode (4-sample avg, ~4.3 ms), so
+  // the pin is a near-instant electrical cut, not a slow layer. It can never be the timed layer:
+  // AVG applies to ALL active inputs, so slowing the bus average would drag CURRENT register
+  // updates to the same cadence and kill the 5 ms load-dump/CV sampling (TI SLYS021 — the alert
+  // path has no independent delay/deglitch feature).
 
   const double LSB = 0.003125;                                           // 3.125 mV/LSB
   uint16_t thresholdLSB = (uint16_t)(VoltageHardwareLimit / LSB + 0.5);  // Round instead of truncate
@@ -3611,7 +3615,7 @@ void updateINA228OvervoltageThreshold() {
   }
 
   queueConsoleMessageF(
-    "INA228: Overvoltage threshold=%.2fV | SLOW_ALERT ON (128-sample avg ~1054ms filter)",
+    "INA228: Overvoltage threshold=%.2fV | SLOW_ALERT ON (averaged compare; ~4.3ms in fast charging mode)",
     VoltageHardwareLimit);
 }
 

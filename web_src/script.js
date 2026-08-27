@@ -1041,6 +1041,8 @@ const CSV2_FIELDS = [
     "fieldDutyCeil",           // enforced field-duty ceiling x100: lower of Max Field % and the Max Field Volts term
     "dvccAuthMfg",             // NAME manufacturer code of the node publishing the charge limits (358 = Victron; 0 = never heard)
     "dvccAuthProd",            // its product code (126996), else its Victron VREG product id, else 0
+    "ovTierLowCount",          // timed OV cut, LOW tier — session rising-edge counter
+    "ovTierMidCount",          // timed OV cut, MID tier — session rising-edge counter
     "sessionId",               // device boot identity, same in every channel this boot
     "sendMs",                  // device millis() when this payload was BUILT (CSV2 sends one pass later)
 ];
@@ -1643,26 +1645,6 @@ const ALTSWEEP_STATE_LABEL = ['idle', 'ramping up', 'ramping down', 'easing out'
 // not change length as the clock runs down. Paired with tabular-nums on the span in the markup.
 const altLogMMSS = s => `${String(Math.floor(Math.max(0, s) / 60)).padStart(2, '0')}:${String(Math.max(0, s) % 60).padStart(2, '0')}`;
 
-// Safety notice. The sweeper takes the field off the regulator, which switches out every soft
-// protection layer (spec section 8), so the panel says so in full rather than in a tooltip. Shown
-// once per page load when the panel is first expanded — a notice that fires on every expand gets
-// dismissed reflexively — and always reachable from the panel's own red button.
-let _altCapSafetyShown = false;
-function altCapSafetyOpen() {
-    const ov = document.getElementById('altcap-safety-overlay');
-    if (!ov) return;
-    try { altSweepEchoMargins(); } catch (e) {}   // quote the margins that are actually set
-    ov.style.display = 'flex';
-    _altCapSafetyShown = true;
-}
-function altCapSafetyClose() {
-    const ov = document.getElementById('altcap-safety-overlay');
-    if (ov) ov.style.display = 'none';
-}
-function altCapSafetyOnPanelOpen() {
-    if (!_altCapSafetyShown) altCapSafetyOpen();
-}
-
 // One gate for every device write here: unlocked, and a real regulator on the other end.
 function altCapPost(query) {
     if (!settingsUnlocked) { xAlert('Please unlock settings first'); return false; }
@@ -1718,7 +1700,6 @@ function altCaptureRender() {
     if (swb) swb.value = sw ? 'Stop sweep' : 'Start sweep';
     altCapEnable('altsweep-rev-btn', sw === 1);
     altSweepSyncCeiling();
-    altSweepEchoMargins();
 }
 
 // Both sweep bounds are capped at the live Max Field %, which is the firmware's only ceiling too, and
@@ -1738,30 +1719,56 @@ function altSweepSyncCeiling() {
     if (to && to.value.trim() === '' && document.activeElement !== to) to.value = cap;
 }
 
-// The margins are settable, so the two places that quote them — the line under the sweeper state and
-// the safety notice — read the boxes rather than repeating the defaults. A safety notice that names
-// numbers the run will not use is worse than one that names none.
 function altSweepMargins() {
     const num = (id, dflt) => {
         const v = parseFloat((document.getElementById(id) || {}).value);
         return isFinite(v) && v >= 0 ? v : dflt;
     };
-    // The volt margin is class-scaled (0.15 V is a 12V value); the amp margin is class-invariant.
+    // The volt margin is class-scaled (0.20 V is a 12V value); the amp margin is class-invariant.
     const k = (parseInt(window._nominalStored, 10) || 12) / 12;
-    return { a: num('altsweep-margin-a', 10), v: num('altsweep-margin-v', 0.15 * k) };
+    return { a: num('altsweep-margin-a', 10), v: num('altsweep-margin-v', 0.20 * k) };
 }
 
-function altSweepEchoMargins() {
-    const m = altSweepMargins();
-    const note = document.getElementById('altsweep-note');
-    if (note) note.textContent = (m.a > 0 || m.v > 0)
-        ? `turns around ${m.a} A / ${m.v} V short of the first limit it approaches, and comes back down at the same rate`
-        : 'turns around on the first limit it reaches, and comes back down at the same rate';
-    const ea = document.getElementById('altcap-safety-margin-a');
-    const ev = document.getElementById('altcap-safety-margin-v');
-    if (ea) ea.textContent = String(m.a);
-    if (ev) ev.textContent = String(m.v);
+// The sweep parameters live in the browser, not in NVS: altSweepPress reads the boxes when Start
+// sweep is pressed. Set is here because every other value box in Setup has one — it clamps to the
+// box's own range, remembers the value across reloads, and refreshes the two places that quote the
+// margins. Typing without pressing Set still runs; the sweeper reads the live box either way.
+const ALTSWEEP_LS_KEY = 'altSweepParams';
+
+function altSweepSetParam(id, btn) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    let v = parseFloat(el.value);
+    if (!isFinite(v)) { xAlert('Enter a number first.'); return; }
+    const lo = parseFloat(el.min), hi = parseFloat(el.max);
+    if (isFinite(lo) && v < lo) v = lo;
+    if (isFinite(hi) && v > hi) v = hi;
+    el.value = String(v);
+    el.dataset.userSet = '1';
+    let store = {};
+    try { store = JSON.parse(localStorage.getItem(ALTSWEEP_LS_KEY)) || {}; } catch (e) { }
+    store[id] = el.value;
+    try { localStorage.setItem(ALTSWEEP_LS_KEY, JSON.stringify(store)); } catch (e) { }
+    if (btn && btn.classList) {
+        btn.classList.add('button-pulse');
+        setTrackedTimeout(() => btn.classList.remove('button-pulse'), 600);
+    }
 }
+
+// Restores before the 1 Hz frame can prefill "up to" from Max Field % — that prefill is only ever
+// for an empty box, and userSet keeps the class-scaled volt-margin prefill off a chosen value too.
+function altSweepRestoreParams() {
+    let store = null;
+    try { store = JSON.parse(localStorage.getItem(ALTSWEEP_LS_KEY)); } catch (e) { }
+    if (!store) return;
+    Object.keys(store).forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.value = store[id];
+        el.dataset.userSet = '1';
+    });
+}
+document.addEventListener('DOMContentLoaded', altSweepRestoreParams);
 
 function altLogRecordPress() {
     const st = altLive.logState | 0;
@@ -3589,6 +3596,14 @@ const CSV3_FIELDS = [
     "displayVolUnit",                // fuel volume display preference: 0 US gallons, 1 litres
     "gpsPositionSource",             // 0=auto, 1=NMEA, 2=Phone — position only; the clock is timeSourceMode
     "MaxFieldVolts",                 // field-volt cap x10; the ceiling it produces is CSV2 fieldDutyCeil
+    "OvTierLoMarginV",               // timed OV cut LOW-tier margin above target (raw float V, %.3f)
+    "OvTierLoDwellMs",               // timed OV cut LOW-tier continuous dwell (ms; 0 = tier off)
+    "OvTierMidMarginV",              // timed OV cut MID-tier margin above target (raw float V, %.3f)
+    "OvTierMidDwellMs",              // timed OV cut MID-tier continuous dwell (ms; 0 = tier off)
+    "VoltageHardwareLimit",          // INA228 hardware shutdown voltage x100 — top OV-ladder rung
+    "LoadDumpN1",                    // load-dump tier 1 consecutive-sample count
+    "LoadDumpN2",                    // load-dump tier 2 consecutive-sample count
+    "LoadDumpN3",                    // load-dump tier 3 consecutive-sample count
     "sessionId",                     // device boot identity, same in every channel this boot
     "sendMs",                        // device millis() when this settings echo was built; event-driven with a 60 s fallback
 ];
@@ -7303,6 +7318,8 @@ function updateAllEchosOptimized(data) {
         { key: 'SwitchingFrequency', id: 'SwitchingFrequency_echo', transform: v => v },
         { key: 'yyMin', id: 'yyMin_echo', transform: v => v },
         { key: 'ManualDutyTarget', id: 'ManualDutyTarget_echo', transform: v => (v / 100).toFixed(2) },
+        // Second ids: the Gate Tuning Capture panel carries duplicates of these two Field Control rows.
+        { key: 'ManualDutyTarget', id: 'ManualDutyTarget_echo_gate', transform: v => (v / 100).toFixed(2) },
         { key: 'SwitchControlOverride', id: 'SwitchControlOverride_echo', transform: v => v == 1 ? 'Override' : 'Normal' },
         { key: 'OnOff', id: 'OnOff_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'ManualFieldToggle', id: 'ManualFieldToggle_echo', transform: v => v === 0 ? 1 : 0 },
@@ -7381,6 +7398,7 @@ function updateAllEchosOptimized(data) {
         { key: 'MaxDuty', id: 'MaxDuty_echo', transform: v => v },
         { key: 'MaxFieldVolts', id: 'MaxFieldVolts_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'MinDuty', id: 'MinDuty_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'MinDuty', id: 'MinDuty_echo_gate', transform: v => (v / 100).toFixed(2) },
         { key: 'FieldResistance', id: 'FieldResistance_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'FieldResistance', id: 'FieldResistance_echo_fldamps',  transform: v => (v / 100).toFixed(2) },
         { key: 'FieldResistance', id: 'FieldResistance_echo_fldamps2', transform: v => (v / 100).toFixed(2) },
@@ -7436,6 +7454,14 @@ function updateAllEchosOptimized(data) {
         { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
         { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v) },
         { key: 'AlternatorHardShutdownV', id: 'AlternatorHardShutdownV_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'VoltageHardwareLimit', id: 'VoltageHardwareLimit_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'OvTierLoMarginV', id: 'OvTierLoMarginV_echo', transform: v => v.toFixed(3) },      // raw float V (%.3f)
+        { key: 'OvTierLoDwellMs', id: 'OvTierLoDwellMs_echo', transform: v => Math.round(v) },
+        { key: 'OvTierMidMarginV', id: 'OvTierMidMarginV_echo', transform: v => v.toFixed(3) },    // raw float V (%.3f)
+        { key: 'OvTierMidDwellMs', id: 'OvTierMidDwellMs_echo', transform: v => Math.round(v) },
+        { key: 'LoadDumpN1', id: 'LoadDumpN1_echo', transform: v => Math.round(v) },
+        { key: 'LoadDumpN2', id: 'LoadDumpN2_echo', transform: v => Math.round(v) },
+        { key: 'LoadDumpN3', id: 'LoadDumpN3_echo', transform: v => Math.round(v) },
         { key: 'HardOCTripAmps', id: 'HardOCTripAmps_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'HardOCDebounceMs', id: 'HardOCDebounceMs_echo', transform: v => Math.round(v) },
         { key: 'IExcessFrac', id: 'IExcessFrac_echo', transform: v => (v / 10).toFixed(1) },          // ×1000 → % of command; shared "Slope" echo also reflects IExcessFracBulk (written in lockstep, no separate span)
@@ -7640,6 +7666,19 @@ function updateAllEchosOptimized(data) {
             const newValue = update.transform(data[update.key]);
             if (updateEchoIfChanged(update.id, newValue)) {
                 updatesCount++;
+            }
+        }
+    });
+
+    // Load-dump derived "time to act" labels: N consecutive samples x the ~5 ms INA fast-mode
+    // cadence (INA_FAST_INTERVAL_MS). Driven by the CSV3 echo so the label tracks the firmware value.
+    [['LoadDumpN1', 'LoadDumpN1_tta'], ['LoadDumpN2', 'LoadDumpN2_tta'], ['LoadDumpN3', 'LoadDumpN3_tta']].forEach(([key, id]) => {
+        if (key in data) {
+            const el = document.getElementById(id);
+            const n = Math.round(Number(data[key]));
+            if (el && isFinite(n) && n > 0) {
+                const txt = 'time to act: ' + n + ' × 5 ms = ' + (n * 5) + ' ms';
+                if (el.textContent !== txt) el.textContent = txt;
             }
         }
     });
@@ -8210,14 +8249,14 @@ async function handleVesselInfoSave(event) {
                     // point and that modal writes a prerequisite field (battery defaults already applied
                     // and bails for Other, the only chemistry whose field set overlaps; the SoC popup
                     // writes SocSeedAck / ManualSOCPoint only).
-                    if (result.firstSave === true) { _commPrepPrefetch = commPrepFetchCfg(); vesselNextStepNote(true); }
+                    if (result.firstSave === true) { _commPrepPrefetch = commPrepFetchCfg(); vesselNextStepWait(true); }
                     for (let i = 0; i < 6; i++) {
                         if (i) await new Promise(res => setTimeout(res, 1000));   // check before sleeping: a snapshot already on file costs nothing
                         _socSeedData = null;
                         await socSeedFetch();
                         if (_socSeedData && _socSeedData.snap) break;
                     }
-                    vesselNextStepNote(false);
+                    vesselNextStepWait(false);
                     if (_socSeedData && _socSeedData.snap && !_socSeedData.ack && !sessionStorage.getItem('socSeedDismissed')) {
                         await new Promise(res => { _socSeedResolve = res; socSeedOpen(); });
                     }
@@ -8258,7 +8297,8 @@ const BATTDEF_FW_DEFAULT = {
     ChargedVoltage: 14, BattCurrentLimitA: 100, MaximumAllowedBatteryAmps: 150,
     coldChargeLockoutEnable: 1, battTempDerateEnable: 1, PeukertExponent: 1.05, ChargeEfficiency: 99,
     AbsorptionTimeoutMs: 20,
-    VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0, AlternatorHardShutdownV: 15.0,
+    VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0, AlternatorHardShutdownV: 14.2,
+    VoltageHardwareLimit: 14.3, OvTierLoMarginV: 0.10, OvTierMidMarginV: 0.20,
     capSocLowMax: 20, capMinSpan: 70, capRestFloor: 30, capSettleRate: 2.0, bhStepLowA: 30, bhStepDeltaA: 30,
     CvKdDeadbandVps: 0.4, CvKdArmV: 0.5, CvKdTd: 0.85,
     vTgtRampUp: 0.15, vTgtRampDn: 0.15,
@@ -8274,12 +8314,41 @@ const BATTDEF_FROM_STORED = {
 const BATTDEF_MODE_NAMES = ['No Float (idle)', 'Voltage Float', 'Zero-Current Float'];
 // Per-chemistry rationale shown under the proposal summary. Framed around what each battery wants —
 // these are battery-specific recommendations, NOT alternator limits (the alternator has its own).
-// Each entry is a fn of (proposed Bulk V, proposed hard-shutdown V), both class-scaled, so the
-// cited numbers match 12/24/36/48 V banks.
+// Each entry is a fn of the copy context built by deriveBatteryDefaults() (class-scaled bulk and
+// hard-cut volts, their per-cell equivalents, cell count, and the derived current limit in amps),
+// so the cited numbers match 12/24/36/48 V banks. Per-cell figures are printed alongside every
+// voltage: the bus number moves with the class, the per-cell number never does, and per-cell is the
+// form an owner checks against a data sheet. limA is 0 when bank capacity is unknown — every
+// amp figure has to drop out with it. An owner sees exactly ONE of these three, chosen by battery
+// type, so no paragraph may lean on a comparison with another chemistry.
+const BATTDEF_CEILING_COPY = d => 'The hard overvoltage cut is set to ' + d.hard + ' V (' + d.hardCell + ' V per cell across ' + d.cells
+    + ' cells): brief voltage excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), '
+    + 'so rather than cut the field on momentary spikes, the ceiling is placed where the connected DC equipment \u2014 not the battery \u2014 '
+    + 'becomes the limiting factor. Check it against the lowest maximum input voltage of anything sharing the bus, and lower it if '
+    + 'something is rated below ' + d.hard + ' V.';
 const BATTDEF_CHEM_COPY = {
-    lifepo4: v => 'For lithium (LiFePO4), Bulk and Absorption are set to ' + v + ' V — roughly a high-90s% state of charge, which avoids the higher-voltage cell stress of a full charge. Float is disabled. The charge current limit is set to a moderate fraction of the bank\'s capacity. You may want to manually increase it if you prioritize charging time vs. battery lifetime.',
-    agm: (v, hardV) => 'For AGM, the default charge current limit is set to a high fraction of the bank\'s capacity: a high charge rate reduces sulfation and extends AGM cycle life, and AGM cells accept high in-rush current. The charge voltages are kept toward the lower end of the acceptable range to limit cell stress. Lead-acid and AGM batteries also want a higher charge voltage when cold and a lower one when hot. The hard overvoltage cut is set to ' + hardV + ' V: brief voltage excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), so instead of cutting the field on momentary spikes the ceiling is placed to protect connected DC loads, whose published continuous ratings usually top out around that level or higher.',
-    lead_acid: (v, hardV) => 'For flooded lead-acid, the absorption voltage and charge current are set on the higher side to keep the cells fully charged and the electrolyte mixed. This errs toward reduced sulfation at the cost of higher water use — check the electrolyte level regularly and top up with distilled water, as a bank charged this way will need watering more often. Lead-acid and AGM batteries also want a higher charge voltage when cold and a lower one when hot. The hard overvoltage cut is set to ' + hardV + ' V: brief voltage excursions do not harm a lead-acid battery (its damage mechanisms accumulate over minutes to years), so instead of cutting the field on momentary spikes the ceiling is placed to protect connected DC loads, whose published continuous ratings usually top out around that level or higher.'
+    lifepo4: d => 'For lithium (LiFePO4), the charge current limit is set to a moderate fraction of the bank\'s capacity'
+        + (d.limA ? ' (' + d.limA + ' A for this bank)' : '')
+        + '. The cells will take considerably more; raise it if you prioritize charging time over battery lifetime. '
+        + 'Bulk and Absorption are set to ' + d.bulk + ' V (' + d.bulkCell + ' V per cell across ' + d.cells + ' cells) \u2014 roughly a '
+        + 'high-90s% state of charge, which avoids the higher-voltage cell stress of a full charge. Float is disabled: a full LiFePO4 bank '
+        + 'wants the charge source to step aside rather than hold a setpoint. Unlike lead-acid and AGM, LiFePO4 does not want its charge '
+        + 'voltage moved with temperature \u2014 what it will not tolerate is being charged below freezing at all. The hard overvoltage cut '
+        + 'is set to ' + d.hard + ' V (' + d.hardCell + ' V per cell across ' + d.cells + ' cells), only ' + d.delta + ' V above the charge '
+        + 'target: on lithium the hazard is not slow cell damage but the battery\'s protection circuit (BMS) opening while the alternator is '
+        + 'charging, so the ceiling is placed to catch a runaway before the BMS does.',
+    agm: d => 'For AGM, the default charge current limit is set to a high fraction of the bank\'s capacity'
+        + (d.limA ? ' (' + d.limA + ' A for this bank)' : '')
+        + ': a high charge rate reduces sulfation and extends AGM cycle life, and AGM cells accept high in-rush current. The charge voltages '
+        + 'are kept toward the lower end of the acceptable range to limit cell stress \u2014 ' + d.bulk + ' V is ' + d.bulkCell + ' V per cell '
+        + 'across ' + d.cells + ' cells. Lead-acid and AGM batteries also want a higher charge voltage when cold and a lower one when hot. '
+        + BATTDEF_CEILING_COPY(d),
+    lead_acid: d => 'For flooded lead-acid, the absorption voltage (' + d.bulk + ' V, ' + d.bulkCell + ' V per cell across ' + d.cells + ' cells)'
+        + ' and charge current' + (d.limA ? ' (' + d.limA + ' A for this bank)' : '')
+        + ' are set on the higher side to keep the cells fully charged and the electrolyte mixed. This errs toward reduced sulfation at the '
+        + 'cost of higher water use \u2014 check the electrolyte level regularly and top up with distilled water, as a bank charged this way '
+        + 'will need watering more often. Lead-acid and AGM batteries also want a higher charge voltage when cold and a lower one when hot. '
+        + BATTDEF_CEILING_COPY(d)
 };
 
 // Notice tiers for the battdef modal, severity carried by the header colour: warn = doing this
@@ -8339,11 +8408,15 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
     // bulkV/absV lean gentle for stress/lifetime: LiFePO4 13.9 V ≈ high-90s% SoC well below 14.4+;
     // AGM at 14.4; flooded higher (14.6) because it needs the extra to counter stratification and its
     // dominant killer is UNDERcharge (sulfation), not overcharge. limC is the opposite philosophy: high
-    // charge current REDUCES sulfation and lengthens life, so AGM is 1.0C (Lifeline tolerates 5C in-rush).
+    // charge current REDUCES sulfation and lengthens life, so AGM is 1.0C (quality AGM cells tolerate several-C in-rush).
     // Flooded stays 0.20C — it genuinely gasses and heats. These are battery-specific; the alternator's
     // own current ceiling is a separate limit.
     const T = {
-        lifepo4:   { bulkV: 13.9, absV: 13.9, floatV: null, durH: null, rebulkV: 13.1, socBlock: 90, socAllow: 80, tailC: 0.05, tailPct: 5, chgDetV: 13.8, limC: 0.50, cold: 1, peukert: 1.05, chgEff: 99, vAlmHi: 14.8, vAlmLo: 11.9, socAlm: 10, absBase: 30, absMax: 45,  ovMeasMargin: 0.1 },
+        // Lithium vAlmHi 14.4: the external-source tripwire sounds ABOVE the whole cut ladder
+        // (hardware rung 14.3) but BELOW the BMS trip floor (~14.5) — an external charger
+        // overdriving the bank alarms before any BMS acts. AGM/lead keep 15.8, below their own
+        // 15.9/16.0 cuts (approach alarm; no BMS race there) — deliberate, don't "fix".
+        lifepo4:   { bulkV: 13.9, absV: 13.9, floatV: null, durH: null, rebulkV: 13.1, socBlock: 90, socAllow: 80, tailC: 0.05, tailPct: 5, chgDetV: 13.8, limC: 0.50, cold: 1, peukert: 1.05, chgEff: 99, vAlmHi: 14.4, vAlmLo: 11.9, socAlm: 10, absBase: 30, absMax: 45,  ovMeasMargin: 0.1 },
         agm:       { bulkV: 14.4, absV: 14.4, floatV: 13.6, durH: 8,    rebulkV: 12.5, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.2, limC: 1.00, cold: 0, peukert: 1.10, chgEff: 93, vAlmHi: 15.8, vAlmLo: 11.8, socAlm: 40, absBase: 60, absMax: 180, ovMeasMargin: 0.5 },
         lead_acid: { bulkV: 14.6, absV: 14.6, floatV: 13.4, durH: 8,    rebulkV: 12.4, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.3, limC: 0.20, cold: 0, peukert: 1.25, chgEff: 88, vAlmHi: 15.8, vAlmLo: 11.5, socAlm: 40, absBase: 90, absMax: 240, ovMeasMargin: 0.5 }
     }[type];
@@ -8378,13 +8451,20 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
     }
     rows.push({ param: 'ChargedVoltage', label: 'Max Charge Detection Voltage (V)', value: r2(T.chgDetV * kV) });
     rows.push({ param: 'TailCurrent', label: 'Max Charge Detection Tail Current (%)', value: T.tailPct });
-    // Lithium keeps the relative bulk + 0.5 V rung (BMS-disconnect cliff — stay tight). AGM/flooded
-    // get an absolute 16 V ceiling (class-scaled): lead-acid damage is time-integrated, indifferent
-    // to brief bounded spikes, so the cut protects the DC loads' published continuous ceilings
-    // instead of the battery. The INA228 hardware ALERT re-derives from this value for non-lithium
-    // (bulk + 0.3 for lithium) whenever BulkVoltage or AlternatorHardShutdownV is applied.
-    const hardSD = (type === 'lifepo4') ? (T.bulkV + 0.5) * kV : 16.0 * kV;
+    // Over-voltage ladder, chained top-down from the battery's BMS charge-disconnect voltage.
+    // Lithium: the hardware (INA228) rung sits 0.2 V x class below the surveyed BMS trip floor —
+    // BMS trips compare the HIGHEST cell while we regulate pack voltage, so the pack-referred
+    // margin must cover imbalance; the software instant cut rides 0.1 x class under it so software
+    // always acts before the electrical backstop. AGM/flooded: no BMS in the picture — lead-acid
+    // damage is time-integrated, indifferent to brief bounded spikes, so the ceiling protects the
+    // DC loads' published continuous ratings instead of the battery. The timed-tier trip lines
+    // ride 0.1/0.2 above each chemistry's shed margin (ovMeasMargin) — same relationship for all.
+    const hwLimit = ((type === 'lifepo4') ? 14.3 : 16.0) * kV;
+    const hardSD = hwLimit - 0.1 * kV;
+    rows.push({ param: 'VoltageHardwareLimit', label: 'Hardware Shutdown Voltage (V)', value: r2(hwLimit) });
     rows.push({ param: 'AlternatorHardShutdownV', label: 'Alternator Hard Shutdown Voltage (V)', value: r2(hardSD) });
+    rows.push({ param: 'OvTierLoMarginV', label: 'Timed OV Cut LOW — Margin Above Target (V)', value: r2(((type === 'lifepo4') ? 0.10 : 0.60) * kV) });
+    rows.push({ param: 'OvTierMidMarginV', label: 'Timed OV Cut MID — Margin Above Target (V)', value: r2(((type === 'lifepo4') ? 0.20 : 0.70) * kV) });
     rows.push({ param: 'OvMeasMarginV', label: 'Soft OV Trip Margin Above Target (V)', value: r2(T.ovMeasMargin * kV) });
     // Flat 20 A for every chemistry and bank size; commissioning later raises it to 40 A for lead-acid/AGM.
     rows.push({ param: 'IExcessCeilA', label: 'Over-Current Trip Ceiling (Alternator) (A)', value: 20 });
@@ -8443,7 +8523,18 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
     rows.push({ param: 'cvAlpha', label: 'Voltage Loop Aggressiveness (α)', value: isLfp ? 0.10 : 0.05 });
     rows.push({ param: 'CvKdTd', label: 'Voltage D Term — Derivative Time (s)', value: isLfp ? 0.42 : 0.85 });
     rows.push({ param: 'cvPiZero', label: 'Voltage Loop Ki/Kp Ratio (ρ)', value: 0.5 });
-    return { rows, useFloat };
+
+    // Context for BATTDEF_CHEM_COPY. Cell counts are per 12 V of nominal bus (lead-acid/AGM 6 × 2 V,
+    // LiFePO4 4 × 3.2 V), so × kV gives the real series count and every per-cell figure comes out
+    // identical on a 12/24/36/48 V bank. Trailing zeros are trimmed so 3.600 reads as 3.6.
+    const cellsPer12 = { lifepo4: 4, agm: 6, lead_acid: 6 }[type];
+    const perCell = v => v.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+    const copy = {
+        bulk: r2(T.bulkV * kV), hard: r2(hardSD), cells: cellsPer12 * kV,
+        bulkCell: perCell(T.bulkV / cellsPer12), hardCell: perCell(hardSD / (cellsPer12 * kV)),
+        delta: r2(hardSD - T.bulkV * kV), limA: C ? Math.min(r1(T.limC * C), 500) : 0
+    };
+    return { rows, useFloat, copy };
 }
 
 let _battDefResolve = null;
@@ -8530,19 +8621,17 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         } else if (type === 'lifepo4') {
             const tFrz = _tc ? '0 °C' : '32 °F';
             const t40 = _tc ? '4 °C' : '40 °F';
-            const tSelf = _tc ? 'about 5 °C' : 'about 10 °F';
             noticeHtml = battDefNotice('warn', 'Do not charge below freezing',
                     'Charging a lithium (LiFePO4) battery below freezing (' + tFrz + ') plates the cells and permanently damages them, and the battery\'s protection circuit (BMS) can disconnect to defend itself — if it opens while the alternator is charging, the sudden loss of load can spike system voltage and damage other electronics.')
                 + battDefNotice('limit', 'No battery temperature sensing yet',
-                    'The Cold-Charge Lockout (recommended on for lithium) stops charging when the regulator\'s own board temperature drops below about ' + t40 + ', but the board runs roughly ' + tSelf + ' warmer than its surroundings, so it is only a rough stand-in — a last-ditch safety net, not a guarantee. It is your responsibility to avoid charging whenever the battery may be below freezing; do not rely on the lockout alone. Battery temperature sensing is planned — to have it prioritized, email joe@xengineering.net.');
+                    'The Cold-Charge Lockout (recommended you turn this ON for lithium) stops charging when the regulator\'s own board temperature drops below about ' + t40 + ' — the best we can do for a proxy right now, if the regulator is installed in a similar environment as the batteries. It is your responsibility to avoid charging whenever the battery may be below freezing; do not rely on the lockout alone. Battery temperature sensing is planned — to have it prioritized, email joe@xengineering.net.');
         }
         if (type === 'lifepo4' && battSrc !== 0) {
             noticeHtml += battDefNotice('info', 'Float changed to No Float',
                 'Zero-current float needs the INA228 battery shunt as the Battery Current Source, so Float Mode is proposed as No Float (idle) instead.');
         }
         const chemCopy = (typeof BATTDEF_CHEM_COPY[type] === 'function')
-            ? BATTDEF_CHEM_COPY[type]((der.rows.find(row => row.param === 'BulkVoltage') || {}).value,
-                                      (der.rows.find(row => row.param === 'AlternatorHardShutdownV') || {}).value)
+            ? BATTDEF_CHEM_COPY[type](der.copy)
             : (BATTDEF_CHEM_COPY[type] || '');
         const sum = document.getElementById('battdef-summary');
         sum.innerHTML = '<p style="margin:0 0 10px;">Based on the bank (<b>' + _cfgEsc(typeName) + '</b>, ' + capTxt + vessel.battery_voltage + ' V), '
@@ -8620,55 +8709,44 @@ function _battDefSkipNote(txt) {
     md.innerHTML += '<br><span style="color:#e6a23c;">' + txt + '</span>';
 }
 
-// First-save chain only: between the vessel/battery-defaults banner and the next popup the page
-// sits idle on the device (SoC-seed poll, then the /exportConfig prefetch), which reads as a
-// finished save. Painting is delayed 600 ms so the common fast path never flashes the line, and a
-// tail swap at 12 s keeps a stalled chain from looking like a completed one.
-// While waiting the whole banner is taken over: green + "saved successfully" is exactly what makes
-// a wait line appended under it invisible, so the box turns teal and pulses, the wait line goes
-// FIRST, and the save result is demoted beneath it. Restored on clear.
+// First-save chain only: between two setup screens the page sits idle on the device (SoC-seed poll,
+// then the /exportConfig NVS walk, then the prerequisites write), which reads as a finished save.
+// A note on the Vessel Info banner is out of sight at the bottom of a long form, so the wait gets
+// its own black box in the same family as the screens on either side of it and the sequence never
+// goes blank. Painting is delayed 600 ms so the common fast path never flashes it; a tail swap at
+// 12 s turns the box amber and offers a close X so a stalled chain is not a trap.
 let _vesselWaitShowTimer = null;
 let _vesselWaitTailTimer = null;
-let _vesselWaitSavedStyle = null;   // banner's success/error colours, put back when the wait clears
-function vesselNextStepNote(on) {
+function vesselNextStepWait(on) {
     if (_vesselWaitShowTimer !== null) { clearTrackedTimeout(_vesselWaitShowTimer); _vesselWaitShowTimer = null; }
     if (_vesselWaitTailTimer !== null) { clearTrackedTimeout(_vesselWaitTailTimer); _vesselWaitTailTimer = null; }
-    const gone = document.getElementById('vessel-next-wait');
-    if (gone) gone.remove();
-    const back = document.getElementById('vessel-info-message');
-    if (back && _vesselWaitSavedStyle) {
-        back.classList.remove('vessel-wait-busy');
-        back.style.backgroundColor = _vesselWaitSavedStyle.bg;
-        back.style.color = _vesselWaitSavedStyle.fg;
-        _vesselWaitSavedStyle = null;
-    }
-    if (!on) return;
+    const ov = document.getElementById('nextstep-modal-overlay');
+    if (!ov) return;
+    if (!on) { ov.style.display = 'none'; return; }
     _vesselWaitShowTimer = setTrackedTimeout(() => {
         _vesselWaitShowTimer = null;
-        const md = document.getElementById('vessel-info-message');
-        if (!md) return;
-        md.style.display = 'block';
-        _vesselWaitSavedStyle = { bg: md.style.backgroundColor, fg: md.style.color };
-        md.style.backgroundColor = '#dff5f2';
-        md.style.color = '#0f5f58';
-        md.classList.add('vessel-wait-busy');
-        const el = document.createElement('div');
-        el.id = 'vessel-next-wait';
-        el.style.cssText = 'margin:0 0 8px; font-size:1.12em; font-weight:700; line-height:1.35;';
-        // currentColor: the banner's busy teal (or the amber it escalates to below), never a fixed blue
-        el.innerHTML = 'Loading the next step (up to 10 seconds). Stay on this page.'
-            + '<span style="margin-left:6px; white-space:nowrap;">'
-            + '<span class="cloud-loading-dot" style="background:currentColor; vertical-align:middle;"></span>'
-            + '<span class="cloud-loading-dot" style="background:currentColor; vertical-align:middle;"></span>'
-            + '<span class="cloud-loading-dot" style="background:currentColor; vertical-align:middle;"></span></span>';
-        md.insertBefore(el, md.firstChild);
+        const title = document.getElementById('nextstep-title');
+        const dots = document.getElementById('nextstep-dots');
+        const head = document.getElementById('nextstep-head');
+        const sub = document.getElementById('nextstep-sub');
+        const x = document.getElementById('nextstep-close-btn');
+        // Reset every escalated field: the same box is reused for each gap in the chain.
+        title.textContent = 'Loading the Next Step';
+        dots.style.color = '#35d6c7';
+        head.style.color = '#e8e8e8';
+        head.innerHTML = 'Setting up &mdash; the next screen opens by itself.';
+        sub.textContent = 'Regulator busy — wait a few seconds and stay on this page';
+        x.style.display = 'none';
+        ov.style.display = 'flex';
         _vesselWaitTailTimer = setTrackedTimeout(() => {
             _vesselWaitTailTimer = null;
-            const tail = document.getElementById('vessel-next-wait');
-            if (!tail) return;
-            const box = document.getElementById('vessel-info-message');
-            if (box) { box.style.backgroundColor = '#fdf3e3'; box.style.color = '#8a5a12'; }
-            tail.textContent = 'Still waiting on the regulator. If nothing opens in a few seconds, press Update Vessel Info again.';
+            title.textContent = 'Still Waiting on the Regulator';
+            dots.style.color = '#f0b86a';
+            head.style.color = '#f0b86a';
+            head.textContent = 'Still waiting on the regulator.';
+            sub.innerHTML = 'If nothing opens in a few more seconds, close this box and press '
+                + '<strong style="color:#ccc;">Update Vessel Info</strong> again to restart the sequence.';
+            x.style.display = '';
         }, 12000);
     }, 600);
 }
@@ -8688,6 +8766,7 @@ let _commPrepShuntPresent = 1;   // live shunt-present selection
 let _commPrepFloatInit = '';     // UseFloat at open (Other-only charge block); written only if the select changed
 let _commPrepRpmActive = false;  // deep-linked into the RPM editor from the wizard: suppress the live blue row highlight
 let _commPrepPrefetch = null;    // in-flight /exportConfig started during the SoC-seed wait, so the modal opens instantly
+let _commPrepFirstInstall = true; // false on a re-commission: different intro copy, and Next skips tach alignment
 
 const CP_BTN_GREEN = 'background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; border:none;';
 
@@ -8717,14 +8796,26 @@ function maintAckClose() {
     if (_maintAckResolve) { _maintAckResolve(); _maintAckResolve = null; }
 }
 
-async function maybeShowCommPrereqs() {
+// Pre-flight for EVERY commissioning run, not only the first. A re-commission needs the same
+// Charge-Limit Follow check and the same sensor settings confirmed before the wizard re-measures
+// the system; the values are simply already filled in. firstInstall also decides what Next hands
+// off to — tach alignment is a first-install-only screen.
+async function openCommPrereqs(firstInstall) {
+    _commPrepFirstInstall = !!firstInstall;
     try {
         if (!settingsUnlocked) syncArmState();  // same stale-mirror case as the battery-defaults popup
         const pre = _commPrepPrefetch; _commPrepPrefetch = null;
-        vesselNextStepNote(true);
+        vesselNextStepWait(true);
         const j = await (pre || commPrepFetchCfg());
-        vesselNextStepNote(false);
-        if (!j) { _battDefSkipNote('Could not read the current device settings, so the commissioning prerequisites screen was skipped. Those settings are all available under Setup.'); return; }
+        vesselNextStepWait(false);
+        if (!j) {
+            // First install the save chain simply carries on. A re-commission was a deliberate button
+            // press, so dead-ending here reads as a broken control — say so and run the rest of the flow.
+            if (firstInstall) { _battDefSkipNote('Could not read the current device settings, so the commissioning prerequisites screen was skipped. Those settings are all available under Setup.'); return; }
+            await xAlert('Could not read the current device settings, so the prerequisites screen was skipped. Check them under Setup if anything has changed since the last run.');
+            openRpmCap(openCommissionModal, null);
+            return;
+        }
         // Same response also carries the RPM cap tables the NEXT screen needs, so hand them over
         // rather than making openRpmCap re-fetch. The cap tables live in the "learning" namespace and
         // nothing this screen writes can touch them, so the snapshot cannot go stale in between.
@@ -8737,6 +8828,9 @@ async function maybeShowCommPrereqs() {
         diagLog('commissioning prerequisites failed:', e);
     }
 }
+
+// First install — the vessel-save chain awaits this one.
+function maybeShowCommPrereqs() { return openCommPrereqs(true); }
 
 function commPrepRender(cfg) {
     const numF = k => (cfg[k] !== undefined && cfg[k] !== '') ? parseFloat(cfg[k]) : NaN;
@@ -8765,9 +8859,20 @@ function commPrepRender(cfg) {
         '<div style="' + rowCss + '"><label style="' + lblCss + '">' + label + '</label>' +
         '<input id="' + id + '" type="number" step="' + step + '" min="' + min + '" max="' + max + '" value="' + val + '" style="' + inputCss + '"></div>';
 
+    // Charge-Limit Follow is only worth a word when it is actually on: commissioning must own the
+    // battery, and follow resumes the instant the wizard's heartbeat stops. Off already — say nothing.
+    const dvccNotice = (numF('dvccEn') === 1)
+        ? '<div id="commprep-dvcc" style="margin:0 0 14px; padding:11px 12px; background:rgba(230,162,60,0.06); border:1px solid rgba(230,162,60,0.32); border-radius:6px;">' +
+          '<div id="commprep-dvcc-copy" style="font-size:12px; line-height:1.5; color:#e6a23c; margin-bottom:9px;"><strong>Charge-Limit Follow is on.</strong> Commissioning must own the battery. Switch it off for the run, then turn it back on under Setup &gt; Integrations when you are done.</div>' +
+          '<button type="button" id="commprep-dvcc-btn" onclick="commPrepDvccOff()" class="btn-secondary" style="border-radius:5px; padding:6px 14px; cursor:pointer; font-size:0.85em;">Switch it off</button>' +
+          '</div>'
+        : '';
+
     const intro = '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;"><strong style="color:#e0e0e0;">Use a laptop or tablet if you can.</strong> Setup and Commissioning works on a phone, but it\'s a worse UX on a small screen.</p>' +
-        '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">A few things to set before commissioning measures your system. These affect how the regulator reads temperature and current. Anything you skip stays editable later under Setup.</p>' +
-        '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">During the wizard, keep house loads steady — avoid switching large loads on or off mid-run. If BMS charge-limit follow is enabled (Setup &gt; Integrations &gt; Charge-Limit Follow), switch it off first: commissioning must own the battery, and external limits are ignored while the wizard runs.</p>';
+        '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">' + (_commPrepFirstInstall
+            ? 'A few things to set before commissioning measures your system. These affect how the regulator reads temperature and current. Anything you skip stays editable later under Setup.'
+            : 'These are the settings commissioning measures against, filled in from the regulator. Confirm they still describe the system before the wizard re-measures it — anything you change here is written when you press Next.') + '</p>' +
+        '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">During the wizard, keep house loads steady — avoid switching large loads on or off mid-run.</p>' + dvccNotice;
 
     const seg = '<div style="' + rowCss + '"><label style="' + lblCss + '">Temperature Source</label>' +
         '<div class="cap-mode-toggle" style="background:rgba(255,255,255,0.07); border-color:#444;">' +
@@ -8816,6 +8921,7 @@ function commPrepRender(cfg) {
         '</div>' + hr +
         field('Battery Charge Current Limit (A)', 'commprep-battlim', raw('BattCurrentLimitA'), '5', '0', '500') + hr +
         field('Alternator Hard Shutdown Voltage (V)', 'commprep-hardsd', raw('AlternatorHardShutdownV'), '0.01', '1', '99') + hr +
+        field('Hardware Shutdown Voltage (V)', 'commprep-hwlim', raw('VoltageHardwareLimit'), '0.01', '10', '70') + hr +
         field('High Voltage Alarm (V)', 'commprep-valmhi', raw('VoltageAlarmHigh'), '0.01', '1', '99') + hr +
         field('Low Voltage Alarm (V)', 'commprep-valmlo', raw('VoltageAlarmLow'), '0.01', '1', '99') + hr
     ) : '';
@@ -8847,6 +8953,30 @@ function commPrepRender(cfg) {
     // Only inputs the user actually edits get written — snapshot their initial strings after render.
     _commPrepInit = {};
     document.querySelectorAll('#commprep-body input[type=number]').forEach(el => { _commPrepInit[el.id] = el.value; });
+}
+
+// Turns Charge-Limit Follow off from the prerequisites screen. Written immediately rather than
+// staged with the number fields: it must hold even if this screen is dismissed with ✕, and a
+// failure has to be visible before the run starts rather than silently skipped.
+async function commPrepDvccOff() {
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
+    const btn = document.getElementById('commprep-dvcc-btn');
+    const copy = document.getElementById('commprep-dvcc-copy');
+    const box = document.getElementById('commprep-dvcc');
+    if (btn) { btn.disabled = true; btn.textContent = 'Switching off...'; }
+    try {
+        const r = await fetchWithTimeout(buildURL('/get?dvccEn=0'), {}, 8000);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+    } catch (e) {
+        diagLog('charge-limit follow off failed:', e);
+        if (btn) { btn.disabled = false; btn.textContent = 'Switch it off'; }
+        if (copy) copy.innerHTML = '<strong>Could not reach the regulator.</strong> Try again, or switch Charge-Limit Follow off under Setup &gt; Integrations before starting.';
+        return;
+    }
+    if (_commPrepCfg) _commPrepCfg.dvccEn = '0';   // a re-render must not re-offer what is already done
+    if (box) { box.style.background = 'rgba(46,196,182,0.06)'; box.style.borderColor = 'rgba(46,196,182,0.32)'; }
+    if (copy) { copy.style.color = '#2ec4b6'; copy.style.marginBottom = '0'; copy.innerHTML = '<strong>Charge-Limit Follow is off.</strong> Turn it back on under Setup &gt; Integrations when commissioning is done.'; }
+    if (btn) btn.remove();
 }
 
 // Thermistor sub-fields (R_fixed / Beta / T0) reveal only when Thermistor is the source.
@@ -8900,6 +9030,7 @@ function commPrepCollectChanges() {
     rec('FloatVoltage', 'commprep-floatv', null);
     rec('FLOAT_DURATION', 'commprep-floatdur', null);
     rec('AlternatorHardShutdownV', 'commprep-hardsd', null);
+    rec('VoltageHardwareLimit', 'commprep-hwlim', null);
     rec('VoltageAlarmHigh', 'commprep-valmhi', null);
     rec('VoltageAlarmLow', 'commprep-valmlo', null);
     const ufSel = document.getElementById('commprep-usefloat');
@@ -8916,13 +9047,16 @@ async function commPrepFinish(start) {
     const changes = commPrepCollectChanges();
     _commPrepRpmActive = false;
     document.getElementById('commprep-modal-overlay').style.display = 'none';
+    if (start) vesselNextStepWait(true);   // the write below, then openRpmCap, run against a blank page
     if (changes.length && settingsUnlocked) {
         const url = '/get?' + changes.map(c => c.param + '=' + encodeURIComponent(c.value)).join('&');
         try { await fetchWithTimeout(buildURL(url), {}, 10000); } catch (e) { diagLog('prerequisites submit failed:', e); }
     }
     const r = _commPrereqResolve; _commPrereqResolve = null; if (r) r();
-    // first-install: Low/High charge-rate limits → tach alignment → wizard; ← Back reopens Prerequisites
-    if (start) openRpmCap(openRpmAlign, () => { document.getElementById('commprep-modal-overlay').style.display = 'flex'; });
+    // Both paths: Low/High charge-rate limits next, ← Back reopens this screen. Tach alignment is
+    // first-install only — RPMScalingFactor/PulleyRatio persist and stay editable under Setup ▸ Engine.
+    if (start) openRpmCap(_commPrepFirstInstall ? openRpmAlign : openCommissionModal,
+                          () => { document.getElementById('commprep-modal-overlay').style.display = 'flex'; });
 }
 
 // ✕ — dismiss without writing edits (mirrors the battdef Skip/✕).
@@ -8941,13 +9075,13 @@ function commPrepClose() {
 // in amps and cross-derived to kW at the live battery voltage for display and on save.
 let _rpmCap = null;         // { rpm:[10], lo:[10], hi:[10] (amps), unit:'amps'|'kw' }
 let _rpmCapNext = null;     // handoff after a Continue button: openRpmAlign (first install) or openCommissionModal (re-commission)
-let _rpmCapBack = null;     // ← Back target: reopen Prerequisites (first install), or null to hide Back (re-commission — no prior screen)
+let _rpmCapBack = null;     // ← Back target: reopen Prerequisites; null only when that screen was skipped
 let _rpmCapTablesPre = null; // tables handed over by the Prerequisites screen's /exportConfig; null → fetch our own
 
 async function openRpmCap(next, back) {
     _rpmCapNext = next || openRpmAlign;
     _rpmCapBack = back || null;
-    if (!settingsUnlocked) { _rpmCapNext(); return; }   // locked → can't write tables; skip ahead
+    if (!settingsUnlocked) { vesselNextStepWait(false); _rpmCapNext(); return; }   // locked → can't write tables; skip ahead
     let tables = _rpmCapTablesPre || {};
     _rpmCapTablesPre = null;   // one-shot: a ← Back and second Next re-reads from the device
     if (!Object.keys(tables).length) {
@@ -8964,6 +9098,7 @@ async function openRpmCap(next, back) {
         hi: Array.from({ length: 10 }, (_, i) => isFinite(hi[i]) ? hi[i] : 0),
         lo: Array.from({ length: 10 }, (_, i) => isFinite(lo[i]) ? lo[i] : 0)
     };
+    vesselNextStepWait(false);   // armed by commPrepFinish; the table read above was the last gap
     const backBtn = document.getElementById('rpmcap-back-btn');
     if (backBtn) backBtn.style.display = _rpmCapBack ? '' : 'none';
     const cta = document.getElementById('rpmcap-continue-btn');
@@ -8988,7 +9123,7 @@ function rpmCapRender() {
             '</tr>';
     }
     document.getElementById('rpmcap-body').innerHTML =
-        '<p style="font-size:15px;line-height:1.5;margin:0 0 12px;">Set a limit for the most charge current the alternator may produce at each engine speed. Fill in two columns: <strong>High</strong> is your system\'s full capability; <strong>Low</strong> is a gentler rate used for commissioning (recommend half of High).</p>' +
+        '<p style="font-size:15px;line-height:1.5;margin:0 0 12px;">Set a limit for the most charge current the alternator may produce at each engine speed. Fill in two columns: <strong>High</strong> is your system\'s full capability; <strong>Low</strong> is a gentler rate used for commissioning (recommend a third of High).</p>' +
         '<div style="display:flex; align-items:center; gap:10px; margin:0 0 12px;">' +
         '<span style="font-size:12px; color:#9cc;">Limit by</span>' +
         '<div class="cap-mode-toggle" style="background:rgba(255,255,255,0.07); border-color:#444;">' +
@@ -9059,7 +9194,7 @@ async function rpmCapContinue(mode) {
     document.getElementById('rpmcap-modal-overlay').style.display = 'none';
     (_rpmCapNext || openRpmAlign)();
 }
-// ← Back to the prior screen (the Prerequisites screen on first install; Back is hidden on re-commission).
+// ← Back to the Prerequisites screen, which now precedes this one on both the first install and a re-commission.
 function rpmCapBack() {
     document.getElementById('rpmcap-modal-overlay').style.display = 'none';
     if (_rpmCapBack) _rpmCapBack();
@@ -9730,6 +9865,8 @@ function fetchOvTelemetry() {
             put('ovtSwHardCount', d.sw_hard);
             put('ovtInaCount', d.ina);
             put('ovtKdCount', d.kd !== undefined ? d.kd : '—');
+            put('ovtTierLowCount', d.tier_low !== undefined ? d.tier_low : '—');
+            put('ovtTierMidCount', d.tier_mid !== undefined ? d.tier_mid : '—');
             if (!body) return;
             const fineW = d.fine_width_12v * d.k, coarseW = d.coarse_width_12v * d.k;
             const fineTop = d.bulk + d.bins_fine * fineW;
@@ -10650,6 +10787,8 @@ function fieldOffReasonText(reasonCode) {
         case 19: return 'field on but no alternator output — check field wiring, ON/OFF switch, or alternator (may be a false RPM signal)';
         case 20: return 'resting — solar forecast is strong (Defer to Solar)';
         case 21: return 'BMS on/off signal is withholding permission to charge';
+        case 22: return 'sustained overvoltage — timed cut (low tier)';
+        case 23: return 'sustained overvoltage — timed cut (mid tier)';
         // 0 NONE (transient), 11 MANUAL (shown as its own status word) — no OFF annotation
         default: return '';
     }
@@ -13898,8 +14037,10 @@ function submitSimpleParam(paramName, val, extra) {
 
 // System voltage (12/24/36/48 V) lives in Vessel Info (firmware global SYSTEM_VOLTAGE_CLASS) — the single source of truth.
 // When the user changes it and saves, /saveVesselInfo rescales the whole charge-voltage profile by
-// newV/oldV and re-derives the hard-shutdown trip. This warns first with an old→new preview (read
-// from the live echo values) and returns false if the user cancels, so the save can be aborted.
+// newV/oldV — the OV-ladder rungs (timed-tier margins, software hard shutdown, hardware shutdown)
+// scale x ratio like every other volt-domain setting (chain-preserving). This warns first with an
+// old→new preview (read from the live echo values) and returns false if the user cancels, so the
+// save can be aborted.
 // oldV/newV are 12/24/36/48; window._nominalStored holds the last-loaded class (set from the vessel fetch).
 async function confirmVoltageRescale(oldV, newV) {
     const ratio = newV / oldV;
@@ -13914,8 +14055,6 @@ async function confirmVoltageRescale(oldV, newV) {
         const o = getEchoNumber(echoId);
         return '  ' + label + ': ' + fmt(o) + ' → ' + fmt(o / ratio) + ' ' + unit;
     };
-    const newBulk = getEchoNumber('BulkVoltage_echo') * ratio;
-    const hardV = Number.isFinite(newBulk) ? newBulk + 0.5 * (newV / 12) : NaN;
     const msg = 'Changing system voltage from ' + oldV + 'V to ' + newV + 'V (×'
         + (ratio % 1 === 0 ? ratio : ratio.toFixed(2)) + ') will rescale your charge profile and '
         + 'write it to the device:\n\n'
@@ -13927,7 +14066,10 @@ async function confirmVoltageRescale(oldV, newV) {
         + line('Charged threshold', 'ChargedVoltage_echo') + '\n'
         + line('Voltage alarm high', 'VoltageAlarmHigh_echo') + '\n'
         + line('Voltage alarm low', 'VoltageAlarmLow_echo') + '\n'
-        + '  Hard-shutdown trip → ' + fmt(hardV) + ' V\n\n'
+        + line('Hard shutdown (software)', 'AlternatorHardShutdownV_echo') + '\n'
+        + line('Hardware shutdown (INA228)', 'VoltageHardwareLimit_echo') + '\n'
+        + line('Timed OV cut LOW margin', 'OvTierLoMarginV_echo') + '\n'
+        + line('Timed OV cut MID margin', 'OvTierMidMarginV_echo') + '\n\n'
         + 'These field-duty settings also rescale (inversely) so field current stays constant:\n'
         + dline('Max Field', 'MaxDuty_echo', '%') + '\n'
         + dline('Min Field', 'MinDuty_echo', '%') + '\n'
@@ -15841,6 +15983,8 @@ window.addEventListener("load", function () {
                 ["inaOVCountID", "inaOVCount"],
                 ["hardOCCountID", "hardOCCount"],
                 ["voltSpikeCountID", "voltSpikeCount"],
+                ["ovTierLowCountID", "ovTierLowCount"],
+                ["ovTierMidCountID", "ovTierMidCount"],
                 ["voltDisagreeCritCountID", "voltDisagreeCritCount"],
                 ["voltDisagreeWarnCountID", "voltDisagreeWarnCount"],
                 ["voltImplausibleCountID", "voltImplausibleCount"],
@@ -17636,6 +17780,29 @@ function goToAltHealthDisplay() {
     requestAnimationFrame(() => card.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 
+// Plots > Short Term with the current plot at the top: from the capture panel to the thing being
+// captured. showMainTab and showSubTab both reset scroll to 0, so this has to be queued behind them.
+function goToLivePlots() {
+    showMainTab('plots');
+    showSubTab('plots', 'displays');
+    const plot = document.getElementById('current-temp-plot');
+    if (!plot) return;
+    requestAnimationFrame(() => (plot.closest('.settings-card') || plot)
+        .scrollIntoView({ behavior: 'smooth', block: 'start' }));
+}
+
+// Reciprocal of the capture panel's plots shortcut: from the health readouts to the recorder and
+// sweeper. goToDiagSettings('c3') already queued a scroll to the whole C3 card on the next frame,
+// so this one waits a second frame or the card's scroll wins and the panel lands off-screen.
+function goToGateTuningCapture() {
+    goToDiagSettings('c3');
+    const sec = document.getElementById('altCapSection');
+    if (!sec) return;
+    sec.open = true;
+    requestAnimationFrame(() => requestAnimationFrame(
+        () => sec.scrollIntoView({ behavior: 'smooth', block: 'start' })));
+}
+
 // Frozen page response stuff
 function showRecoveryOptions() {
     // Don't show multiple recovery dialogs.
@@ -18481,6 +18648,33 @@ const SINFO = {
         ['Filter', 'averaging (EMA) sized from the commissioned plant response (~10–80 ms) — rejects belt-ripple crests; logged as ovFilt_V in the CV log'],
         ['Compared to', svTargetV()],
     ],
+    ovTierLo: () => [
+        ['Signal', 'filtered battery voltage vs ' + svv('OvTierLoMarginV_echo', 'V') + ' above target — the same filtered signal Group 2 sheds on'],
+        ['Source', S_INA_V],
+        ['Filter', 'averaging (EMA) sized from the commissioned plant response (~10–80 ms) — a ripple crest dipping back under the line resets the clock instead of accumulating'],
+        ['Trips', 'after ' + svv('OvTierLoDwellMs_echo', 'ms') + ' continuously above the line (0 disables the tier); the proportional shed gets that whole window to resolve the excursion first'],
+        ['Action', 'immediate field cut, with the same escalating re-enable lockout as the instant overvoltage cut'],
+        ['Compared to', svTargetV()],
+    ],
+    ovTierMid: () => [
+        ['Signal', 'filtered battery voltage vs ' + svv('OvTierMidMarginV_echo', 'V') + ' above target'],
+        ['Source', S_INA_V],
+        ['Filter', 'averaging (EMA) sized from the commissioned plant response (~10–80 ms)'],
+        ['Trips', 'after ' + svv('OvTierMidDwellMs_echo', 'ms') + ' continuously above the line (0 disables the tier) — a faster response to a larger excursion than the low tier'],
+        ['Action', 'immediate field cut, with the same escalating re-enable lockout as the instant overvoltage cut'],
+        ['Compared to', svTargetV()],
+    ],
+    hardShutdownV: () => [
+        ['Signal', 'raw per-tick battery voltage vs the absolute ceiling ' + svv('AlternatorHardShutdownV_echo', 'V')],
+        ['Source', S_INA_V + ', unfiltered'],
+        ['Filter', 'none — raw per-tick, armed in every mode including manual; catches fast excursions the filtered tiers ride through'],
+        ['Set', '0.1 V (× system-voltage class / 12) below the Hardware Shutdown Voltage, so software always acts before the hardware backstop'],
+    ],
+    hwShutdownV: () => [
+        ['Signal', 'battery voltage averaged inside the shunt monitor chip (INA228) vs its programmed limit ' + svv('VoltageHardwareLimit_echo', 'V')],
+        ['Action', 'the chip’s alert pin cuts the field electrically, with no processor involvement — the backstop if software ever hangs. Should never be the rung that fires'],
+        ['Set', '0.2 V (× system-voltage class / 12) below your battery’s BMS charge-disconnect voltage (its highest-cell trip voltage × cell count); for lead-acid and AGM, where connected DC equipment becomes the limiting factor'],
+    ],
     // ── CV Tuning: voltage D term (rate-of-rise damping, pre-protection) ──
     cvKd: () => [
         ['Signal', 'rate of rise of the smoothed battery voltage — the per-tick slope of the Voltage-sensor-filtered signal; logged as cvDSlope_Vps in the CV log'],
@@ -18498,14 +18692,14 @@ const SINFO = {
     ],
     ovtSwHard: () => [
         ['Signal', 'raw per-tick battery voltage vs the hard-shutdown ceiling (AlternatorHardShutdownV) = ' + svv('AlternatorHardShutdownV_echo', 'V')],
-        ['Action', 'instant field cut plus an escalating re-enable delay (adaptive lockout). Compares the unfiltered per-tick sample, so it catches fast excursions the averaged hardware comparator below cannot see'],
+        ['Action', 'instant field cut plus an escalating re-enable delay (adaptive lockout). Compares the unfiltered per-tick sample, armed in every mode — and its threshold sits below the hardware comparator, so software always gets first shot'],
         ['Counts', 'each cut (rising edge), lifetime — survives restarts; the Protections tab twin is per-session'],
         ['Sources', 'counts bus-voltage excursions from any charge source (alternator, solar, shore), not just the alternator'],
     ],
     ovtIna: () => [
-        ['Signal', 'battery voltage averaged over ~1 s inside the shunt monitor chip (INA228, 128-sample SLOW_ALERT) vs its own hardware limit'],
-        ['Action', 'the chip’s alert pin cuts the field electrically, with no processor involvement — the backstop if software hangs. The trip latches in the chip (BUSOL bit) and firmware polls it every 250 ms, so no trip is missed'],
-        ['Counts', 'each hardware trip (rising edge), lifetime. The software cut above should always act first — a nonzero count here means software failed to protect: a red flag worth reporting'],
+        ['Signal', 'battery voltage averaged inside the shunt monitor chip (INA228 SLOW_ALERT — a few ms in the fast charging mode) vs the Hardware Shutdown Voltage'],
+        ['Action', 'the chip’s alert pin cuts the field electrically, with no processor involvement — the backstop if software hangs. Sustained trips are latched by firmware; a pin blip that clears before the 250 ms status poll still cuts the field but may not be logged'],
+        ['Counts', 'each logged hardware trip (rising edge), lifetime. Its threshold sits above every software rung, so software should always act first — a nonzero count here means software failed to protect: a red flag worth reporting'],
         ['Sources', 'any charge source can push the bus voltage here — alternator, solar, or shore'],
     ],
     iexG3: () => [
@@ -18557,6 +18751,7 @@ const SINFO = {
         ['Signal', 'rate-of-change of battery current, computed on every new sample'],
         ['Source', S_INA_I],
         ['Filter', 'none — raw per-sample derivative (a filtered edge would be missed)'],
+        ['Trips', 'when a tier’s set number of consecutive samples all exceed its threshold — time to act = samples × the ~5 ms sampling interval; a single sample below resets that tier’s run'],
         ['Armed', 'whenever charging with fast battery reads — even when test protections are disabled; only the Group 5 Enable toggle disarms it'],    ],
     // ── Protections: Response ──
     KHard: () => [
@@ -21546,10 +21741,12 @@ function applyClassScaledInputAttrs() {
     // 36V is the first class where k (=3) isn't a power of two: raw products pick up float dust
     // (0.05*3 = 0.15000000000000002) and 1/k is non-terminating, so round to 6 decimals.
     const r = x => String(Math.round(x * 1e6) / 1e6);
-    const md = document.querySelector('input[name="MinDuty"]');
+    // querySelectorAll, not querySelector: Min Field % is duplicated into the Gate Tuning Capture
+    // panel, and a box left on the 12V step blocks its own Set with a stepMismatch.
+    const mdStep = (k === 3) ? 'any' : r(1 / k);
     // At 36V, 1/k = 1/3 never terminates, so ANY finite step makes typed round values (e.g. 1)
     // a stepMismatch and the native form submit blocks the Set — step-free is the only correct attr.
-    if (md) md.step = (k === 3) ? 'any' : r(1 / k);
+    document.querySelectorAll('input[name="MinDuty"]').forEach(md => { md.step = mdStep; });
     const cw = document.querySelector('input[name="cvWaveAmplitudeV"]');
     if (cw) { cw.min = r(0.05 * k); cw.max = r(2.0 * k); cw.step = r(0.05 * k); }
     // Sweep turnaround volt margin: volt-domain, so its default and ceiling are 12V values. Prefill
@@ -21558,7 +21755,7 @@ function applyClassScaledInputAttrs() {
     const smv = document.getElementById('altsweep-margin-v');
     if (smv) {
         smv.max = r(2 * k);
-        if (k !== 1 && smv.value === '0.15' && document.activeElement !== smv) smv.value = r(0.15 * k);
+        if (k !== 1 && smv.value === '0.20' && !smv.dataset.userSet && document.activeElement !== smv) smv.value = r(0.20 * k);
     }
     // D-term deadband + slope ceiling (V/s), arm window (V), target ramp rates (V/s) and the
     // wind-down stop margin (V) are WYSIWYG per-bus (scale ×class), so their input bounds must
@@ -23036,7 +23233,7 @@ function commissionPrimaryAction() {
     if (intent.disabled) return;
     if (intent.action === 'restart') commissionClearAndRestart();
     else if (intent.action === 'finish') commissionCommitUncommitted();
-    else openRpmCap(openCommissionModal, null);   // re-commission: Low/High limits + pick mode, then the wizard (no tach align)
+    else openCommPrereqs(false);   // re-commission: same pre-flight as a first install, minus tach alignment
 }
 // Commit a completed-but-uncommitted run: every step is done but Finish never fired (wizard closed
 // at the end, or the network dropped between the last step and Finish). Sends commissionDone=1 to
@@ -23301,15 +23498,15 @@ function cxVerifyParams() {
   return { floor, amp, fStart: fStart.toFixed(2), fEnd: fEnd.toFixed(1), cycles: 2 };
 }
 
-// Bring the dashboard tab the user should be watching into view. Called from the field-action
-// buttons (NOT on phase entry — advancing with "Next →" leaves the tab put), so the test is
-// on-screen the moment the field moves:
+// Bring the dashboard tab the user should be watching into view — on phase entry and again when a
+// field-action button fires, so the test is on-screen the moment the field moves:
 //   open-loop ramp / open-loop sine / disturbance creep / validation hold → Plots ▸ Short Term
 //   closed-loop sine-sweep verify                                          → Tuning ▸ Current
+// Switching the tab is all it does when the page is already there — pressing Run on a step whose
+// tab is already up moves nothing, so the same tab is never scrolled twice.
 function cxShowTab(main, sub) {
   try {
     // The wizard panel floats over the page — the tab's live plot sits below the fold behind it.
-    // Scroll the relevant first plot into view so the user can watch the run without hunting for it.
     const firstPlot = { 'plots|displays': 'current-temp-plot', 'tuning|current': 'pid-tuning-plot', 'tuning|voltage': 'cv-tuning-plot' }[main + '|' + sub];
     const el = firstPlot ? document.getElementById(firstPlot) : null;
     // Laid out => its main tab, sub-tab and (for Tuning) alt-panel are ALL already the active ones.
@@ -23318,17 +23515,15 @@ function cxShowTab(main, sub) {
     // calls this twice per held speed (onset sweep, then the drain run auto-starts), so that
     // top-and-back-down lurch happened six times in a row.
     const showing = !!el && el.offsetParent !== null;
-    if (!showing) {
-      if (main === 'tuning') { goToTuning(sub); }   // #tuning is an alt-panel, not a main tab
-      else { showMainTab(main); showSubTab(main, sub); }
-    }
+    if (showing) return;   // right tab already up — never move the page the user placed
+    if (main === 'tuning') { goToTuning(sub); }   // #tuning is an alt-panel, not a main tab
+    else { showMainTab(main); showSubTab(main, sub); }
+    // Only a real tab CHANGE scrolls, and it has to: showSubTab/showTuningPanel just slammed the
+    // page to the top, so the plot has to be pulled back down or it sits below the fold. Instant,
+    // not smooth — a fresh tab landing at its plot reads as placement; an animated glide down from
+    // the top reads as the page lurching under you.
     if (el) requestAnimationFrame(() => {
-      try {
-        // Already usably on-screen — leave the page where the user put it.
-        const r = el.getBoundingClientRect();
-        if (r.top >= 0 && r.top <= window.innerHeight * 0.6) return;
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      } catch (e) { }
+      try { el.scrollIntoView({ block: 'start' }); } catch (e) { }
     });
   } catch (e) { /* tab not present — non-fatal */ }
 }
@@ -23416,9 +23611,9 @@ function closeCommissionModal() {
 }
 
 // Background page plot each phase should reveal on entry, by phase index. cxShowTab switches the tab
-// AND scrolls its first plot into view, so the relevant live graph is on-screen the instant the step
-// opens — not only once its Run button is pressed. Fault Threshold (5) draws its plots inside the
-// modal, so it (and any unlisted phase) keeps whatever tab is showing.
+// (and scrolls its first plot into view only when the tab actually changed), so the relevant live
+// graph is on-screen the instant the step opens — not only once its Run button is pressed. Fault
+// Threshold (5) draws its plots inside the modal, so it (and any unlisted phase) keeps the tab up.
 const CX_PHASE_TAB = { 0: ['plots', 'displays'], 1: ['plots', 'displays'], 2: ['plots', 'displays'], 3: ['tuning', 'current'], 4: ['plots', 'displays'], 6: ['plots', 'displays'], 7: ['plots', 'displays'], 8: ['plots', 'displays'] };
 
 function cxGoto(phase) {
@@ -23642,16 +23837,16 @@ function rpmAlignRender() {
           '<span style="font-size:13px; color:#888;">Regulator RPM</span>' +
           '<strong id="cx-rpma-rpm" style="color:#2ec4b6; font-size:22px;">—</strong>' +
         '</div>' +
+        '<label style="display:block; font-size:14px; font-weight:600; margin-bottom:5px;">Pulley ratio (alternator to engine)</label>' +
+        '<p style="font-size:12px; color:#9a9a9a; line-height:1.5; margin:0 0 8px;">Estimate the crankshaft pulley diameter divided by the alternator pulley diameter. A ruler measurement is fine.</p>' +
+        '<input type="number" id="cx-rpma-pr" step="0.01" min="0" value="' + prVal.toFixed(2) + '" onchange="cxRpmAlignWritePr()" style="width:100%; background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:7px 10px; font-size:14px; box-sizing:border-box;">' +
+        '<hr style="border:none; border-top:1px solid #2c2c2c; margin:14px 0;">' +
         '<label style="display:block; font-size:14px; font-weight:600; margin-bottom:5px;">Scaling factor</label>' +
         '<p style="font-size:12px; color:#9a9a9a; line-height:1.5; margin:0 0 8px;">Accounts for things like the number of electrical poles in the alternator. Adjust it until the Regulator RPM above matches your tachometer.</p>' +
         '<div style="display:flex; align-items:center; gap:12px; margin-bottom:2px;">' +
           '<input type="range" id="cx-rpma-sf-slider" min="200" max="3000" step="1" value="' + sliderVal + '" oninput="cxRpmAlignSlider(this.value)" onchange="cxRpmAlignWriteSf()" style="flex:1; accent-color:#14b8af;">' +
           '<input type="number" id="cx-rpma-sf-num" step="1" min="1" value="' + sfVal + '" oninput="cxRpmAlignNum(this.value)" onchange="cxRpmAlignWriteSf()" style="width:96px; background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:7px 10px; font-size:14px; box-sizing:border-box;">' +
-        '</div>' +
-        '<hr style="border:none; border-top:1px solid #2c2c2c; margin:14px 0;">' +
-        '<label style="display:block; font-size:14px; font-weight:600; margin-bottom:5px;">Pulley ratio (alternator to engine)</label>' +
-        '<p style="font-size:12px; color:#9a9a9a; line-height:1.5; margin:0 0 8px;">Estimate the crankshaft pulley diameter divided by the alternator pulley diameter. A ruler measurement is fine.</p>' +
-        '<input type="number" id="cx-rpma-pr" step="0.01" min="0" value="' + prVal.toFixed(2) + '" onchange="cxRpmAlignWritePr()" style="width:100%; background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:7px 10px; font-size:14px; box-sizing:border-box;">';
+        '</div>';
     cxRpmAlignRefresh();
 }
 // iOS WebKit never focuses a range input during a touch drag, so the activeElement guard in
@@ -23815,6 +24010,8 @@ function cxCutCauseText(code) {
         case 19: return 'the field being driven with no alternator output';
         case 20: return 'Defer to Solar resting the alternator on a strong solar forecast';
         case 21: return 'the BMS on/off signal withholding permission to charge';
+        case 22:
+        case 23: return 'sustained over-voltage protection (timed cut)';
         default: return '';
     }
 }
@@ -23825,9 +24022,10 @@ const CX_CUT_NAME_TO_CODE = {
     'VOLT_IMPLAUSIBLE': 5, 'VOLT_DISAGREE_CRIT': 6, 'VOLT_SPIKE': 7, 'VOLT_DISAGREE_WARN': 8,
     'LOCKOUT': 9, 'DISABLED': 10, 'MANUAL': 11, 'INA228 hardware overvoltage': 12,
     'HARD_OVERCURRENT': 13, 'RPM_TOO_LOW': 14, 'CURRENT_STALE': 15, 'FAST_OVERVOLTAGE': 16,
-    'Battery too cold to charge': 17, 'TACH_IMPLAUSIBLE': 19, 'SOLAR_PAUSE': 20, 'BMS_OFF': 21
+    'Battery too cold to charge': 17, 'TACH_IMPLAUSIBLE': 19, 'SOLAR_PAUSE': 20, 'BMS_OFF': 21,
+    'OV_TIER_LOW': 22, 'OV_TIER_MID': 23
 };
-function cxCutIsOv(code) { return code === 7 || code === 12 || code === 16; }
+function cxCutIsOv(code) { return code === 7 || code === 12 || code === 16 || code === 22 || code === 23; }
 
 // The saturation ramp climbs open-loop until output reaches the current limit for the held RPM in
 // the active cap table, so on a nearly-full bank the voltage ceiling arrives first. Both remedies
@@ -26984,7 +27182,7 @@ const CX_HELPFUL_HINTS_HTML =
       '<li style="margin-bottom:7px;"><strong style="color:#2ec4b6;">Client Mode:</strong> low-power doze is automatically woken when you open the App interface.</li>' +
       '<li><strong style="color:#2ec4b6;">AP (Hotspot) Mode:</strong> WiFi shuts down 30 minutes after last use. Wake up with the WiFi Wake button (5 minute increments) or Ignition On.</li>' +
       '</ul></li>' +
-    '<li style="margin-bottom:0; color:#2ec4b6; font-weight:600;">You should at this time take a few minutes to explore the whole interface tab by tab. There are many non-critical settings not touched by Commissioning / the recommendation tools which you should sanity check and be aware of. Click the tooltips for more info.</li>' +
+    '<li style="margin-bottom:0; color:#2ec4b6; font-weight:600;">After clicking Done, take a few minutes to explore the rest of the interface, tab by tab. There are many other settings not touched by Commissioning / the recommendation tools which you should sanity check and be aware of.</li>' +
     '</ul>';
 // Terminal Helpful Hints page, drawn into the commissioning modal body after Finish. No per-phase
 // poll or RPM strip (the run is over); the abort row is hidden so it can't revert the saved tune.
@@ -27227,7 +27425,7 @@ async function commissionClearAndRestart() {
         // done-mask back (CSV3 is event-driven, so that lag is user-visible).
         cxLastState = 0; cxLastPhase = 0; cxLastMask = 0; cxLastManual = 0;
         renderCommissionStatus(0, 0, 0, 0);
-        openRpmCap(openCommissionModal, null);   // re-commission: Low/High limits + mode first, then reopen fresh at Prep
+        openCommPrereqs(false);   // re-commission: prerequisites → Low/High limits → wizard, reopened fresh at Prep
     }).catch(e => xAlert('Clear failed: ' + e));
 }
 
@@ -27332,7 +27530,7 @@ window.addEventListener('load', function () {
   let activeFilter = 'all';
 
   function applyFilter() {
-    panel.querySelectorAll('.protections-param').forEach(card => {
+    panel.querySelectorAll('.protections-param, .protections-subhead').forEach(card => {
       const groups = (card.dataset.groups || '').split(/\s+/).filter(Boolean);
       const show = (activeFilter === 'all') || groups.includes(activeFilter);
       card.style.display = show ? '' : 'none';
