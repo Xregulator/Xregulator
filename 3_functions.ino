@@ -1534,13 +1534,11 @@ h1{color:#333;margin-bottom:1rem;font-size:24px}
   Serial.println("Landing page ready");
 }
 
+// Re-entrant on purpose. Engine-off standby powers the radio all the way down
+// (enterLowPowerStandby -> WiFi.mode(WIFI_OFF)) to save standby draw, so ignition-on and the GPIO5
+// wake button have to be able to raise the softAP again. A one-shot guard here left the radio off
+// until a reboot. Only the mDNS start below stays one-shot.
 void setupAccessPoint() {
-  static bool apInitialized = false;
-  if (apInitialized) {
-    Serial.println("setupAccessPoint() already initialized - skipping");
-    return;
-  }
-  apInitialized = true;
   Serial.println("=== SETTING UP ACCESS POINT ===");
   Serial.println("Using SSID: '" + esp32_ap_ssid + "'");
   Serial.println("Using password: [" + String(esp32_ap_password.length()) + " chars]");
@@ -1564,6 +1562,7 @@ void setupAccessPoint() {
     // Start DNS server for captive portal
     IPAddress apIP = WiFi.softAPIP();
     Serial.println("AP IP before DNS start: " + apIP.toString());
+    dnsServer.stop();  // on an AP restart the old socket is bound to a netif WIFI_OFF destroyed
     bool dnsStarted = dnsServer.start(DNS_PORT, "*", apIP);
     Serial.println("DNS server start result: " + String(dnsStarted));
     Serial.println("DNS server started for captive portal");
