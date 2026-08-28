@@ -4525,17 +4525,43 @@ void setupServer() {
         if (ripGameFill || ripTabPendingWipe) { ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true; }
         testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
         bool reverted = commissionRestore();  // revert every setting to the Phase-0 snapshot
-        commissionSetState(0);                // NOT_COMMISSIONED
-        commissionSetPhase(0);                // clear checklist progress
-        commissionDoneMask = 0;               // revert also drops all per-stage completion
-        commissionWriteDoneMask();
-        commissionManualMask = 0;             // …and all hand-set flags
-        commissionWriteManualMask();
+        // Bookkeeping goes back to the pre-run record (a device that was COMMISSIONED before a targeted
+        // redo is commissioned again — its tune just came back). No record (runs started on older
+        // firmware, or Clear-and-restart on a committed device) → everything clears, as before.
+        if (!commissionRestorePreRun()) {
+          commissionSetState(0);                // NOT_COMMISSIONED
+          commissionSetPhase(0);                // clear checklist progress
+          commissionDoneMask = 0;               // revert also drops all per-stage completion
+          commissionWriteDoneMask();
+          commissionManualMask = 0;             // …and all hand-set flags
+          commissionWriteManualMask();
+        }
         settingRemove(NK_commissionStepSnap); // teardown: no interrupted step to revert on next boot
         settingsDirty = true;
         queueConsoleMessageF("Commissioning: aborted — %s",
                              reverted ? "settings reverted to the pre-commissioning snapshot"
                                       : "no usable pre-state snapshot, settings left as they are");
+      }
+    }
+    // Stop for now: keep every finished step (done marks, applied values, origin snapshot) and undo only
+    // the step in progress, exactly what a reboot mid-wizard does. State stays IN_PROGRESS so the tab
+    // offers Continue; the origin snapshot stays so a later Abort / Clear-and-restart can still fully revert.
+    if (request->hasParam("commissionStop")) {
+      foundParameter = true;
+      if (cxStartPersistFreshPending()) {
+        cxStartPersistCancel();  // a fresh Start still staging never began: exact pre-click teardown
+        settingsDirty = true;
+        queueConsoleMessage("Commissioning: stopped before the restore point was saved — nothing changed");
+      } else {
+        cxStartPersistCancel();  // a resume raced the worker: stop its bookkeeping writes — the original snapshot is intact
+        faCommissionGate = false;
+        if (ripGameFill || ripTabPendingWipe) { ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true; }
+        testProtectionsEnabled = commissionProtBackup;
+        bool undone = false;
+        if (commissionState == 1 && settingExists(NK_commissionStepSnap)) undone = commissionRestoreScalars(NK_commissionStepSnap);
+        settingRemove(NK_commissionStepSnap);
+        settingsDirty = true;
+        queueConsoleMessageF("Commissioning: stopped — finished steps kept%s", undone ? ", the step in progress was undone" : "");
       }
     }
     if (request->hasParam("commissionDone")) {
@@ -4545,6 +4571,7 @@ void setupServer() {
       if (ripGameFill || ripTabPendingWipe) { ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true; }
       testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
       settingRemove(NK_commissionSnap);     // commit the new tune (no snapshot ⇒ reboot won't revert)
+      settingRemove(NK_commissionPreRun);   // the run is committed — nothing to abort back to
       settingRemove(NK_commissionStepSnap); // run over: drop the in-flight step baseline too
       commissionClearMinPctBackup();        // discard the Min% backup too — the new floors stay
       commissionRecomputeState();           // COMMISSIONED if every required stage done (stress test optional), else IN_PROGRESS (partial)

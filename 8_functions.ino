@@ -1062,6 +1062,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "cxLedgerSeq", NK_cxLedgerSeq, 3 },
   { "commissionSnap", NK_commissionSnap, 3 },
   { "commissionStepSnap", NK_commissionStepSnap, 3 },
+  { "commissionPreRun", NK_commissionPreRun, 3 },
   { "cvStressLast", NK_cvStressLast, 3 },
   { "faCalGain", NK_faCalGain, 3 },
   { "faCalOffA", NK_faCalOffA, 3 },

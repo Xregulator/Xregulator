@@ -3040,8 +3040,11 @@ void AdjustFieldLearnMode() {
   // An automated/guided test owns the limiters while it runs — the four user-facing limiter toggles
   // go inert so a stray user setting can't ruin a commissioning/health measurement (each test carries
   // its own built-in slew behavior). NOT bare TuningMode/CVTuningMode — those are the manual study tabs
-  // where the toggles are meant to be live.
-  g_autoTestActive = (commissionState == 1) || batteryHealthTestActive || resTestActive || cvPlantFitActive || (systemIDActive != 0) || (fieldCutActive != 0) || cvStressActive || (protTestActive != 0);
+  // where the toggles are meant to be live. Commissioning counts only while the wizard dialog is open
+  // (cxOwnsBatteryNow: IN_PROGRESS + fresh heartbeat), NOT on the bare state byte: a run stopped for
+  // days keeps state==1, and on the bare byte it also kept the maintenance-reboot ladder, the CV
+  // wind-down governor and the limiter toggles frozen the whole time.
+  g_autoTestActive = cxOwnsBatteryNow() || (fieldCurveActive != 0) || batteryHealthTestActive || resTestActive || cvPlantFitActive || (systemIDActive != 0) || (fieldCutActive != 0) || cvStressActive || (protTestActive != 0);
 
   // ========== DETERMINE GOVERNOR MODE ==========
   govMode = GOV_NORMAL_SLEW;
@@ -8078,8 +8081,9 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
 
   // Suppress the warmup margin during commissioning/tuning: those toggle the field/TuningMode,
   // re-seeding the slope buffer, so the margin would step the setpoint and derate mid-test.
-  // Hard trips (warning ramp, critical cut) are NOT gated by this.
-  const bool suppressWarmupMargin = (commissionState == 1) || (TuningMode != 0);
+  // Hard trips (warning ramp, critical cut) are NOT gated by this. Commissioning = wizard dialog
+  // open (heartbeat-fresh), not the bare state byte — a stopped run must not derate-exempt for days.
+  const bool suppressWarmupMargin = cxOwnsBatteryNow() || (TuningMode != 0);
 
   if (!tempPIDActive) {
 

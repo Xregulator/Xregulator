@@ -15298,7 +15298,10 @@
         </div>
         <div id="commission-body" style="font-size:0.92em; line-height:1.5; color:#ddd;"></div>
         <div id="commission-abort-row" style="margin-top:16px; padding-top:10px; border-top:1px solid #333; display:none;">
-          <button onclick="commissionAbort()" class="btn-danger-ghost btn-sm" style="width:100%;">Abort and revert all</button>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button onclick="commissionStop()" class="btn-secondary btn-sm" style="flex:1 1 160px;" title="Keep every finished step. The step in progress is discarded and runs again when you continue.">Stop — keep finished steps</button>
+            <button onclick="commissionAbort()" class="btn-danger-ghost btn-sm" style="flex:1 1 160px;" title="Put every setting back to how it was before this run started. Steps finished during this run are discarded.">Abort and revert all</button>
+          </div>
         </div>
       </div>
     </div>

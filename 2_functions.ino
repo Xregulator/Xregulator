@@ -399,6 +399,7 @@ bool fsRemove(const char *path) {
 #define NK_commissionManualMask "commissnManMsk" // per-stage set-by-hand bitmask (skip / mark-done-manually)
 #define NK_commissionSnap "commissnSnap"      // Phase-0 origin snapshot (explicit-abort full revert): positional CSV of the settings the flow writes
 #define NK_commissionStepSnap "commissnStepSnp" // in-flight step snapshot: scalars as of the current step's entry — reboot undoes only that step
+#define NK_commissionPreRun "commissnPreRun"    // "state,phase,doneMask,manualMask" as of a fresh Start — Abort restores it so a device commissioned before the run stays commissioned
 #define NK_cxLedgerSeq "cxLedgerSeq"          // commissioning-ledger monotonic event counter (persisted at flush; cloud dedupes on device_uid+seq)
 #define NK_cvStressLast "cvStressLast"        // last CV stress-test result (positional CSV, ver-prefixed); diagnostic record, not a tune input
 #define NK_T0_C "T0_C"
@@ -792,6 +793,25 @@ bool commissionRestore() {
   return ok;
 }
 
+// Put the lifecycle bookkeeping back to exactly what it was before the run that is being aborted
+// (written by the deferred Start worker on every fresh Start). Returns false when no record exists —
+// the caller then falls back to the legacy zeroing.
+bool commissionRestorePreRun() {
+  if (!settingExists(NK_commissionPreRun)) return false;
+  String s = settingRead(NK_commissionPreRun);
+  int st = 0, ph = 0, dm = 0, mm = 0;
+  int n = sscanf(s.c_str(), "%d,%d,%d,%d", &st, &ph, &dm, &mm);
+  settingRemove(NK_commissionPreRun);
+  if (n != 4 || st < 0 || st > 2) return false;
+  commissionSetState((uint8_t)st);
+  commissionSetPhase((uint8_t)ph);
+  commissionDoneMask = (uint16_t)dm;
+  commissionWriteDoneMask();
+  commissionManualMask = (uint16_t)mm;
+  commissionWriteManualMask();
+  return true;
+}
+
 // Persist the commissioning state byte (0=not / 1=in-progress / 2=commissioned).
 void commissionSetState(uint8_t st) {
   commissionState = st;
@@ -938,9 +958,9 @@ static float cxStartMinDuty[RPM_TABLE_SIZE], cxStartKneeFloor[RPM_TABLE_SIZE], c
 static bool  cxStartKneeFrozen[RPM_TABLE_SIZE];
 static float cxStartKneeFitA;
 static bool  cxStartResume;         // resuming a live run: origin snapshot + Min% backup kept from the original Start
-static uint8_t  cxStartPrevPhase;   // pre-click wizard bookkeeping, restored exactly if a fresh
-static uint16_t cxStartPrevDoneMask, cxStartPrevManualMask;  // still-pending Start is cancelled
-volatile uint8_t cxStartPersistStep = 0;  // 0 = idle; 1..6 = next write to retire
+static uint8_t  cxStartPrevState, cxStartPrevPhase;   // pre-click wizard bookkeeping, restored exactly if a fresh
+static uint16_t cxStartPrevDoneMask, cxStartPrevManualMask;  // still-pending Start is cancelled; also persisted as NK_commissionPreRun for Abort
+volatile uint8_t cxStartPersistStep = 0;  // 0 = idle; 1..7 = next write to retire
 volatile bool cxStartPersistFail = false; // restore-point write refused → start cancelled
 
 void cxStartPersistBegin(bool resuming) {
@@ -954,6 +974,7 @@ void cxStartPersistBegin(bool resuming) {
   memcpy(cxStartKneeKnee, kneeKnee, sizeof(cxStartKneeKnee));
   memcpy(cxStartKneeFrozen, kneeFrozen, sizeof(cxStartKneeFrozen));
   cxStartKneeFitA = kneeFitA;
+  cxStartPrevState = commissionState;
   cxStartPrevPhase = commissionPhase;
   cxStartPrevDoneMask = commissionDoneMask;
   cxStartPrevManualMask = commissionManualMask;
@@ -983,6 +1004,7 @@ void cxStartPersistCancel() {
   if (fresh) {
     testProtectionsEnabled = commissionProtBackup;
     settingRemove(NK_commissionSnap);       // drop whatever subset the worker already wrote
+    settingRemove(NK_commissionPreRun);
     settingRemove(NK_commissionStepSnap);
     commissionClearMinPctBackup();
     commissionSetPhase(cxStartPrevPhase);
@@ -1017,14 +1039,22 @@ void cxStartPersistService() {
       }
       cxStartPersistStep = 2;
       break;
-    case 2:
-      if (!cxStartResume) commissionBackupMinPct(cxStartMinDuty, cxStartKneeFloor, cxStartKneeKnee, cxStartKneeFrozen, cxStartKneeFitA);
+    case 2:  // pre-run bookkeeping — Abort restores it, so a device commissioned before this run ends up commissioned again
+      if (!cxStartResume) {
+        char b[40];
+        snprintf(b, sizeof(b), "%d,%d,%d,%d", (int)cxStartPrevState, (int)cxStartPrevPhase, (int)cxStartPrevDoneMask, (int)cxStartPrevManualMask);
+        settingWrite(NK_commissionPreRun, b);
+      }
       cxStartPersistStep = 3;
       break;
-    case 3: settingWrite(NK_commissionStepSnap, cxStartTuneCsv); cxStartPersistStep = 4; break;
-    case 4: commissionSetPhase(0); cxStartPersistStep = 5; break;
-    case 5: commissionMarkStage(0); cxStartPersistStep = 6; break;  // Prep complete: snapshot staged, preconditions checked
-    case 6:
+    case 3:
+      if (!cxStartResume) commissionBackupMinPct(cxStartMinDuty, cxStartKneeFloor, cxStartKneeKnee, cxStartKneeFrozen, cxStartKneeFitA);
+      cxStartPersistStep = 4;
+      break;
+    case 4: settingWrite(NK_commissionStepSnap, cxStartTuneCsv); cxStartPersistStep = 5; break;
+    case 5: commissionSetPhase(0); cxStartPersistStep = 6; break;
+    case 6: commissionMarkStage(0); cxStartPersistStep = 7; break;  // Prep complete: snapshot staged, preconditions checked
+    case 7:
       commissionSetState(1);  // LAST — a persisted state=1 proves the restore point is on flash
       cxStartPersistStep = 0;
       settingsDirty = true;   // push the CSV3 state echo promptly

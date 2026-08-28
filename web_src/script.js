@@ -23145,6 +23145,7 @@ let cxPlan = [true, true, true, true, true, true, true, true, true];
 // not a stage. (Mirrors commissionDependentsMask() in the firmware.)
 const CX_DEPENDENTS = { 1: [2, 3, 6, 8], 2: [3, 6, 8], 3: [6, 8], 4: [5], 6: [8] };
 let cxPlanUserSet = false;   // true once the user ticks a box, so CSV3 re-renders stop re-defaulting the plan
+let cxPlanMaskBasis = -1;    // done-mask the plan was last derived/edited against; a change while idle re-derives it
 let cxLastPhase = 0;         // remembered from the last CSV3 frame (for re-render after a checkbox toggle)
 let cxLastMask = 0;          // per-stage done bitmask from the last CSV3 frame
 let cxLastManual = 0;        // per-stage set-by-hand bitmask (skip / mark-done-manually); pairs with cxLastMask
@@ -23183,11 +23184,22 @@ function cxDefaultPlanFromMask(mask) {
     for (let i = 0; i < CX_PHASES.length; i++) cxPlan[i] = (i === 0) ? true : (allDone ? true : !(mask & (1 << i)));
     cxApplyDeps();
 }
-// Checkbox handlers (Commissioning tab). Prep can't be unchecked; selecting a step pulls in deps.
+// Reverse of cxApplyDeps: unticking a stage unticks every planned stage that feeds it (transitively),
+// otherwise the plan runs the feeder, the firmware clears this stage's done bit, and nothing re-measures
+// it — the pass ends with a silently stale step. Stage 8 is never force-pulled, so unticking it frees nothing.
+function cxUnselectFeeders(i) {
+    if (i === 8) return;
+    for (const k in CX_DEPENDENTS) {
+        const kk = +k;
+        if (cxPlan[kk] && CX_DEPENDENTS[k].includes(i)) { cxPlan[kk] = false; cxUnselectFeeders(kk); }
+    }
+}
+// Checkbox handlers (Commissioning tab). Prep can't be unchecked; selecting a step pulls in deps,
+// deselecting one drops its feeders.
 function cxToggleStage(i, on) {
     cxPlanUserSet = true;
     cxPlan[i] = on || i === 0;
-    if (cxPlan[i]) cxApplyDeps();
+    if (cxPlan[i]) cxApplyDeps(); else cxUnselectFeeders(i);
     renderCommissionStatus(cxLastState, cxLastPhase, cxLastMask);
 }
 function cxToggleSelectAll(on) {
@@ -23240,7 +23252,8 @@ function commissionPrimaryAction() {
 // persist the new tune and flip the badge to COMMISSIONED — without reopening the wizard or reverting.
 function commissionCommitUncommitted() {
     if (!settingsUnlocked) { xAlert('Unlock settings first.'); return; }
-    cxGet('commissionDone=1').then(() => {
+    cxGet('commissionDone=1&cmEpoch=' + Math.floor(Date.now() / 1000)).then(() => {
+        cx = null; cxPlanUserSet = false;   // run over — the plan re-defaults from the now-complete mask
         cxLastState = 2;
         renderCommissionStatus(2, CX_PHASES.length, cxLastMask);   // phase=length clears the ▶ marker
     }).catch(e => xAlert('Finish failed: ' + e));
@@ -23558,9 +23571,15 @@ document.addEventListener('visibilitychange', () => {
 function openCommissionModal() {
     if (!settingsUnlocked) { xAlert('Unlock settings first.'); return; }
     wakeLockWant(true);
-    // In-session resume: if a flow is already underway, reopen exactly where it was.
-    if (!cx) cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false, handled: {} };
-    if (!cx.handled) cx.handled = {};   // stage → 'skip' | 'manual' for this session's Finish summary
+    // Every entry from the Commissioning tab opens at Prep with a FRESH session object: the other-sources
+    // acknowledgement and the restore point happen on every pass, and no result from an earlier pass can
+    // ride into a redo of the same step (a stale cx used to reopen on whatever step it last showed, Next
+    // already lit). A run paused with the X — still IN_PROGRESS on the device — is kept aside; cxStart
+    // resumes into it, results intact, when its step is the next one planned.
+    const paused = (cx && cx.phase > 0 && cxLastState === 1) ? cx : null;
+    cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false,
+           handled: (paused && paused.handled) || {},   // stage → 'skip' | 'manual' for this run's Finish summary
+           paused: paused };
     document.getElementById('commission-modal-overlay').style.display = 'block';
     // Make the panel draggable (idempotent) — drag by the header, clamped on-screen.
     makePanelDraggable(document.getElementById('commission-modal-panel'),
@@ -23606,6 +23625,8 @@ function closeCommissionModal() {
             cxGet('faCommissionGate=0').catch(() => { });
         }
         cx.fieldRunning = cx.plantRunning = cx.verifyRunning = cx.cvFitRunning = cx.kneeRunning = cx.matrixOn = cx.matrixShooting = cx.rtFieldArmed = false;
+        // Past Finish (Helpful Hints / cloud pitch page) there is nothing to resume — an X here is Done.
+        if (cx.finished) { cx = null; cxPlanUserSet = false; }
     }
     document.getElementById('commission-modal-overlay').style.display = 'none';
 }
@@ -23621,7 +23642,9 @@ function cxGoto(phase) {
     cx.phase = phase;
     // Persist the current phase (moves backward on Back) so the checklist survives a page reload /
     // other clients, and so the firmware re-baselines the in-flight step snapshot on each step entry.
-    if (settingsUnlocked) cxGet('commissionPhase=' + phase).catch(() => { });
+    // Not for Prep: every entry from the tab opens there, and a paused run's persisted step must keep
+    // its RESUME marker through a Prep-only peek (the Start worker writes phase 0 itself).
+    if (settingsUnlocked && phase > 0) cxGet('commissionPhase=' + phase).catch(() => { });
     // A new step is the one moment the panel SHOULD re-anchor to this phase's height (placeLeftPanel
     // holds the top across mid-step re-renders otherwise).
     { const p = document.getElementById('commission-modal-panel'); if (p) p._holdTop = false; }
@@ -23705,7 +23728,8 @@ function cxRenderPrep(b) {
         '<label style="display:flex; align-items:flex-start; gap:8px; font-size:13px; line-height:1.5; margin:4px 0 2px; cursor:pointer;">' +
         '<input type="checkbox" id="cx-prep-ack"' + (cx.srcAck ? ' checked' : '') + ' onchange="cxPrepAck(this.checked)" style="margin-top:2px;">' +
         '<span>Other charging sources and large on/off loads are OFF and will stay off.</span></label>' +
-        '<button id="cx-start-btn" onclick="cxStart()" class="btn-primary" style="width:100%;padding:9px;margin-top:6px;" disabled>Start commissioning</button>';
+        '<button id="cx-start-btn" onclick="cxStart()" class="btn-primary" style="width:100%;padding:9px;margin-top:6px;" disabled>' +
+        ((cxLastState === 1 && (cxLastMask & ~1)) ? 'Continue commissioning' : 'Start commissioning') + '</button>';
     cxPrepRefresh();
 }
 function cxPrepAck(on) { if (cx) cx.srcAck = on; cxPrepRefresh(); }
@@ -23779,13 +23803,19 @@ function cxAwaitStartPersist(timeoutMs) {
 function cxStart() {
     // commissionStart stages the restore-point snapshot (kept from the original Start when resuming
     // a live run) + marks Prep done; advance only after the device confirms it is written to flash.
-    if (cx) cx.handled = {};   // fresh run — clear any skip/manual notes carried over from a prior session
     const btn = document.getElementById('cx-start-btn');
     const label = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Saving restore point…'; }
     cxGet('commissionStart=1')
         .then(r => { if (!r.ok) throw ('rejected (HTTP ' + r.status + ')'); return cxAwaitStartPersist(8000); })
-        .then(() => { const nx = cxNextSelected(0); if (nx === -1) cxFinish(); else cxGoto(nx); })
+        .then(() => {
+            const nx = cxNextSelected(0);
+            // A run paused with the X resumes into its step with that step's results intact, but only when
+            // it is the next planned one; a redo of anything upstream (or a re-ticked plan) starts clean.
+            const p = cx.paused; cx.paused = null;
+            if (p && p.phase === nx) Object.assign(cx, p, { phase: 0, paused: null, finished: false });
+            if (nx === -1) cxFinish(); else cxGoto(nx);
+        })
         .catch(e => {
             if (btn) { btn.disabled = false; btn.textContent = label; }
             xAlert('Commissioning has not started — ' + e + '. Nothing was changed; check the connection and try again.');
@@ -27188,6 +27218,7 @@ const CX_HELPFUL_HINTS_HTML =
 // poll or RPM strip (the run is over); the abort row is hidden so it can't revert the saved tune.
 function cxShowHelpfulHints() {
     cxStopPoll();
+    if (cx) cx.finished = true;   // terminal page: closing it any way ends the session (see closeCommissionModal)
     const strip = document.getElementById('cx-rpm-strip'); if (strip) strip.style.display = 'none';
     const abort = document.getElementById('commission-abort-row'); if (abort) abort.style.display = 'none';
     const b = document.getElementById('commission-body');
@@ -27287,9 +27318,25 @@ async function cxHintsDone() {
     goToCommissioning();   // land on the Commissioning checklist
 }
 async function commissionAbort() {
-    if (!await xConfirm('Abort commissioning and revert all settings to the pre-commissioning snapshot?')) return;
+    if (!await xConfirm('Abort this run and put every setting back to how it was before it started? Steps finished during this run are discarded too — the device returns to exactly its pre-run state (one that was commissioned before the run is commissioned again). To keep finished steps and come back later, use Stop instead.',
+        { title: 'Abort and revert all', okText: 'Abort and revert', cancelText: 'Keep going' })) return;
     cxStopPoll();
     cxGet('commissionAbort=1').then(() => { xAlert('Reverted to pre-commissioning settings.'); closeCommissionModal(); cx = null; cxPlanUserSet = false; }).catch(e => xAlert('Abort failed: ' + e));
+}
+
+// Stop for now: keep every finished step (done marks + applied values), undo only the step in progress
+// (the device restores that step's entry snapshot, as a reboot would), and land on the checklist with
+// the remaining steps ticked. The origin snapshot stays on the device, so Abort / Clear-and-restart can
+// still fully revert later.
+async function commissionStop() {
+    if (!await xConfirm('Stop commissioning for now? Every finished step is kept. The step you are on is discarded — its settings go back to what they were when it began — and it runs again when you continue.',
+        { title: 'Stop commissioning', okText: 'Stop', cancelText: 'Keep going' })) return;
+    closeCommissionModal();   // cancels any running test and drops the rest hold
+    cxGet('commissionStop=1').then(() => {
+        cx = null; cxPlanUserSet = false;
+        renderCommissionStatus(cxLastState, cxLastPhase, cxLastMask);   // plan re-defaults to the pending steps
+        goToCommissioning();
+    }).catch(e => xAlert('Stop failed: ' + e));
 }
 
 // The nine wizard steps, mirrored from CX_PHASES, with a one-line plain-English purpose.
@@ -27317,18 +27364,25 @@ function renderCommissionStatus(state, phase, mask, manual) {
     cxLastMask = mask || 0;
     if (manual !== undefined) cxLastManual = manual || 0;   // 3-arg internal re-renders keep the last value
     manual = cxLastManual;
-    // Until the user touches a checkbox, keep the run plan defaulted to the pending stages (so a
-    // fresh device pre-selects all and a single stale step pre-selects just that one).
-    if (!cxPlanUserSet) cxDefaultPlanFromMask(cxLastMask);
-
-    // A partial is wiped on reboot (firmware aborts in-progress at boot). If the device now
-    // reports NOT_COMMISSIONED while we still hold stale in-session state past Prep — and the
-    // panel is closed — drop it so "Resume" can't reopen a phase the device no longer backs.
-    // Gated on the panel being closed so a freshly-started flow (Prep→phase 1) can't be nuked
-    // by a late CSV3 frame still carrying the pre-start state.
+    // If the device reports NOT_COMMISSIONED while we still hold in-session state past Prep — and the
+    // panel is closed — drop it so a resume can't reopen a phase the device no longer backs (an Abort
+    // from another client, for instance). Gated on the panel being closed so a freshly-started flow
+    // (Prep→phase 1) can't be nuked by a late CSV3 frame still carrying the pre-start state.
     const _ov = document.getElementById('commission-modal-overlay');
     const _panelOpen = _ov && _ov.style.display === 'block';
     if (state === 0 && !_panelOpen && cx && cx.phase > 0) { cx = null; }
+
+    // Run plan: until the user touches a checkbox it is the pending stages (a fresh device pre-selects
+    // all, a single stale step pre-selects just that one). A hand-edited plan is kept, but a stage that
+    // goes stale on the device while nothing is open or paused (tach rescale, RPM-table edit) is added
+    // to it — never silently left out of the next pass. Every run-ending path resets cxPlanUserSet.
+    if (!cxPlanUserSet) cxDefaultPlanFromMask(cxLastMask);
+    else if (cxLastMask !== cxPlanMaskBasis && !_panelOpen && !cx) {
+        const staled = cxPlanMaskBasis & ~cxLastMask;
+        for (let i = 1; i < CX_PHASES.length; i++) if (staled & (1 << i)) cxPlan[i] = true;
+        cxApplyDeps();
+    }
+    cxPlanMaskBasis = cxLastMask;
 
     const ov = document.getElementById('commission-overall');
     if (ov) {
@@ -27355,7 +27409,8 @@ function renderCommissionStatus(state, phase, mask, manual) {
             const prep = (i === 0);
             const cbAttrs = (cxPlan[i] ? 'checked ' : '') + (prep ? 'disabled ' : '');
             const cbTitle = prep ? 'Prep always runs (snapshot + preconditions)'
-                          : 'Run this step in the next commissioning pass';
+                          : (done ? 'Run this step again in the next pass (the steps it feeds run again too)'
+                                  : 'Run this step in the next commissioning pass');
             // Status badge sits at the RIGHT of the row (not between the checkbox and the name) so a
             // completed step is unmistakable next to the run checkboxes. Big bold ✓ DONE when complete;
             // ▶ RUNNING while the wizard is open on this step, ▶ RESUME when paused (modal closed); ○ otherwise.
