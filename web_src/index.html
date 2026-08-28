@@ -7772,6 +7772,7 @@
               </table>
               <div id="weather-forecast-age"
                 style="text-align: right; font-size: 12px; color: #888; font-style: italic;"></div>
+              <div id="solar-need-line" style="font-size: 13px; color: var(--text-dark); margin-top: 8px; line-height: 1.4;"></div>
             </div>
             </div><!-- closes #solar-forecast-block -->
 
@@ -7812,7 +7813,7 @@
                     style="font-family: 'Courier New', monospace; font-size: 13px; color: #666; margin-left: 5px;"><span
                       id="performanceRatio_echo">?</span></span>
                   <span class="tooltip">
-                    <span class="tooltip-box">Accounts for losses, 0.75 typical, adjust to fit your system</span>
+                    <span class="tooltip-box">Fraction of nameplate output the array really delivers after tilt, shading, temperature and charger losses. Learned from the ledger automatically while Learn Performance Ratio is on; a value typed here restarts the learning from that point.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -7834,15 +7835,120 @@
                     style="font-family: 'Courier New', monospace; font-size: 13px; color: #666; margin-left: 5px;"><span
                       id="UVThresholdHigh_echo">?</span></span>
                   <span class="tooltip">
-                    <span class="tooltip-box">If predicted solar output for at least 2 of next 3 days exceeds this
-                      value,
-                      pause alternator output</span>
+                    <span class="tooltip-box">Forecast harvest a day must exceed to count as sunny; at least 2 of the next 3 days
+                      must clear it to pause the alternator. Decides alone when Size Threshold from Consumption is off,
+                      and stands in until the ledger has consumption history.</span>
                   </span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form"
                     style="display: flex; gap: 8px; align-items: center;">
                     <input name="UVThresholdHigh" type="number" step="0.01" min="0" max="9999"
+                      style="flex: 1 1 auto; min-width: 0; max-width: 150px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 14px;" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row"
+                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center;">
+                <div class="form-label" style="display: flex; align-items: center; gap: 8px;">
+                  <span>Size Threshold from Consumption:</span>
+                  <span
+                    style="font-family: 'Courier New', monospace; font-size: 13px; color: #666; margin-left: 5px;"><span
+                      id="solarUseConsEnable_echo">?</span></span>
+                  <span class="tooltip">
+                    <span class="tooltip-box">On: a day counts as sunny enough when its forecast harvest covers the
+                      consumption predicted from the ledger plus the margin below; until that history exists the High
+                      Solar Threshold stands in. Off: the High Solar Threshold alone decides.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    style="display: flex; gap: 8px; align-items: center;">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="solarUseConsEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('solarUseConsEnable_checkbox', 'solarUseConsEnable', 'solarUseConsEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="solarUseConsEnable" name="solarUseConsEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row"
+                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center;">
+                <div class="form-label" style="display: flex; align-items: center; gap: 8px;">
+                  <span>Consumption Margin (%):</span>
+                  <span
+                    style="font-family: 'Courier New', monospace; font-size: 13px; color: #666; margin-left: 5px;"><span
+                      id="solarConsMarginPct_echo">?</span></span>
+                  <span class="tooltip">
+                    <span class="tooltip-box">Headroom added to the predicted consumption before a day counts as covered by
+                      solar. Larger values pause the alternator less readily.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    style="display: flex; gap: 8px; align-items: center;">
+                    <input name="solarConsMarginPct" type="number" step="1" min="0" max="500"
+                      style="flex: 1 1 auto; min-width: 0; max-width: 150px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 14px;" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row"
+                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center;">
+                <div class="form-label" style="display: flex; align-items: center; gap: 8px;">
+                  <span>Learn Performance Ratio:</span>
+                  <span
+                    style="font-family: 'Courier New', monospace; font-size: 13px; color: #666; margin-left: 5px;"><span
+                      id="solarLearnEnable_echo">?</span></span>
+                  <span class="tooltip">
+                    <span class="tooltip-box">On: each complete day with a forecast and a VE.Direct link nudges the
+                      performance ratio toward what the panels actually delivered, so the forecast fits this array.
+                      Off: the ratio stays at the value entered above.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    style="display: flex; gap: 8px; align-items: center;">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="solarLearnEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('solarLearnEnable_checkbox', 'solarLearnEnable', 'solarLearnEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="solarLearnEnable" name="solarLearnEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row"
+                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center;">
+                <div class="form-label" style="display: flex; align-items: center; gap: 8px;">
+                  <span>Learning Rate (% per day):</span>
+                  <span
+                    style="font-family: 'Courier New', monospace; font-size: 13px; color: #666; margin-left: 5px;"><span
+                      id="solarLearnRatePct_echo">?</span></span>
+                  <span class="tooltip">
+                    <span class="tooltip-box">How far one day's result moves the performance ratio. Small values ride out a
+                      single cloudy day; large values track a real change, such as new shade or a cleaned array,
+                      within a few days.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    style="display: flex; gap: 8px; align-items: center;">
+                    <input name="solarLearnRatePct" type="number" step="1" min="0" max="50"
                       style="flex: 1 1 auto; min-width: 0; max-width: 150px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 14px;" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
@@ -7883,6 +7989,14 @@
                   forecast updates while you are not charging — at anchor, or between engine runs. On a long motoring
                   day the numbers above can be hours old; the line under the table tells you exactly how old. "Update
                   Weather Now" forces a fetch on demand.
+                </p>
+                <p style="margin: 0 0 12px 0;">
+                  <strong>How it checks itself.</strong> Every day the regulator books what the forecast promised, what
+                  the panels delivered over VE.Direct, and what the boat consumed (from the battery shunt). With Learn
+                  Performance Ratio on, each complete day nudges the ratio toward the real array, so the forecast fits
+                  your boat rather than a typical one. With Size Threshold from Consumption on, the bar a day must clear
+                  becomes the consumption the last week predicts plus the margin, instead of a fixed number. The
+                  ledger and its chart are on Live Data, Weather.
                 </p>
                 <p style="margin: 0;">
                   <strong>If the forecast goes stale.</strong> A forecast the regulator can no longer refresh — no
@@ -8648,6 +8762,121 @@
                 </div>
                 <div class="form-input">
                   <span class="integ-live" id="rvcHeardDetail_ID">&mdash;</span>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Transmit RV-C (<span id="rvcTxEnable_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Publishes this regulator onto the CAN port as an RV-C charging source, so RV-C displays and battery systems can see the alternator the same way they see a converter or solar controller. RV-C shares the wire and the address with NMEA 2000, so nothing extra is wired and nothing else has to be turned off. Joining the bus happens once at startup, so a reboot is needed after switching this on. Off by default: on a purely NMEA 2000 boat there is nothing listening.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="rvcTxEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('rvcTxEnable_checkbox', 'rvcTxEnable', 'rvcTxEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="rvcTxEnable" name="rvcTxEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Charger Messages (<span id="rvcChgrEnable_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Charger Status, Charger Status 2, Charger Status 3 and Charger Configuration Status. Between them they carry the voltage and current being aimed for, the voltage, current and temperature actually measured at the alternator, the charge stage, whether output is being held back and why, and the battery type, bank size and alternator rating.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="rvcChgrEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('rvcChgrEnable_checkbox', 'rvcChgrEnable', 'rvcChgrEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="rvcChgrEnable" name="rvcChgrEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">DC Source Messages (<span id="rvcDcEnable_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">DC Source Status 1, 2 and 3, published for the alternator as its own DC source: its voltage, output current and temperature. This regulator never publishes DC Source messages for a battery bank &mdash; that is the battery monitor's or BMS's job, and two devices describing one bank is how displays end up showing the wrong number.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="rvcDcEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('rvcDcEnable_checkbox', 'rvcDcEnable', 'rvcDcEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="rvcDcEnable" name="rvcDcEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Fault Messages (<span id="rvcFaultEnable_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The RV-C diagnostic message: a red or yellow fault flag plus a code naming what failed and how. It reports the protection cuts &mdash; over voltage, over current, alternator over temperature, a sensor that stopped updating or disagrees with its partner, an implausible tachometer reading, a bank too cold to charge &mdash; and repeats every five seconds when nothing is wrong so a display can tell a healthy regulator from a missing one. Deliberate states are never faults: switched off, manual mode, engine below the minimum speed, a solar rest, or a BMS withholding permission.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="rvcFaultEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('rvcFaultEnable_checkbox', 'rvcFaultEnable', 'rvcFaultEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="rvcFaultEnable" name="rvcFaultEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">RV-C Charger Instance (<span id="rvcChgrInstance_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Which charger this regulator calls itself in its RV-C messages. 49 marks it as an alternator: the upper digit of the number is a charger type, 3 meaning engine alternator, and the lower digit is the charger number. Change only if another alternator regulator on the same bus already claims it &mdash; a Wakespeed WS500 at its own default lands on 48.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="rvcChgrInstance" type="number" step="1" min="1" max="250" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">RV-C DC Source Instance (<span id="rvcDcInstance_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The DC source number the alternator is published under. 1 to 4 are reserved by RV-C for battery banks &mdash; house, chassis start, second house, generator start &mdash; so the default of 5 keeps the alternator clear of them. Anything from 5 up is free for other sources.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="rvcDcInstance" type="number" step="1" min="1" max="250" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">RV-C Device Priority (<span id="rvcDevPriority_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">How much weight a display gives this regulator's numbers when more than one device describes the same DC source. RV-C ranks by this number: 120 a battery management system, 100 an inverter/charger, 80 a charger, 40 a meter. 80 is correct here, and keeps a real BMS ahead of this regulator wherever both are heard.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="rvcDevPriority" type="number" step="1" min="0" max="250" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
                 </div>
               </div>
 
@@ -10607,6 +10836,67 @@
             <div class="metric-row">
               <span class="metric-label">Sender Address</span>
               <span class="metric-value"><span id="li_dvccSrc_ID">&mdash;</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-title" style="margin-top:16px;">Solar Energy Ledger</div>
+        <div class="grid">
+          <div class="card-group">
+            <p class="card-group-title"><span>Today</span>
+              <span class="tooltip">ℹ️<span class="tooltip-box">Harvest: what the forecast promised for today, frozen the evening before (the number Defer to Solar was acting on overnight), against what the panels have delivered so far over VE.Direct. Consumption: what the last week of history predicted for today against what the boat has drawn so far — alternator plus solar plus battery discharge, minus battery charge, which needs the battery shunt. A dash means the value is not measurable on this install or there is no history yet.</span></span>
+            </p>
+            <div class="metric-row">
+              <span class="metric-label">Predicted Harvest</span>
+              <span class="metric-value"><span id="sledPredHarvTodayID">&mdash;</span> kWh</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Harvest So Far</span>
+              <span class="metric-value"><span id="sledActHarvTodayID">&mdash;</span> kWh</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Predicted Consumption</span>
+              <span class="metric-value"><span id="sledPredConsTodayID">&mdash;</span> kWh</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Consumption So Far</span>
+              <span class="metric-value"><span id="sledActConsTodayID">&mdash;</span> kWh</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Performance Ratio
+                <span class="tooltip">ℹ️<span class="tooltip-box">Fraction of the array's nameplate the forecast is scaled by. Learned from complete days when Learn Performance Ratio is on (Setup, Solar).</span></span>
+              </span>
+              <span class="metric-value"><span id="sledRatioID">&mdash;</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Complete Days on Record</span>
+              <span class="metric-value"><span id="sledDaysValidID">&mdash;</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Awake Today</span>
+              <span class="metric-value"><span id="sledCoverageID">&mdash;</span></span>
+            </div>
+          </div>
+        </div>
+        <div class="settings-card" style="margin-top:12px;">
+          <div class="card-group">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+              <p class="card-group-title" style="border:0;margin:0;padding:0;">Predicted vs Actual, by Day
+                <span class="tooltip">ℹ️<span class="tooltip-box">Bars are what happened; the line with points is what was predicted the evening before. Days the regulator was awake under 20 hours are drawn but do not feed the learned ratio or the consumption prediction. A missing bar means that quantity was not measurable that day (no VE.Direct link, no battery shunt); a missing point means there was no forecast or no history to predict from.</span></span>
+              </p>
+              <div class="seg-field">
+                <span class="seg-label">Window</span>
+                <div class="seg">
+                  <button type="button" class="on" onclick="setSledWindow(30)" id="sled-w-30">30d</button>
+                  <button type="button" onclick="setSledWindow(90)" id="sled-w-90">90d</button>
+                </div>
+              </div>
+            </div>
+            <div class="plot-container" id="sled-harv-plot" style="min-height:220px;margin-top:8px;"></div>
+            <div class="plot-container" id="sled-cons-plot" style="min-height:220px;margin-top:8px;"></div>
+            <div id="sled-summary" style="font-size:13px;color:var(--text-dark);margin-top:8px;line-height:1.45;white-space:normal;"></div>
+            <div style="display:flex;justify-content:flex-end;margin-top:10px;">
+              <button type="button" class="btn-danger-ghost btn-sm" onclick="solarLedgerClearConfirm()">Clear Ledger</button>
             </div>
           </div>
         </div>
@@ -12659,6 +12949,23 @@
                 <div
                   style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
                   <span id="ft_zeroLogService_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Solar Ledger Service -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Solar Ledger Service
+                  <span class="tooltip">ℹ️
+                    <span class="tooltip-box">Books the solar ledger's day at local midnight and writes it to flash. The
+                      write happens only with the field off; every other pass is a clock compare.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_solarLedger_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_solarLedger_ses_ID">0</span>
                 </div>
               </div>
 

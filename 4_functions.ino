@@ -224,6 +224,7 @@ bool executeFetchWeatherData() {
     // runs on the other core and voids any forecast whose stamp is stale or 0, so a valid-but-
     // unstamped instant is enough to throw this forecast away for the whole next interval.
     weatherLastUpdate = millis();   // was never written — the freshness gate measured uptime, not fetch age
+    weatherFetchEpoch = time(NULL);  // the ledger maps this fetch's "tomorrow"/"day 2" onto calendar days by the local day it was made
     weatherDataValid = 1;
     weatherLastError[0] = '\0';
     nextWeatherUpdate = millis() + WeatherUpdateInterval;   // honor the user's interval (hardcoded 1 h ignored it)
@@ -257,15 +258,25 @@ void analyzeWeatherMode() {
     weatherDataValid = 0;
     queueConsoleMessageF("Weather: forecast too old - solar pause released");
   }
-  //If 2 or more days have a UV index above the configured threshold, it sets the mode to high UV mode (1), which disables the alternator.
+  // The bar a day must clear: the owner's High Solar Threshold, or — with the toggle on and consumption
+  // history in the ledger — predicted consumption plus margin, so "enough sun" means enough for THIS boat.
+  // Computed before the validity gate so the settings page can always show which bar is in force.
+  float need = UVThresholdHigh;
+  sledNeedSource = 0;
+  if (solarUseConsEnable == 1 && !isnan(sledLive.predConsKwh)) {
+    need = sledLive.predConsKwh * (1.0f + solarConsMarginPct / 100.0f);
+    sledNeedSource = 1;
+  }
+  sledNeedKwh = need;
+  // 2 or more of the next 3 days clearing the bar sets high-solar mode (1), which rests the alternator.
   if (!weatherDataValid || !weatherModeEnabled) {
     currentWeatherMode = 0;
     return;
   }
   int highUVDays = 0;
-  if (pKwHrToday >= UVThresholdHigh) highUVDays++;
-  if (pKwHrTomorrow >= UVThresholdHigh) highUVDays++;
-  if (pKwHr2days >= UVThresholdHigh) highUVDays++;
+  if (pKwHrToday >= need) highUVDays++;
+  if (pKwHrTomorrow >= need) highUVDays++;
+  if (pKwHr2days >= need) highUVDays++;
 
   if (highUVDays >= 2) {
     currentWeatherMode = 1;  // Disable alternator
@@ -313,6 +324,288 @@ void updateWeatherMode() {
   }
 }
 
+// ── Solar energy ledger ─────────────────────────────────────────────────────────────────────────
+// Globals, record layouts and the SLED_* constants are in Xregulator.ino next to the weather block.
+
+// Forecast kWh at performance ratio 1.0 for a day's irradiance (kWh/m²): array watts / STC 1000 W/m².
+static inline float solarIrrToKwh(float uvKwhM2) { return uvKwhM2 * (float)SolarWatts / STC_IRRADIANCE; }
+static inline uint32_t sledLocalDay(time_t ep) { return (uint32_t)((ep + usageTzOffsetS) / 86400); }
+static inline bool sledClockValid(time_t ep) { return ep > 1700000000LL; }
+
+// Re-derive the three displayed predictions from the held irradiance — needed whenever the ratio or
+// array watts change between fetches (learning step, settings page), else the table lags a fetch.
+void weatherRecomputePredicted() {
+  pKwHrToday    = solarIrrToKwh(UVToday) * performanceRatio;
+  pKwHrTomorrow = solarIrrToKwh(UVTomorrow) * performanceRatio;
+  pKwHr2days    = solarIrrToKwh(UVDay2) * performanceRatio;
+}
+
+void solarLedgerInit() {
+  if (!sledRing) {
+    sledRing = (SolarLedgerRec *)ps_malloc(SLED_SIZE * sizeof(SolarLedgerRec));
+    if (!sledRing) { Serial.println("FATAL: sledRing ps_malloc failed"); return; }
+    memset(sledRing, 0, SLED_SIZE * sizeof(SolarLedgerRec));
+  }
+  uint32_t n = readPsramBlob(SLED_PATH, SLED_MAGIC, SLED_VER, sledRing, sizeof(SolarLedgerRec), SLED_SIZE, NULL, false);
+  sledCount = (uint16_t)n;
+  sledHead  = (n >= SLED_SIZE) ? 0 : (uint16_t)n;
+  SolarLedgerLive lv = {};
+  if (readPsramBlob(SLED_LIVE_PATH, SLED_MAGIC ^ 1u, SLED_VER, &lv, sizeof(SolarLedgerLive), 1, NULL, false) == 1) {
+    sledLive = lv;   // the day in progress resumes with its midnight baselines intact
+  } else {
+    memset(&sledLive, 0, sizeof(sledLive));
+    sledLive.predHarvKwh = sledLive.predIrrKwh = sledLive.predConsKwh = NAN;
+  }
+  Serial.printf("solarLedgerInit: %u days restored, live day %lu\n", (unsigned)n, (unsigned long)sledLive.dayIdx);
+}
+
+// Median of the newest SLED_PRED_MEDIAN_N complete days within SLED_PRED_WINDOW days of `today`; the
+// mean when fewer exist; NAN with none. A median ignores the one night the inverter ran — a mean can't.
+float solarLedgerPredictCons(uint32_t today) {
+  float v[SLED_PRED_MEDIAN_N];
+  int n = 0;
+  for (int i = 0; i < (int)sledCount && n < SLED_PRED_MEDIAN_N; i++) {
+    const SolarLedgerRec &r = sledRing[(sledHead + SLED_SIZE - 1 - i) % SLED_SIZE];   // newest first
+    if (r.dayIdx + SLED_PRED_WINDOW < today) break;
+    if (isnan(r.actConsKwh) || (r.flags & SLED_F_PARTIAL)) continue;
+    v[n++] = r.actConsKwh;
+  }
+  if (n == 0) return NAN;
+  if (n < SLED_PRED_MEDIAN_N) { float sum = 0; for (int i = 0; i < n; i++) sum += v[i]; return sum / n; }
+  for (int i = 1; i < n; i++) { float t = v[i]; int j = i - 1; while (j >= 0 && v[j] > t) { v[j + 1] = v[j]; j--; } v[j + 1] = t; }
+  return v[n / 2];
+}
+
+int sledCompleteDays() {
+  int c = 0;
+  for (int i = 0; i < (int)sledCount; i++) if (!(sledRing[i].flags & SLED_F_PARTIAL)) c++;
+  return c;
+}
+
+// Live so-far values for the day in progress (CSV2 + the CSV export's last row).
+float sledLiveActHarvKwh() {
+  if (sledLive.dayIdx == 0 || !(sledLive.flags & SLED_F_VEDIRECT)) return NAN;
+  double wh = SolarChargedEnergy_AllTime - sledLive.baseSolarWh;
+  return wh < 0 ? 0.0f : (float)(wh / 1000.0);
+}
+float sledLiveAltKwh() {
+  if (sledLive.dayIdx == 0) return NAN;
+  double wh = AlternatorChargedEnergy_AllTime - sledLive.baseAltWh;
+  return wh < 0 ? 0.0f : (float)(wh / 1000.0);
+}
+// Consumption needs the battery terms (shunt) and every source on the bus: solar is a source only a
+// VE.Direct link can see, so an array with no link leaves consumption unmeasurable — NAN, not a low number.
+static bool sledConsMeasurable(uint8_t flags) {
+  return (flags & SLED_F_SHUNT) && HAS_BATT_SHUNT && ((flags & SLED_F_VEDIRECT) || SolarWatts <= 0);
+}
+float sledLiveActConsKwh() {
+  if (sledLive.dayIdx == 0 || !sledConsMeasurable(sledLive.flags)) return NAN;
+  double solarWh = SolarChargedEnergy_AllTime - sledLive.baseSolarWh;       if (solarWh < 0) solarWh = 0;
+  double altWh   = AlternatorChargedEnergy_AllTime - sledLive.baseAltWh;    if (altWh < 0) altWh = 0;
+  double chgWh   = ChargedEnergy_AllTime - sledLive.baseChgWh;              if (chgWh < 0) chgWh = 0;
+  double disWh   = DischargedEnergy_AllTime - sledLive.baseDischgWh;        if (disWh < 0) disWh = 0;
+  double consWh  = altWh + solarWh + disWh - chgWh;
+  return consWh < 0 ? 0.0f : (float)(consWh / 1000.0);
+}
+int sledTele(float kwh) { return isnan(kwh) ? -1 : (int)lroundf(kwh * 100.0f); }   // CSV2 encoding: -1 = unknown
+
+static void solarLedgerOpenDay(uint32_t today) {
+  SolarLedgerLive &L = sledLive;
+  memset(&L, 0, sizeof(L));
+  L.dayIdx = today;
+  L.baseSolarWh  = SolarChargedEnergy_AllTime;
+  L.baseAltWh    = AlternatorChargedEnergy_AllTime;
+  L.baseChgWh    = ChargedEnergy_AllTime;
+  L.baseDischgWh = DischargedEnergy_AllTime;
+  L.predHarvKwh = L.predIrrKwh = NAN;
+  // Which forecast slot named this day depends on when the last fetch happened: yesterday's fetch
+  // called it "tomorrow", the day before's called it "day 2". Older than that is no forecast. Keyed on
+  // the fetch stamp, not weatherDataValid — a forecast too old to HOLD a pause still said what it said.
+  if (sledClockValid(weatherFetchEpoch)) {
+    uint32_t fcDay = sledLocalDay(weatherFetchEpoch);
+    float uv = NAN;
+    if (fcDay + 1 == today) uv = UVTomorrow;
+    else if (fcDay + 2 == today) uv = UVDay2;
+    else if (fcDay == today) { uv = UVToday; L.flags |= SLED_F_SAMEDAY; }
+    if (!isnan(uv)) {
+      L.predIrrKwh  = solarIrrToKwh(uv);
+      L.predHarvKwh = L.predIrrKwh * performanceRatio;
+      L.flags |= SLED_F_FORECAST;
+    }
+  }
+  L.predConsKwh = solarLedgerPredictCons(today);
+  if (HAS_BATT_SHUNT) L.flags |= SLED_F_SHUNT;
+  sledLiveDirty = true;
+}
+
+static void solarLedgerCloseDay() {
+  SolarLedgerLive &L = sledLive;
+  if (L.dayIdx == 0) return;
+  SolarLedgerRec r = {};
+  r.dayIdx      = L.dayIdx;
+  r.predHarvKwh = L.predHarvKwh;
+  r.predIrrKwh  = L.predIrrKwh;
+  r.predConsKwh = L.predConsKwh;
+  r.coverageMin = L.coverageMin;
+  r.flags       = L.flags;
+  if (r.coverageMin < SLED_MIN_COVER_MIN) r.flags |= SLED_F_PARTIAL;
+  r.altKwh      = sledLiveAltKwh();
+  r.actHarvKwh  = sledLiveActHarvKwh();
+  r.actConsKwh  = sledLiveActConsKwh();
+  r.ratioAfter  = NAN;
+  // Learn: the day's actual/forecast ratio blended slowly into performanceRatio. Only a full day with
+  // a real forecast, a live VE.Direct link and a meaningful promise can teach anything.
+  if (solarLearnEnable == 1 && (r.flags & SLED_F_FORECAST) && !(r.flags & SLED_F_PARTIAL)
+      && !isnan(r.actHarvKwh) && r.predIrrKwh >= SLED_MIN_IRR_KWH) {
+    float dayRatio = r.actHarvKwh / r.predIrrKwh;
+    if (dayRatio < SLED_RATIO_MIN) dayRatio = SLED_RATIO_MIN;
+    if (dayRatio > SLED_RATIO_MAX) dayRatio = SLED_RATIO_MAX;
+    float a = solarLearnRatePct / 100.0f;
+    if (a < 0.0f) a = 0.0f;
+    if (a > 0.5f) a = 0.5f;
+    performanceRatio = (1.0f - a) * performanceRatio + a * dayRatio;
+    if (performanceRatio < SLED_RATIO_MIN) performanceRatio = SLED_RATIO_MIN;
+    if (performanceRatio > SLED_RATIO_MAX) performanceRatio = SLED_RATIO_MAX;
+    weatherRecomputePredicted();
+    r.ratioAfter = performanceRatio;
+    r.flags |= SLED_F_LEARNED;
+    sledRatioDirty = true;    // NVS write waits for field-cut in the service
+    settingsDirty = true;     // CSV3 echoes the new ratio now
+    queueConsoleMessageF("Solar: day ratio %.2f, performance ratio now %.2f", dayRatio, performanceRatio);
+  }
+  sledRing[sledHead] = r;
+  sledHead = (sledHead + 1) % SLED_SIZE;
+  if (sledCount < SLED_SIZE) sledCount++;
+  sledDirty = true;
+  L.dayIdx = 0;
+}
+
+// The flash writers. Ring + live-day blobs to LittleFS, learned ratio to NVS. Callers own the gate:
+// the service only reaches here with the field gate cut; the shutdown/restart paths accept the stall.
+static void sledWrite(bool ring) {
+  if (!sledRing) return;
+  if (ring) {
+    uint16_t start = (sledCount < SLED_SIZE) ? 0 : sledHead;
+    writePsramBlob(SLED_PATH, SLED_MAGIC, SLED_VER, 0, sledRing, sizeof(SolarLedgerRec), SLED_SIZE, start, sledCount);
+    sledDirty = false;
+  }
+  writePsramBlob(SLED_LIVE_PATH, SLED_MAGIC ^ 1u, SLED_VER, 0, &sledLive, sizeof(SolarLedgerLive), 1, 0, 1);
+  sledLiveDirty = false;
+  if (sledRatioDirty) {
+    settingWrite(NK_performanceRatio, String(performanceRatio, 3).c_str());
+    sledRatioDirty = false;
+  }
+}
+void solarLedgerFlushNow() {   // shutdown / maintenance-restart paths only
+  if (!sledRing || (!sledDirty && !sledLiveDirty && !sledRatioDirty)) return;
+  sledWrite(sledDirty);
+}
+
+// 1 Hz. Rolls the local day (a handful of float ops at midnight), ticks coverage once a minute, and
+// flushes to flash only with the field gate physically cut (fieldCutSettled — never the duty-based
+// fieldOffSettled, which reads "off" during a live duty-0 CV hold). Every other pass is one compare.
+void solarLedgerService() {
+  static uint32_t lastTickMs = 0, lastMinuteMs = 0, lastLiveFlushMs = 0;
+  uint32_t now = millis();
+  if (now - lastTickMs < 1000) return;
+  lastTickMs = now;
+  if (!sledRing) return;
+  time_t ep = time(NULL);
+  if (sledClockValid(ep)) {
+    uint32_t today = sledLocalDay(ep);
+    if (sledLive.dayIdx != 0 && sledLive.dayIdx != today) solarLedgerCloseDay();
+    if (sledLive.dayIdx == 0) {
+      solarLedgerOpenDay(today);
+      lastMinuteMs = now;
+    } else if (now - lastMinuteMs >= 60000) {
+      lastMinuteMs = now;
+      if (sledLive.coverageMin < 1440) sledLive.coverageMin++;
+      if (dataTimestamps[IDX_VICTRON_SOLAR] != 0 && now - dataTimestamps[IDX_VICTRON_SOLAR] < 600000UL) sledLive.flags |= SLED_F_VEDIRECT;
+      if (!HAS_BATT_SHUNT) sledLive.flags &= ~SLED_F_SHUNT;   // a shunt unconfigured mid-day voids the day's consumption
+      // A forecast that only arrived after midnight (late boot) still names today — take it once, flagged.
+      if (!(sledLive.flags & SLED_F_FORECAST) && sledClockValid(weatherFetchEpoch) && sledLocalDay(weatherFetchEpoch) == today) {
+        sledLive.predIrrKwh  = solarIrrToKwh(UVToday);
+        sledLive.predHarvKwh = sledLive.predIrrKwh * performanceRatio;
+        sledLive.flags |= SLED_F_FORECAST | SLED_F_SAMEDAY;
+      }
+      sledLiveDirty = true;
+    }
+  }
+  if (!fieldCutSettled(10000)) return;
+  bool liveDue = sledLiveDirty && (lastLiveFlushMs == 0 || now - lastLiveFlushMs >= SLED_LIVE_FLUSH_MS);
+  if (!sledDirty && !liveDue && !sledRatioDirty) return;
+  sledWrite(sledDirty);
+  lastLiveFlushMs = now;
+}
+
+// /get?ResetSolarLedger — flags only; the flash write waits for field-cut in the service. Today
+// reopens on the next tick with fresh baselines and no history to predict from.
+void solarLedgerClear() {
+  sledCount = 0;
+  sledHead = 0;
+  sledLive.dayIdx = 0;
+  sledDirty = true;
+  sledLiveDirty = true;
+}
+
+// /solarledger.csv — every closed day oldest-first, then the day in progress (flag SLED_F_LIVE).
+// Empty cell = unknown (NAN). Streamed straight from PSRAM, no buffer.
+static void sledCell(char *buf, size_t n, float v) {
+  if (isnan(v)) { buf[0] = '\0'; return; }
+  snprintf(buf, n, "%.3f", v);
+}
+void solarLedgerCsvSend(AsyncWebServerRequest *request) {
+  struct St { uint32_t total, base, idx; bool done; char line[200]; int len, pos; };
+  St st;
+  st.total = sledRing ? sledCount : 0;
+  st.base  = (sledHead + SLED_SIZE - st.total) % SLED_SIZE;
+  st.idx = 0; st.done = false; st.len = 0; st.pos = 0;
+  AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
+    [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+      size_t written = 0;
+      while (written < maxLen) {
+        if (st.pos >= st.len) {
+          if (st.done) return written;
+          if (st.idx == 0) {
+            time_t ep = time(NULL);
+            st.len = snprintf(st.line, sizeof(st.line), "# sledger v1 today=%lu tz=%ld n=%lu ratio=%.3f need=%.2f needSrc=%d learn=%d useCons=%d\n",
+                              (unsigned long)(sledClockValid(ep) ? sledLocalDay(ep) : 0), (long)usageTzOffsetS,
+                              (unsigned long)st.total, performanceRatio, sledNeedKwh, sledNeedSource,
+                              solarLearnEnable, solarUseConsEnable);
+          } else if (st.idx == 1) {
+            st.len = snprintf(st.line, sizeof(st.line), "day,predHarv,predIrr,actHarv,predCons,actCons,alt,ratio,covMin,flags\n");
+          } else {
+            uint32_t i = st.idx - 2;
+            SolarLedgerRec r;
+            if (i < st.total) {
+              r = sledRing[(st.base + i) % SLED_SIZE];
+            } else if (i == st.total && sledLive.dayIdx != 0) {
+              memset(&r, 0, sizeof(r));
+              r.dayIdx = sledLive.dayIdx; r.predHarvKwh = sledLive.predHarvKwh; r.predIrrKwh = sledLive.predIrrKwh;
+              r.predConsKwh = sledLive.predConsKwh; r.actHarvKwh = sledLiveActHarvKwh(); r.actConsKwh = sledLiveActConsKwh();
+              r.altKwh = sledLiveAltKwh(); r.ratioAfter = NAN; r.coverageMin = sledLive.coverageMin;
+              r.flags = sledLive.flags | SLED_F_LIVE;
+            } else { st.done = true; return written; }
+            char c1[16], c2[16], c3[16], c4[16], c5[16], c6[16], c7[16];
+            sledCell(c1, sizeof(c1), r.predHarvKwh); sledCell(c2, sizeof(c2), r.predIrrKwh); sledCell(c3, sizeof(c3), r.actHarvKwh);
+            sledCell(c4, sizeof(c4), r.predConsKwh); sledCell(c5, sizeof(c5), r.actConsKwh); sledCell(c6, sizeof(c6), r.altKwh);
+            sledCell(c7, sizeof(c7), r.ratioAfter);
+            st.len = snprintf(st.line, sizeof(st.line), "%lu,%s,%s,%s,%s,%s,%s,%s,%u,%u\n",
+                              (unsigned long)r.dayIdx, c1, c2, c3, c4, c5, c6, c7, (unsigned)r.coverageMin, (unsigned)r.flags);
+          }
+          if (st.len > (int)sizeof(st.line) - 1) st.len = sizeof(st.line) - 1;
+          st.idx++; st.pos = 0;
+        }
+        size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+        memcpy(buf + written, st.line + st.pos, tw);
+        written += tw; st.pos += (int)tw;
+      }
+      return written;
+    });
+  response->addHeader("Cache-Control", "no-cache");
+  request->send(response);
+}
+
 void initWeatherModeSettings() {
   if (!settingExists(NK_LatitudeNMEA)) {
     settingWrite(NK_LatitudeNMEA, "0.0");
@@ -358,6 +651,26 @@ void initWeatherModeSettings() {
     settingWrite(NK_performanceRatio, String(performanceRatio, 2).c_str());
   } else {
     performanceRatio = settingRead(NK_performanceRatio).toFloat();
+  }
+  if (!settingExists(NK_solarLearnEnable)) {
+    settingWrite(NK_solarLearnEnable, String(solarLearnEnable).c_str());
+  } else {
+    solarLearnEnable = settingRead(NK_solarLearnEnable).toInt();
+  }
+  if (!settingExists(NK_solarUseConsEnable)) {
+    settingWrite(NK_solarUseConsEnable, String(solarUseConsEnable).c_str());
+  } else {
+    solarUseConsEnable = settingRead(NK_solarUseConsEnable).toInt();
+  }
+  if (!settingExists(NK_solarConsMarginPct)) {
+    settingWrite(NK_solarConsMarginPct, String(solarConsMarginPct, 1).c_str());
+  } else {
+    solarConsMarginPct = settingRead(NK_solarConsMarginPct).toFloat();
+  }
+  if (!settingExists(NK_solarLearnRatePct)) {
+    settingWrite(NK_solarLearnRatePct, String(solarLearnRatePct, 1).c_str());
+  } else {
+    solarLearnRatePct = settingRead(NK_solarLearnRatePct).toFloat();
   }
   if (!settingExists(NK_SolarWatts)) {
     settingWrite(NK_SolarWatts, String(SolarWatts).c_str());
@@ -706,7 +1019,7 @@ if (!BMP388Disconnected) {
   // only; the /get handler tells the user a toggle change needs a reboot. n2kTxEnable off keeps the
   // library's listen-only default: zero bus presence, no address claim, exactly the pre-TX behavior.
   // InitSystemSettings() has already run (setup order), so the n2k* globals hold NVS values here.
-  if (n2kTxEnable == 1) {
+  if (n2kTxEnable == 1 || rvcTxEnable == 1) {  // RV-C rides the same node: one address claim, one mode
     NMEA2000.SetN2kCANSendFrameBufSize(80);  // software retry ring for frames the non-blocking _xeng driver refuses (TWAI queue full / no bus)
     uint64_t mac = ESP.getEfuseMac();
     static char n2kSerial[9];
@@ -722,7 +1035,7 @@ if (!BMP388Disconnected) {
     int savedAddr = settingExists(NK_n2kSrcAddr) ? settingRead(NK_n2kSrcAddr).toInt() : 22;
     if (savedAddr < 0 || savedAddr > 251) savedAddr = 22;
     NMEA2000.SetMode(tNMEA2000::N2km_ListenAndNode, (uint8_t)savedAddr);
-    NMEA2000.ExtendTransmitMessages(N2kTransmitMessages);
+    if (n2kTxEnable == 1) NMEA2000.ExtendTransmitMessages(N2kTransmitMessages);  // never advertise N2K PGNs an RV-C-only node will not send
     NMEA2000.ExtendReceiveMessages(N2kReceiveMessages);
     n2kSrcAddrLive = savedAddr;
   }
@@ -1312,6 +1625,41 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_n2kEngBitsEn, String(n2kEngBitsEnable).c_str());
   } else {
     n2kEngBitsEnable = settingRead(NK_n2kEngBitsEn).toInt();
+  }
+  if (!settingExists(NK_rvcTxEn)) {
+    settingWrite(NK_rvcTxEn, String(rvcTxEnable).c_str());
+  } else {
+    rvcTxEnable = settingRead(NK_rvcTxEn).toInt();
+  }
+  if (!settingExists(NK_rvcChgrEn)) {
+    settingWrite(NK_rvcChgrEn, String(rvcChgrEnable).c_str());
+  } else {
+    rvcChgrEnable = settingRead(NK_rvcChgrEn).toInt();
+  }
+  if (!settingExists(NK_rvcDcEn)) {
+    settingWrite(NK_rvcDcEn, String(rvcDcEnable).c_str());
+  } else {
+    rvcDcEnable = settingRead(NK_rvcDcEn).toInt();
+  }
+  if (!settingExists(NK_rvcFaultEn)) {
+    settingWrite(NK_rvcFaultEn, String(rvcFaultEnable).c_str());
+  } else {
+    rvcFaultEnable = settingRead(NK_rvcFaultEn).toInt();
+  }
+  if (!settingExists(NK_rvcChgrInst)) {
+    settingWrite(NK_rvcChgrInst, String(rvcChgrInstance).c_str());
+  } else {
+    rvcChgrInstance = settingRead(NK_rvcChgrInst).toInt();
+  }
+  if (!settingExists(NK_rvcDcInst)) {
+    settingWrite(NK_rvcDcInst, String(rvcDcInstance).c_str());
+  } else {
+    rvcDcInstance = settingRead(NK_rvcDcInst).toInt();
+  }
+  if (!settingExists(NK_rvcDevPri)) {
+    settingWrite(NK_rvcDevPri, String(rvcDevPriority).c_str());
+  } else {
+    rvcDevPriority = settingRead(NK_rvcDevPri).toInt();
   }
   if (!settingExists(NK_n2kRxBattInst)) {
     settingWrite(NK_n2kRxBattInst, String(n2kRxBattInstance).c_str());

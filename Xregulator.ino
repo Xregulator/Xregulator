@@ -1405,6 +1405,67 @@ int WeatherTimeoutMs = 10000;          // HTTP timeout in milliseconds
 
 int currentWeatherMode = 0;           // 0=normal, 1=high solar, 2=low solar
 unsigned long nextWeatherUpdate = 0;  // When next update is due
+time_t weatherFetchEpoch = 0;         // wall clock of the last successful forecast fetch (0 = none this boot) — tells the ledger which local day "tomorrow" meant
+
+// ── Solar energy ledger: predicted vs actual harvest + consumption, one record per LOCAL day ──
+// Closes the loop on Defer to Solar. The forecast for day X is frozen the evening before (the number
+// the pause decision was acting on overnight), the panels' actual harvest and the boat's actual
+// consumption are booked at the next midnight, and the day's actual/forecast ratio drifts
+// performanceRatio (solarLearnEnable). Consumption history sizes the pause threshold
+// (solarUseConsEnable). Ring + live-day state live in PSRAM, flash only at field-cut-settled.
+#define SLED_SIZE           90
+#define SLED_PATH           "/solarledger.bin"
+#define SLED_LIVE_PATH      "/solarlive.bin"
+#define SLED_MAGIC          0x534C4547u   // 'SLEG'
+#define SLED_VER            1u
+#define SLED_MIN_COVER_MIN  1200          // a day feeds learning/prediction only if the device was awake >= 20 h of it
+#define SLED_MIN_IRR_KWH    0.30f         // forecast (at ratio 1.0) below this can't ratio-learn — a near-zero promise makes the ratio noise
+#define SLED_RATIO_MIN      0.15f
+#define SLED_RATIO_MAX      1.20f
+#define SLED_LIVE_FLUSH_MS  1800000UL     // live-day state to flash at most every 30 min while the field is cut
+#define SLED_PRED_WINDOW    30            // consumption prediction looks back at most this many ledger days
+#define SLED_PRED_MEDIAN_N  7             // ...and takes the median of the newest N complete days (mean when fewer exist)
+#define SLED_F_FORECAST 0x01   // predHarvKwh came from a real forecast
+#define SLED_F_VEDIRECT 0x02   // VE.Direct frames were seen during the day
+#define SLED_F_SHUNT    0x04   // battery shunt configured (consumption is measurable)
+#define SLED_F_LEARNED  0x08   // this day moved performanceRatio
+#define SLED_F_PARTIAL  0x10   // coverage below SLED_MIN_COVER_MIN — excluded from learning and prediction
+#define SLED_F_SAMEDAY  0x20   // forecast only arrived after midnight (device booted late) — a full-day number, but not the one any overnight pause acted on
+#define SLED_F_LIVE     0x80   // CSV export only: the day still in progress
+struct SolarLedgerRec {
+  uint32_t dayIdx;        // local calendar day number: (epoch + usageTzOffsetS) / 86400
+  float predHarvKwh;      // forecast harvest at the ratio then in force (NAN = no forecast the evening before)
+  float predIrrKwh;       // the same forecast at ratio 1.0 (irradiance x array watts) — the learning basis
+  float actHarvKwh;       // VE.Direct panel-power integral over the day (NAN = no VE.Direct all day)
+  float predConsKwh;      // consumption predicted for this day from ledger history (NAN = no history yet)
+  float actConsKwh;       // house loads = alternator + solar + battery discharge - battery charge (NAN = not measurable)
+  float altKwh;           // alternator share of the day's sources
+  float ratioAfter;       // performanceRatio after this day's learning step (NAN = day did not learn)
+  uint16_t coverageMin;   // minutes of the day the device was awake and accumulating
+  uint8_t  flags;         // SLED_F_*
+  uint8_t  pad;
+};
+struct SolarLedgerLive {  // the day in progress — persisted so a reboot resumes it instead of losing the day
+  uint32_t dayIdx;        // 0 = no day open (clock never valid)
+  double baseSolarWh, baseAltWh, baseChgWh, baseDischgWh;   // *_AllTime counters at day open
+  float predHarvKwh, predIrrKwh, predConsKwh;
+  uint16_t coverageMin;
+  uint8_t  flags;
+  uint8_t  pad;
+};
+SolarLedgerRec *sledRing = nullptr;   // ps_malloc'd in solarLedgerInit()
+uint16_t sledHead = 0;                // next write slot
+uint16_t sledCount = 0;               // 0..SLED_SIZE
+SolarLedgerLive sledLive = {};
+bool sledDirty = false;               // ring changed (day closed / cleared) — flush at field-cut
+bool sledLiveDirty = false;           // live-day state changed — flush at field-cut, rate-limited
+bool sledRatioDirty = false;          // learned performanceRatio awaiting its NVS write (field-cut only)
+float sledNeedKwh = 0.0f;             // pause threshold actually in force (manual or consumption-sized)
+int   sledNeedSource = 0;             // 0 = High Solar Threshold setting, 1 = predicted consumption + margin
+int   solarLearnEnable = 1;           // learn performanceRatio from each complete day's actual/forecast harvest
+int   solarUseConsEnable = 1;         // size the pause threshold from predicted consumption (falls back to the setting until history exists)
+float solarConsMarginPct = 25.0f;     // headroom over predicted consumption before a day counts as "solar covers it"
+float solarLearnRatePct = 10.0f;      // per-day blend weight of the day's ratio into performanceRatio (slow by design)
 
 //Input Settings
 float uTargetAmps = 3;                           // the one that gets used as the real target
@@ -2952,6 +3013,7 @@ FuncTiming ft_faWindowFinalize; // fast alt-current per-2s-window finalize (Goer
 // ft_dumpLongTermRing: a dirty-gated flash write is rare but, when it fires, shows up as an
 // otherwise-unattributed loop spike in the stall hunt. All three are field-off only (no OV risk).
 FuncTiming ft_zeroLogService;   // zero-drift diagnostic: dumpZeroLog() LittleFS flush (field-off, 30-min, dirty-gated)
+FuncTiming ft_solarLedger;      // solar ledger: 1 Hz day roll (microseconds) + field-cut-only LittleFS/NVS flush
 FuncTiming ft_bhFlushCapNVS;    // Battery Health: LittleFS blob write of capacity ring + results (field-off, dirty-gated)
 FuncTiming ft_kneeLearnService; // Auto Min% learning: NVS write of learned onset floors (field-off, 5-min, dirty-gated)
 
@@ -3020,7 +3082,7 @@ FuncTiming *const ftBlameReg[] = {
   &ft_ch1_compute_stats, &ft_SendWifiData, &ft_checkWiFiConnection, &ft_checkTimeSync,
   &ft_uploadSensorHistory, &ft_uploadBufferedRecords, &ft_buildConfigPayload,
   &ft_dumpLongTermRing, &ft_faMatrixFlush, &ft_fastAltDrain, &ft_faDetector,
-  &ft_zeroLogService, &ft_bhFlushCapNVS, &ft_kneeLearnService, &ft_n2kTx, &ft_dvcc,
+  &ft_zeroLogService, &ft_bhFlushCapNVS, &ft_kneeLearnService, &ft_n2kTx, &ft_dvcc, &ft_solarLedger,
   &ft_n2kParse, &ft_ReadNMEA0183
 };
 constexpr uint8_t FT_BLAME_N = sizeof(ftBlameReg) / sizeof(ftBlameReg[0]);
@@ -5163,6 +5225,25 @@ int n2kEngRpmEnable = 0;    // 127488 engine RPM (off: conflicts with a real eng
 int n2kEngInstance = 0;
 int n2kEngDynEnable = 0;    // 127489 engine dynamic (alternator voltage + warning bits)
 int n2kEngBitsEnable = 1;   // include the discrete warning bits in 127489 (hard over-temp cut/alarm, low voltage, not-charging) — never fires on thermal derating
+
+// ===== RV-C transmit (producer) settings — spec: Working Markdown Docs/RVC_TRANSMIT_SPEC.md =====
+// RV-C DGNs are J1939 PGNs and ride the same 250 kbps port and the same claimed address as our
+// N2K node; they go out through the same round-robin so the one-message-per-pass budget holds.
+int rvcTxEnable = 0;        // RV-C transmit master. Independent of n2kTxEnable for the toggle, but
+                            // the node mode it needs is the same one n2kTxEnable sets at boot.
+int rvcChgrEnable = 1;      // CHARGER_STATUS + _2 + _3 + CHARGER_CONFIGURATION_STATUS
+int rvcDcEnable = 1;        // DC_SOURCE_STATUS_1/2/3 at our own alternator DC instance
+int rvcFaultEnable = 1;     // DM_RV diagnostic message (fault + operating status)
+int rvcChgrInstance = 49;   // 0x31: charger instance 1 with the alternator type nibble (3) in the
+                            // upper 4 bits — the de-facto convention a WS500 uses (a default WS500
+                            // lands on 0x30). Not ratified RV-C; 49 is a legal instance either way.
+int rvcDcInstance = 5;      // the alternator's own DC source instance. 1-4 are the standard banks
+                            // (house/chassis/secondary/genset start) — never publish into those.
+int rvcDevPriority = 80;    // RV-C device priority, spec Table 6.5.2b: 80 = Charger. Below a BMS's
+                            // 120, so a real battery monitor always outranks us on shared data.
+// Deliberately absent from N2kTransmitMessages[]: RV-C DGNs are not N2K PGNs, so listing them in
+// the library's 126464 transmit-PGN reply would be a false claim about our N2K capability.
+
 uint32_t n2kTxCount = 0;      // frames/messages accepted by SendMsg since Reset Peak Values
 uint32_t n2kTxDropCount = 0;  // SendMsg failures (TX queue + retry ring full — normal when no bus is attached)
 int n2kSrcAddrLive = -1;      // claimed source address; -1 = not claimed / listen-only
@@ -5704,6 +5785,7 @@ void setup() {
   memset(&ft_faDetector, 0, sizeof(FuncTiming));
   memset(&ft_faWindowFinalize, 0, sizeof(FuncTiming));
   memset(&ft_zeroLogService, 0, sizeof(FuncTiming));
+  memset(&ft_solarLedger, 0, sizeof(FuncTiming));
   memset(&ft_bhFlushCapNVS, 0, sizeof(FuncTiming));
   memset(&ft_kneeLearnService, 0, sizeof(FuncTiming));
   memset(&ft_rai_total, 0, sizeof(FuncTiming));
@@ -5895,6 +5977,7 @@ void setup() {
   kneeLearnInit();             // Auto Min% learning: load knobs + learned per-bin state (after the table)
   zeroLogInit();               // Zero-drift log: load toggle, alloc PSRAM ring, restore persisted records
   zeroFitInit();               // Temp-comp zero correction: alloc daily-fit history ring, restore /zerofit.bin
+  solarLedgerInit();           // Solar ledger: alloc the 90-day ring in PSRAM, restore /solarledger.bin + the day in progress
   Serial.println();
   // Force initial sensor readings before main loop starts
   delay(50);  // Brief settling time
@@ -6350,6 +6433,7 @@ void loop() {
             }
             TIMED_CALL(ft_dumpLongTermRing, dumpLongTermRing());  // durable month-long plot cache → flash (final)
             dumpUsageAccum();  // app-usage counters survive a breaker cut during standby
+            solarLedgerFlushNow();  // ledger + live day + learned ratio survive the same cut
             pendingShutdownFlush = false;
             shutdownNVSFlushDone = false;
             shutdownCloudDeadlineMs = 0;
@@ -6471,6 +6555,7 @@ void loop() {
       // WiFi loss) or a solar pause latches on and holds the field off forever. The fetch itself is
       // still gated on client mode + WiFi inside the call.
       updateWeatherMode();  // untimed: core-1 cost is local analysis only; fetch is queued to Core 0
+      TIMED_CALL(ft_solarLedger, solarLedgerService());  // 1 Hz local-day roll of the solar ledger; flash only at field-cut-settled
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
       // Inner-PID firing + INA228 read interval re-baseline: while the field is down, drop the
       // previous-sample timestamp so the first sample after re-enable measures a fresh interval,
@@ -6764,6 +6849,7 @@ void loop() {
     ft_faDetector.worstWindow = 0;
     ft_faWindowFinalize.worstWindow = 0;
     ft_zeroLogService.worstWindow = 0;
+    ft_solarLedger.worstWindow = 0;
     ft_bhFlushCapNVS.worstWindow = 0;
     ft_kneeLearnService.worstWindow = 0;
     ft_uploadBufferedRecords.worstWindow = 0;

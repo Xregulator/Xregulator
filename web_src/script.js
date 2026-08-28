@@ -1043,6 +1043,16 @@ const CSV2_FIELDS = [
     "dvccAuthProd",            // its product code (126996), else its Victron VREG product id, else 0
     "ovTierLowCount",          // timed OV cut, LOW tier — session rising-edge counter
     "ovTierMidCount",          // timed OV cut, MID tier — session rising-edge counter
+    "sledPredHarvToday",       // solar ledger: harvest the forecast promised for today (kWh x100, -1 = unknown)
+    "sledActHarvToday",        // panel-power integral so far today (kWh x100, -1 = no VE.Direct)
+    "sledPredConsToday",       // consumption predicted for today (kWh x100, -1 = no history)
+    "sledActConsToday",        // house-load energy so far today (kWh x100, -1 = not measurable)
+    "sledNeedKwh",             // the bar the 2-of-3 rule is using (kWh x100)
+    "sledNeedSource",          // 0 = High Solar Threshold setting, 1 = predicted consumption + margin
+    "sledDaysValid",           // complete days on the ledger
+    "sledCoverageMin",         // minutes of today the device has been awake
+    "ft_solarLedger_win",
+    "ft_solarLedger_ses",
     "sessionId",               // device boot identity, same in every channel this boot
     "sendMs",                  // device millis() when this payload was BUILT (CSV2 sends one pass later)
 ];
@@ -3604,6 +3614,17 @@ const CSV3_FIELDS = [
     "LoadDumpN1",                    // load-dump tier 1 consecutive-sample count
     "LoadDumpN2",                    // load-dump tier 2 consecutive-sample count
     "LoadDumpN3",                    // load-dump tier 3 consecutive-sample count
+    "solarLearnEnable",              // 0/1 learn the performance ratio from each complete ledger day
+    "solarUseConsEnable",            // 0/1 size the solar-pause bar from predicted consumption
+    "solarConsMarginPct",            // x100 (%)
+    "solarLearnRatePct",             // x100 (%)
+    "rvcTxEnable",                   // 0/1 RV-C transmit master (bus mode applied at boot)
+    "rvcChgrEnable",                 // 0/1 RV-C charger DGNs
+    "rvcDcEnable",                   // 0/1 RV-C DC source DGNs at the alternator instance
+    "rvcFaultEnable",                // 0/1 RV-C DM_RV diagnostic message
+    "rvcChgrInstance",               // RV-C charger instance
+    "rvcDcInstance",                 // RV-C DC source instance
+    "rvcDevPriority",                // RV-C device priority
     "sessionId",                     // device boot identity, same in every channel this boot
     "sendMs",                        // device millis() when this settings echo was built; event-driven with a 60 s fallback
 ];
@@ -3807,7 +3828,9 @@ async function discoverAndConnect() {
             syncFormActionsToDevice();
             sseReconnectAttempts = 0;
             setSplashText('Connecting to regulator');
-            matchAppBundleToDevice(hit.fw);
+            lastDiscoveredFw = hit.fw;
+            lastDiscoveredBase = hit.base;
+            matchAppBundleToDevice(hit.fw, hit.base);
         } else {
             console.log('[DISCOVERY] no regulator found');
         }
@@ -3840,7 +3863,9 @@ async function rediscoverAfterLoss() {
         syncFormActionsToDevice();
         sseReconnectAttempts = 0;
         initializeEventSource();
-        matchAppBundleToDevice(hit.fw);
+        lastDiscoveredFw = hit.fw;
+        lastDiscoveredBase = hit.base;
+        matchAppBundleToDevice(hit.fw, hit.base);
     } else {
         console.log('[DISCOVERY] re-scan found nothing');
         showRecoveryOptions();
@@ -3849,37 +3874,99 @@ async function rediscoverAfterLoss() {
     }
 }
 
-// Match-on-connect: adopt the connected regulator's interface version. Downloads
-// the device's fw-matched web bundle via LiveUpdate (applied at next cold app
-// launch); download failure is non-fatal — that fw's bundle may not exist in the
-// OTA bucket, and the current UI keeps working over the live connection.
-let webBundleMatchTried = false;
+// Match-on-connect: make the app's stored interface identical to the one the connected
+// regulator serves. The regulator is the source of truth — it holds the byte-exact bundle for
+// its own firmware and serves it over the link the app is already on, so this works in AP mode
+// and offshore with no internet. The signed OTA zip (web_<fw>.zip) is only the fallback when the
+// device pull fails. Content is compared by hash on the native side, so a re-flashed device
+// carrying the same version number with different files still syncs. A staged bundle is applied
+// in place (applyDownloaded re-points the WebView, then location.reload() — nothing here relies
+// on a cold relaunch). Keyed per firmware string, not once per launch, so a firmware update taken
+// mid-session syncs on reconnect too.
+let webBundleMatchedFw = null;      // fw string already reconciled (or given up on) this page load
+let webBundleSyncRunning = false;
+let lastDiscoveredFw = null;
+let lastDiscoveredBase = null;
+const WEB_APPLY_STAMP_KEY = 'xregWebApplyStamp';
+const WEB_APPLY_LOOP_GUARD_MS = 120000;
 
-async function matchAppBundleToDevice(fw) {
-    if (!IS_CAPACITOR || DEMO_MODE || webBundleMatchTried) return;
+async function matchAppBundleToDevice(fw, base) {
+    if (!IS_CAPACITOR || DEMO_MODE) return;
     if (typeof fw !== 'string' || !/^\d+\.\d+\.\d+$/.test(fw)) return;
+    if (webBundleMatchedFw === fw || webBundleSyncRunning) return;
     const plugin = window.Capacitor.Plugins && window.Capacitor.Plugins.LiveUpdate;
-    if (!plugin || !plugin.getCurrentVersion || !plugin.downloadVersion) return;
-    webBundleMatchTried = true;
+    if (!plugin || !plugin.getCurrentVersion) return;
+    if (!base) base = lastDiscoveredBase || API_BASE_URL;
+    localStorage.removeItem('xregPendingWebVersion');   // pre-08-28 key, no longer consulted
+    webBundleSyncRunning = true;
+    let outcome = null;   // 'ready' = pending bundle waiting, 'unchanged', 'failed'
     try {
-        const cur = await plugin.getCurrentVersion();
-        if (cur && !cur.isBundled && cur.version === fw) {
-            localStorage.removeItem('xregPendingWebVersion');
-            return;
+        if (plugin.syncFromDevice && base && /^https?:\/\//.test(base)) {
+            try {
+                const r = await plugin.syncFromDevice({ version: fw, base: base });
+                outcome = (r && r.applyReady) ? 'ready' : 'unchanged';
+                console.log('[LiveUpdate] Device sync ' + fw + ': ' + (r ? r.status : '?') + (r && r.isActive ? ' (active)' : ''));
+            } catch (err) {
+                console.log('[LiveUpdate] Device pull failed (' + (err && err.message ? err.message : err) + ') — trying OTA');
+            }
         }
-        if (localStorage.getItem('xregPendingWebVersion') === fw) {
-            console.log('[LiveUpdate] Bundle ' + fw + ' already downloaded, awaiting cold relaunch');
-            showWebMatchBanner(fw);
-            return;
+        if (outcome === null) {
+            const cur = await plugin.getCurrentVersion();
+            if (cur && !cur.isBundled && cur.version === fw) {
+                outcome = 'unchanged';
+            } else if (plugin.downloadVersion) {
+                console.log('[LiveUpdate] Active interface ' + (cur ? cur.version : 'unknown') + ', device fw ' + fw + ' — downloading matching bundle from OTA');
+                await plugin.downloadVersion({ version: fw });
+                outcome = 'ready';
+            } else {
+                outcome = 'failed';
+            }
         }
-        console.log('[LiveUpdate] Active interface ' + (cur ? cur.version : 'unknown') + ', device fw ' + fw + ' — downloading matching bundle');
-        await plugin.downloadVersion({ version: fw });
-        localStorage.setItem('xregPendingWebVersion', fw);
-        console.log('[LiveUpdate] Bundle ' + fw + ' ready, applies on next cold launch');
-        showWebMatchBanner(fw);
     } catch (err) {
-        console.log('[LiveUpdate] Match-on-connect download failed (non-fatal): ' + (err && err.message ? err.message : err));
+        outcome = 'failed';
+        console.log('[LiveUpdate] Match-on-connect failed (non-fatal): ' + (err && err.message ? err.message : err));
+    } finally {
+        webBundleSyncRunning = false;
     }
+    webBundleMatchedFw = fw;   // failures too: no automatic hammering; the mismatch dialog's Sync button clears this
+    if (outcome === 'ready') {
+        await applyWebBundleNow(fw);
+        return;
+    }
+    if (outcome === 'unchanged') localStorage.removeItem(WEB_APPLY_STAMP_KEY);
+    flushDeferredSchemaMismatch();
+}
+
+// Promote the pending bundle and reload onto it. The stamp is a reload-loop guard: if this same
+// version was applied moments ago and a sync is asking again, something is wrong with the
+// comparison and the page must not bounce forever — fall back to the relaunch banner instead.
+async function applyWebBundleNow(fw) {
+    const plugin = window.Capacitor.Plugins && window.Capacitor.Plugins.LiveUpdate;
+    let stamp = null;
+    try { stamp = JSON.parse(localStorage.getItem(WEB_APPLY_STAMP_KEY) || 'null'); } catch (e) { stamp = null; }
+    if (stamp && stamp.version === fw && (Date.now() - stamp.ts) < WEB_APPLY_LOOP_GUARD_MS) {
+        console.log('[LiveUpdate] ' + fw + ' was applied ' + Math.round((Date.now() - stamp.ts) / 1000) + 's ago and is being staged again — not reloading');
+        showWebMatchBanner(fw);
+        flushDeferredSchemaMismatch();
+        return;
+    }
+    try {
+        localStorage.setItem(WEB_APPLY_STAMP_KEY, JSON.stringify({ version: fw, ts: Date.now() }));
+        setSplashText('Updating interface to match regulator');
+        await plugin.applyDownloaded();
+        console.log('[LiveUpdate] Applied ' + fw + ' — reloading');
+        location.reload();
+    } catch (err) {
+        console.log('[LiveUpdate] Apply failed (' + (err && err.message ? err.message : err) + ') — relaunch will apply');
+        showWebMatchBanner(fw);
+        flushDeferredSchemaMismatch();
+    }
+}
+
+function retryWebBundleSync() {
+    webBundleMatchedFw = null;
+    const fw = lastDiscoveredFw || document.getElementById('current-version-display').textContent.trim();
+    matchAppBundleToDevice(fw, lastDiscoveredBase || API_BASE_URL);
 }
 
 function showWebMatchBanner(fw) {
@@ -3887,7 +3974,7 @@ function showWebMatchBanner(fw) {
     const banner = document.createElement('div');
     banner.id = 'web-match-banner';
     banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#0a84ff;color:#fff;padding:calc(12px + env(safe-area-inset-top)) 44px 12px 14px;text-align:center;z-index:10000;font-weight:600;font-size:14px;line-height:1.45;';
-    banner.textContent = 'Interface version ' + fw + ' downloaded to match your regulator — close and reopen the app to apply.';
+    banner.textContent = 'Interface version ' + fw + ' is ready to match your regulator — close and reopen the app to apply.';
     const close = document.createElement('button');
     close.textContent = '×';
     close.setAttribute('aria-label', 'Dismiss');
@@ -3896,6 +3983,44 @@ function showWebMatchBanner(fw) {
     banner.appendChild(close);
     document.body.insertBefore(banner, document.body.firstChild);
     document.body.style.paddingTop = 'calc(72px + env(safe-area-inset-top))';
+}
+
+// Interface/firmware skew notice. Every positional CSV channel hard-drops frames whose field
+// count differs from this build's array, so a version gap shows as blank gauges and dead settings
+// echoes under a green connection — this dialog is the only thing that says why. Once per page
+// load. In the app it holds until the bundle sync settles, because the sync normally closes the
+// gap by reloading before anyone would see it.
+let schemaMismatchInfo = null;
+let schemaMismatchShown = false;
+
+function noteSchemaMismatch(channel, declared, expected) {
+    if (DEMO_MODE || schemaMismatchShown) return;
+    if (!schemaMismatchInfo) schemaMismatchInfo = { channel: channel, declared: declared, expected: expected };
+    if (IS_CAPACITOR && (webBundleSyncRunning || (lastDiscoveredFw && webBundleMatchedFw !== lastDiscoveredFw))) return;
+    showSchemaMismatchDialog();
+}
+
+function flushDeferredSchemaMismatch() {
+    if (schemaMismatchInfo && !schemaMismatchShown) showSchemaMismatchDialog();
+}
+
+function showSchemaMismatchDialog() {
+    if (schemaMismatchShown) return;
+    schemaMismatchShown = true;
+    const info = schemaMismatchInfo || {};
+    const detail = info.channel
+        ? `\n\nTelemetry channel ${String(info.channel).toUpperCase()}: the regulator sends ${info.declared} fields, this interface expects ${info.expected}.`
+        : '';
+    console.log('[UI] Interface mismatch dialog shown' + detail.replace(/\n+/g, ' '));
+    if (IS_CAPACITOR) {
+        xConfirm(`This app's interface does not match the regulator's firmware, so some readings and settings will stay blank. The app normally copies the matching interface from the regulator when it connects; that has not happened yet.${detail}`,
+            { title: 'Interface Out of Date', okText: 'Sync Interface', cancelText: 'Not Now' })
+            .then(ok => { if (ok) retryWebBundleSync(); });
+    } else {
+        xConfirm(`This page was loaded from a different version of the regulator's interface than the firmware now running, so some readings and settings will stay blank. Reload the page to get the matching interface.${detail}`,
+            { title: 'Interface Out of Date', okText: 'Reload Page', cancelText: 'Not Now' })
+            .then(ok => { if (ok) location.reload(); });
+    }
 }
 
 // =====================================================================
@@ -5689,7 +5814,7 @@ function showUpdateInProgressOverlay(versionStr) {
               Downloading firmware v<strong>${versionStr}</strong> and rebooting.
           </p>
           <p style="margin: 12px 0 4px 0; font-size: 13px; color: #999;">
-              Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux, or fully close and reopen the app on mobile. A regular refresh may show stale cached files.
+              Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux. A regular refresh may show stale cached files. The app refreshes its own interface automatically when it reconnects.
           </p>
           <p style="margin: 12px 0 0; font-size: 11px; color: #777;">
               Do not power-cycle the device during the update.
@@ -5701,7 +5826,9 @@ function showUpdateInProgressOverlay(versionStr) {
 // ota.xengineering.net proxy (otaBaseUrl in LiveUpdate.swift), which forwards to
 // the Supabase Storage OTA bucket. The device firmware update is still triggered
 // by the form submit; this just keeps the app's local web UI in sync. Silently
-// no-ops in a regular browser.
+// no-ops in a regular browser. Pre-staging only: once the device is back on the
+// new firmware, match-on-connect finds this bundle identical to what the device
+// serves and applies it (or pulls from the device if this download never landed).
 async function kickOffAppWebUpdate(version) {
     if (!window.Capacitor || !window.Capacitor.isNativePlatform || !window.Capacitor.isNativePlatform()) {
         return;
@@ -5718,7 +5845,7 @@ async function kickOffAppWebUpdate(version) {
             });
         }
         const result = await plugin.downloadVersion({ version });
-        console.log('[LiveUpdate] App bundle ready, applies on next cold launch:', result);
+        console.log('[LiveUpdate] App bundle pre-staged, applied on reconnect:', result);
     } catch (err) {
         console.error('[LiveUpdate] App web bundle download failed:', err);
     }
@@ -5740,6 +5867,10 @@ function updateFirmwareVersion(versionInt) {
         document.getElementById('current-version-display').textContent = versionStr;
         document.getElementById('current-version-display-2').textContent = versionStr;
         prevVersionInt = versionInt;
+        if (versionInt > 0) {
+            lastDiscoveredFw = versionStr;
+            matchAppBundleToDevice(versionStr, lastDiscoveredBase || API_BASE_URL);
+        }
     }
 }
 
@@ -5933,7 +6064,7 @@ function handleForcedUpdate(data) {
                       Downloading firmware v<strong>${versionStr}</strong> and rebooting.
                   </p>
                   <p style="margin: 12px 0 4px 0; font-size: 13px; color: #999;">
-                      Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux, or fully close and reopen the app on mobile. A regular refresh may show stale cached files.
+                      Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux. A regular refresh may show stale cached files. The app refreshes its own interface automatically when it reconnects.
                   </p>
                   <p style="margin: 12px 0 0; font-size: 11px; color: #777;">
                       Do not power-cycle the device during the update.
@@ -7435,7 +7566,19 @@ function updateAllEchosOptimized(data) {
         { key: 'weatherModeEnabled', id: 'weatherModeEnabled_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'SolarWatts', id: 'SolarWatts_echo', transform: v => v },
         { key: 'performanceRatio', id: 'performanceRatio_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'UVThresholdHigh', id: 'UVThresholdHigh_echo', transform: v => v },
+        { key: 'UVThresholdHigh', id: 'UVThresholdHigh_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'performanceRatio', id: 'sledRatioID', transform: v => (v / 100).toFixed(2) },
+        { key: 'solarLearnEnable', id: 'solarLearnEnable_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'solarUseConsEnable', id: 'solarUseConsEnable_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'solarConsMarginPct', id: 'solarConsMarginPct_echo', transform: v => (v / 100).toFixed(0) },
+        { key: 'solarLearnRatePct', id: 'solarLearnRatePct_echo', transform: v => (v / 100).toFixed(0) },
+        { key: 'rvcTxEnable', id: 'rvcTxEnable_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'rvcChgrEnable', id: 'rvcChgrEnable_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'rvcDcEnable', id: 'rvcDcEnable_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'rvcFaultEnable', id: 'rvcFaultEnable_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'rvcChgrInstance', id: 'rvcChgrInstance_echo', transform: v => v },
+        { key: 'rvcDcInstance', id: 'rvcDcInstance_echo', transform: v => v },
+        { key: 'rvcDevPriority', id: 'rvcDevPriority_echo', transform: v => v },
         { key: 'TuningMode', id: 'TuningMode_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'CloudFeatures', id: 'CloudFeatures_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'PidKp', id: 'PidKp_echo', transform: v => (v / 1000).toFixed(3) },
@@ -13645,6 +13788,10 @@ function updateTogglesFromData(data) {
         updateCheckbox("n2kEngRpmEnable_checkbox", data.n2kEngRpmEnable, "n2kEngRpmEnable");
         updateCheckbox("n2kEngDynEnable_checkbox", data.n2kEngDynEnable, "n2kEngDynEnable");
         updateCheckbox("n2kEngBitsEnable_checkbox", data.n2kEngBitsEnable, "n2kEngBitsEnable");
+        updateCheckbox("rvcTxEnable_checkbox", data.rvcTxEnable, "rvcTxEnable");
+        updateCheckbox("rvcChgrEnable_checkbox", data.rvcChgrEnable, "rvcChgrEnable");
+        updateCheckbox("rvcDcEnable_checkbox", data.rvcDcEnable, "rvcDcEnable");
+        updateCheckbox("rvcFaultEnable_checkbox", data.rvcFaultEnable, "rvcFaultEnable");
         updateCheckbox("dvccEn_checkbox", data.dvccEn, "dvccEn");
         updateCheckbox("IgnoreTemperature_checkbox", data.IgnoreTemperature, "IgnoreTemperature");
         updateCheckbox("IgnoreRPM_checkbox", data.IgnoreRPM, "IgnoreRPM");
@@ -13688,6 +13835,9 @@ function updateTogglesFromData(data) {
         }
         updateCheckbox("timeAxisModeChanging_checkbox", data.timeAxisModeChanging, "timeAxisModeChanging");
         updateCheckbox("weatherModeEnabled_checkbox", data.weatherModeEnabled, "weatherModeEnabled");
+        updateCheckbox("solarLearnEnable_checkbox", data.solarLearnEnable, "solarLearnEnable");
+        updateCheckbox("solarUseConsEnable_checkbox", data.solarUseConsEnable, "solarUseConsEnable");
+        if (data.solarUseConsEnable !== undefined) window.solarUseConsEnable = Number(data.solarUseConsEnable);
         // Stash the three settings that decide whether this phone's position is wanted at
         // all — phonePositionWanted() reads them, and the 60 s poster asks for no location
         // until one of them is on. Echo-driven, so a change made on another client lands here too.
@@ -14760,6 +14910,7 @@ window.addEventListener("load", function () {
                 if (!window.lastCsv1WarnTime || Date.now() - window.lastCsv1WarnTime > 10000) {
                     console.warn(`[CSV1] schema mismatch: ESP32=${declaredCount}, UI=${CSV1_FIELDS.length}`);
                     noteStreamReject('csv1', declaredCount, CSV1_FIELDS.length);
+                    noteSchemaMismatch('csv1', declaredCount, CSV1_FIELDS.length);
                     window.lastCsv1WarnTime = Date.now();
                 }
                 return;
@@ -15112,6 +15263,7 @@ window.addEventListener("load", function () {
                 if (!window.lastCsv2WarnTime || Date.now() - window.lastCsv2WarnTime > 10000) {
                     console.warn(`[CSV2] schema mismatch: ESP32=${declaredCount}, UI=${CSV2_FIELDS.length}`);
                     noteStreamReject('csv2', declaredCount, CSV2_FIELDS.length);
+                    noteSchemaMismatch('csv2', declaredCount, CSV2_FIELDS.length);
                     window.lastCsv2WarnTime = Date.now();
                 }
                 return;
@@ -15136,6 +15288,9 @@ window.addEventListener("load", function () {
 
             // Wind trend plot: refresh Beaufort/gale watermark + bank one ring column (~5s).
             try { windLiveOnCsv2(data); } catch (e) { }
+
+            // Solar ledger: today's predicted/actual tiles + the pause bar in force (~5s).
+            try { solarLedgerOnCsv2(data); } catch (e) { }
 
             // Gate-tuning readouts: render the firmware 10s extremes next to each threshold.
             try { gateReadoutOnCsv2(data); } catch (e) { }
@@ -15964,6 +16119,8 @@ window.addEventListener("load", function () {
                 ["ft_checkTimeSync_ses_ID", "ft_checkTimeSync_ses"],
                 ["ft_zeroLogService_win_ID", "ft_zeroLogService_win"],
                 ["ft_zeroLogService_ses_ID", "ft_zeroLogService_ses"],
+                ["ft_solarLedger_win_ID", "ft_solarLedger_win"],
+                ["ft_solarLedger_ses_ID", "ft_solarLedger_ses"],
                 ["ft_bhFlushCapNVS_win_ID", "ft_bhFlushCapNVS_win"],
                 ["ft_bhFlushCapNVS_ses_ID", "ft_bhFlushCapNVS_ses"],
                 ["ft_kneeLearnService_win_ID", "ft_kneeLearnService_win"],
@@ -16449,6 +16606,7 @@ window.addEventListener("load", function () {
                 if (!window.lastCsv4WarnTime || Date.now() - window.lastCsv4WarnTime > 10000) {
                     console.warn(`[CSV4] schema mismatch: ESP32=${declaredCount}, UI=${CSV4_FIELDS.length}`);
                     noteStreamReject('csv4', declaredCount, CSV4_FIELDS.length);
+                    noteSchemaMismatch('csv4', declaredCount, CSV4_FIELDS.length);
                     window.lastCsv4WarnTime = Date.now();
                 }
                 return;
@@ -16565,6 +16723,7 @@ window.addEventListener("load", function () {
                 if (!window.lastCsv3WarnTime || Date.now() - window.lastCsv3WarnTime > 10000) {
                     console.warn(`[CSV3] schema mismatch: ESP32=${declaredCount}, UI=${CSV3_FIELDS.length}`);
                     noteStreamReject('csv3', declaredCount, CSV3_FIELDS.length);
+                    noteSchemaMismatch('csv3', declaredCount, CSV3_FIELDS.length);
                     window.lastCsv3WarnTime = Date.now();
                 }
                 return;
@@ -16985,6 +17144,7 @@ window.addEventListener("load", function () {
                 if (!window.lastTsWarnTime || Date.now() - window.lastTsWarnTime > 10000) {
                     console.warn(`[TimestampData] schema mismatch: ESP32=${declaredCount}, UI=${TS_FIELDS.length}`);
                     noteStreamReject('ts', declaredCount, TS_FIELDS.length);
+                    noteSchemaMismatch('ts', declaredCount, TS_FIELDS.length);
                     window.lastTsWarnTime = Date.now();
                 }
                 return;
@@ -17104,6 +17264,10 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("n2kEngRpmEnable_checkbox").checked = (document.getElementById("n2kEngRpmEnable").value === "1");
     document.getElementById("n2kEngDynEnable_checkbox").checked = (document.getElementById("n2kEngDynEnable").value === "1");
     document.getElementById("n2kEngBitsEnable_checkbox").checked = (document.getElementById("n2kEngBitsEnable").value === "1");
+    document.getElementById("rvcTxEnable_checkbox").checked = (document.getElementById("rvcTxEnable").value === "1");
+    document.getElementById("rvcChgrEnable_checkbox").checked = (document.getElementById("rvcChgrEnable").value === "1");
+    document.getElementById("rvcDcEnable_checkbox").checked = (document.getElementById("rvcDcEnable").value === "1");
+    document.getElementById("rvcFaultEnable_checkbox").checked = (document.getElementById("rvcFaultEnable").value === "1");
     document.getElementById("dvccEn_checkbox").checked = (document.getElementById("dvccEn").value === "1");
     document.getElementById("IgnoreTemperature_checkbox").checked = (document.getElementById("IgnoreTemperature").value === "1");
     document.getElementById("IgnoreRPM_checkbox").checked = (document.getElementById("IgnoreRPM").value === "1");
@@ -17482,6 +17646,7 @@ function showSubTab(parentTab, subTabName, evt = null) {
         if (typeof window.initBaroPanel === 'function') window.initBaroPanel();
         // Draw the Wind Trend plot now it's visible (it needs a non-zero width to size).
         if (typeof windTrendRender === 'function') setTimeout(() => { try { windTrendRender(); } catch (e) { } }, 60);
+        if (typeof solarLedgerTabOpened === 'function') setTimeout(() => { try { solarLedgerTabOpened(); } catch (e) { } }, 60);
     }
 
     // Resume the Fast Alt-Current scope only if its Waveforms section is expanded and on-screen
@@ -31359,3 +31524,131 @@ function usageFetchStats() {
         .catch(() => { usageStatsInFlight = false; });
 }
 // ================================ END APP-USAGE TRACKER ================================
+
+
+// ===== Solar energy ledger (Live Data > Weather; settings on Setup > Solar) =====
+// Firmware books one record per local day: the harvest the forecast promised (frozen the evening
+// before), the harvest the panels delivered, the consumption predicted from history, the consumption
+// drawn. /solarledger.csv serves the closed days oldest-first plus the day in progress (flag 0x80).
+const SLED_F = { FORECAST: 1, VEDIRECT: 2, SHUNT: 4, LEARNED: 8, PARTIAL: 16, SAMEDAY: 32, LIVE: 128 };
+let sledRows = [];
+let sledMeta = {};
+let sledLastFetchMs = 0;
+let sledWindowDays = 30;
+const sledPlots = { harv: null, cons: null };
+const sledResizeSeen = new Set();
+
+function sledKwhText(raw) {   // CSV2 encoding: kWh x100, -1 = unknown
+    const v = Number(raw);
+    return (!Number.isFinite(v) || v < 0) ? '—' : (v / 100).toFixed(2);
+}
+function solarLedgerOnCsv2(data) {
+    setTxt('sledPredHarvTodayID', sledKwhText(data.sledPredHarvToday));
+    setTxt('sledActHarvTodayID', sledKwhText(data.sledActHarvToday));
+    setTxt('sledPredConsTodayID', sledKwhText(data.sledPredConsToday));
+    setTxt('sledActConsTodayID', sledKwhText(data.sledActConsToday));
+    const days = Number(data.sledDaysValid);
+    setTxt('sledDaysValidID', Number.isFinite(days) ? String(days) : '—');
+    const cov = Number(data.sledCoverageMin);
+    setTxt('sledCoverageID', Number.isFinite(cov) ? (cov / 60).toFixed(1) + ' h' : '—');
+    // Setup > Solar: which bar the 2-of-3 rule is using right now.
+    const need = Number(data.sledNeedKwh) / 100, src = Number(data.sledNeedSource);
+    const el = document.getElementById('solar-need-line');
+    if (el && Number.isFinite(need)) {
+        let why;
+        if (src === 1) why = 'predicted consumption plus margin.';
+        else if (Number(window.solarUseConsEnable) === 1) why = 'the High Solar Threshold setting, standing in until the ledger has consumption history.';
+        else why = 'the High Solar Threshold setting.';
+        el.textContent = 'Charging pauses when at least 2 of the next 3 days are forecast above ' + need.toFixed(2) + ' kWh: ' + why;
+    }
+}
+
+function solarLedgerTabOpened() {
+    if (Date.now() - sledLastFetchMs > 60000) solarLedgerFetch();
+    else solarLedgerRender();
+}
+function solarLedgerFetch() {
+    fetch(buildURL('/solarledger.csv'), { cache: 'no-cache' }).then(r => r.ok ? r.text() : null).then(txt => {
+        if (txt === null) return;
+        sledLastFetchMs = Date.now();
+        const rows = [], meta = {};
+        const num = x => (x === '' || x === undefined) ? null : +x;
+        for (const ln of txt.split('\n')) {
+            if (!ln) continue;
+            if (ln[0] === '#') { for (const m of ln.matchAll(/(\w+)=([-\d.]+)/g)) meta[m[1]] = +m[2]; continue; }
+            if (ln[0] === 'd') continue;   // column header
+            const c = ln.split(',');
+            if (c.length < 10) continue;
+            rows.push({ day: +c[0], predHarv: num(c[1]), predIrr: num(c[2]), actHarv: num(c[3]), predCons: num(c[4]),
+                        actCons: num(c[5]), alt: num(c[6]), ratio: num(c[7]), covMin: +c[8], flags: +c[9] });
+        }
+        sledRows = rows; sledMeta = meta;
+        solarLedgerRender();
+    }).catch(() => { });
+}
+function setSledWindow(n) {
+    sledWindowDays = n;
+    [30, 90].forEach(k => { const b = document.getElementById('sled-w-' + k); if (b) b.classList.toggle('on', k === n); });
+    solarLedgerRender();
+}
+// dayIdx is a local calendar day number; noon of that day in UTC arithmetic gives the calendar date
+// regardless of the viewer's zone.
+function sledDayLabel(day) { const d = new Date(day * 86400000 + 43200000); return (d.getUTCMonth() + 1) + '/' + d.getUTCDate(); }
+
+function solarLedgerRender() {
+    const elH = document.getElementById('sled-harv-plot'), elC = document.getElementById('sled-cons-plot');
+    if (!elH || !elC || typeof uPlot === 'undefined' || !elH.offsetParent) return;
+    const rows = sledRows.slice(-sledWindowDays);
+    const xs = rows.map((_, i) => i);
+    const pick = k => rows.map(r => (r[k] == null ? null : r[k]));
+    const dark = document.body.classList.contains('dark-mode');
+    const fmtKwh = (u, v) => v == null ? '—' : v.toFixed(2) + ' kWh';
+    const mk = (el, key, label, actKey, predKey, actColor, predColor) => {
+        if (sledPlots[key]) { sledPlots[key].destroy(); sledPlots[key] = null; }
+        el.innerHTML = '';
+        if (!rows.length) { el.innerHTML = '<div style="padding:24px 8px;color:#888;font-size:13px;">No days on record yet. The first entry is booked at the next local midnight.</div>'; return; }
+        const opts = {
+            width: plotFitWidth(el, 320), height: 220,
+            series: [
+                { label: 'Day', value: (u, v) => (rows[v] ? sledDayLabel(rows[v].day) + (rows[v].flags & SLED_F.LIVE ? ' (today so far)' : (rows[v].flags & SLED_F.PARTIAL ? ' (partial day)' : '')) : '') },
+                { label: 'Actual', stroke: actColor, fill: actColor + '66', width: 1, paths: uPlot.paths.bars({ size: [0.6, 40] }), points: { show: false }, value: fmtKwh },
+                { label: 'Predicted', stroke: predColor, width: 2, points: { show: true, size: 6 }, value: fmtKwh },
+            ],
+            scales: { x: { time: false, range: [-0.5, rows.length - 0.5] }, y: { range: (u, mn, mx) => [0, Math.max((mx || 0) * 1.15, 0.5)] } },
+            axes: [
+                { values: (u, ticks) => ticks.map(t => (Number.isInteger(t) && rows[t]) ? sledDayLabel(rows[t].day) : ''), grid: { show: false } },
+                { label: label + ' (kWh)', size: 60 },
+            ],
+            legend: { show: true }, cursor: { drag: { x: false, y: false } },
+        };
+        sledPlots[key] = new uPlot(opts, [xs, pick(actKey), pick(predKey)], el);
+        if (!sledResizeSeen.has(el)) {
+            sledResizeSeen.add(el);
+            new ResizeObserver(() => { const p = sledPlots[key]; if (p && el.clientWidth) p.setSize({ width: el.clientWidth, height: 220 }); }).observe(el);
+        }
+    };
+    mk(elH, 'harv', 'Harvest', 'actHarv', 'predHarv', '#00a19a', dark ? '#e0a83a' : '#c98a1c');
+    mk(elC, 'cons', 'Consumption', 'actCons', 'predCons', '#d6453e', dark ? '#8ab4f8' : '#3b6fd1');
+
+    // Totals over the window, complete days with both halves present.
+    let hA = 0, hP = 0, hN = 0, cA = 0, cP = 0, cN = 0;
+    for (const r of rows) {
+        if (r.flags & (SLED_F.LIVE | SLED_F.PARTIAL)) continue;
+        if (r.actHarv != null && r.predHarv != null) { hA += r.actHarv; hP += r.predHarv; hN++; }
+        if (r.actCons != null && r.predCons != null) { cA += r.actCons; cP += r.predCons; cN++; }
+    }
+    const parts = [];
+    if (hN) parts.push('Harvest, ' + hN + ' complete day' + (hN > 1 ? 's' : '') + ': panels delivered ' + hA.toFixed(1) + ' kWh against ' + hP.toFixed(1) + ' kWh forecast (' + (hP > 0 ? Math.round(100 * hA / hP) + '%' : '—') + ').');
+    if (cN) parts.push('Consumption, ' + cN + ' day' + (cN > 1 ? 's' : '') + ': ' + cA.toFixed(1) + ' kWh drawn against ' + cP.toFixed(1) + ' kWh predicted (' + (cP > 0 ? Math.round(100 * cA / cP) + '%' : '—') + ').');
+    if (Number.isFinite(sledMeta.ratio)) parts.push('Performance ratio in force: ' + sledMeta.ratio.toFixed(2) + '.');
+    setTxt('sled-summary', parts.join(' '));
+}
+function solarLedgerClearConfirm() {
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
+    xConfirm('Clear the solar ledger? Every day on record is erased and the consumption prediction starts over. The learned performance ratio is kept.').then(ok => {
+        if (!ok) return;
+        fetchWithTimeout(buildURL('/get?ResetSolarLedger=1'), {}, 8000)
+            .then(() => { sledRows = []; sledLastFetchMs = 0; setTimeout(solarLedgerFetch, 1500); })
+            .catch(err => diagError('Solar ledger clear failed:', err));
+    });
+}

@@ -689,6 +689,17 @@ enum Csv2Index {
   CSV2_dvccAuthProd,      // its 126996 product code, else its Victron VREG 0x0100 product id, else 0
   CSV2_ovTierLowCount,    // timed OV cut, LOW tier — session rising-edge counter (lifetime twin in ov_telemetry)
   CSV2_ovTierMidCount,    // timed OV cut, MID tier — session rising-edge counter
+  // Solar ledger — the day in progress (kWh x100, -1 = unknown) + the pause bar in force + coverage
+  CSV2_sledPredHarvToday,   // harvest the forecast promised for today, frozen the evening before
+  CSV2_sledActHarvToday,    // VE.Direct panel-power integral so far today
+  CSV2_sledPredConsToday,   // consumption predicted for today from the ledger
+  CSV2_sledActConsToday,    // house-load energy so far today (alt + solar + batt discharge - batt charge)
+  CSV2_sledNeedKwh,         // the bar the 2-of-3 rule is using right now (x100)
+  CSV2_sledNeedSource,      // 0 = High Solar Threshold setting, 1 = predicted consumption + margin
+  CSV2_sledDaysValid,       // complete days on the ledger (feed learning + prediction)
+  CSV2_sledCoverageMin,     // minutes of today the device has been awake
+  CSV2_ft_solarLedger_win,  // solar ledger service worst us (window)
+  CSV2_ft_solarLedger_ses,  // solar ledger service worst us (session)
 
   CSV2_sessionId,    // boot identity — matches CSV1_sessionId while this cached block is from the live run
   CSV2_sendMs,            // millis() when this payload was BUILT (CSV2 builds one pass and sends the next)
@@ -1136,6 +1147,17 @@ enum Csv3Index {
   CSV3_LoadDumpN1,             // load-dump tier 1 consecutive-sample count (time to act = N x ~5 ms)
   CSV3_LoadDumpN2,             // load-dump tier 2 consecutive-sample count
   CSV3_LoadDumpN3,             // load-dump tier 3 consecutive-sample count
+  CSV3_solarLearnEnable,       // 0/1 — learn performanceRatio from each complete day's actual/forecast harvest
+  CSV3_solarUseConsEnable,     // 0/1 — size the solar-pause bar from predicted consumption
+  CSV3_solarConsMarginPct,     // x100 — headroom over predicted consumption (%)
+  CSV3_solarLearnRatePct,      // x100 — per-day blend weight into performanceRatio (%)
+  CSV3_rvcTxEnable,            // RV-C transmit master (0/1) — bus mode applied at boot
+  CSV3_rvcChgrEnable,          // RV-C CHARGER_STATUS / _2 / _3 / CONFIGURATION_STATUS (0/1)
+  CSV3_rvcDcEnable,            // RV-C DC_SOURCE_STATUS_1/2/3 at the alternator instance (0/1)
+  CSV3_rvcFaultEnable,         // RV-C DM_RV diagnostic message (0/1)
+  CSV3_rvcChgrInstance,        // RV-C charger instance (49 = alternator type nibble + instance 1)
+  CSV3_rvcDcInstance,          // RV-C DC source instance for the alternator
+  CSV3_rvcDevPriority,         // RV-C device priority (80 = Charger, below a BMS 120)
   CSV3_sessionId,              // boot identity — matches CSV1_sessionId while this cached block is from the live run
   CSV3_sendMs,                 // millis() when this settings echo was built. CSV3 is event-driven with a 60 s
                                // fallback, so an age much past ~60 s means the echo stopped arriving and every
@@ -3195,6 +3217,10 @@ void setupServer() {
   // whole run — the live stream never backfills. RAM-only ring, streamed.
   server.on("/altsess.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     altSessCsvSend(request);
+  });
+  // Solar ledger: predicted vs actual harvest and consumption per local day, plus the day in progress.
+  server.on("/solarledger.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    solarLedgerCsvSend(request);
   });
   // Emit-window sizing probe — TEMPORARY, REMOVE AFTER AUGUST 2026 (see the probe block in 7_functions).
   server.on("/altwinstats.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -5287,6 +5313,52 @@ void setupServer() {
       dataTimestamps[IDX_N2K_BATT] = 0;
       dataTimestamps[IDX_N2K_SOC] = 0;
     }
+    if (request->hasParam("rvcTxEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("rvcTxEnable")->value();
+      int newVal = inputMessage.toInt();
+      settingWrite(NK_rvcTxEn, inputMessage.c_str());
+      // Same boot-time constraint as n2kTxEnable: becoming a bus node (address claim) happens once
+      // in initializeHardware. The per-DGN toggles and instances below apply live.
+      if (newVal != rvcTxEnable && n2kTxEnable != 1) queueConsoleMessage("RV-C transmit: bus mode is set at boot — reboot to apply");
+      rvcTxEnable = newVal;
+    }
+    if (request->hasParam("rvcChgrEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("rvcChgrEnable")->value();
+      settingWrite(NK_rvcChgrEn, inputMessage.c_str());
+      rvcChgrEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("rvcDcEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("rvcDcEnable")->value();
+      settingWrite(NK_rvcDcEn, inputMessage.c_str());
+      rvcDcEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("rvcFaultEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("rvcFaultEnable")->value();
+      settingWrite(NK_rvcFaultEn, inputMessage.c_str());
+      rvcFaultEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("rvcChgrInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("rvcChgrInstance")->value();
+      rvcChgrInstance = constrain(inputMessage.toInt(), 1, 250);  // spec 6.20.8b: 0 is invalid
+      settingWrite(NK_rvcChgrInst, String(rvcChgrInstance).c_str());
+    }
+    if (request->hasParam("rvcDcInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("rvcDcInstance")->value();
+      rvcDcInstance = constrain(inputMessage.toInt(), 1, 250);  // spec 6.5.2b: 0 is invalid
+      settingWrite(NK_rvcDcInst, String(rvcDcInstance).c_str());
+    }
+    if (request->hasParam("rvcDevPriority")) {
+      foundParameter = true;
+      inputMessage = request->getParam("rvcDevPriority")->value();
+      rvcDevPriority = constrain(inputMessage.toInt(), 0, 250);
+      settingWrite(NK_rvcDevPri, String(rvcDevPriority).c_str());
+    }
     if (request->hasParam("dvccEn")) {
       foundParameter = true;
       inputMessage = request->getParam("dvccEn")->value();
@@ -6146,12 +6218,44 @@ void setupServer() {
       inputMessage = request->getParam("SolarWatts")->value();
       settingWrite(NK_SolarWatts, inputMessage.c_str());
       SolarWatts = inputMessage.toInt();
+      weatherRecomputePredicted();
     }
     if (request->hasParam("performanceRatio")) {
       foundParameter = true;
       inputMessage = request->getParam("performanceRatio")->value();
       settingWrite(NK_performanceRatio, inputMessage.c_str());
       performanceRatio = inputMessage.toFloat();
+      sledRatioDirty = false;   // the typed value is now the stored value — a pending learned write must not overwrite it
+      weatherRecomputePredicted();
+    }
+    if (request->hasParam("solarLearnEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("solarLearnEnable")->value();
+      settingWrite(NK_solarLearnEnable, inputMessage.c_str());
+      solarLearnEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("solarUseConsEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("solarUseConsEnable")->value();
+      settingWrite(NK_solarUseConsEnable, inputMessage.c_str());
+      solarUseConsEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("solarConsMarginPct")) {
+      foundParameter = true;
+      inputMessage = request->getParam("solarConsMarginPct")->value();
+      settingWrite(NK_solarConsMarginPct, inputMessage.c_str());
+      solarConsMarginPct = inputMessage.toFloat();
+    }
+    if (request->hasParam("solarLearnRatePct")) {
+      foundParameter = true;
+      inputMessage = request->getParam("solarLearnRatePct")->value();
+      settingWrite(NK_solarLearnRatePct, inputMessage.c_str());
+      solarLearnRatePct = inputMessage.toFloat();
+    }
+    if (request->hasParam("ResetSolarLedger")) {
+      foundParameter = true;
+      solarLedgerClear();
+      queueConsoleMessage("Solar ledger cleared - history and today's baselines reset");
     }
     if (request->hasParam("TriggerWeatherUpdate")) {
       foundParameter = true;
@@ -7714,6 +7818,7 @@ void setupServer() {
       ft_faDetector.worstSession = 0;
       ft_faWindowFinalize.worstSession = 0;
       ft_zeroLogService.worstSession = 0;
+      ft_solarLedger.worstSession = 0;
       ft_bhFlushCapNVS.worstSession = 0;
       ft_kneeLearnService.worstSession = 0;
       // Deliberately NOT cleared here: the ripple analyzer's per-session worsts (faSesPkpkWorstA /
@@ -9576,6 +9681,7 @@ void SendWifiData() {
                                "%d,"            // +1 enforced field-duty ceiling (x100)
                                "%d,%d,"         // +2 DVCC authority identity: NAME manufacturer code, product code
                                "%d,%d,"         // +2 timed OV cut session counters: LOW tier, MID tier
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // +10 solar ledger: today's pred/act harvest + consumption, bar, source, days, coverage, ft win/ses
                                "%u,%u\n",       // +2: sessionId, sendMs
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -10169,6 +10275,16 @@ void SendWifiData() {
                                (int)dvccAuthProd,
                                SafeInt(g_ovTierLowCount),   // CSV2_ovTierLowCount
                                SafeInt(g_ovTierMidCount),   // CSV2_ovTierMidCount
+                               sledTele(sledLive.dayIdx ? sledLive.predHarvKwh : NAN),   // CSV2_sledPredHarvToday
+                               sledTele(sledLiveActHarvKwh()),                           // CSV2_sledActHarvToday
+                               sledTele(sledLive.dayIdx ? sledLive.predConsKwh : NAN),   // CSV2_sledPredConsToday
+                               sledTele(sledLiveActConsKwh()),                           // CSV2_sledActConsToday
+                               SafeInt(sledNeedKwh, 100),                                // CSV2_sledNeedKwh
+                               SafeInt(sledNeedSource),                                  // CSV2_sledNeedSource
+                               SafeInt(sledCompleteDays()),                              // CSV2_sledDaysValid
+                               SafeInt(sledLive.dayIdx ? sledLive.coverageMin : 0),      // CSV2_sledCoverageMin
+                               SafeInt(ft_solarLedger.worstWindow),                      // CSV2_ft_solarLedger_win
+                               SafeInt(ft_solarLedger.worstSession),                     // CSV2_ft_solarLedger_ses
                                (unsigned)g_sessionId,   // CSV2_sessionId
                                (unsigned)millis());     // CSV2_sendMs — build time; the send happens one pass later
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
@@ -10252,6 +10368,8 @@ void SendWifiData() {
                                "%.3f,%d,%.3f,%d,"  // timed OV tiers: LOW margin (V), LOW dwell (ms), MID margin (V), MID dwell (ms)
                                "%d,"         // VoltageHardwareLimit (x100)
                                "%d,%d,%d,"   // load-dump consecutive-sample counts N1/N2/N3
+                               "%d,%d,%d,%d," // solar ledger toggles + margins: learn, use consumption, margin % (x100), learn rate % (x100)
+                               "%d,%d,%d,%d,%d,%d,%d,"  // RV-C: tx master, charger DGNs, DC source DGNs, DM_RV, charger instance, DC instance, device priority
                                "%u,%u\n",    // +2: sessionId, sendMs
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -10658,6 +10776,17 @@ void SendWifiData() {
                                SafeInt(LoadDumpN1),
                                SafeInt(LoadDumpN2),
                                SafeInt(LoadDumpN3),
+                               SafeInt(solarLearnEnable),           // CSV3_solarLearnEnable
+                               SafeInt(solarUseConsEnable),         // CSV3_solarUseConsEnable
+                               SafeInt(solarConsMarginPct, 100),    // CSV3_solarConsMarginPct
+                               SafeInt(solarLearnRatePct, 100),     // CSV3_solarLearnRatePct
+                               SafeInt(rvcTxEnable),                // CSV3_rvcTxEnable
+                               SafeInt(rvcChgrEnable),              // CSV3_rvcChgrEnable
+                               SafeInt(rvcDcEnable),                // CSV3_rvcDcEnable
+                               SafeInt(rvcFaultEnable),             // CSV3_rvcFaultEnable
+                               SafeInt(rvcChgrInstance),            // CSV3_rvcChgrInstance
+                               SafeInt(rvcDcInstance),              // CSV3_rvcDcInstance
+                               SafeInt(rvcDevPriority),             // CSV3_rvcDevPriority
                                (unsigned)g_sessionId,   // CSV3_sessionId
                                (unsigned)millis());     // CSV3_sendMs
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {

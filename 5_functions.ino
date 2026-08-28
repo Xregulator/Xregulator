@@ -1150,12 +1150,137 @@ float n2kAltTempF() {
   return (temperatureThermistor == -99) ? NAN : (float)temperatureThermistor;
 }
 
+// ===== RV-C producer — spec: Working Markdown Docs/RVC_TRANSMIT_SPEC.md =====
+// RV-C is a J1939 application layer that shares the 250 kbps wire with NMEA 2000, so its DGNs are
+// composed as tN2kMsg and go out through the same SendMsg path and the same claimed address.
+// Field scalings are RV-C Table 5.3 (spec revision July 31, 2025). Every "not available" value is
+// all-bits-1, the J1939 convention — a source we do not have is NEVER encoded as a number.
+
+// Forces SINGLE-FRAME transmit. DGNs 130816-131071 (1FFC7h, 1FFFBh-1FFFDh) sit inside the range
+// the NMEA2000 library treats as proprietary FAST PACKET; without this, SendMsg would prepend a
+// fast-packet sequence byte and split an 8-byte RV-C frame across two CAN frames, which no RV-C
+// node can decode. tNMEA2000::IsFastPacket() returns false for Priority>=0x80, and N2ktoCanID()
+// masks priority to 3 bits, so the wire still carries RV-C's default priority 6.
+static void rvcBeginMsg(tN2kMsg &m, unsigned long dgn) {
+  m.SetPGN(dgn);
+  m.Priority = 6 | 0x80;
+}
+
+static inline uint16_t rvcVoltsU16(float v) {  // 0.050 V/bit, 0..3212.5 V
+  if (!isfinite(v) || v < 0.0f || v > 3212.5f) return 0xFFFF;
+  return (uint16_t)lroundf(v / 0.05f);
+}
+static inline uint16_t rvcAmpsU16(float a) {  // 0.05 A/bit, -1600..1612.5 A, 0 A = 7D00h
+  if (!isfinite(a) || a < -1600.0f || a > 1612.5f) return 0xFFFF;
+  return (uint16_t)lroundf(a / 0.05f + 32000.0f);
+}
+static inline uint32_t rvcAmpsU32(float a) {  // 0.001 A/bit, 0 A = 77359400h
+  if (!isfinite(a) || a < -2000000.0f || a > 2221081.0f) return 0xFFFFFFFFUL;
+  return (uint32_t)(llround((double)a * 1000.0) + 2000000000LL);
+}
+static inline uint16_t rvcTempU16(float c) {  // 0.03125 degC/bit, -273..1735 degC
+  if (!isfinite(c) || c < -273.0f || c > 1735.0f) return 0xFFFF;
+  return (uint16_t)lroundf((c + 273.0f) / 0.03125f);
+}
+static inline uint8_t rvcTempU8(float c) {  // 1 degC/bit, -40..210 degC
+  if (!isfinite(c) || c < -40.0f || c > 210.0f) return 0xFF;
+  return (uint8_t)lroundf(c + 40.0f);
+}
+static inline uint8_t rvcPctU8(float p) {  // 0.5 %/bit, 0..125 %
+  if (!isfinite(p) || p < 0.0f || p > 125.0f) return 0xFF;
+  return (uint8_t)lroundf(p / 0.5f);
+}
+static inline float rvcAltTempC() {
+  float f = n2kAltTempF();
+  return isfinite(f) ? (f - 32.0f) / 1.8f : NAN;
+}
+
+// RV-C charger operating state (spec Table 6.20.8b). Unlike the N2K map this has an explicit
+// Disable state, so the master switch being off is distinguishable from "on but not charging".
+static uint8_t rvcChargeState() {
+  if (OnOff != 1) return 0;  // Disable
+  switch (getChargeStageDisplayCode()) {
+    case CHARGE_STAGE_BULK: return 2;
+    case CHARGE_STAGE_ABSORPTION: return 3;
+    case CHARGE_STAGE_FLOAT:
+    case CHARGE_STAGE_MAINTAIN: return 6;
+    case CHARGE_STAGE_MANUAL:
+    case CHARGE_STAGE_TARGET_V:
+    case CHARGE_STAGE_COMMISSION: return 7;  // constant voltage / current
+    default: return 1;                       // Not charging (NONE, IDLE, protective cut)
+  }
+}
+
+// CHARGER_STATUS_3 derating reason (spec Table 6.20.10b) from our banner limiter code. The RV-C
+// enum only names thermal, battery-temperature and battery-voltage causes, so the limiters with
+// no equivalent (RPM/belt cap, max duty, protection recovery, BMS current limit) report the
+// derating bit with reason 255 = not available rather than a wrong named cause.
+static void rvcDeratingFromLimiter(uint8_t &derating, uint8_t &reason) {
+  if (ctrlLimiter == 0) { derating = 0; reason = 0; return; }
+  derating = 1;
+  switch (ctrlLimiter) {
+    case 2: reason = 1; break;  // thermal derate -> High Internal Temperature
+    case 3:                     // CV voltage loop
+    case 9: reason = 3; break;  // BMS charge-voltage limit -> Battery Voltage
+    default: reason = 0xFF; break;
+  }
+}
+
+// Highest-severity active fault as an RV-C service point. SPN encoding per spec 3.2.5.5:
+// MSB byte, ISB byte, then 3 LS bits. Under DSA 76 (Charge Controller) the spec defines no SPN
+// table, so ours is documented in RVC_TRANSMIT_SPEC.md §5 — MSB 1 keeps the Charger table's
+// numbering for the points that exist there (DC voltage / DC current / battery temperature) and
+// MSB 2 carries the alternator-specific points the Charger table has no room for.
+// Returns true when a fault is active; red = severe (charging stopped), else yellow.
+static bool rvcActiveFault(uint8_t &msb, uint8_t &lsb, uint8_t &fmi, bool &red) {
+  red = true;
+  bool cut = gpio4IsLow;
+  if (cut) {
+    switch (g_fieldEventReason) {
+      case REASON_FAST_OVERVOLTAGE:
+      case REASON_INA_OVERVOLTAGE:
+      case REASON_OV_TIER_LOW:
+      case REASON_OV_TIER_MID:
+      case REASON_LOCKOUT_ACTIVE:
+        msb = 1; lsb = 0; fmi = 0; return true;  // DC voltage above normal range
+      case REASON_VOLTAGE_IMPLAUSIBLE:
+      case REASON_VOLTAGE_DISAGREE_CRITICAL:
+      case REASON_VOLTAGE_SPIKE:
+        msb = 1; lsb = 0; fmi = 2; return true;  // DC voltage erratic or invalid
+      case REASON_HARD_OVERCURRENT:
+        msb = 1; lsb = 1; fmi = 0; return true;  // DC current above normal range
+      case REASON_CURRENT_STALE:
+        msb = 1; lsb = 1; fmi = 9; return true;  // DC current not updating at proper rate
+      case REASON_BATTERY_TOO_COLD:
+        msb = 1; lsb = 2; fmi = 1; return true;  // battery temperature below normal range
+      case REASON_TEMP_CRITICAL:
+      case REASON_TEMP_WARNING:
+      case REASON_TEMP_SUSTAINED:
+        msb = 2; lsb = 0; fmi = 0; return true;  // alternator temperature above normal range
+      case REASON_TEMP_STALE:
+        msb = 2; lsb = 0; fmi = 9; return true;  // alternator temperature not updating
+      case REASON_TACH_IMPLAUSIBLE:
+        msb = 2; lsb = 3; fmi = 2; return true;  // engine speed erratic or invalid
+      default: break;                            // disabled / manual / low RPM / rest / solar / BMS are not faults
+    }
+  }
+  red = false;
+  float tF = n2kAltTempF();
+  if (TempAlarm > 0 && isfinite(tF) && tF > (float)TempAlarm) {
+    msb = 2; lsb = 0; fmi = 15; return true;  // valid but above normal operating range, least severe
+  }
+  if (g_fieldEventReason == REASON_VOLTAGE_DISAGREE_WARNING) {
+    msb = 1; lsb = 0; fmi = 2; return true;
+  }
+  return false;
+}
+
 // Sends AT MOST one PGN per loop pass (rotating scan for fairness); compose + enqueue is µs-scale
 // because the _xeng driver never blocks — frames the TWAI queue refuses land in the core library's
 // retry ring and eventually drop (counted). Missing sources publish N2K not-available, never a
 // stale/fabricated number; the single-value 130312 is skipped entirely instead.
 void nmea2kTransmitTick() {
-  if (n2kTxEnable != 1) return;
+  if (n2kTxEnable != 1 && rvcTxEnable != 1) return;
 
   // Persist a claim/renegotiation result. NVS write is deferred to field-off (no flash in the
   // control path); claims normally complete at boot with the field down anyway.
@@ -1178,8 +1303,19 @@ void nmea2kTransmitTick() {
                    SLOT_ENG_RAPID,
                    SLOT_ENG_DYN,
                    SLOT_BATTCFG,
+                   SLOT_RVC_CHGR,      // ---- RV-C family below this line (see the master gate in the scan) ----
+                   SLOT_RVC_CHGR2,
+                   SLOT_RVC_CHGR3,
+                   SLOT_RVC_CHGRCFG,
+                   SLOT_RVC_DC1,
+                   SLOT_RVC_DC2,
+                   SLOT_RVC_DC3,
+                   SLOT_RVC_DM,
                    SLOT_N };
-  static const uint32_t ivl[SLOT_N] = { 1500, 1500, 1500, 1500, 2000, 1500, 1500, 100, 500, 15000 };  // ms, NMEA-recommended rates
+  // ms. N2K slots use the NMEA-recommended rates; RV-C slots use its "normal broadcast gap"
+  // (spec 6.20.8a/6.20.9a/6.20.10a/6.5.2a-6.5.4a). DM_RV re-arms to 1000 ms while faulted.
+  static const uint32_t ivl[SLOT_N] = { 1500, 1500, 1500, 1500, 2000, 1500, 1500, 100, 500, 15000,
+                                        5000, 500, 500, 5000, 500, 500, 500, 5000 };
   static uint32_t nextDue[SLOT_N];
   static bool seeded = false;
   // Per-stream SIDs: each 127508+127506 pair shares one (ties the pair to the same sample set)
@@ -1187,6 +1323,7 @@ void nmea2kTransmitTick() {
   static uint8_t sidBatt = 0, sidAlt = 0, sidTemp = 0;
   static uint8_t rr = 0;
   static tN2kChargeState lastChgState = N2kCS_Unavailable;
+  static uint8_t lastRvcState = 0xFF;
   uint32_t now = millis();
   if (!seeded) {  // stagger initial phases so the 1500ms PGNs never bunch into one pass
     seeded = true;
@@ -1194,14 +1331,21 @@ void nmea2kTransmitTick() {
   }
 
   // Charge-stage change sends 127507 promptly instead of waiting out its interval
-  if (n2kChgrEnable == 1 && n2kChargeStateFromStage(getChargeStageDisplayCode()) != lastChgState && (int32_t)(now - nextDue[SLOT_CHGR]) < 0) {
+  if (n2kTxEnable == 1 && n2kChgrEnable == 1 && n2kChargeStateFromStage(getChargeStageDisplayCode()) != lastChgState && (int32_t)(now - nextDue[SLOT_CHGR]) < 0) {
     nextDue[SLOT_CHGR] = now;
+  }
+  // Same idea on the RV-C side: CHARGER_STATUS is "5000 ms or on change" (spec 6.20.8a)
+  if (rvcTxEnable == 1 && rvcChgrEnable == 1 && rvcChargeState() != lastRvcState && (int32_t)(now - nextDue[SLOT_RVC_CHGR]) < 0) {
+    nextDue[SLOT_RVC_CHGR] = now;
   }
 
   for (uint8_t k = 0; k < SLOT_N; k++) {
     uint8_t s = (rr + k) % SLOT_N;
     if ((int32_t)(now - nextDue[s]) < 0) continue;
     nextDue[s] = now + ivl[s];
+    // Family master gate. The per-DGN toggles inside each case are subordinate to it, and the
+    // schedule is advanced first so a disabled family cannot re-arm every pass.
+    if ((s >= SLOT_RVC_CHGR) ? (rvcTxEnable != 1) : (n2kTxEnable != 1)) continue;
 
     tN2kMsg N2kMsg;
     bool composed = false;
@@ -1319,6 +1463,129 @@ void nmea2kTransmitTick() {
                         (bt == N2kDCbt_Flooded && bc == N2kDCbc_LeadAcid) ? N2kDCES_Yes : N2kDCES_No,
                         nv, bc, AhToCoulomb((double)BatteryCapacity_Ah), N2kInt8NA,
                         PeukertExponent_scaled / 100.0, (int8_t)(ChargeEfficiency_scaled / 10));
+          composed = true;
+        }
+        break;
+
+      // ---- RV-C ----------------------------------------------------------------------------
+      case SLOT_RVC_CHGR:  // CHARGER_STATUS 1FFC7h — what we are TRYING to deliver
+        if (rvcChgrEnable == 1) {
+          lastRvcState = rvcChargeState();
+          float pctMax = (AlternatorNominalAmps > 0 && isfinite(uTargetAmps))
+                           ? (100.0f * uTargetAmps / (float)AlternatorNominalAmps) : NAN;
+          rvcBeginMsg(N2kMsg, 0x1FFC7UL);
+          N2kMsg.AddByte((unsigned char)rvcChgrInstance);
+          N2kMsg.Add2ByteUInt(rvcVoltsU16(ChargingVoltageTarget));
+          N2kMsg.Add2ByteUInt(rvcAmpsU16(uTargetAmps));
+          N2kMsg.AddByte(rvcPctU8(pctMax));
+          N2kMsg.AddByte(lastRvcState);
+          // b7: default state on power-up (OnOff persists, so it is the same bit), auto-recharge
+          // enabled (we re-enter bulk on our own), force-charge never commanded by us.
+          N2kMsg.AddByte((unsigned char)(((OnOff == 1) ? 0x01 : 0x00) | 0x04));
+          composed = true;
+        }
+        break;
+      case SLOT_RVC_CHGR2:  // CHARGER_STATUS_2 1FEA3h — what we are actually MEASURING
+        if (rvcChgrEnable == 1) {
+          rvcBeginMsg(N2kMsg, 0x1FEA3UL);
+          N2kMsg.AddByte((unsigned char)rvcChgrInstance);
+          N2kMsg.AddByte((unsigned char)rvcDcInstance);
+          N2kMsg.AddByte((unsigned char)rvcDevPriority);
+          N2kMsg.Add2ByteUInt(rvcVoltsU16(BatteryV));      // measured at the charger = alternator side
+          N2kMsg.Add2ByteUInt(rvcAmpsU16(MeasuredAmps));   // delivered by the charger
+          N2kMsg.AddByte(rvcTempU8(rvcAltTempC()));        // the charging element's own temperature
+          composed = true;
+        }
+        break;
+      case SLOT_RVC_CHGR3:  // CHARGER_STATUS_3 1FDCAh — derating state, the only standard limit-reason carrier
+        if (rvcChgrEnable == 1) {
+          uint8_t derating = 0, reason = 0;
+          rvcDeratingFromLimiter(derating, reason);
+          rvcBeginMsg(N2kMsg, 0x1FDCAUL);
+          N2kMsg.AddByte((unsigned char)rvcChgrInstance);
+          N2kMsg.AddByte((unsigned char)(derating | 0xFC));  // bits 2-7 undefined -> leave at 1s
+          N2kMsg.AddByte(reason);
+          for (uint8_t i = 0; i < 5; i++) N2kMsg.AddByte(0xFF);  // bytes 3-7 undefined by the spec
+          composed = true;
+        }
+        break;
+      case SLOT_RVC_CHGRCFG:  // CHARGER_CONFIGURATION_STATUS 1FFC6h
+        if (rvcChgrEnable == 1) {
+          uint8_t bt = 0x0F;  // 4-bit field, all 1s = unknown
+          if (BATTERY_TYPE.equalsIgnoreCase("lead_acid")) bt = 0;
+          else if (BATTERY_TYPE.equalsIgnoreCase("gel")) bt = 1;
+          else if (BATTERY_TYPE.equalsIgnoreCase("agm")) bt = 2;
+          else if (BATTERY_TYPE.equalsIgnoreCase("lifepo4")) bt = 3;
+          rvcBeginMsg(N2kMsg, 0x1FFC6UL);
+          N2kMsg.AddByte((unsigned char)rvcChgrInstance);
+          N2kMsg.AddByte(2);  // charging algorithm: 3-stage (matches the N2K N2kCA_3State we publish)
+          N2kMsg.AddByte((unsigned char)constrain(n2kChgrMode, 0, 2));  // 0 stand-alone / 1 primary / 2 secondary — same label setting both stacks use
+          // b3: no battery temperature sensor in use (00b); AC installation line not applicable to
+          // an alternator (11b = no value); battery type in the upper nibble.
+          N2kMsg.AddByte((unsigned char)(0x00 | (0x03 << 2) | (bt << 4)));
+          N2kMsg.Add2ByteUInt((uint16_t)constrain(BatteryCapacity_Ah, 0, 65530));
+          N2kMsg.Add2ByteUInt(rvcAmpsU16((float)AlternatorNominalAmps));
+          composed = true;
+        }
+        break;
+      case SLOT_RVC_DC1:  // DC_SOURCE_STATUS_1 1FFFDh — the alternator as its own DC source
+        if (rvcDcEnable == 1) {
+          rvcBeginMsg(N2kMsg, 0x1FFFDUL);
+          N2kMsg.AddByte((unsigned char)rvcDcInstance);
+          N2kMsg.AddByte((unsigned char)rvcDevPriority);
+          N2kMsg.Add2ByteUInt(rvcVoltsU16(BatteryV));
+          // Spec 6.5.2b: positive = current flowing FROM the source, so alternator output is
+          // positive as measured. No sign flip (that would only apply to a battery instance).
+          N2kMsg.Add4ByteUInt(rvcAmpsU32(MeasuredAmps));
+          composed = true;
+        }
+        break;
+      case SLOT_RVC_DC2:  // DC_SOURCE_STATUS_2 1FFFCh
+        if (rvcDcEnable == 1) {
+          rvcBeginMsg(N2kMsg, 0x1FFFCUL);
+          N2kMsg.AddByte((unsigned char)rvcDcInstance);
+          N2kMsg.AddByte((unsigned char)rvcDevPriority);
+          N2kMsg.Add2ByteUInt(rvcTempU16(rvcAltTempC()));
+          N2kMsg.AddByte(0xFF);        // state of charge: meaningless for an alternator
+          N2kMsg.Add2ByteUInt(0xFFFF); // time remaining: likewise
+          N2kMsg.AddByte(0xFF);        // time-remaining interpretation: no value
+          composed = true;
+        }
+        break;
+      case SLOT_RVC_DC3:  // DC_SOURCE_STATUS_3 1FFFBh
+        if (rvcDcEnable == 1) {
+          rvcBeginMsg(N2kMsg, 0x1FFFBUL);
+          N2kMsg.AddByte((unsigned char)rvcDcInstance);
+          N2kMsg.AddByte((unsigned char)rvcDevPriority);
+          N2kMsg.AddByte(0xFF);         // state of health: a battery datum
+          N2kMsg.Add2ByteUInt(0xFFFF);  // capacity remaining: a battery datum
+          N2kMsg.AddByte(0xFF);         // relative capacity: a battery datum
+          // AC RMS ripple stays not-available BY MEASUREMENT, not by omission: the only ripple this
+          // device measures is alternator CURRENT ripple (20 kSPS on GPIO3). Bus voltage is sampled
+          // at 5 ms (INA228) and ~30 ms (ADS1115), which aliases rectifier ripple entirely, so any
+          // number here would be an artifact. Needs a fast AC-coupled voltage tap in hardware.
+          N2kMsg.Add2ByteUInt(0xFFFF);
+          composed = true;
+        }
+        break;
+      case SLOT_RVC_DM:  // DM_RV 1FECAh — operating status + the one active fault
+        if (rvcFaultEnable == 1) {
+          uint8_t msb = 0, lsb = 0, fmi = 31;  // 31 = failure mode not available
+          bool red = false;
+          bool faulted = rvcActiveFault(msb, lsb, fmi, red);
+          nextDue[s] = now + (faulted ? 1000UL : 5000UL);  // spec 3.2.5.1a: faster while a fault stands
+          uint8_t op = 0;  // 00b OFF + 00b standby = disabled and not operating
+          if (OnOff == 1) op = gpio4IsLow ? 0x01 : 0x05;  // ON+standby (waiting) vs ON+active
+          if (faulted) op |= red ? 0x40 : 0x10;           // bits 6-7 red lamp, bits 4-5 yellow lamp
+          rvcBeginMsg(N2kMsg, 0x1FECAUL);
+          N2kMsg.AddByte(op);
+          N2kMsg.AddByte(76);   // DSA: Charge Controller (spec Table 6.2.6c) — see RVC_TRANSMIT_SPEC.md §5
+          N2kMsg.AddByte(msb);  // SPN MSB
+          N2kMsg.AddByte((unsigned char)(msb ? rvcChgrInstance : 0));  // ISB = instance for node-specific SPNs, 0 for standard ones
+          N2kMsg.AddByte((unsigned char)((lsb << 5) | (fmi & 0x1F)));
+          N2kMsg.AddByte(0xFF);  // occurrence count not available (7Fh) + reserved bit 7 always 1
+          N2kMsg.AddByte(0xFF);  // no DSA extension defined for this product
+          N2kMsg.AddByte(0xFF);  // bank select not applicable
           composed = true;
         }
         break;
@@ -1754,6 +2021,7 @@ void checkAndRestart() {
     // unflushed records (the periodic flush only fires every LONGTERM_DUMP_INTERVAL_MS).
     dumpLongTermRing();
     dumpUsageAccum();  // app-usage period counters span the restart via /usage.bin
+    solarLedgerFlushNow();  // ledger + live day + learned ratio span the restart too
 
     if (WiFi.getMode() != WIFI_OFF) {
       // Console event only — the client has no "status" listener, so that event was composed and dropped
