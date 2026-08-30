@@ -8726,7 +8726,7 @@
             </details>
 
             <details class="integ-section">
-              <summary class="integ-section-title">RV-C<span class="integ-state"><span id="integStateRvc">?</span></span></summary>
+              <summary class="integ-section-title">RV-C<span class="integ-state">Rx <span id="integStateRvc">?</span> &middot; Tx <span id="integStateRvcTx">?</span></span></summary>
 
               <p class="integ-copy">Listens for the DC Source Status messages an RV-C battery management system broadcasts on the same CAN port, and that port has to be listening: turn on Receive NMEA2K Data in the NMEA 2000 card above, or the follow switch below. RV-C messages carry a bank number, so the instance filter here selects which battery bank is obeyed &mdash; the one setting that belongs to this dialect alone.</p>
 
@@ -9152,6 +9152,68 @@
                   </div>
                 </div>
               </div>
+            </details>
+
+            <!-- App-only. Joining a named network needs NEHotspotConfiguration, which exists
+                 only in the iOS app; initRegulatorApUi() unhides this card when the plugin is
+                 present. The values are stored on this phone, not on the regulator — the AP
+                 credentials live in the regulator's NVS and are never sent in the echo. -->
+            <details id="regApCard" open style="margin-top: 20px; display: none;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Regulator Hotspot</summary>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Hotspot Name:</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">The name of the WiFi network the regulator broadcasts itself when it
+                      is running in access-point mode. Change this only if you renamed the regulator's hotspot on
+                      its own setup page. Stored on this phone.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <input id="regApSsid" type="text" maxlength="32" autocapitalize="none" autocorrect="off"
+                    spellcheck="false" onchange="saveRegulatorApCreds()" />
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Hotspot Password:</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">The password for that hotspot. Shown in plain text so a typo is
+                      visible — it protects a network that reaches nothing but the regulator. Stored on this
+                      phone.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <input id="regApPass" type="text" maxlength="63" autocapitalize="none" autocorrect="off"
+                    spellcheck="false" onchange="saveRegulatorApCreds()" />
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Join This Network:</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">Asks iOS to connect this phone to the regulator's own hotspot, so you
+                      do not have to leave for Settings &#9656; Wi-Fi. iOS shows its own Join prompt the first time,
+                      then remembers the network. Once joined, the app re-scans and reconnects on its own. While you
+                      are on this network the phone has no internet, so cloud features stay unavailable.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <button type="button" class="btn-primary"
+                    onclick="joinRegulatorHotspot('regApJoinStatus')">Join Regulator WiFi</button>
+                </div>
+              </div>
+              <div id="regApJoinStatus" style="font-size: 13px; color: var(--accent); margin: 8px 2px 0; min-height: 16px;"></div>
             </details>
 
             <!-- Display Preferences Section -->

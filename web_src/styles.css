@@ -5954,10 +5954,12 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
 }
 
 /* ── Generated-file delivery feedback (see deliverFile in script.js) ──────────
-   Toast: confirmation after an anchor download (desktop/Android) or a completed
-   iOS share. Ready bar: iOS holds generated files for one tap that opens the
-   system share sheet — anchor clicks save nothing in the app's WKWebView, and
-   Safari drops programmatic clicks once the button tap's activation expires. */
+   Toast: confirmation after a browser anchor download or a completed share sheet
+   (the app shares through the native plugins on both platforms). Ready bar: iOS
+   Safari, and app binaries predating those plugins, hold generated files for one
+   tap that opens the system share sheet — anchor clicks save nothing in either
+   app WebView, and Safari drops programmatic clicks once the tap's activation
+   expires. */
 #file-toast {
   position: fixed;
   left: 50%;

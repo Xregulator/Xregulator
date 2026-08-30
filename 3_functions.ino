@@ -8105,9 +8105,19 @@ void setupServer() {
     if (currentMode == MODE_CONFIG) {
       sendWifiConfigPortal(request);  // provisioning: captive probe → WiFi-setup page (correct for new users)
     } else if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
-      // Operational AP: answer the OS connectivity probe as "success" so NO captive
-      // browser sheet auto-pops — app-first. Browser only appears if user navigates there.
-      request->send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+      // Operational AP: every OS connectivity probe must read "internet is fine" so no captive sheet
+      // auto-pops. Android/ChromeOS need 204 + EMPTY body (a 200 with a body = "sign in", and Android
+      // may then drop the AP); Windows needs those literal strings; Apple needs 200 with "Success".
+      const String &probe = request->url();
+      if (probe == "/generate_204" || probe == "/gen_204") {
+        request->send(204);
+      } else if (probe == "/connecttest.txt") {
+        request->send(200, "text/plain", "Microsoft Connect Test");
+      } else if (probe == "/ncsi.txt") {
+        request->send(200, "text/plain", "Microsoft NCSI");
+      } else {
+        request->send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+      }
     } else {
       request->send(404, "text/plain", "Not Found");
     }

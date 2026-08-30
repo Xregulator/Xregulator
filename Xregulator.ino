@@ -6537,8 +6537,9 @@ void loop() {
       if (NMEA0183Data == 1 && hardwarePresent == 1) TIMED_CALL(ft_ReadNMEA0183, ReadNMEA0183Data());  // deadline-capped inside; see the HARD REAL-TIME CONTRACT note on the function
       // n2kTxEnable also forces ParseMessages: node mode needs it for address claim + heartbeat
       // servicing even if the user left the receive toggle off. dvccEn forces it too: the follow
-      // feature must keep hearing the authority even with the general receive toggle off.
-      if ((NMEA2KData == 1 || n2kTxEnable == 1 || dvccEn == 1) && hardwarePresent == 1) {
+      // feature must keep hearing the authority even with the general receive toggle off. So does
+      // rvcTxEnable — an RV-C-only producer is still a claiming node on the same bus.
+      if ((NMEA2KData == 1 || n2kTxEnable == 1 || rvcTxEnable == 1 || dvccEn == 1) && hardwarePresent == 1) {
         TIMED_CALL(ft_n2kParse, NMEA2000.ParseMessages());  // CAN bus (only with real hardware)
         TIMED_CALL(ft_n2kTx, nmea2kTransmitTick());
       }

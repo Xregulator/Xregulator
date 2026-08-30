@@ -1560,10 +1560,13 @@ void nmea2kTransmitTick() {
           N2kMsg.AddByte(0xFF);         // state of health: a battery datum
           N2kMsg.Add2ByteUInt(0xFFFF);  // capacity remaining: a battery datum
           N2kMsg.AddByte(0xFF);         // relative capacity: a battery datum
-          // AC RMS ripple stays not-available BY MEASUREMENT, not by omission: the only ripple this
-          // device measures is alternator CURRENT ripple (20 kSPS on GPIO3). Bus voltage is sampled
-          // at 5 ms (INA228) and ~30 ms (ADS1115), which aliases rectifier ripple entirely, so any
-          // number here would be an artifact. Needs a fast AC-coupled voltage tap in hardware.
+          // AC RMS ripple: not-available BY MEASUREMENT, not by omission. Built and removed
+          // 2026-08-28 — the INA228 bus channel cannot carry this field. See CAN_UPGRADES.md
+          // item 2 for the numbers; the short version is that the INA's own 4x540us averaging
+          // puts a healthy rectifier ripple through at ~0.11 with speed-dependent nulls, while
+          // normal control-loop and charging activity puts 15-70mV into the same number, so a
+          // failing diode reads no higher than a healthy alternator mid-ramp. Needs a fast
+          // AC-coupled voltage tap on an ESP32 ADC1 channel — a board revision.
           N2kMsg.Add2ByteUInt(0xFFFF);
           composed = true;
         }

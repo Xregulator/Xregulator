@@ -1947,15 +1947,16 @@ function altLogToCsv(d) {
 
 // ── Generated-file delivery with feedback ────────────────────────────────────
 // Every file this page generates (CSV/JSON exports, Download Logs, config backup)
-// goes through deliverFile(). Desktop/Android: per-file anchor download plus a
-// confirmation toast. iOS (Safari AND the Capacitor app): files queue into a bottom
-// "ready" bar and one tap opens the system share sheet (Save to Files / AirDrop /
-// Mail). Anchors are not used there: the app's WKWebView has no download handler so
-// a.click() saves NOTHING, and Safari silently drops programmatic clicks once the
-// button tap's user activation expires — every export here fetches for seconds
-// first. The share promise resolving is the only real "it saved" signal iOS gives.
-const IS_IOS_DEVICE = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
-    (navigator.userAgent.includes('Mac') && navigator.maxTouchPoints > 1);   // iPadOS 13+ masquerades as Mac
+// goes through deliverFile(). Capacitor app (iOS and Android alike): the bytes are
+// written to the app cache with @capacitor/filesystem and handed to the system share
+// sheet (Save to Files / Drive / Mail); an anchor click saves NOTHING in either app
+// WebView — WKWebView has no download handler, and a blob-URL anchor never reaches
+// Android's DownloadListener. Desktop/Android browsers: per-file anchor download plus
+// a confirmation toast. iOS Safari, and app binaries too old to carry the plugins:
+// files queue into a bottom "ready" bar and one tap opens the share sheet, because
+// Safari silently drops programmatic clicks once the button tap's user activation
+// expires — every export here fetches for seconds first. The share promise resolving
+// is the only real "it saved" signal either share path gives.
 
 function fileToast(msg) {
     let t = document.getElementById('file-toast');
@@ -1967,9 +1968,84 @@ function fileToast(msg) {
 }
 
 const _readyFiles = [];
+
+// Both plugins ship together (iOS build 21+ and every Android build); an older binary has
+// neither, so absence — not the platform — is what selects the Web Share fallback below.
+function capFilePlugins() {
+    const P = IS_CAPACITOR && window.Capacitor.Plugins;
+    return (P && P.Filesystem && P.Share) ? P : null;
+}
+
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onerror = () => reject(r.error || new Error('read failed'));
+        r.onload = () => { const s = String(r.result); resolve(s.slice(s.indexOf(',') + 1)); };
+        r.readAsDataURL(blob);
+    });
+}
+
+// Download Logs emits five files across ~30 s of device fetches; without a batch that is
+// five share sheets in a row. Files queued between begin/end ride one sheet.
+let _fileBatchDepth = 0;
+let _capSharing = false;
+const _capQueue = [];
+function beginFileBatch() { _fileBatchDepth++; }
+function endFileBatch() {
+    if (_fileBatchDepth > 0) _fileBatchDepth--;
+    if (!_fileBatchDepth) shareCapFiles();
+}
+
+// One sheet per batch. Resolve = delivered; a rejection naming cancel is the user backing
+// out (silent); anything else is a real failure and says so — never an anchor fallback,
+// which would save nothing inside the app. The sheet has copied the bytes by the time it
+// settles, so the cache copies go either way.
+async function shareCapFiles() {
+    const P = capFilePlugins();
+    if (_capSharing || !P || !_capQueue.length) return;
+    _capSharing = true;
+    const batch = _capQueue.splice(0, _capQueue.length);
+    const written = [];
+    let err = null;
+    try {
+        for (const f of batch) {
+            const path = 'xreg_exports/' + f.name;
+            const res = await P.Filesystem.writeFile({ path: path, data: await blobToBase64(f.blob),
+                                                       directory: 'CACHE', recursive: true });
+            if (res && res.uri) written.push({ path: path, uri: res.uri, name: f.name });
+        }
+    } catch (e) { err = e; }
+    if (written.length) {
+        try {
+            await P.Share.share({ files: written.map(w => w.uri),
+                                  title: written.length === 1 ? written[0].name : written.length + ' files' });
+            fileToast(written.length === 1 ? 'Saved: ' + written[0].name : 'Saved ' + written.length + ' files');
+        } catch (e) {
+            const m = String((e && (e.message || e.errorMessage)) || e);
+            if (!/cancel/i.test(m)) fileToast('Save failed: ' + m);
+        }
+        for (const w of written) {
+            try { await P.Filesystem.deleteFile({ path: w.path, directory: 'CACHE' }); } catch (e) { }
+        }
+    } else {
+        fileToast('Save failed: ' + ((err && err.message) || err || 'nothing written'));
+    }
+    _capSharing = false;
+    if (!_fileBatchDepth && _capQueue.length) shareCapFiles();
+}
+
 function deliverFile(name, data, mime) {
     const blob = (data instanceof Blob) ? data : new Blob([data], { type: mime || 'application/octet-stream' });
-    if (IS_IOS_DEVICE && navigator.canShare && typeof File === 'function') {
+    if (capFilePlugins()) {
+        _capQueue.push({ name: name.replace(/[\\/:*?"<>|]/g, '-'), blob: blob });   // the name becomes a real cache path
+        if (!_fileBatchDepth) shareCapFiles();
+        return;
+    }
+    // iOS Safari, or an app binary predating the plugins — the ready bar is the only path
+    // that saves anything there. Desktop Safari on a Mac is deliberately not sniffed for:
+    // its anchor downloads work, and iPad Safari in desktop mode reports as a Mac.
+    if ((IS_CAPACITOR || /iPhone|iPad|iPod/.test(navigator.userAgent)) &&
+        navigator.canShare && typeof File === 'function') {
         try {
             const f = new File([blob], name, { type: blob.type || 'application/octet-stream' });
             if (navigator.canShare({ files: [f] })) { _readyFiles.push(f); renderFileReadyBar(); return; }
@@ -2025,7 +2101,7 @@ async function shareReadyFiles() {
 // saved file round-trips straight back through the matching Load CSV button. Shared by both the
 // alternator-health and boat-performance download buttons.
 function downloadCsv(url, baseName){
-  fetchWithTimeout(buildURL(url),{},10000).then(r=>r.text()).then(txt=>{
+  return fetchWithTimeout(buildURL(url),{},10000).then(r=>r.text()).then(txt=>{
     if(!txt || txt.trim().length < 8){ xAlert('No '+baseName+' to download yet.'); return; }
     const d=new Date(), p=n=>String(n).padStart(2,'0');
     const stamp=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+'-'+p(d.getMinutes())+'-'+p(d.getSeconds());
@@ -2038,15 +2114,17 @@ function downloadCsv(url, baseName){
 // (filtripple), and the commit-forensics ring (ripforensic). filtripple/ripforensic are supplementary —
 // download them silently and skip (no alert) if empty, so an un-swept device still gets the main map.
 function downloadRippleBundle(){
-  downloadCsv('/famatrix.csv','Resonance and Ripple Map');
+  beginFileBatch();   // three independent fetches, one share sheet
+  const jobs=[downloadCsv('/famatrix.csv','Resonance and Ripple Map')];
   const stampName=b=>{ const d=new Date(), p=n=>String(n).padStart(2,'0');
     return b+' '+d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+'-'+p(d.getMinutes())+'-'+p(d.getSeconds())+'.csv'; };
   for(const [url,name] of [['/filtripple.csv','Filtered Ripple (INA+ADS)'],['/ripforensic.csv','Ripple Commit Forensics']]){
-    fetchWithTimeout(buildURL(url),{},10000).then(r=>r.text()).then(txt=>{
+    jobs.push(fetchWithTimeout(buildURL(url),{},10000).then(r=>r.text()).then(txt=>{
       if(!txt || txt.trim().split('\n').length < 2) return;  // header-only / empty → nothing captured, skip silently
       deliverFile(stampName(name), txt, 'text/csv');
-    }).catch(()=>{});
+    }).catch(()=>{}));
   }
+  Promise.allSettled(jobs).then(endFileBatch);
 }
 
 // ── Configuration Backup & Sharing ──────────────────────────────────────────
@@ -3777,9 +3855,35 @@ async function getPhoneIPv4() {
     }
 }
 
+// ── Android network helpers (XEngNet native plugin) ─────────────────────────
+// Android-only; absent on iOS and in browsers, where both calls are no-ops.
+// bindWifi(): Android keeps routing app traffic to cellular when the joined WiFi has no
+// internet (the regulator's AP never does), while still showing WiFi connected — every
+// request then leaves the phone and fails. This pins this app's sockets to the WiFi net.
+async function bindWifiNetwork() {
+    const P = IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.XEngNet;
+    if (!P || !P.bindWifi) return false;
+    try { const r = await P.bindWifi(); return !!(r && r.bound); } catch (e) { return false; }
+}
+
+// Android's resolver generally will not answer .local, so the native side does the mDNS
+// query and hands back an address to probe instead. Rejection = fall through unchanged.
+async function resolveLocalHost(host) {
+    const P = IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.XEngNet;
+    if (!P || !P.resolveLocal) return null;
+    try { const r = await P.resolveLocal({ host: host }); return (r && r.ip) || null; } catch (e) { return null; }
+}
+
 async function discoverDeviceBase() {
-    // Round 1: mDNS name raced against the last address that worked.
-    const first = ['http://alternator.local'];
+    await bindWifiNetwork();   // every discovery path lands here — bind before the first probe
+    // Round 1: mDNS name, the regulator's own access-point gateway, and the last
+    // address that worked, all probed in parallel — extra candidates cost no time.
+    // 192.168.4.1 is fixed by the firmware's softAP, so an AP-mode phone lands on
+    // the device in round 1 instead of falling through to the /24 sweep. In WiFi
+    // CONFIG mode that address serves the setup portal, which has no /identify, so
+    // the probe misses and the hotspot hint banner still wins that case.
+    const mdnsIP = await resolveLocalHost('alternator.local');
+    const first = [mdnsIP ? 'http://' + mdnsIP : 'http://alternator.local', 'http://192.168.4.1'];
     const last = localStorage.getItem('xregDeviceBase');
     if (last && first.indexOf(last) === -1) first.push(last);
     let hit = await probeFirstHit(first, 2500);
@@ -3846,7 +3950,10 @@ async function discoverAndConnect() {
 // re-scan once before surrendering to the Connection Lost dialog. The
 // _rediscoveryTried latch (cleared on SSE open / foreground / manual retry)
 // bounds this to one scan per loss so a half-dead link can't loop forever.
-async function rediscoverAfterLoss() {
+// quiet=true suppresses the Connection Lost dialog on failure — used by the
+// network-change watcher, which fires before the app has ever had a packet (an
+// App Review phone changing networks must still reach demo mode, not a dialog).
+async function rediscoverAfterLoss(quiet) {
     if (discoveryInProgress || DEMO_MODE) return;
     discoveryInProgress = true;
     let hit = null;
@@ -3866,12 +3973,175 @@ async function rediscoverAfterLoss() {
         lastDiscoveredFw = hit.fw;
         lastDiscoveredBase = hit.base;
         matchAppBundleToDevice(hit.fw, hit.base);
-    } else {
-        console.log('[DISCOVERY] re-scan found nothing');
+        return hit;
+    }
+    console.log('[DISCOVERY] re-scan found nothing');
+    if (!quiet) {
         showRecoveryOptions();
         const reconnectBtn = document.getElementById('reconnect-button');
         if (reconnectBtn) reconnectBtn.style.display = 'none';
     }
+    return null;
+}
+
+// =====================================================================
+// Join the regulator's own hotspot from inside the app — Capacitor only
+// =====================================================================
+// NEHotspotConfiguration (via @capgo/capacitor-wifi) asks iOS to join a named
+// network; iOS shows its own one-time Join/Cancel alert and the join persists.
+// Without it an access-point user has to leave the app for Settings > Wi-Fi.
+// The AP name and password live only in the regulator's NVS and are never in the
+// telemetry echo, so the app keeps its own copy: firmware defaults until edited.
+const AP_SSID_DEFAULT = 'ALTERNATOR_WIFI';
+const AP_PASS_DEFAULT = 'alternator123';
+
+function wifiJoinPlugin() {
+    const p = IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorWifi;
+    return (p && typeof p.connect === 'function') ? p : null;
+}
+
+function getRegulatorApCreds() {
+    return {
+        ssid: (localStorage.getItem('xregApSsid') || AP_SSID_DEFAULT).trim(),
+        password: (localStorage.getItem('xregApPass') || AP_PASS_DEFAULT)
+    };
+}
+
+function saveRegulatorApCreds() {
+    const ssidEl = document.getElementById('regApSsid');
+    const passEl = document.getElementById('regApPass');
+    if (ssidEl) localStorage.setItem('xregApSsid', ssidEl.value.trim() || AP_SSID_DEFAULT);
+    if (passEl) localStorage.setItem('xregApPass', passEl.value || AP_PASS_DEFAULT);
+    setApJoinStatus('regApJoinStatus', 'Saved on this phone.');
+}
+
+function setApJoinStatus(elId, msg) {
+    const el = document.getElementById(elId);
+    if (el) el.textContent = msg;
+}
+
+// Join, then re-resolve the regulator. Discovery round 1 already probes
+// 192.168.4.1, so the normal re-scan path finds it with no special casing.
+async function joinRegulatorHotspot(statusElId) {
+    const plugin = wifiJoinPlugin();
+    if (!plugin) {
+        setApJoinStatus(statusElId, 'Joining a network from inside the app needs the iOS app.');
+        return;
+    }
+    const creds = getRegulatorApCreds();
+    if (!creds.ssid) {
+        setApJoinStatus(statusElId, 'Enter the regulator hotspot name first.');
+        return;
+    }
+    setApJoinStatus(statusElId, 'Asking iOS to join ' + creds.ssid + '…');
+    try {
+        await plugin.connect({ ssid: creds.ssid, password: creds.password });
+    } catch (e) {
+        const msg = (e && (e.message || e.errorMessage)) ? String(e.message || e.errorMessage) : String(e);
+        // iOS rejects an apply() for the network it is already on; that is a success here.
+        if (!/already/i.test(msg)) {
+            setApJoinStatus(statusElId, /cancel|denied/i.test(msg)
+                ? 'Join cancelled.'
+                : 'Could not join ' + creds.ssid + ': ' + msg);
+            return;
+        }
+    }
+    // Demo mode is a deliberate hard latch — API_BASE_URL is severed to
+    // demo.invalid and rediscoverAfterLoss() refuses to run — so it cannot be
+    // unwound in place. Tapping this button IS an explicit "take me to the real
+    // regulator", and a user who was never on its network is exactly who demo
+    // mode catches, so reload: the fresh page life finds 192.168.4.1 in round 1.
+    if (DEMO_MODE) {
+        setApJoinStatus(statusElId, 'Joined ' + creds.ssid + '. Reloading to leave demo mode…');
+        setTrackedTimeout(() => location.reload(), 2000);
+        return;
+    }
+    setApJoinStatus(statusElId, 'Joined ' + creds.ssid + '. Looking for the regulator…');
+    // The association needs a moment before the interface will route. If the
+    // network-change watcher already started a scan, let it finish first —
+    // rediscoverAfterLoss() no-ops while one is in flight and would report a
+    // false miss.
+    await new Promise(r => setTrackedTimeout(r, 1500));
+    for (let i = 0; i < 30 && discoveryInProgress; i++) {
+        await new Promise(r => setTrackedTimeout(r, 500));
+    }
+    // Data actually flowing right now — readyState alone lies after an iOS network
+    // switch, so the freshness test is the real check (same rule as visibilitychange).
+    if (source && source.readyState === EventSource.OPEN && (Date.now() - lastEventTime) < 5000) {
+        setApJoinStatus(statusElId, 'Connected to the regulator at ' + API_BASE_URL + '.');
+        closeRecovery();
+        return;
+    }
+    sseReconnectAttempts = 0;
+    sseConnectingErrors = 0;
+    window._rediscoveryTried = false;
+    if (source) { source.close(); source = null; }
+    const hit = await rediscoverAfterLoss(true);   // quiet: this button owns the messaging
+    if (hit) {
+        setApJoinStatus(statusElId, 'Connected to the regulator at ' + hit.base + '.');
+        closeRecovery();
+    } else {
+        setApJoinStatus(statusElId, 'On ' + creds.ssid + ', but the regulator did not answer. Check that it is powered and running in access-point mode.');
+    }
+}
+
+// Reveal the app-only hotspot card and seed it from what this phone remembers.
+function initRegulatorApUi() {
+    const card = document.getElementById('regApCard');
+    if (!card) return;
+    if (!wifiJoinPlugin()) return;      // browsers cannot join a network; card stays hidden
+    card.style.display = '';
+    const creds = getRegulatorApCreds();
+    const ssidEl = document.getElementById('regApSsid');
+    const passEl = document.getElementById('regApPass');
+    if (ssidEl) ssidEl.value = creds.ssid;
+    if (passEl) passEl.value = creds.password;
+}
+document.addEventListener('DOMContentLoaded', initRegulatorApUi);
+
+// =====================================================================
+// Network-change watch — Capacitor only (@capacitor/network)
+// =====================================================================
+// Without it the app learns a WiFi switch only after SSE burns its retry budget:
+// ~20 s of dead stream before rediscovery fires. The plugin reports the change
+// immediately, so joining the regulator's hotspot (or walking off the boat's
+// network onto cellular) is acted on at once instead of waited out.
+let lastNetStatus = null;
+
+async function bindNetworkStatusWatch() {
+    const plugin = IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.Network;
+    if (!plugin || !plugin.addListener) return;
+    try { lastNetStatus = await plugin.getStatus(); } catch (e) { lastNetStatus = null; }
+    plugin.addListener('networkStatusChange', async (status) => {
+        const was = lastNetStatus;
+        lastNetStatus = status;
+        if (DEMO_MODE || isOfflineMode) return;
+        if (!status.connected) {
+            console.log('[NETWORK] phone lost its connection');
+            updateInlineStatus(false);
+            return;
+        }
+        await bindWifiNetwork();   // a new WiFi net needs a fresh bind before anything is probed
+        // A blip that lands back on the same network usually heals itself; only
+        // a genuine change, or a stream that is already dead, is worth a re-scan.
+        const changed = !was || !was.connected || was.connectionType !== status.connectionType;
+        const dead = !source || source.readyState !== EventSource.OPEN || (Date.now() - lastEventTime > 5000);
+        if (!changed && !dead) return;
+        if (discoveryInProgress) return;
+        console.log('[NETWORK] now on ' + status.connectionType + ' - re-scanning for the regulator');
+        sseReconnectAttempts = 0;
+        sseConnectingErrors = 0;
+        window._rediscoveryTried = false;
+        if (source) { source.close(); source = null; }
+        rediscoverAfterLoss(!window._firstCsvPacketReceived);
+    });
+}
+document.addEventListener('DOMContentLoaded', bindNetworkStatusWatch);
+
+// True when the phone itself reports no connection — the Connection Lost dialog
+// says that instead of blaming the regulator.
+function phoneIsOffline() {
+    return !!(lastNetStatus && lastNetStatus.connected === false);
 }
 
 // Match-on-connect: make the app's stored interface identical to the one the connected
@@ -4140,9 +4410,10 @@ async function requestPhoneLocationPermission(whyLine) {
     try {
         const p = await window.Capacitor.Plugins.Geolocation.checkPermissions();
         if (p && p.location === 'denied') {
-            await xAlert('Location is turned off for X Regulator. Turn it on in iOS Settings ' +
-                         '> Privacy & Security > Location Services > X Regulator, then choose ' +
-                         'While Using the App.', 'Location is off');
+            const where = (window.Capacitor.getPlatform && window.Capacitor.getPlatform() === 'android')
+                ? 'Android Settings > Apps > X Regulator > Permissions > Location, then choose Allow'
+                : 'iOS Settings > Privacy & Security > Location Services > X Regulator, then choose While Using the App';
+            await xAlert('Location is turned off for X Regulator. Turn it on in ' + where + '.', 'Location is off');
             return false;
         }
     } catch (e) { /* services off system-wide — the request below will fail harmlessly */ }
@@ -4285,10 +4556,57 @@ function stopPhoneSpeedJsWatch() {
     }
 }
 
+// Text for the phone-speed dialog, shared by the selector and by the disclosure gate below
+// so both say exactly the same thing. The first bullet reflects what THIS client can
+// actually do: with the native BackgroundSpeed plugin the stream survives backgrounding;
+// without it (older app binary, or a browser) it is foreground-only. The background
+// sentence is fixed word-for-word by Google Play's prominent-disclosure rule — do not reword.
+function phoneSpeedModeDialogText() {
+    const runLine = phoneSpeedNativePlugin()
+        ? '- X Regulator collects location data to enable speed and course logging even when the app is closed or not in use. ' +
+          'It keeps running for as long as the phone allows. Battery drain is substantial ' +
+          'with GPS running full-time; keep the phone on a charger underway. The phone ' +
+          'shows its location indicator while this is active.\n'
+        : '- Works only while the app is open in the foreground on a phone aboard; ' +
+          'speed greys out about 10 seconds after posting stops. Continuous GPS ' +
+          'use increases phone battery drain.\n';
+    return 'Speed and course will come from this phone instead of NMEA 2000.\n\n' +
+        runLine +
+        '- Speed records set in this mode are flagged in cloud uploads and are ' +
+        'excluded from the speed leaderboard. If a phone-sourced run becomes your ' +
+        'best ever, your boat stays off the board until an NMEA-sourced record beats it.';
+}
+
+const BG_SPEED_DISCLOSED_KEY = 'bgSpeedDisclosed';
+let bgSpeedDisclosurePending = null;    // in-flight dialog — the CSV3 echo re-enters this every few seconds
+let bgSpeedDisclosureDeclined = false;  // session-only, so a decline is not re-asked on every echo
+function markPhoneSpeedDisclosed() { try { localStorage.setItem(BG_SPEED_DISCLOSED_KEY, '1'); } catch (e) { } }
+
+// The disclosure must be shown before the first call that can start background location, and
+// the speed source is a DEVICE setting: a laptop browser can turn it on for a phone that has
+// never seen the dialog, so this phone shows it here before its own first native start.
+// Declining leaves the foreground-only JS watch, which needs no such disclosure.
+async function phoneSpeedBgDisclosed() {
+    let seen = false;
+    try { seen = localStorage.getItem(BG_SPEED_DISCLOSED_KEY) === '1'; } catch (e) { }
+    if (seen) return true;
+    if (bgSpeedDisclosureDeclined) return false;
+    if (!bgSpeedDisclosurePending) {
+        bgSpeedDisclosurePending = xConfirm(phoneSpeedModeDialogText(),
+            { title: 'Use phone GPS for speed?', okText: 'Use Phone GPS' })
+            .then(ok => {
+                if (ok) markPhoneSpeedDisclosed(); else bgSpeedDisclosureDeclined = true;
+                bgSpeedDisclosurePending = null;
+                return ok;
+            });
+    }
+    return bgSpeedDisclosurePending;
+}
+
 async function updatePhoneSpeedPoster(mode) {
     const wantFast = Number(mode) === 1;
     const bs = phoneSpeedNativePlugin();
-    if (wantFast && bs) {
+    if (wantFast && bs && await phoneSpeedBgDisclosed()) {
         // Re-called on every CSV3 echo; the plugin treats a repeat start as a config
         // refresh, so a changed device IP is picked up within a minute.
         try {
@@ -4349,26 +4667,10 @@ window.updatePhoneSpeedPoster = updatePhoneSpeedPoster;
 // it regardless on the next frame).
 async function speedSourceModeChanged(sel) {
     if (Number(sel.value) === 1) {
-        // First bullet reflects what THIS client can actually do: with the native
-        // BackgroundSpeed plugin the stream survives backgrounding; without it (older
-        // app binary, or a browser) it is foreground-only.
-        const runLine = phoneSpeedNativePlugin()
-            ? '- Runs continuously, including with the app in the background or the ' +
-              'screen locked, for as long as iOS allows. Battery drain is substantial ' +
-              'with GPS running full-time; keep the phone on a charger underway. iOS ' +
-              'shows the location indicator while this is active.\n'
-            : '- Works only while the app is open in the foreground on a phone aboard; ' +
-              'speed greys out about 10 seconds after posting stops. Continuous GPS ' +
-              'use increases phone battery drain.\n';
-        const ok = await xConfirm(
-            'Speed and course will come from this phone instead of NMEA 2000.\n\n' +
-            runLine +
-            '- Speed records set in this mode are flagged in cloud uploads and are ' +
-            'excluded from the speed leaderboard. If a phone-sourced run becomes your ' +
-            'best ever, your boat stays off the board until an NMEA-sourced record beats it.',
-            { title: 'Use phone GPS for speed?', okText: 'Use Phone GPS' }
-        );
+        const ok = await xConfirm(phoneSpeedModeDialogText(),
+            { title: 'Use phone GPS for speed?', okText: 'Use Phone GPS' });
         if (!ok) { sel.value = '0'; return; }
+        markPhoneSpeedDisclosed();   // this dialog IS the disclosure — the poster must not raise a second copy
         // Ask for authorization here rather than at launch: this is the moment the feature
         // is switched on, which is what guideline 5.1.1(ii) and the HIG both want.
         // Capacitor only — the setting is device-global while the permission is this-client's,
@@ -4630,23 +4932,30 @@ function refreshAllPlotThemes() {
 // 3. Cleanup on page unload
 window.addEventListener('beforeunload', cleanupResources);
 
+// Foregrounding fires BOTH @capacitor/app's appStateChange and visibilitychange, and one
+// reconnect is all that is wanted: a second would close the EventSource the first just
+// opened. Single entry point, one reconnect per 3 s. A stream can read OPEN while dead
+// (backgrounded sockets), so an event drought counts as dead too.
+let lastForegroundReconnectMs = 0;
+function foregroundReconnect() {
+    isAppInBackground = false;
+    sseReconnectAttempts = 0;
+    window._rediscoveryTried = false;  // each foreground gets a fresh network re-scan chance
+    const now = Date.now();
+    if (now - lastForegroundReconnectMs < 3000) return;
+    const dead = !source || source.readyState === EventSource.CLOSED || (now - lastEventTime > 5000);
+    if (!dead || discoveryInProgress) { diagLog("Connection still alive, resuming normal operation"); return; }
+    lastForegroundReconnectMs = now;
+    diagLog("Connection was closed, reconnecting...");
+    initializeEventSource();
+}
+
 // 4. Handle app lifecycle (Capacitor-specific)
 if (IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
     window.Capacitor.Plugins.App.addListener('appStateChange', ({ isActive }) => {
         if (isActive) {
             diagLog("App foregrounded");
-            isAppInBackground = false;
-
-            sseReconnectAttempts = 0;
-            window._rediscoveryTried = false;  // each foreground gets a fresh network re-scan chance
-
-            // Only reconnect if connection is actually dead
-            if ((!source || source.readyState === EventSource.CLOSED) && !discoveryInProgress) {
-                diagLog("Connection was closed, reconnecting...");
-                initializeEventSource();
-            } else {
-                diagLog("Connection still alive, resuming normal operation");
-            }
+            foregroundReconnect();
         } else {
             diagLog("App backgrounded - keeping connection alive");
             isAppInBackground = true;
@@ -4661,19 +4970,59 @@ if (IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.App) {
             // iOS may close it after ~30 seconds, but we'll reconnect when foregrounded
         }
     });
+    // Android hardware/gesture Back (never fires on iOS).
+    window.Capacitor.Plugins.App.addListener('backButton', () => {
+        try { handleAndroidBack(); } catch (e) { console.warn('[BACK]', e && e.message); }
+    });
+}
+
+// Back precedence: themed dialog, Connection Lost, settings search, then the topmost open
+// modal, then the Live Data tab, then the OS. minimizeApp, never exitApp — a stray swipe
+// must not kill the SSE session and the page state behind it.
+function handleAndroidBack() {
+    const vis = el => !!(el && el.getClientRects().length);   // these overlays are position:fixed, so offsetParent is always null
+    // The themed alert/confirm's first button is Cancel on a confirm and OK on an alert:
+    // clicking it settles the promise the caller is awaiting. Hiding the overlay would not.
+    const dlg = document.getElementById('xdlg-overlay');
+    if (vis(dlg)) { const b = dlg.querySelector('#xdlg-btns button'); if (b) b.click(); return; }
+    if (document.getElementById('recoveryDialog')) { closeRecovery(); return; }
+    if (document.querySelector('.ss-backdrop.ss-open')) { ssClose(); return; }
+
+    // Every dismissable panel is a top-level fixed overlay whose header carries a lone ✕ —
+    // the one button that also tears its state down. Highest z-index is the topmost.
+    // #test-panel-overlay is excluded: it is a floating pill, and its ✕ aborts a running test.
+    let top = null, topZ = -1;
+    document.querySelectorAll('body > div[id$="-overlay"]').forEach(el => {
+        if (el.id === 'test-panel-overlay' || !vis(el)) return;
+        const z = parseInt(getComputedStyle(el).zIndex, 10) || 0;
+        if (z >= topZ) { topZ = z; top = el; }
+    });
+    if (top) {
+        if (top.id === 'commission-modal-overlay' && cxRunActive()) {
+            fileToast('Test running — use the wizard\'s Stop or Abort button');
+            return;   // a back swipe must never abort a run
+        }
+        const x = Array.prototype.find.call(top.querySelectorAll('button'),
+                                            b => b.textContent.trim() === '✕' && vis(b));
+        if (x) x.click();
+        return;   // a modal with no dismiss button swallows Back rather than letting it through
+    }
+
+    // Vessel Info incomplete pins the UI to Setup, where sending Back to Live Data would only
+    // raise the nag alert — minimize instead.
+    const active = document.querySelector('.tab-content.active');
+    if (active && active.id !== 'livedata' && vesselInfoComplete) { showMainTab('livedata'); return; }
+    const App = window.Capacitor.Plugins.App;
+    if (App && App.minimizeApp) App.minimizeApp();
 }
 
 // Foreground reconnect that needs no plugin: app builds without @capacitor/app never bind
-// the appStateChange listener above, but WKWebView still fires visibilitychange on
-// background/foreground. iOS suspends sockets in background and readyState can still read
-// OPEN on a dead stream, so a 5s event drought forces the reconnect too.
+// the appStateChange listener above, but every WebView still fires visibilitychange on
+// background/foreground. Both routes share foregroundReconnect(), which collapses the two
+// into one reconnect when the plugin IS present.
 document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
-    isAppInBackground = false;
-    sseReconnectAttempts = 0;
-    window._rediscoveryTried = false;
-    const dead = !source || source.readyState === EventSource.CLOSED || (Date.now() - lastEventTime > 5000);
-    if (dead && !discoveryInProgress) initializeEventSource();
+    foregroundReconnect();
 });
 
 function initializeEventSource() {
@@ -7482,6 +7831,7 @@ function updateAllEchosOptimized(data) {
         // Integrations card-header at-a-glance states (same keys as the echoes above, second ids)
         { key: 'NMEA2KData', id: 'integStateN2kRx', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'n2kTxEnable', id: 'integStateN2kTx', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'rvcTxEnable', id: 'integStateRvcTx', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'VeData', id: 'integStateVe', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'NMEA0183Data', id: 'integStateN183', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'dvccEn', id: 'dvccEn_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
@@ -15276,7 +15626,6 @@ window.addEventListener("load", function () {
             renderBattTempDerate();   // live board temp + applied derate scale arrive on CSV2
             renderLoopBlame(data);    // worst field-on pass attribution line
             renderImuInstallWarning(data.imuInstallCode);
-
             // Active RPM row highlight in the cap/learning table — currentRPMTableIndex
             // lives in CSV2, so this MUST run from the CSV2 handler.
             updateLearningTableHighlight(data);
@@ -17979,12 +18328,24 @@ function showRecoveryOptions() {
     // Browser: it can't scan, and after a hotspot bounce the regulator usually
     // has a NEW address — say so plainly instead of letting Retry spin forever.
     let addressHint;
-    if (IS_CAPACITOR) {
+    if (IS_CAPACITOR && phoneIsOffline()) {
+        // The phone, not the regulator, is the problem — say so instead of sending
+        // the user off to power-cycle hardware that is probably fine.
+        addressHint = `This phone reports <b>no network connection</b>. Turn WiFi on, or rejoin the boat's network, and the app will reconnect on its own.`;
+    } else if (IS_CAPACITOR) {
         const lastBase = localStorage.getItem('xregDeviceBase') || 'http://alternator.local';
         addressHint = `Last found at <b>${lastBase}</b>. Retry re-scans the network in case the regulator came back at a different address.`;
     } else {
         addressHint = `This browser can't scan the network for the regulator. If it reconnected at a new address, <b>http://alternator.local</b> usually finds it; otherwise look up its IP in your router or phone-hotspot device list (hotspots assign 172.20.10.2&ndash;14).`;
     }
+
+    // Access-point users have no router to fall back on: offer the one-tap join
+    // instead of sending them out to Settings > Wi-Fi. The SSID is written with
+    // textContent after insertion — it is user-editable text, never markup.
+    const joinBlock = wifiJoinPlugin() ? `
+      <button onclick="joinRegulatorHotspot('recoveryJoinStatus')" style="width:100%; margin-top:10px; background:#2b3f4a; border:1px solid #3f6070; color:#9fd8e8; border-radius:5px; padding:9px 16px; cursor:pointer; font-size:13px;">Join Regulator WiFi</button>
+      <p style="font-size:11px; color:#777; margin:6px 0 0;">Asks iOS to join <b id="recoveryJoinSsid"></b>, the hotspot the regulator broadcasts in access-point mode. Its name and password live under Setup &#9656; System.</p>
+      <p id="recoveryJoinStatus" style="font-size:11px; color:#8fd9d3; margin:6px 0 0; min-height:13px;"></p>` : '';
 
     const recoveryDiv = document.createElement('div');
     recoveryDiv.id = 'recoveryDialog';
@@ -18002,12 +18363,15 @@ function showRecoveryOptions() {
         <button onclick="retryConnection()" style="flex:1; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; font-size:13px; border:none; border-radius:5px; padding:9px 16px; cursor:pointer;">Retry Connection</button>
         <button onclick="enterOfflineMode()" style="flex:1; background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:5px; padding:9px 16px; cursor:pointer; font-size:13px;">Continue Offline</button>
       </div>
+      ${joinBlock}
       <p style="font-size:11px; color:#777; margin:12px 0 0;">If the problem persists, the device may need to be power-cycled.</p>
     </div>
   </div>
 </div>
 `;
     document.body.appendChild(recoveryDiv);
+    const ssidEl = document.getElementById('recoveryJoinSsid');
+    if (ssidEl) ssidEl.textContent = getRegulatorApCreds().ssid;
 }
 function retryConnection() {
     closeRecovery();
@@ -19691,13 +20055,20 @@ function getLogNameSuffix() {
 
 // One save path for the whole Download Logs batch — real payloads and error-marker
 // files alike, so every batch always produces the full file set. deliverFile gives
-// per-platform delivery + feedback; on iOS the batch accumulates in the ready bar
-// and one tap shares all of it.
+// per-platform delivery + feedback; the batch accumulates (ready bar in iOS Safari,
+// cache files in the app) and is shared in one go.
 function saveLogFile(name, text, mime = 'text/plain') {
     deliverFile(name, text, mime);
 }
 
+// Batch wrapper: the whole set rides ONE share sheet, and the batch is closed even if a
+// device fetch throws mid-run — a batch left open would strand every later export.
 async function downloadLogs() {
+    beginFileBatch();
+    try { await downloadLogsRun(); } finally { endFileBatch(); }
+}
+
+async function downloadLogsRun() {
     if (DEMO_MODE) return;   // deliberate no-op: log pulls hog a device that isn't there
     const ts = getLogTimestamp();
     const sfx = getLogNameSuffix();
