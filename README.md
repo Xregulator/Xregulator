@@ -4,13 +4,13 @@
 
 **Product information, documentation, ordering, and support: [www.xengineering.net](https://www.xengineering.net)**
 
-Xregulator is a real product built and sold by X Engineering. This repository is the open source code that runs on it. If you are looking for what the device does, how to install it, wiring diagrams, or how to buy one, start at [www.xengineering.net](https://www.xengineering.net) — not here.
+Xregulator is the first product sold by X Engineering. This repository is the open source code it runs on. If you are looking for what the device does, how to install it, wiring diagrams, or how to buy one, start at [www.xengineering.net](https://www.xengineering.net).
 
 ---
 
 ## Overview
 
-This repository is a  public mirror of the Xregulator project.
+This repository is a public mirror of the Xregulator project.
 
 It contains:
 - Core firmware that runs on ESP32 (`.ino` files)
@@ -43,14 +43,16 @@ Anyone who has:
 - run the Arduino `Blink` example
 - programmed in basically any language
 
-should be able to understand and modify this code with AI help.  Claude has been the best for me (early 2026).
+should be able to understand and modify this code with AI help.  ClaudeCode has been the best for me (mid 2026).
 
-My typical workflow is:
-1. Paste `Xregulator.ino` into Claude with whatever my request is
-2. Ask what other files/functions it needs in order to answer questions or make modifications
-3. Paste the additional info as needed.  The codebase is too large to upload all at once, it's something like 50k lines not including libraries.
+Suggested workflow is:
+1. Download repository
+2. Open a ClaudeCode instance on that folder
+3. Point it to docs.xengineering.net, but when in doubt, the code is the ultimate source of truth
+4. Ask your questions/make your requests
+5. Submit any feature changes or bug fixes to me either here with a pull request or by email joe@xengineering.net (It is preferable, if at all possible, not to create your own branches, as they will be unsupported.  It's of course too difficult to maintain infinite branches, at least with today's tools.)
 
-Because the code is organized in a predictable, mostly flat way, the above works well.
+This is what I do, and it works well!
 
 ## Web Interface (`web_src/` folder)
 
@@ -61,18 +63,14 @@ Like many web projects, it contains:
 - `script.js` for programmatic behavior
 - `styles.css` for visual styling
 
-Additional supporting web assets may also be present.  Workflow for the web files is much the same as with the ESP32 firmware.  Often you'll end up needing to work with several files in parallel to accomplish goals. 
+Additional supporting web assets may also be present.  Workflow for the web files is much the same as with the ESP32 firmware.  Often you'll end up needing to work with several files in parallel to accomplish goals.
 
 ## Design Philosophy
 
-The codebase is intentionally kept as a monolith, and mabye 90% of variables are global.
+The codebase is intentionally kept as a monolith, and maybe 90% of variables are global.
 
 This goes against conventional software engineering practices, but it has advantages for this project:
 - easier navigation by beginners
 - easier AI-assisted development (lower token spend)
 
-The latter matters more than just about anything else! 
-
-The goal was fast iteration, as an individual project, but is now moving to clarity, as ideally the open community starts to help.
-
-In the meantime, please feel free to email me (joe@xengineering.net) with any bugs, feature requests, comments.  Or use the built in tools here on github. I haven't figured those out yet, but someday..
+The latter matters more than just about anything else!
