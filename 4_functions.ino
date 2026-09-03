@@ -4177,6 +4177,7 @@ bool parseTarHeader(StreamingExtractor *extractor) {
       if (webFS.begin(true, "/web", 10, "prod_fs")) {
         extractor->prodFSMounted = true;
         Serial.println("OTA: Mounted prod_fs for web file updates");
+        purgeProdFs();
       } else {
         Serial.println("OTA: Failed to mount prod_fs");
         return false;
@@ -4655,9 +4656,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
 
   if (!success) {
     Serial.println("Streaming extraction failed");
-    if (extractor.otaStarted) {
-      esp_ota_abort(extractor.otaHandle);
-    }
+    discardOta0Install(&extractor);
     goto cleanup;
   }
 
@@ -4668,7 +4667,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   if (extractor.webWriteFailed) {
     Serial.println("OTA FAILED: web file write/open failure during extraction");
     queueConsoleMessage("OTA FAILED: web file write error - update not applied");
-    if (extractor.otaStarted) esp_ota_abort(extractor.otaHandle);
+    discardOta0Install(&extractor);
     verifyFailed = true;
     goto cleanup;
   }
@@ -4678,7 +4677,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
 
   if (!base64Decode(signatureBase64, signature, sizeof(signature), &sigLength)) {
     Serial.println("SECURITY: Failed to decode signature");
-    if (extractor.otaStarted) esp_ota_abort(extractor.otaHandle);
+    discardOta0Install(&extractor);
     verifyFailed = true;
     goto cleanup;
   }
@@ -4687,7 +4686,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   ret = mbedtls_pk_parse_public_key(&pk, (const unsigned char *)OTA_PUBLIC_KEY, strlen(OTA_PUBLIC_KEY) + 1);
   if (ret != 0) {
     Serial.printf("SECURITY: Failed to parse public key: -0x%04x\n", -ret);
-    if (extractor.otaStarted) esp_ota_abort(extractor.otaHandle);
+    discardOta0Install(&extractor);
     mbedtls_pk_free(&pk);
     verifyFailed = true;
     goto cleanup;
@@ -4698,7 +4697,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
 
   if (ret != 0) {
     Serial.printf("SECURITY: Signature verification FAILED (error -0x%04x)\n", -ret);
-    if (extractor.otaStarted) esp_ota_abort(extractor.otaHandle);
+    discardOta0Install(&extractor);
     verifyFailed = true;
     goto cleanup;
   }
@@ -4709,6 +4708,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
     esp_err_t err = esp_ota_end(extractor.otaHandle);
     if (err != ESP_OK) {
       Serial.printf("OTA end failed: %s\n", esp_err_to_name(err));
+      discardOta0Image(extractor.otaPartition);
       verifyFailed = true;
       goto cleanup;
     }
@@ -4716,8 +4716,12 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
     err = esp_ota_set_boot_partition(extractor.otaPartition);
     if (err != ESP_OK) {
       Serial.printf("Set boot partition failed: %s\n", esp_err_to_name(err));
+      discardOta0Image(extractor.otaPartition);
       verifyFailed = true;
       goto cleanup;
+    }
+    if (!recordOta0AsVerified()) {
+      Serial.println("OTA: verified-install record write failed - ota_0 boots now, but a later factory boot will not re-promote it");
     }
   }
 
@@ -4862,6 +4866,127 @@ void clearPendingUpdateNVS() {
     nvs_commit(clear_handle);
     nvs_close(clear_handle);
     Serial.println("UPDATE: NVS flags cleared");
+  }
+}
+// ---- prod_fs clean slate + ota_0 verified-install record ------------------------------------------
+// Delete every file on prod_fs before the first web asset is written. A renamed asset can no longer
+// leave its predecessor behind, and the write path stops depending on how the library reclaims a
+// truncated file's blocks (bench 2026-09-03, esp_littlefs 1.20.4: open(...,"w") frees them at the open
+// call, so the old in-place rewrite of script.js.gz never needed old+new space — a library detail,
+// not a contract).
+void purgeProdFs() {
+  int removed = 0, failed = 0, count;
+  do {
+    String names[16];
+    count = 0;
+    File root = webFS.open("/");
+    if (root && root.isDirectory()) {
+      for (File f = root.openNextFile(); f && count < 16; f = root.openNextFile()) {
+        names[count++] = String("/") + f.name();
+        f.close();
+      }
+    }
+    if (root) root.close();
+    for (int i = 0; i < count; i++) {
+      if (webFS.remove(names[i])) removed++;
+      else failed++;
+    }
+  } while (count == 16 && failed == 0);
+  Serial.printf("OTA: prod_fs purge - %d removed, %d failed, %u bytes used\n", removed, failed, (unsigned)webFS.usedBytes());
+}
+
+// ota_0 is promoted at a factory boot only when it holds exactly the image a completed, RSA-verified
+// install recorded here. Identity = the SHA-256 esp_image_verify computes over the whole image (the
+// digest appended at build time), never an app-descriptor field: a descriptor can be copied into a
+// forged image, the image digest cannot. Lives in the "update_req" namespace beside the staged-update
+// flags; a deep factory reset wipes it and the next ota_0 boot re-records itself
+// (ensurePreferredBootPartition).
+static const char *OTA0_RECORD_KEY = "ota0_sha";
+
+// Appended SHA-256 of the image in `part`, read by walking the segment headers (a few small flash
+// reads, no full-image hash, no mmap of the running app). Trusted only where the content has already
+// been validated: the bootloader validated the running image, esp_ota_set_boot_partition validated a
+// fresh install. The factory gate uses ota0ImageDigest (esp_image_verify, full content check) instead.
+bool appImageAppendedDigest(const esp_partition_t *part, uint8_t *digest32) {
+  if (!part) return false;
+  esp_image_header_t hdr;
+  if (esp_partition_read(part, 0, &hdr, sizeof(hdr)) != ESP_OK) return false;
+  if (hdr.magic != ESP_IMAGE_HEADER_MAGIC || !hdr.hash_appended || hdr.segment_count == 0 || hdr.segment_count > ESP_IMAGE_MAX_SEGMENTS) return false;
+  uint32_t off = sizeof(esp_image_header_t);
+  for (int i = 0; i < hdr.segment_count; i++) {
+    esp_image_segment_header_t seg;
+    if (esp_partition_read(part, off, &seg, sizeof(seg)) != ESP_OK) return false;
+    off += sizeof(seg) + seg.data_len;
+    if (off > part->size) return false;
+  }
+  off = (off + 16) & ~15u;  // checksum byte, padded so the image ends on a 16-byte boundary
+  if (off + 32 > part->size) return false;
+  return esp_partition_read(part, off, digest32, 32) == ESP_OK;
+}
+bool ota0ImageDigest(uint8_t *digest32) {
+  const esp_partition_t *ota0 = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+  if (!ota0) return false;
+  esp_partition_pos_t pos = { .offset = ota0->address, .size = ota0->size };
+  esp_image_metadata_t meta;
+  if (esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) != ESP_OK) return false;
+  if (!meta.image.hash_appended) return false;
+  memcpy(digest32, meta.image_digest, 32);
+  return true;
+}
+bool readOta0Record(uint8_t *digest32) {
+  nvs_handle_t h;
+  if (nvs_open("update_req", NVS_READONLY, &h) != ESP_OK) return false;
+  size_t len = 32;
+  esp_err_t e = nvs_get_blob(h, OTA0_RECORD_KEY, digest32, &len);
+  nvs_close(h);
+  return e == ESP_OK && len == 32;
+}
+bool writeOta0Record(const uint8_t *digest32) {
+  nvs_handle_t h;
+  if (nvs_open("update_req", NVS_READWRITE, &h) != ESP_OK) return false;
+  esp_err_t e = nvs_set_blob(h, OTA0_RECORD_KEY, digest32, 32);
+  if (e == ESP_OK) e = nvs_commit(h);
+  nvs_close(h);
+  return e == ESP_OK;
+}
+void clearOta0Record() {
+  nvs_handle_t h;
+  if (nvs_open("update_req", NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_erase_key(h, OTA0_RECORD_KEY);
+  nvs_commit(h);
+  nvs_close(h);
+}
+// Record the image now in ota_0 as the verified install. Callers have just had the content validated
+// (esp_ota_set_boot_partition after an install, the bootloader for a running ota_0), so the appended
+// digest is read directly. False if the slot holds no well-formed image or NVS refused the write.
+bool recordOta0AsVerified() {
+  uint8_t d[32];
+  const esp_partition_t *ota0 = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+  if (!appImageAppendedDigest(ota0, d)) return false;
+  if (!writeOta0Record(d)) return false;
+  Serial.printf("OTA: ota_0 verified-install record %02x%02x%02x%02x%02x%02x%02x%02x\n", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+  return true;
+}
+bool ota0MatchesRecord() {
+  uint8_t rec[32], d[32];
+  if (!readOta0Record(rec)) return false;
+  if (!ota0ImageDigest(d)) return false;
+  return memcmp(rec, d, 32) == 0;
+}
+// A failed install must leave nothing promotable behind: wipe the image header so the slot can neither
+// boot nor pass a descriptor check, and drop the record (the previous ota_0 image is gone anyway —
+// esp_ota_begin erased it). Bench 2026-09-03: without this a fully-streamed image that then failed
+// signature verification was promoted by the next factory boot.
+void discardOta0Image(const esp_partition_t *ota0) {
+  if (ota0) esp_partition_erase_range(ota0, 0, 0x1000);
+  clearOta0Record();
+}
+void discardOta0Install(StreamingExtractor *ex) {
+  if (ex->otaStarted) {
+    esp_ota_abort(ex->otaHandle);
+    discardOta0Image(ex->otaPartition);
+  } else if (ex->prodFSMounted) {
+    clearOta0Record();  // web bundle already disturbed against an untouched slot: not a matched pair any more
   }
 }
 void performOTAUpdateToVersion(const char *targetVersion) {

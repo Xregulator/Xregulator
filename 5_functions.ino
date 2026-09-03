@@ -5160,6 +5160,7 @@ bool ensureWebFS() {
 
         webFS.end();
         queueConsoleMessage("CRITICAL: prod_fs corrupted, forcing factory rollback");
+        clearOta0Record();  // the factory boot must not bring this install back
 
         delay(5000);
 
@@ -5418,12 +5419,16 @@ bool ensureLittleFS() {
 
 
 void ensurePreferredBootPartition() {
-  //Boot partition selection. Prefer ota_0 whenever it holds valid firmware, else stay on factory
-  //(a corrupt ota_0 must never be booted). GPIO41 held at boot forces factory and clears any stuck
-  //OTA flags — the emergency path back to known-good firmware.
+  //Boot partition selection. ota_0 is promoted only when it holds the image a completed, RSA-verified
+  //install recorded (recordOta0AsVerified): a slot can hold a well-formed image that never passed
+  //verification (signature rejected, web bundle failed after the firmware entry streamed), and the
+  //bootloader's structural checks cannot tell those apart. GPIO41 held at boot forces factory, clears
+  //the staged-update flags and drops the record — the emergency path back to known-good firmware, and
+  //the unit stays there until the next verified install.
   const esp_partition_t *ota0_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
   const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
   const esp_partition_t *current_boot = esp_ota_get_boot_partition();
+  const esp_partition_t *running = esp_ota_get_running_partition();
 
   // Check GPIO41 for manual factory reset
   pinMode(41, INPUT_PULLUP);
@@ -5434,6 +5439,7 @@ void ensurePreferredBootPartition() {
     // "update_req" namespace — erasing them from "storage" was a silent no-op that let an
     // armed staged update survive the recovery jumper.
     clearPendingUpdateNVS();
+    clearOta0Record();
 
 
     if (current_boot != factory_partition) {
@@ -5453,18 +5459,42 @@ void ensurePreferredBootPartition() {
     return;  // <<<< CRITICAL: Exit function, don't run normal logic
   }
 
-  esp_app_desc_t app_desc;
-  esp_err_t err = esp_ota_get_partition_description(ota0_partition, &app_desc);
-  bool ota0_valid = (err == ESP_OK);
+  if (running == ota0_partition) {
+    // The bootloader only lands here by a trusted path (verified install, gated promotion, USB flash).
+    // Self-record when the record is missing (USB-flashed unit, deep factory reset) so a later factory
+    // boot can bring this image back after an abandoned update.
+    uint8_t rec[32];
+    if (!readOta0Record(rec)) {
+      Serial.println("Boot: running ota_0 without a verified-install record - recording this image");
+      recordOta0AsVerified();
+    }
+    return;
+  }
 
-  if (ota0_valid && current_boot != ota0_partition) {
-    esp_ota_set_boot_partition(ota0_partition);
-    Serial.println("Boot: Switched to ota_0 partition !!");
-    events.send("Boot: Switched to ota_0 partition", "console", millis());
-  } else if (!ota0_valid && current_boot != factory_partition) {
-    esp_ota_set_boot_partition(factory_partition);
-    Serial.println("Boot: ota_0 invalid, using factory partition");
-    events.send("Boot: ota_0 invalid, using factory partition", "console", millis());
+  esp_app_desc_t app_desc;
+  bool ota0_valid = (esp_ota_get_partition_description(ota0_partition, &app_desc) == ESP_OK);
+  uint8_t rec[32];
+  bool haveRecord = readOta0Record(rec);
+
+  if (ota0_valid && haveRecord && ota0MatchesRecord()) {
+    if (current_boot != ota0_partition) {
+      esp_err_t err = esp_ota_set_boot_partition(ota0_partition);
+      if (err == ESP_OK) {
+        Serial.println("Boot: ota_0 holds the recorded verified install - switched to ota_0 partition");
+        events.send("Boot: Switched to ota_0 partition", "console", millis());
+      } else {
+        Serial.printf("Boot: esp_ota_set_boot_partition(ota_0) failed: %s - staying on factory\n", esp_err_to_name(err));
+        esp_ota_set_boot_partition(factory_partition);
+      }
+    }
+  } else {
+    Serial.println(!ota0_valid ? "Boot: ota_0 empty or invalid - staying on factory"
+                   : !haveRecord ? "Boot: ota_0 image has no verified-install record - staying on factory"
+                                 : "Boot: ota_0 image does not match the verified-install record - staying on factory");
+    if (current_boot != factory_partition) {
+      esp_ota_set_boot_partition(factory_partition);
+      events.send("Boot: ota_0 not promotable, using factory partition", "console", millis());
+    }
   }
 }
 // Lazy-expiring check for the settings arm gate — every mutating endpoint calls this.

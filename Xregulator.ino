@@ -74,6 +74,7 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include "esp_system.h"                  // secure OTA
 #include <BMP388_DEV.h>                  //non blocking capability - don't upgrade, this was customized for better error handling by xengineering
 #include "esp_partition.h"               // for esp_partition_find_first
+#include "esp_image_format.h"            // esp_image_verify: whole-image digest for the ota_0 verified-install record
 #include "esp_heap_caps.h"
 #include <time.h>            // Supabase
 #include "esp_psram.h"       // for ESP32 health calculations
