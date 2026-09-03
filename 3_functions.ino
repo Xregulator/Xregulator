@@ -1,4 +1,4 @@
-// X Engineering Alternator Regulator
+// Xregulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -700,6 +700,18 @@ enum Csv2Index {
   CSV2_sledCoverageMin,     // minutes of today the device has been awake
   CSV2_ft_solarLedger_win,  // solar ledger service worst us (window)
   CSV2_ft_solarLedger_ses,  // solar ledger service worst us (session)
+  // Battery + extra temperature probes and the battery-temperature source chain (BATTERY_TEMP_SENSORS_SPEC.md §7)
+  CSV2_BatteryTempProbeF,   // BATT-role DS18B20 (°F x10; -9999 = no reading yet)
+  CSV2_ExtraTempF,          // EXTRA-role DS18B20 (°F x10; -9999 = no reading yet)
+  CSV2_battTempActiveF,     // batteryTempF() result this tick (°F x10; -9999 = no source qualifies)
+  CSV2_battTempActiveSrc,   // 0 none, 1 probe, 2 NMEA 2000, 3 VE.Direct, 4 RV-C, 5 board temperature
+  CSV2_owProbeCount,        // DS18B20s in the 1-Wire registry
+  CSV2_owUnassignedCount,   // present probes with no role
+  CSV2_VictronBattTempF,    // VE.Direct "T" battery temperature (°F x10; -9999 = none)
+  CSV2_rvcRxBattTempF,      // RV-C DC_SOURCE_STATUS_2 battery temperature (°F x10; -9999 = none)
+  CSV2_cvTempDerateInert,   // 1 = battery-temperature source class changed since commissioning; CV derate held at 1.0
+  CSV2_wmIgn_battTempF_lo,  CSV2_wmIgn_battTempF_hi,   // BatteryTempProbeF (°F, int)
+  CSV2_wmIgn_extraTempF_lo, CSV2_wmIgn_extraTempF_hi,  // ExtraTempF (°F, int)
 
   CSV2_sessionId,    // boot identity — matches CSV1_sessionId while this cached block is from the live run
   CSV2_sendMs,            // millis() when this payload was BUILT (CSV2 builds one pass and sends the next)
@@ -1158,6 +1170,21 @@ enum Csv3Index {
   CSV3_rvcChgrInstance,        // RV-C charger instance (49 = alternator type nibble + instance 1)
   CSV3_rvcDcInstance,          // RV-C DC source instance for the alternator
   CSV3_rvcDevPriority,         // RV-C device priority (80 = Charger, below a BMS 120)
+  // Battery + extra temperature probes, source chain, hot-charge lockout (BATTERY_TEMP_SENSORS_SPEC.md §6)
+  CSV3_battTempProbeEnable,    // BATT-role probe feeds the battery-temperature source chain (0/1)
+  CSV3_extraTempProbeEnable,   // EXTRA-role probe live (0/1)
+  CSV3_battTempSource,         // 0 Auto, 1 Probe, 2 NMEA 2000, 3 VE.Direct, 4 RV-C, 5 Board, 6 None
+  CSV3_battTempProxyEnable,    // Auto may fall back to the board temperature (0/1)
+  CSV3_hotChargeLockoutEnable, // hot-charge lockout master on/off (0/1)
+  CSV3_MaxChargeTempF,         // hot-charge lockout ceiling (°F)
+  CSV3_extraTempAlarmHiEnable, // EXTRA-probe high alarm (0/1)
+  CSV3_extraTempAlarmHiF,      // EXTRA-probe high alarm threshold (°F)
+  CSV3_extraTempAlarmLoEnable, // EXTRA-probe low alarm (0/1)
+  CSV3_extraTempAlarmLoF,      // EXTRA-probe low alarm threshold (°F)
+  CSV3_n2kExtraTempEnable,     // 130312 for the EXTRA probe (0/1)
+  CSV3_n2kExtraTempInstance,
+  CSV3_n2kExtraTempSource,     // tN2kTempSource code for the EXTRA probe
+  CSV3_CommissionTempSrc,      // battTempActiveSrc when CommissionTempF was stamped (0 = legacy/unknown = board)
   CSV3_sessionId,              // boot identity — matches CSV1_sessionId while this cached block is from the live run
   CSV3_sendMs,                 // millis() when this settings echo was built. CSV3 is event-driven with a 60 s
                                // fallback, so an age much past ~60 s means the echo stopped arriving and every
@@ -1203,12 +1230,16 @@ enum TsIndex {
   TS_Dvcc,          // DVCC follow: received charge-limit (CVL/CCL) stream staleness
   TS_WeatherFetch,  // age of the last successful solar-forecast fetch (Open-Meteo)
   TS_N183,          // NMEA 0183 serial receive staleness (any checksum-valid sentence)
+  TS_BattTempProbe, // BATT-role DS18B20 staleness (IDX_BATT_TEMP_PROBE)
+  TS_ExtraTemp,     // EXTRA-role DS18B20 staleness (IDX_EXTRA_TEMP)
+  TS_VeBattTemp,    // VE.Direct "T" battery temperature staleness (IDX_VE_BATT_TEMP)
+  TS_RvcBattTemp,   // RV-C DC_SOURCE_STATUS_2 battery temperature staleness (IDX_RVC_BATT_TEMP)
 
   TS_sessionId,     // boot identity — matches CSV1_sessionId while this cached block is from the live run
   TS_sendMs,        // millis() when this payload was built. Every other TS field is an AGE, so without this
                     // a frozen block reads as a set of plausible ages that simply stopped advancing.
 
-  TS_FIELD_COUNT  // = 37
+  TS_FIELD_COUNT  // = 41
 };
 
 
@@ -3137,6 +3168,65 @@ void setupServer() {
     j += "}";
     request->send(200, "application/json", j);
   });
+  // Multi-drop 1-Wire probe registry for Setup > Temperature (BATTERY_TEMP_SENSORS_SPEC.md §8). The registry
+  // is copied under owMux first and the JSON built from that copy on the stack, so TempTask never waits on
+  // the network and the handler never allocates. "role" comes from the stored role addresses, so a probe
+  // that dropped off the bus still reports its role with present:0.
+  server.on("/tempSensors", HTTP_GET, [](AsyncWebServerRequest *request) {
+    OwProbe snap[OW_MAX_PROBES];
+    DeviceAddress roleAddr[TR_COUNT];
+    int8_t roleSlot[TR_COUNT];
+    uint8_t n;
+    portENTER_CRITICAL(&owMux);
+    n = owProbeCount;
+    memcpy(snap, owProbes, sizeof(OwProbe) * n);
+    memcpy(roleAddr, tempRoleAddr, sizeof(roleAddr));
+    memcpy(roleSlot, tempRoleSlot, sizeof(roleSlot));
+    portEXIT_CRITICAL(&owMux);
+    const uint32_t nowMs = millis();
+    unsigned unassigned = 0;
+    for (uint8_t i = 0; i < n; i++) {
+      if (!snap[i].present) continue;
+      bool bound = false;
+      for (int r = 0; r < TR_COUNT; r++) if (roleSlot[r] == (int8_t)i) { bound = true; break; }
+      if (!bound) unassigned++;
+    }
+    char out[1200];  // 6 probes x ~100 chars + roles block; the overflow guard below returns 500 rather than truncated JSON
+    int pos = snprintf(out, sizeof(out), "{\"count\":%u,\"unassigned\":%u,\"probes\":[", (unsigned)n, unassigned);
+    for (uint8_t i = 0; i < n && pos < (int)sizeof(out); i++) {
+      char hex[17];
+      owAddrToHex(snap[i].addr, hex);
+      int role = -1;
+      for (int r = 0; r < TR_COUNT; r++) if (memcmp(roleAddr[r], snap[i].addr, sizeof(DeviceAddress)) == 0) { role = r; break; }
+      char tempStr[16], ageStr[16];
+      if (snap[i].lastGoodMs == 0) {
+        strcpy(tempStr, "null");
+        strcpy(ageStr, "null");
+      } else {
+        snprintf(tempStr, sizeof(tempStr), "%.1f", snap[i].lastF);
+        snprintf(ageStr, sizeof(ageStr), "%lu", (unsigned long)((nowMs - snap[i].lastGoodMs) / 1000UL));
+      }
+      pos += snprintf(out + pos, sizeof(out) - pos,
+                      "%s{\"id\":\"%s\",\"role\":%d,\"tempF\":%s,\"ageS\":%s,\"ok\":%u,\"fail\":%u,\"present\":%d}",
+                      i ? "," : "", hex, role, tempStr, ageStr, (unsigned)snap[i].okCount, (unsigned)snap[i].failCount, snap[i].present ? 1 : 0);
+    }
+    char roleHex[TR_COUNT][17];
+    for (int r = 0; r < TR_COUNT; r++) {
+      if (owAddrIsZero(roleAddr[r])) roleHex[r][0] = '\0';
+      else owAddrToHex(roleAddr[r], roleHex[r]);
+    }
+    if (pos < (int)sizeof(out)) {
+      pos += snprintf(out + pos, sizeof(out) - pos,
+                      "],\"roles\":{\"alt\":\"%s\",\"batt\":\"%s\",\"extra\":\"%s\"},\"enabled\":{\"batt\":%d,\"extra\":%d},\"scanning\":%d}",
+                      roleHex[TR_ALT], roleHex[TR_BATT], roleHex[TR_EXTRA],
+                      battTempProbeEnable ? 1 : 0, extraTempProbeEnable ? 1 : 0, owScanRequested ? 1 : 0);
+    }
+    if (pos >= (int)sizeof(out)) {
+      request->send(500, "text/plain", "tempSensors: response buffer overflow");
+      return;
+    }
+    request->send(200, "application/json", out);
+  });
   // Temp-comp zero correction: daily-fit history (≤90 rows) for the trend view. Small enough to build inline.
   server.on("/zerofit.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     String out = "epoch,sensor,c,b,r2,n\n";
@@ -4668,6 +4758,123 @@ void setupServer() {
       settingWrite(NK_MinChargeTempF, inputMessage.c_str());
       MinChargeTempF = inputMessage.toFloat();
     }
+    // Battery + extra temperature probes, battery-temperature source chain, hot-charge lockout
+    // (BATTERY_TEMP_SENSORS_SPEC.md §6). Temperatures arrive in °F (the UI converts).
+    if (request->hasParam("battTempProbeEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("battTempProbeEnable")->value();
+      battTempProbeEnable = (inputMessage.toInt() != 0) ? 1 : 0;
+      settingWrite(NK_battTempProbeEnable, String(battTempProbeEnable).c_str());
+    }
+    if (request->hasParam("extraTempProbeEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("extraTempProbeEnable")->value();
+      extraTempProbeEnable = (inputMessage.toInt() != 0) ? 1 : 0;
+      settingWrite(NK_extraTempProbeEnable, String(extraTempProbeEnable).c_str());
+    }
+    if (request->hasParam("battTempSource")) {
+      foundParameter = true;
+      inputMessage = request->getParam("battTempSource")->value();
+      battTempSource = constrain(inputMessage.toInt(), 0, 6);  // 0 Auto .. 5 Board, 6 None
+      settingWrite(NK_battTempSource, String(battTempSource).c_str());
+    }
+    if (request->hasParam("battTempProxyEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("battTempProxyEnable")->value();
+      battTempProxyEnable = (inputMessage.toInt() != 0) ? 1 : 0;
+      settingWrite(NK_battTempProxyEnable, String(battTempProxyEnable).c_str());
+    }
+    // Hot-charge lockout — mirror of the cold one; acts only on a measured battery temperature (source 1..4).
+    if (request->hasParam("hotChargeLockoutEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("hotChargeLockoutEnable")->value();
+      hotChargeLockoutEnable = (inputMessage.toInt() != 0) ? 1 : 0;
+      settingWrite(NK_hotChargeLockoutEnable, String(hotChargeLockoutEnable).c_str());
+      queueConsoleMessageF("Hot-charge lockout (measured battery temperature): %s", hotChargeLockoutEnable ? "ENABLED" : "DISABLED");
+    }
+    if (request->hasParam("MaxChargeTempF")) {
+      foundParameter = true;
+      inputMessage = request->getParam("MaxChargeTempF")->value();
+      settingWrite(NK_MaxChargeTempF, inputMessage.c_str());
+      MaxChargeTempF = inputMessage.toFloat();
+    }
+    if (request->hasParam("extraTempAlarmHiEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("extraTempAlarmHiEnable")->value();
+      extraTempAlarmHiEnable = (inputMessage.toInt() != 0) ? 1 : 0;
+      settingWrite(NK_extraTempAlarmHiEnable, String(extraTempAlarmHiEnable).c_str());
+    }
+    if (request->hasParam("extraTempAlarmHiF")) {
+      foundParameter = true;
+      inputMessage = request->getParam("extraTempAlarmHiF")->value();
+      settingWrite(NK_extraTempAlarmHiF, inputMessage.c_str());
+      extraTempAlarmHiF = inputMessage.toFloat();
+    }
+    if (request->hasParam("extraTempAlarmLoEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("extraTempAlarmLoEnable")->value();
+      extraTempAlarmLoEnable = (inputMessage.toInt() != 0) ? 1 : 0;
+      settingWrite(NK_extraTempAlarmLoEnable, String(extraTempAlarmLoEnable).c_str());
+    }
+    if (request->hasParam("extraTempAlarmLoF")) {
+      foundParameter = true;
+      inputMessage = request->getParam("extraTempAlarmLoF")->value();
+      settingWrite(NK_extraTempAlarmLoF, inputMessage.c_str());
+      extraTempAlarmLoF = inputMessage.toFloat();
+    }
+    // 1-Wire probe registry actions. A scan is a request to TempTask (it owns the bus); a role assignment
+    // writes NVS right here (explicit user action, the one exception to the field-off flash rule) and
+    // then asks TempTask to rebind. An id already bound to another role is refused.
+    {
+      static const char *const owAssignParams[TR_COUNT] = { "owAssignAlt", "owAssignBatt", "owAssignExtra" };
+      static const char *const owAssignKeys[TR_COUNT] = { NK_owAddrAlt, NK_owAddrBatt, NK_owAddrExtra };
+      for (int r = 0; r < TR_COUNT; r++) {
+        if (!request->hasParam(owAssignParams[r])) continue;
+        foundParameter = true;
+        inputMessage = request->getParam(owAssignParams[r])->value();
+        inputMessage.trim();
+        inputMessage.toLowerCase();
+        DeviceAddress a;
+        const bool clearRole = (inputMessage.length() == 0 || inputMessage == "none");
+        if (clearRole) {
+          memset(a, 0, sizeof(a));
+        } else if (!owHexToAddr(inputMessage.c_str(), a)) {
+          inputMessage = "Rejected: probe id must be 16 hex characters or none";
+          continue;
+        }
+        bool taken = false;
+        if (!clearRole) {
+          for (int o = 0; o < TR_COUNT; o++) {
+            if (o != r && memcmp(tempRoleAddr[o], a, sizeof(DeviceAddress)) == 0) taken = true;
+          }
+        }
+        if (taken) {
+          inputMessage = "Rejected: that probe is already assigned to another role";
+          continue;
+        }
+        portENTER_CRITICAL(&owMux);
+        memcpy(tempRoleAddr[r], a, sizeof(DeviceAddress));
+        tempRoleAssigned[r] = !clearRole;
+        tempRoleSlot[r] = -1;
+        if (!clearRole) {
+          for (uint8_t i = 0; i < owProbeCount; i++) {
+            if (owProbes[i].present && memcmp(owProbes[i].addr, a, sizeof(DeviceAddress)) == 0) { tempRoleSlot[r] = (int8_t)i; break; }
+          }
+        }
+        owRolePersistPending[r] = false;  // this write supersedes any queued auto-bind
+        portEXIT_CRITICAL(&owMux);
+        settingWrite(owAssignKeys[r], clearRole ? "" : inputMessage.c_str());
+        owScanRequested = true;
+        if (clearRole) queueConsoleMessageF("Temperature probe role cleared: %s", owRoleName(r));
+        else queueConsoleMessageF("Temperature probe %s assigned to the %s role", inputMessage.c_str(), owRoleName(r));
+      }
+    }
+    // Placed after the assignment loop so config_drift_check.py's hasParam window sees no settingWrite (momentary action, persists nothing).
+    if (request->hasParam("owScan")) {
+      foundParameter = true;
+      owScanRequested = true;
+      inputMessage = "1";
+    }
     if (request->hasParam("ClearBuffer")) {
       foundParameter = true;
       clearSensorBuffer();
@@ -5254,6 +5461,24 @@ void setupServer() {
       inputMessage = request->getParam("n2kTempSource")->value();
       n2kTempSource = constrain(inputMessage.toInt(), 0, 15);  // tN2kTempSource 4-bit field
       settingWrite(NK_n2kTempSrc, String(n2kTempSource).c_str());
+    }
+    if (request->hasParam("n2kExtraTempEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kExtraTempEnable")->value();
+      settingWrite(NK_n2kExtraTempEnable, inputMessage.c_str());
+      n2kExtraTempEnable = inputMessage.toInt();
+    }
+    if (request->hasParam("n2kExtraTempInstance")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kExtraTempInstance")->value();
+      n2kExtraTempInstance = constrain(inputMessage.toInt(), 0, 252);
+      settingWrite(NK_n2kExtraTempInstance, String(n2kExtraTempInstance).c_str());
+    }
+    if (request->hasParam("n2kExtraTempSource")) {
+      foundParameter = true;
+      inputMessage = request->getParam("n2kExtraTempSource")->value();
+      n2kExtraTempSource = constrain(inputMessage.toInt(), 0, 15);  // tN2kTempSource 4-bit field
+      settingWrite(NK_n2kExtraTempSource, String(n2kExtraTempSource).c_str());
     }
     if (request->hasParam("n2kChgrEnable")) {
       foundParameter = true;
@@ -7035,11 +7260,20 @@ void setupServer() {
       foundParameter = true;
       cvPlantKa = request->getParam("cvPlantKa")->value().toFloat();
       settingWrite(NK_cvPlantKa, String(cvPlantKa, 5).c_str());
-      // Stamp the board temp at the moment the curve was measured — the reference for the battery-temp gain
-      // derate. Only when the proxy reading is live; otherwise leave the prior stamp (no false reference).
-      if (!IS_STALE(IDX_AMBIENT_TEMP) && isfinite(ambientTemp)) {
-        CommissionTempF = ambientTemp;
+      // Stamp the battery temperature and its source at the moment the curve was measured — the reference for
+      // the battery-temp gain derate (computeCvTempScale compares source classes, measured vs board). The
+      // batteryTempF() result of the current tick when it has one; the live board reading otherwise (source 5);
+      // neither → leave the prior stamp (no false reference).
+      if (isfinite(battTempActiveF)) {
+        CommissionTempF = battTempActiveF;
+        CommissionTempSrc = (int)battTempActiveSrc;
         settingWrite(NK_CommissionTempF, String(CommissionTempF, 2).c_str());
+        settingWrite(NK_CommissionTempSrc, String(CommissionTempSrc).c_str());
+      } else if (!IS_STALE(IDX_AMBIENT_TEMP) && isfinite(ambientTemp)) {
+        CommissionTempF = ambientTemp;
+        CommissionTempSrc = 5;
+        settingWrite(NK_CommissionTempF, String(CommissionTempF, 2).c_str());
+        settingWrite(NK_CommissionTempSrc, String(CommissionTempSrc).c_str());
       }
       recomputeCvGains();
     }
@@ -9692,6 +9926,7 @@ void SendWifiData() {
                                "%d,%d,"         // +2 DVCC authority identity: NAME manufacturer code, product code
                                "%d,%d,"         // +2 timed OV cut session counters: LOW tier, MID tier
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // +10 solar ledger: today's pred/act harvest + consumption, bar, source, days, coverage, ft win/ses
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // +13 battery/extra temperature: BATT probe, EXTRA probe, active F, active src, probe count, unassigned, VE.Direct T, RV-C T, derate inert, batt wm lo/hi, extra wm lo/hi
                                "%u,%u\n",       // +2: sessionId, sendMs
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -10295,6 +10530,19 @@ void SendWifiData() {
                                SafeInt(sledLive.dayIdx ? sledLive.coverageMin : 0),      // CSV2_sledCoverageMin
                                SafeInt(ft_solarLedger.worstWindow),                      // CSV2_ft_solarLedger_win
                                SafeInt(ft_solarLedger.worstSession),                     // CSV2_ft_solarLedger_ses
+                               isfinite(BatteryTempProbeF) ? (int)lroundf(BatteryTempProbeF * 10.0f) : -9999,  // CSV2_BatteryTempProbeF
+                               isfinite(ExtraTempF) ? (int)lroundf(ExtraTempF * 10.0f) : -9999,                // CSV2_ExtraTempF
+                               isfinite(battTempActiveF) ? (int)lroundf(battTempActiveF * 10.0f) : -9999,      // CSV2_battTempActiveF
+                               (int)battTempActiveSrc,                                   // CSV2_battTempActiveSrc
+                               (int)owProbeCount,                                        // CSV2_owProbeCount
+                               (int)owUnassignedCount(),                                 // CSV2_owUnassignedCount
+                               isfinite(VictronBattTempF) ? (int)lroundf(VictronBattTempF * 10.0f) : -9999,    // CSV2_VictronBattTempF
+                               isfinite(rvcRxBattTempF) ? (int)lroundf(rvcRxBattTempF * 10.0f) : -9999,        // CSV2_rvcRxBattTempF
+                               (int)cvTempDerateInert,                                   // CSV2_cvTempDerateInert
+                               SafeInt(wmIgnSafe(wmIgn_battTempF.lo), 1),                // CSV2_wmIgn_battTempF_lo
+                               SafeInt(wmIgnSafe(wmIgn_battTempF.hi), 1),                // CSV2_wmIgn_battTempF_hi
+                               SafeInt(wmIgnSafe(wmIgn_extraTempF.lo), 1),               // CSV2_wmIgn_extraTempF_lo
+                               SafeInt(wmIgnSafe(wmIgn_extraTempF.hi), 1),               // CSV2_wmIgn_extraTempF_hi
                                (unsigned)g_sessionId,   // CSV2_sessionId
                                (unsigned)millis());     // CSV2_sendMs — build time; the send happens one pass later
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
@@ -10380,6 +10628,7 @@ void SendWifiData() {
                                "%d,%d,%d,"   // load-dump consecutive-sample counts N1/N2/N3
                                "%d,%d,%d,%d," // solar ledger toggles + margins: learn, use consumption, margin % (x100), learn rate % (x100)
                                "%d,%d,%d,%d,%d,%d,%d,"  // RV-C: tx master, charger DGNs, DC source DGNs, DM_RV, charger instance, DC instance, device priority
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // +14 battery/extra temperature settings (§6 order, CommissionTempSrc last)
                                "%u,%u\n",    // +2: sessionId, sendMs
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -10797,6 +11046,20 @@ void SendWifiData() {
                                SafeInt(rvcChgrInstance),            // CSV3_rvcChgrInstance
                                SafeInt(rvcDcInstance),              // CSV3_rvcDcInstance
                                SafeInt(rvcDevPriority),             // CSV3_rvcDevPriority
+                               SafeInt(battTempProbeEnable),        // CSV3_battTempProbeEnable
+                               SafeInt(extraTempProbeEnable),       // CSV3_extraTempProbeEnable
+                               SafeInt(battTempSource),             // CSV3_battTempSource
+                               SafeInt(battTempProxyEnable),        // CSV3_battTempProxyEnable
+                               SafeInt(hotChargeLockoutEnable),     // CSV3_hotChargeLockoutEnable
+                               SafeInt(MaxChargeTempF),             // CSV3_MaxChargeTempF
+                               SafeInt(extraTempAlarmHiEnable),     // CSV3_extraTempAlarmHiEnable
+                               SafeInt(extraTempAlarmHiF),          // CSV3_extraTempAlarmHiF
+                               SafeInt(extraTempAlarmLoEnable),     // CSV3_extraTempAlarmLoEnable
+                               SafeInt(extraTempAlarmLoF),          // CSV3_extraTempAlarmLoF
+                               SafeInt(n2kExtraTempEnable),         // CSV3_n2kExtraTempEnable
+                               SafeInt(n2kExtraTempInstance),       // CSV3_n2kExtraTempInstance
+                               SafeInt(n2kExtraTempSource),         // CSV3_n2kExtraTempSource
+                               SafeInt(CommissionTempSrc),          // CSV3_CommissionTempSrc
                                (unsigned)g_sessionId,   // CSV3_sessionId
                                (unsigned)millis());     // CSV3_sendMs
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
@@ -10825,6 +11088,7 @@ void SendWifiData() {
     }
     int timestampPayloadLen = snprintf(timestampPayload, TIMESTAMP_PAYLOAD_SIZE,
                                        "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,"
+                                       "%lu,%lu,%lu,%lu,"  // +4 battery/extra temperature: BATT probe, EXTRA probe, VE.Direct T, RV-C T
                                        "%lu,%lu",  // +2: sessionId, sendMs
                                        (unsigned long)TS_FIELD_COUNT,
                                        (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),
@@ -10865,6 +11129,10 @@ void SendWifiData() {
                                        // the shared sensor sentinel would read as a real age here.
                                        (weatherLastUpdate == 0) ? 4294967295UL : (unsigned long)(now - weatherLastUpdate),
                                        (dataTimestamps[IDX_N183] == 0) ? 999999 : (now - dataTimestamps[IDX_N183]),
+                                       (dataTimestamps[IDX_BATT_TEMP_PROBE] == 0) ? 999999 : (now - dataTimestamps[IDX_BATT_TEMP_PROBE]),
+                                       (dataTimestamps[IDX_EXTRA_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_EXTRA_TEMP]),
+                                       (dataTimestamps[IDX_VE_BATT_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_VE_BATT_TEMP]),
+                                       (dataTimestamps[IDX_RVC_BATT_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_RVC_BATT_TEMP]),
                                        (unsigned long)g_sessionId,   // TS_sessionId
                                        (unsigned long)now            // TS_sendMs (`now` is this dispatch tick's millis())
     );

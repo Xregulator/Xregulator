@@ -25,7 +25,7 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
  * CRITICAL_INSTRUCTION_FOR_AI:: When adding new code, try to first use or modify existing code whenever possible, to avoid bloat. When impossible, always mimick my style and coding patterns. If you have a performance improvement idea, tell me. When giving me new code, I prefer complete copy and paste functions when they are short, or for you to give step by step instructions for me to edit if function is long, to conserve tokens. Always specify which option you chose.  Never re-write the entire file, this just wastes my tokens.
  */
 
-// X Engineering Alternator Regulator
+// Xregulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -218,7 +218,9 @@ function updateAllTempUnitLabels() {
         fBtn.classList.toggle('on', displayTempUnit === 0);
         cBtn.classList.toggle('on', displayTempUnit === 1);
     }
-    if (typeof renderBattTempDerate === 'function') renderBattTempDerate();  // re-convert commission/board temps
+    if (typeof renderBattTempDerate === 'function') renderBattTempDerate();  // re-convert commission/battery temps
+    if (typeof renderBattTempReadouts === 'function' && g_lastCsv2) renderBattTempReadouts(g_lastCsv2);
+    if (typeof owRender === 'function' && _owLast) owRender(_owLast);
 }
 
 function setTempUnit(unit) {
@@ -1053,6 +1055,17 @@ const CSV2_FIELDS = [
     "sledCoverageMin",         // minutes of today the device has been awake
     "ft_solarLedger_win",
     "ft_solarLedger_ses",
+    "BatteryTempProbeF",       // BATT-role DS18B20 (°F x10; -9999 = no reading)
+    "ExtraTempF",              // EXTRA-role DS18B20 (°F x10; -9999 = no reading)
+    "battTempActiveF",         // battery temperature in use this tick (°F x10; -9999 = none)
+    "battTempActiveSrc",       // 0 none, 1 probe, 2 NMEA 2000, 3 VE.Direct, 4 RV-C, 5 board stand-in
+    "owProbeCount",            // 1-Wire probes present on the last enumeration
+    "owUnassignedCount",       // present probes with no role
+    "VictronBattTempF",        // VE.Direct T field (°F x10; -9999 = none)
+    "rvcRxBattTempF",          // RV-C DC_SOURCE_STATUS_2 (°F x10; -9999 = none)
+    "cvTempDerateInert",       // 1 = battery-temp source class changed since commissioning; derate holds 1.0
+    "wmIgn_battTempF_lo", "wmIgn_battTempF_hi",     // BatteryTempProbeF (°F, int)
+    "wmIgn_extraTempF_lo", "wmIgn_extraTempF_hi",   // ExtraTempF (°F, int)
     "sessionId",               // device boot identity, same in every channel this boot
     "sendMs",                  // device millis() when this payload was BUILT (CSV2 sends one pass later)
 ];
@@ -3568,7 +3581,7 @@ const CSV3_FIELDS = [
     "commissionPhase",               // current wizard phase: 0=Prep…8=Stress Test, 9=finished
     "commissionDoneMask",            // per-stage completion bitmask (bit i = stage i done)
     "cvHelpersEnabled",              // master switch: asymmetric KiDown unwind + CV D term (1=on)
-    "MinChargeTempF",                // cold-charge lockout board-temp floor (°F)
+    "MinChargeTempF",                // cold-charge lockout floor on the active battery temperature (°F)
     "coldChargeLockoutEnable",       // cold-charge lockout master on/off (1=on)
     "cvGainMode",                    // CV gain mode: 0=Manual, 1=Auto (α/K anchored)
     "cvPlantK",                      // measured plant gain K (V/A); ×10000
@@ -3703,6 +3716,20 @@ const CSV3_FIELDS = [
     "rvcChgrInstance",               // RV-C charger instance
     "rvcDcInstance",                 // RV-C DC source instance
     "rvcDevPriority",                // RV-C device priority
+    "battTempProbeEnable",           // 0/1 BATT-role probe feeds the battery temperature
+    "extraTempProbeEnable",          // 0/1 EXTRA-role probe reported / alarmed / transmitted
+    "battTempSource",                // 0 Auto, 1 Probe, 2 NMEA 2000, 3 VE.Direct, 4 RV-C, 5 Board, 6 None
+    "battTempProxyEnable",           // 0/1 board temperature may stand in when Auto finds no measurement
+    "hotChargeLockoutEnable",        // hot-charge lockout master on/off (1=on)
+    "MaxChargeTempF",                // hot-charge lockout ceiling (°F)
+    "extraTempAlarmHiEnable",        // 0/1 extra-probe high alarm
+    "extraTempAlarmHiF",             // extra-probe high alarm threshold (°F)
+    "extraTempAlarmLoEnable",        // 0/1 extra-probe low alarm
+    "extraTempAlarmLoF",             // extra-probe low alarm threshold (°F)
+    "n2kExtraTempEnable",            // 0/1 PGN 130312 for the extra probe
+    "n2kExtraTempInstance",          // extra-probe temperature instance (0..252)
+    "n2kExtraTempSource",            // tN2kTempSource code for the extra probe
+    "CommissionTempSrc",             // battTempActiveSrc when CommissionTempF was stamped (0 = legacy = board)
     "sessionId",                     // device boot identity, same in every channel this boot
     "sendMs",                        // device millis() when this settings echo was built; event-driven with a 60 s fallback
 ];
@@ -3742,6 +3769,10 @@ const TS_FIELDS = [
     "ts_Dvcc",
     "ts_WeatherFetch",
     "ts_N183",
+    "ts_BattTempProbe",
+    "ts_ExtraTemp",
+    "ts_VeBattTemp",
+    "ts_RvcBattTemp",
     "ts_sessionId",   // device boot identity, same in every channel this boot
     "ts_sendMs",      // device millis() when this payload was built — every other TS field is an age measured at that instant
 ];
@@ -7816,6 +7847,9 @@ function updateAllEchosOptimized(data) {
         { key: 'n2kAltInstance', id: 'n2kAltInstance_echo', transform: v => v },
         { key: 'n2kAltTempEnable', id: 'n2kAltTempEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'n2kTempInstance', id: 'n2kTempInstance_echo', transform: v => v },
+        { key: 'n2kExtraTempEnable', id: 'n2kExtraTempEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'n2kExtraTempSource', id: 'n2kExtraTempSource_echo', transform: v => (N2K_TEMP_SOURCE_NAMES[v] ?? v) },
+        { key: 'n2kExtraTempInstance', id: 'n2kExtraTempInstance_echo', transform: v => v },
         { key: 'n2kTempSource', id: 'n2kTempSource_echo', transform: v => (N2K_TEMP_SOURCE_NAMES[v] ?? v) },
         { key: 'n2kChgrEnable', id: 'n2kChgrEnable_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'n2kChgrInstance', id: 'n2kChgrInstance_echo', transform: v => v },
@@ -8059,6 +8093,16 @@ function updateAllEchosOptimized(data) {
         { key: 'cvHelpersEnabled',  id: 'cvHelpersEnabled_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'coldChargeLockoutEnable', id: 'coldChargeLockoutEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'MinChargeTempF',    id: 'MinChargeTempF_echo',    transform: v => Math.round(toDisplayTemp(v)) },
+        { key: 'battTempProbeEnable',    id: 'battTempProbeEnable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'extraTempProbeEnable',   id: 'extraTempProbeEnable_echo',   transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'battTempSource',         id: 'battTempSource_echo',         transform: v => (BATT_TEMP_SOURCE_OPTION_NAMES[v] ?? v) },
+        { key: 'battTempProxyEnable',    id: 'battTempProxyEnable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'hotChargeLockoutEnable', id: 'hotChargeLockoutEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'MaxChargeTempF',         id: 'MaxChargeTempF_echo',         transform: v => Math.round(toDisplayTemp(v)) },
+        { key: 'extraTempAlarmHiEnable', id: 'extraTempAlarmHiEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'extraTempAlarmHiF',      id: 'extraTempAlarmHiF_echo',      transform: v => Math.round(toDisplayTemp(v)) },
+        { key: 'extraTempAlarmLoEnable', id: 'extraTempAlarmLoEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'extraTempAlarmLoF',      id: 'extraTempAlarmLoF_echo',      transform: v => Math.round(toDisplayTemp(v)) },
         { key: 'TdPred',            id: 'TdPred_echo',            transform: v => v.toFixed(3) },
         { key: 'OvMeasMarginV',     id: 'OvMeasMarginV_echo',     transform: v => v.toFixed(3) },
         { key: 'OvPredMarginV',     id: 'OvPredMarginV_echo',     transform: v => v.toFixed(3) },
@@ -8189,6 +8233,8 @@ function updateAllEchosOptimized(data) {
         { key: 'speedSourceMode',       name: 'speedSourceMode' },
         { key: 'UseFloat',              name: 'UseFloat' },
         { key: 'n2kTempSource',         name: 'n2kTempSource' },
+        { key: 'n2kExtraTempSource',    name: 'n2kExtraTempSource' },
+        { key: 'battTempSource',        name: 'battTempSource' },
         { key: 'n2kChgrMode',           name: 'n2kChgrMode' },
         { key: 'dvccSrcType',           name: 'dvccSrcType' },
     ]);
@@ -8788,7 +8834,8 @@ const BATTDEF_FW_DEFAULT = {
     UseFloat: 0, FloatVoltage: 13.4, FLOAT_DURATION: 12, RebulkVoltage: 13.2, RebulkCurrent_A: 5,
     SOC_BlockRebulk_percent: 95, SOC_AllowRebulk_percent: 94, TailCurrent_A: 5, TailCurrent: 2,
     ChargedVoltage: 14, BattCurrentLimitA: 100, MaximumAllowedBatteryAmps: 150,
-    coldChargeLockoutEnable: 1, battTempDerateEnable: 1, PeukertExponent: 1.05, ChargeEfficiency: 99,
+    coldChargeLockoutEnable: 1, battTempDerateEnable: 1, hotChargeLockoutEnable: 0, MaxChargeTempF: 122,
+    PeukertExponent: 1.05, ChargeEfficiency: 99,
     AbsorptionTimeoutMs: 20,
     VoltageAlarmHigh: 15, VoltageAlarmLow: 11, SocAlarmLow: 0, AlternatorHardShutdownV: 14.2,
     VoltageHardwareLimit: 14.3, OvTierLoMarginV: 0.10, OvTierMidMarginV: 0.20,
@@ -8897,7 +8944,7 @@ function ocvBlobsEqual(a, b) {
     return true;
 }
 
-function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
+function deriveBatteryDefaults(type, capAh, sysV, mountLoc, battProbe) {
     // bulkV/absV lean gentle for stress/lifetime: LiFePO4 13.9 V ≈ high-90s% SoC well below 14.4+;
     // AGM at 14.4; flooded higher (14.6) because it needs the extra to counter stratification and its
     // dominant killer is UNDERcharge (sulfation), not overcharge. limC is the opposite philosophy: high
@@ -8909,9 +8956,9 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
         // (hardware rung 14.3) but BELOW the BMS trip floor (~14.5) — an external charger
         // overdriving the bank alarms before any BMS acts. AGM/lead keep 15.8, below their own
         // 15.9/16.0 cuts (approach alarm; no BMS race there) — deliberate, don't "fix".
-        lifepo4:   { bulkV: 13.9, absV: 13.9, floatV: null, durH: null, rebulkV: 13.1, socBlock: 90, socAllow: 80, tailC: 0.05, tailPct: 5, chgDetV: 13.8, limC: 0.50, cold: 1, peukert: 1.05, chgEff: 99, vAlmHi: 14.4, vAlmLo: 11.9, socAlm: 10, absBase: 30, absMax: 45,  ovMeasMargin: 0.1 },
-        agm:       { bulkV: 14.4, absV: 14.4, floatV: 13.6, durH: 8,    rebulkV: 12.5, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.2, limC: 1.00, cold: 0, peukert: 1.10, chgEff: 93, vAlmHi: 15.8, vAlmLo: 11.8, socAlm: 40, absBase: 60, absMax: 180, ovMeasMargin: 0.5 },
-        lead_acid: { bulkV: 14.6, absV: 14.6, floatV: 13.4, durH: 8,    rebulkV: 12.4, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.3, limC: 0.20, cold: 0, peukert: 1.25, chgEff: 88, vAlmHi: 15.8, vAlmLo: 11.5, socAlm: 40, absBase: 90, absMax: 240, ovMeasMargin: 0.5 }
+        lifepo4:   { bulkV: 13.9, absV: 13.9, floatV: null, durH: null, rebulkV: 13.1, socBlock: 90, socAllow: 80, tailC: 0.05, tailPct: 5, chgDetV: 13.8, limC: 0.50, cold: 1, hot: 1, hotF: 113, peukert: 1.05, chgEff: 99, vAlmHi: 14.4, vAlmLo: 11.9, socAlm: 10, absBase: 30, absMax: 45,  ovMeasMargin: 0.1 },
+        agm:       { bulkV: 14.4, absV: 14.4, floatV: 13.6, durH: 8,    rebulkV: 12.5, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.2, limC: 1.00, cold: 0, hot: 0, hotF: 122, peukert: 1.10, chgEff: 93, vAlmHi: 15.8, vAlmLo: 11.8, socAlm: 40, absBase: 60, absMax: 180, ovMeasMargin: 0.5 },
+        lead_acid: { bulkV: 14.6, absV: 14.6, floatV: 13.4, durH: 8,    rebulkV: 12.4, socBlock: 97, socAllow: 90, tailC: 0.02, tailPct: 2, chgDetV: 14.3, limC: 0.20, cold: 0, hot: 0, hotF: 122, peukert: 1.25, chgEff: 88, vAlmHi: 15.8, vAlmLo: 11.5, socAlm: 40, absBase: 90, absMax: 240, ovMeasMargin: 0.5 }
     }[type];
     if (!T) return null;
     const kV = (isFinite(sysV) && sysV > 0) ? sysV / 12 : 1;   // 12V-equivalent voltages scale by class
@@ -8965,9 +9012,16 @@ function deriveBatteryDefaults(type, capAh, sysV, mountLoc) {
     rows.push({ param: 'VoltageAlarmLow', label: 'Low Voltage Alarm (V)', value: r2(T.vAlmLo * kV) });
     rows.push({ param: 'SocAlarmLow', label: 'Low State of Charge Alarm (%)', value: T.socAlm });
     rows.push({ param: 'coldChargeLockoutEnable', label: 'Cold-Charge Lockout', value: T.cold, show: v => v ? 'On' : 'Off' });
-    // An engine-room board temp is not a battery proxy — it reads hot while the bank is still cold, which
-    // would push the gains UP exactly when the plant is stiffest. Off beats a proxy that inverts.
-    if (mountLoc === 0 || mountLoc === 1) {
+    // With a battery probe the derate reads the battery itself, so it is On wherever the regulator sits,
+    // and the hot lockout has a measurement to act on (it never acts on the board stand-in). Without a
+    // probe the board stands in, and an engine-room board temp is not a battery proxy — it reads hot
+    // while the bank is still cold, which would push the gains UP exactly when the plant is stiffest.
+    // Off beats a proxy that inverts.
+    if (battProbe === 1) {
+        rows.push({ param: 'battTempDerateEnable', label: 'Battery-Temp Gain Derate', value: 1, show: v => v ? 'On' : 'Off' });
+        rows.push({ param: 'hotChargeLockoutEnable', label: 'Hot-Charge Lockout', value: T.hot, show: v => v ? 'On' : 'Off' });
+        rows.push({ param: 'MaxChargeTempF', label: 'Max Charge Temp (' + tempUnitLabel() + ')', value: T.hotF, show: v => String(Math.round(toDisplayTemp(v))) });
+    } else if (mountLoc === 0 || mountLoc === 1) {
         rows.push({ param: 'battTempDerateEnable', label: 'Battery-Temp Gain Derate', value: mountLoc === 0 ? 1 : 0, show: v => v ? 'On' : 'Off' });
     }
     rows.push({ param: 'PeukertExponent', label: 'Peukert Exponent', value: T.peukert });
@@ -9076,8 +9130,9 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         if (!r.ok) { _battDefSkipNote('Could not read the current device settings (HTTP ' + r.status + '), so the recommended battery defaults were skipped. Review them any time under Setup &rarr; Battery.'); return; }
         const cfg = (await r.json()).config || {};
         const battSrc = ('BatteryCurrentSource' in cfg) ? parseInt(cfg.BatteryCurrentSource, 10) : 0;  // 0 = INA228
+        const battProbe = ('battTempProbeEnable' in cfg) ? parseInt(cfg.battTempProbeEnable, 10) : 0;   // 1 = BATT-role DS18B20 in use
 
-        const der = deriveBatteryDefaults(type, Number(vessel.battery_capacity_ah), Number(vessel.battery_voltage), Number(vessel.regulator_mount_loc));
+        const der = deriveBatteryDefaults(type, Number(vessel.battery_capacity_ah), Number(vessel.battery_voltage), Number(vessel.regulator_mount_loc), battProbe);
         if (!der) return;
 
         const rows = [];   // preserve der.rows order; each carries now + match so matches render inline, highlighted
@@ -9101,23 +9156,24 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
 
         const typeName = { lifepo4: 'LiFePO4', agm: 'AGM', lead_acid: 'Lead Acid' }[type] || type;
         const capTxt = (Number(vessel.battery_capacity_ah) > 0) ? Number(vessel.battery_capacity_ah) + ' Ah, ' : '';
-        // Charge targets/limits don't yet move with temperature (a board-temp proxy exists via
-        // Mounting Location, but setpoint temp-comp is unbuilt). Inline here (one message, in
-        // context) rather than a separate popup after this modal.
+        // Charge targets/limits don't yet move with temperature (setpoint temp-comp is unbuilt; the
+        // battery temperature itself now comes from the Setup > Temperature source chain). Inline here
+        // (one message, in context) rather than a separate popup after this modal.
         const _tc = (typeof displayTempUnit !== 'undefined' && displayTempUnit === 1);
         let noticeHtml = '';
         if (type === 'agm' || type === 'lead_acid') {
             // The "wants more voltage cold, less hot" physics lives in BATTDEF_CHEM_COPY; only the
             // regulator's own gap is a notice.
             noticeHtml = battDefNotice('limit', 'No temperature compensation yet',
-                'This regulator does not yet move your charge voltages, current limit, or protection limits with temperature — they stay fixed at whatever you set. Temperature compensation of the charge settings for lead-acid and AGM is planned — to have it prioritized, email joe@xengineering.net.');
+                'This regulator does not yet move your charge voltages, current limit, or protection limits with temperature — they stay fixed at whatever you set.');
         } else if (type === 'lifepo4') {
             const tFrz = _tc ? '0 °C' : '32 °F';
-            const t40 = _tc ? '4 °C' : '40 °F';
             noticeHtml = battDefNotice('warn', 'Do not charge below freezing',
-                    'Charging a lithium (LiFePO4) battery below freezing (' + tFrz + ') plates the cells and permanently damages them, and the battery\'s protection circuit (BMS) can disconnect to defend itself — if it opens while the alternator is charging, the sudden loss of load can spike system voltage and damage other electronics.')
-                + battDefNotice('limit', 'No battery temperature sensing yet',
-                    'The Cold-Charge Lockout (recommended you turn this ON for lithium) stops charging when the regulator\'s own board temperature drops below about ' + t40 + ' — the best we can do for a proxy right now, if the regulator is installed in a similar environment as the batteries. It is your responsibility to avoid charging whenever the battery may be below freezing; do not rely on the lockout alone. Battery temperature sensing is planned — to have it prioritized, email joe@xengineering.net.');
+                    'Charging a lithium (LiFePO4) battery below freezing (' + tFrz + ') plates the cells and permanently damages them, and the battery\'s protection circuit (BMS) can disconnect to defend itself — if it opens while the alternator is charging, the sudden loss of load can spike system voltage and damage other electronics.');
+        }
+        if (battProbe !== 1) {
+            noticeHtml += battDefNotice('limit', 'Battery temperature source',
+                'Battery temperature is taken from the regulator board unless a battery probe, an NMEA 2000 battery monitor, a VE.Direct monitor with a temperature sensor, or an RV-C source provides it. The board runs warmer than its surroundings, so the cold-charge lockout is a coarse guard when it is the only source. Assign a probe under Setup > Temperature.');
         }
         if (type === 'lifepo4' && battSrc !== 0) {
             noticeHtml += battDefNotice('info', 'Float changed to No Float',
@@ -9265,7 +9321,43 @@ const CP_BTN_GREEN = 'background:linear-gradient(180deg,#35d6c7,#23a99c); color:
 
 function commPrepPaintCta() {
     const start = document.getElementById('commprep-start-btn');
-    if (start) start.style.cssText = 'border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em; ' + CP_BTN_GREEN;
+    if (start) {
+        start.style.cssText = 'border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em; ' + CP_BTN_GREEN;
+        start.disabled = false;   // a re-render clears the probe-assignment gate; commPrepOwGate re-applies it if still needed
+        start.title = '';
+    }
+}
+
+// Prerequisite gate: with more than one probe on the bus every role in use must be bound before
+// commissioning — an unbound Alternator role leaves the thermal protection without a temperature, and
+// an unbound Battery/Extra role with its enable on is a half-configured install. Runs after render and
+// injects a blocking line at the top of the body; Next stays disabled until the screen is reopened.
+async function commPrepOwGate(cfg) {
+    let j = null;
+    try {
+        const r = await fetchWithTimeout(buildURL('/tempSensors'), { cache: 'no-cache' }, 6000);
+        if (r.ok) j = await r.json();
+    } catch (e) { diagLog('prerequisites tempSensors fetch failed:', e); }
+    if (!j || Number(j.count) <= 1) return;
+    const roles = j.roles || {}, en = j.enabled || {};
+    const num = k => (cfg && cfg[k] !== undefined && cfg[k] !== '') ? parseFloat(cfg[k]) : NaN;
+    const missing = [];
+    if (num('TempSource') !== 1 && !roles.alt) missing.push('Alternator');
+    if (Number(en.batt) === 1 && !roles.batt) missing.push('Battery');
+    if (Number(en.extra) === 1 && !roles.extra) missing.push('Extra');
+    if (!missing.length) return;
+    const body = document.getElementById('commprep-body');
+    const overlay = document.getElementById('commprep-modal-overlay');
+    if (!body || !overlay || overlay.style.display === 'none') return;
+    const box = document.createElement('div');
+    box.id = 'commprep-owgate';
+    box.style.cssText = 'margin:0 0 14px; padding:11px 12px; background:rgba(230,162,60,0.06); border:1px solid rgba(230,162,60,0.32); border-radius:6px; font-size:12px; line-height:1.5; color:#e6a23c;';
+    box.innerHTML = '<strong>Assign the temperature probes under Setup &gt; Temperature before commissioning.</strong> '
+        + Number(j.count) + ' probes are on the bus and the ' + missing.join(', ') + ' role' + (missing.length === 1 ? ' has' : 's have') + ' no probe. '
+        + '<a href="#" onclick="commPrepClose(); goToTemperatureSetup(); return false;" style="color:#e6a23c; text-decoration:underline;">Open Setup &gt; Temperature</a>';
+    body.insertBefore(box, body.firstChild);
+    const start = document.getElementById('commprep-start-btn');
+    if (start) { start.disabled = true; start.style.opacity = '0.45'; start.style.cursor = 'default'; start.title = 'Assign the temperature probes first'; }
 }
 
 function commPrepFetchCfg() {
@@ -9316,6 +9408,7 @@ async function openCommPrereqs(firstInstall) {
         _commPrepCfg = j.config || {};
         commPrepRender(_commPrepCfg);
         document.getElementById('commprep-modal-overlay').style.display = 'flex';
+        commPrepOwGate(_commPrepCfg);   // async; blocks Next only when probes still need roles
         await new Promise(res => { _commPrereqResolve = res; });
     } catch (e) {
         diagLog('commissioning prerequisites failed:', e);
@@ -11282,6 +11375,7 @@ function fieldOffReasonText(reasonCode) {
         case 21: return 'BMS on/off signal is withholding permission to charge';
         case 22: return 'sustained overvoltage — timed cut (low tier)';
         case 23: return 'sustained overvoltage — timed cut (mid tier)';
+        case 24: return 'too hot to charge';
         // 0 NONE (transient), 11 MANUAL (shown as its own status word) — no OFF annotation
         default: return '';
     }
@@ -13699,6 +13793,13 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("baroPressureID", sa.baroPressure, STALE_THRESHOLD_BOARD_MS);
     applyStaleStyleByAge("ambientTempID", sa.ambientTemp, STALE_THRESHOLD_BOARD_MS);
 
+    // --- Battery / extra temperature — the battery readouts grey on whichever source feeds them ---
+    const battTempAge = battTempActiveAgeMs(_battTempActiveSrc);
+    applyStaleStyleByAge("battTempActive_ID", battTempAge, STALE_THRESHOLD_TEMP_MS);
+    applyStaleStyleByAge("header-batt-temp", battTempAge, STALE_THRESHOLD_TEMP_MS);
+    applyStaleStyleByAge("extraTemp_ID", sa.extraTemp, STALE_THRESHOLD_TEMP_MS);
+    applyStaleStyleByAge("extraTempSetup_ID", sa.extraTemp, STALE_THRESHOLD_TEMP_MS);
+
     // --- IMU — all displays share one timestamp ---
     applyStaleStyleByAge("imu_heel_deg_ID", sa.imu);
     applyStaleStyleByAge("imu_pitch_deg_ID", sa.imu);
@@ -14133,6 +14234,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("n2kBattCfgEnable_checkbox", data.n2kBattCfgEnable, "n2kBattCfgEnable");
         updateCheckbox("n2kAltEnable_checkbox", data.n2kAltEnable, "n2kAltEnable");
         updateCheckbox("n2kAltTempEnable_checkbox", data.n2kAltTempEnable, "n2kAltTempEnable");
+        updateCheckbox("n2kExtraTempEnable_checkbox", data.n2kExtraTempEnable, "n2kExtraTempEnable");
         updateCheckbox("n2kChgrEnable_checkbox", data.n2kChgrEnable, "n2kChgrEnable");
         updateCheckbox("n2kChgrCfgEnable_checkbox", data.n2kChgrCfgEnable, "n2kChgrCfgEnable");
         updateCheckbox("n2kEngRpmEnable_checkbox", data.n2kEngRpmEnable, "n2kEngRpmEnable");
@@ -14254,6 +14356,12 @@ function updateTogglesFromData(data) {
         updateCheckbox("dutySlewEnable_cv_checkbox", data.dutySlewEnable, "dutySlewEnable");
         updateCheckbox("battTempDerateEnable_checkbox", data.battTempDerateEnable, "battTempDerateEnable");
         updateCheckbox("coldChargeLockoutEnable_checkbox", data.coldChargeLockoutEnable, "coldChargeLockoutEnable");
+        updateCheckbox("hotChargeLockoutEnable_checkbox", data.hotChargeLockoutEnable, "hotChargeLockoutEnable");
+        updateCheckbox("battTempProbeEnable_checkbox", data.battTempProbeEnable, "battTempProbeEnable");
+        updateCheckbox("extraTempProbeEnable_checkbox", data.extraTempProbeEnable, "extraTempProbeEnable");
+        updateCheckbox("battTempProxyEnable_checkbox", data.battTempProxyEnable, "battTempProxyEnable");
+        updateCheckbox("extraTempAlarmHiEnable_checkbox", data.extraTempAlarmHiEnable, "extraTempAlarmHiEnable");
+        updateCheckbox("extraTempAlarmLoEnable_checkbox", data.extraTempAlarmLoEnable, "extraTempAlarmLoEnable");
         updateCheckbox("cvGainMode_checkbox", data.cvGainMode, "cvGainMode");
         updateCvGainModeUI(data);
         if (data.OutputPIDSigSrc !== undefined)  updateTripleBtn('outputPIDSigSrc_', data.OutputPIDSigSrc);
@@ -14419,10 +14527,11 @@ function previewCvAlpha() {
     out.innerHTML = `Will apply: <strong>Kp ≈ ${g.Kp.toFixed(1)}</strong>, <strong>Ki ≈ ${g.Ki.toFixed(1)}</strong> (12 V-equiv) · battery stiffness ${((window._cvKdc || 0) * 1000).toFixed(1)} mV/A`;
 }
 
-// Battery-temperature derate readout. Pulls the commissioning reference temp + coefficient from CSV3
-// (g_lastCsv3) and the live board temp + applied scale from CSV2 (g_lastCsv2) — two channels, so it
-// reads the caches rather than the single `data` arg. Honours the °F/°C toggle via toDisplayTemp().
-// CommissionTempF is sent °F×10 with -32768 = unset; cvTempDerateScale is ×1000; ambientTemp is integer °F.
+// Battery-temperature derate readout. Pulls the commissioning reference temp + source from CSV3
+// (g_lastCsv3) and the live battery temperature, its source, the applied scale and the inert flag from
+// CSV2 (g_lastCsv2) — two channels, so it reads the caches rather than the single `data` arg. Honours
+// the °F/°C toggle via toDisplayTemp(). CommissionTempF is sent °F×10 with -32768 = unset;
+// CommissionTempSrc 0 = legacy = board; cvTempDerateScale is ×1000; battTempActiveF is °F×10 with -9999 = none.
 function renderBattTempDerate() {
     const el = document.getElementById('battTempDerate_status');
     if (!el) return;
@@ -14434,9 +14543,17 @@ function renderBattTempDerate() {
         return;
     }
     const commF = rawComm / 10;
-    let s = 'Commissioned at <strong>' + toDisplayTemp(commF).toFixed(0) + lbl + '</strong>';
-    const boardF = (c2.ambientTemp !== undefined && c2.ambientTemp !== '') ? parseFloat(c2.ambientTemp) : NaN;
-    if (isFinite(boardF)) s += ', board now <strong>' + toDisplayTemp(boardF).toFixed(0) + lbl + '</strong>';
+    const commSrc = (c3.CommissionTempSrc !== undefined) ? (parseInt(c3.CommissionTempSrc, 10) || 5) : 5;
+    let s = 'Commissioned at <strong>' + toDisplayTemp(commF).toFixed(0) + lbl + '</strong> (' + battTempSrcName(commSrc) + ')';
+    const battF = tempX10(c2.battTempActiveF);
+    const src = Number(c2.battTempActiveSrc) | 0;
+    if (isFinite(battF)) s += ', battery now <strong>' + toDisplayTemp(battF).toFixed(0) + lbl + '</strong> from ' + battTempSrcName(src) + (src === 5 ? ' (stand-in)' : '');
+    else s += ', no battery temperature available now';
+    if (Number(c2.cvTempDerateInert) === 1) {
+        s += '. <strong>Battery temperature source changed since commissioning — re-run Voltage Control Autotuning to re-anchor the derate.</strong> The commissioned gains run uncorrected until then.';
+        el.innerHTML = s;
+        return;
+    }
     const sc = (c2.cvTempDerateScale !== undefined && c2.cvTempDerateScale !== '') ? parseFloat(c2.cvTempDerateScale) / 1000 : NaN;
     if (isFinite(sc)) {
         const pct = Math.round(sc * 100);
@@ -14446,6 +14563,224 @@ function renderBattTempDerate() {
         s += '. CV gains scaled to <strong>' + pct + '%</strong>' + dir + '.';
     }
     el.innerHTML = s;
+}
+
+// ===== Battery / Extra temperature (Setup > Temperature) =====
+// Source codes shared with CSV2 battTempActiveSrc and the firmware batteryTempF() accessor:
+// 0 none, 1 probe, 2 NMEA 2000 (127508), 3 VE.Direct (T field), 4 RV-C (DC_SOURCE_STATUS_2), 5 board stand-in.
+const BATT_TEMP_SRC_NAMES = ['none', 'probe', 'NMEA 2000', 'VE.Direct', 'RV-C', 'board temperature'];
+// battTempSource setting labels (index = wire code): 0 Automatic .. 6 None.
+const BATT_TEMP_SOURCE_OPTION_NAMES = ['Automatic', 'Battery probe', 'NMEA 2000', 'VE.Direct', 'RV-C', 'Board temperature', 'None'];
+const TEMP_NA_X10 = -9999;   // the CSV2 x10 temperature fields carry this for NAN
+
+function tempX10(v) {
+    const n = Number(v);
+    return (!Number.isFinite(n) || n <= TEMP_NA_X10) ? NaN : n / 10;
+}
+function battTempSrcName(src) { return BATT_TEMP_SRC_NAMES[src | 0] || 'none'; }
+// Age (ms) of whichever stream feeds the battery temperature, so the readouts grey on that source's own clock.
+function battTempActiveAgeMs(src) {
+    const sa = window.sensorAges || {};
+    const a = k => Number(sa[k] ?? 999999);
+    switch (src | 0) {
+        case 1: return a('battTempProbe');
+        case 2: return a('n2kBatt');
+        case 3: return a('veBattTemp');
+        case 4: return a('rvcBattTemp');
+        case 5: return a('ambientTemp');
+        default: return 999999;
+    }
+}
+let _battTempActiveSrc = 0;   // last CSV2 battTempActiveSrc with a finite value, for the staleness pass
+
+// Battery + extra temperature readouts: the Setup > Temperature status row, Live Data > Battery,
+// Live Data > ESP32 (extra probe) and the header Batt chip. Fed by every CSV2 frame and re-run on a
+// °F/°C flip from the cached frame.
+function renderBattTempReadouts(data) {
+    const set = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+    const lbl = tempUnitLabel();
+    const fmt = f => Number.isFinite(f) ? toDisplayTemp(f).toFixed(1) : '—';
+    const battF = tempX10(data.battTempActiveF);
+    const src = Number(data.battTempActiveSrc) | 0;
+    const have = Number.isFinite(battF);
+    _battTempActiveSrc = have ? src : 0;
+    const srcTxt = battTempSrcName(src) + (src === 5 ? ' (stand-in)' : '');
+    set('battTempStatus_ID', have ? 'Battery temperature ' + fmt(battF) + ' ' + lbl + ' from ' + srcTxt : 'No battery temperature available');
+    set('battTempActive_ID', fmt(battF));
+    set('battTempActiveSrc_ID', have ? srcTxt : 'none');
+    const wm = document.getElementById('battTempProbe_wm');   // probe watermarks only mean something while the probe is the source
+    if (wm) { const d = (have && src === 1) ? '' : 'none'; if (wm.style.display !== d) wm.style.display = d; }
+    set('header-batt-temp', have ? String(Math.round(toDisplayTemp(battF))) : '-');
+    const duo = document.getElementById('hdr-temp-duo');
+    if (duo) duo.classList.toggle('has-batt-temp', have);
+    const extraF = tempX10(data.ExtraTempF);
+    set('extraTemp_ID', fmt(extraF));
+    set('extraTempSetup_ID', fmt(extraF));
+    const xwm = document.querySelector('#extraTemp-display .wm-inline');   // NAN watermarks arrive as 0 (wmIgnSafe): hide them until the extra probe has read
+    if (xwm) { const d = Number.isFinite(extraF) ? '' : 'none'; if (xwm.style.display !== d) xwm.style.display = d; }
+}
+
+// ----- 1-Wire probe registry (Setup > Temperature > Temperature Sensors) -----
+// /tempSensors is polled every 5 s only while that sub-tab is on screen. Rows are keyed by probe id and
+// the table is rebuilt only when the id/role/present set changes, so an open role <select> is never
+// torn down mid-choice; the temperature/age/count cells update in place.
+const OW_ROLE_NAMES = ['Alternator', 'Battery', 'Extra'];             // TempRole 0..2; -1 = unassigned
+const OW_ASSIGN_PARAM = ['owAssignAlt', 'owAssignBatt', 'owAssignExtra'];
+let _owLast = null;        // last /tempSensors JSON
+let _owSig = null;         // id:role:present signature of the rendered rows; null so the first render always builds (an empty bus signs as '')
+let _owBusy = false;       // a /tempSensors fetch is in flight
+let _owScanUntilMs = 0;    // "Scanning" shown until this time after a scan or assignment request
+
+function owTabVisible() {
+    const tab = document.getElementById('settings-temperature');
+    const main = document.getElementById('settings');
+    return !!(tab && main && tab.classList.contains('active') && main.classList.contains('active')
+        && document.visibilityState !== 'hidden');
+}
+function owPollStart() {
+    setTrackedInterval(() => { if (owTabVisible()) owPollNow(); }, 5000);
+}
+async function owPollNow() {
+    if (_owBusy) return;
+    _owBusy = true;
+    try {
+        const r = await fetchWithTimeout(buildURL('/tempSensors'), { cache: 'no-cache' }, 6000);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        _owLast = await r.json();
+        owRender(_owLast);
+    } catch (e) {
+        diagLog('tempSensors fetch failed:', e);
+    } finally {
+        _owBusy = false;
+    }
+}
+function owFmtAge(s) {
+    const n = Number(s);
+    if (s === null || s === undefined || !Number.isFinite(n)) return '—';
+    if (n < 120) return n + ' s';
+    if (n < 7200) return Math.round(n / 60) + ' min';
+    return (n / 3600).toFixed(1) + ' h';
+}
+function owRender(j) {
+    const body = document.getElementById('owProbeTableBody');
+    if (!body || !j) return;
+    const probes = Array.isArray(j.probes) ? j.probes : [];
+    const lbl = tempUnitLabel();
+    const sig = probes.map(p => p.id + ':' + p.role + ':' + (p.present ? 1 : 0)).join(',');
+    if (sig !== _owSig) {
+        _owSig = sig;
+        if (!probes.length) {
+            body.innerHTML = '<tr><td colspan="5" class="ow-empty">No temperature probes found on the bus. Check the probe wiring, then press Scan.</td></tr>';
+        } else {
+            body.innerHTML = probes.map(p => {
+                const id = String(p.id || '').toLowerCase();
+                const role = Number(p.role);
+                const opts = [-1, 0, 1, 2].map(v => '<option value="' + v + '"' + (v === role ? ' selected' : '') + '>'
+                    + (v < 0 ? 'Unassigned' : OW_ROLE_NAMES[v]) + '</option>').join('');
+                return '<tr data-ow-id="' + _cfgEsc(id) + '"' + (p.present ? '' : ' class="ow-absent"') + '>'
+                    + '<td title="' + _cfgEsc(id) + '"><span class="ow-serial">' + _cfgEsc(id.slice(-6).toUpperCase()) + '</span>'
+                    + (p.present ? '' : '<span class="ow-absent-tag">not on bus</span>') + '</td>'
+                    + '<td class="ow-temp"></td><td class="ow-age"></td><td class="ow-okfail"></td>'
+                    + '<td><select class="ow-role-sel" onchange="owAssignRole(this)">' + opts + '</select></td></tr>';
+            }).join('');
+        }
+    }
+    for (const p of probes) {
+        const id = String(p.id || '').toLowerCase();
+        if (!/^[0-9a-f]{16}$/.test(id)) continue;
+        const tr = body.querySelector('tr[data-ow-id="' + id + '"]');
+        if (!tr) continue;
+        const setCell = (cls, txt) => { const td = tr.querySelector('.' + cls); if (td && td.textContent !== txt) td.textContent = txt; };
+        const tF = (p.tempF === null || p.tempF === undefined) ? NaN : Number(p.tempF);
+        setCell('ow-temp', Number.isFinite(tF) ? toDisplayTemp(tF).toFixed(1) + ' ' + lbl : '—');
+        setCell('ow-age', owFmtAge(p.ageS));
+        setCell('ow-okfail', (p.ok | 0) + ' / ' + (p.fail | 0));
+    }
+    const warn = document.getElementById('owRoleWarn');
+    if (warn) {
+        const roles = j.roles || {}, en = j.enabled || {};
+        const present = new Set(probes.filter(p => p.present).map(p => String(p.id || '').toLowerCase()));
+        const lines = [];
+        const check = (key, name, enabled) => {
+            if (!enabled) return;
+            const addr = String(roles[key] || '').toLowerCase();
+            if (!addr) lines.push(name + ' temperature probe is on, but no probe has the ' + name + ' role. Assign one in the table above.');
+            else if (!present.has(addr)) lines.push('The ' + name + ' probe (' + addr.slice(-6).toUpperCase() + ') is not on the bus.');
+        };
+        check('batt', 'Battery', Number(en.batt) === 1);
+        check('extra', 'Extra', Number(en.extra) === 1);
+        const txt = lines.join(' ');
+        if (warn.textContent !== txt) warn.textContent = txt;
+        warn.style.display = lines.length ? '' : 'none';
+    }
+    const st = document.getElementById('owScanStatus');
+    if (st) {
+        const scanning = Number(j.scanning) === 1 || Date.now() < _owScanUntilMs;
+        const n = probes.filter(p => p.present).length;
+        const txt = scanning ? 'Scanning the bus'
+            : (n + ' probe' + (n === 1 ? '' : 's') + ' on the bus' + (Number(j.unassigned) > 0 ? ', ' + j.unassigned + ' unassigned' : ''));
+        if (st.textContent !== txt) st.textContent = txt;
+    }
+}
+// Role change from a row's <select>. A probe holds one role, so moving it between roles clears the old
+// binding first — the /get handler refuses an id that is already bound elsewhere.
+async function owAssignRole(sel) {
+    const tr = sel.closest('tr');
+    const id = tr ? String(tr.dataset.owId || '') : '';
+    const newRole = parseInt(sel.value, 10);
+    const cur = (_owLast && Array.isArray(_owLast.probes)) ? _owLast.probes.find(p => String(p.id || '').toLowerCase() === id) : null;
+    const oldRole = cur ? Number(cur.role) : -1;
+    const revert = () => { sel.value = String(oldRole); };
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); revert(); return; }
+    if (!/^[0-9a-f]{16}$/.test(id) || !Number.isFinite(newRole)) { revert(); return; }
+    const params = [];
+    if (oldRole >= 0 && oldRole !== newRole) params.push(OW_ASSIGN_PARAM[oldRole] + '=none');
+    if (newRole >= 0 && newRole !== oldRole) params.push(OW_ASSIGN_PARAM[newRole] + '=' + id);
+    if (!params.length) return;
+    sel.disabled = true;
+    try {
+        for (const p of params) {   // sequential: the clear must land before the re-bind
+            const r = await fetchWithTimeout(buildURL('/get?' + p), {}, 8000);
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+        }
+        _owScanUntilMs = Date.now() + 1500;
+    } catch (e) {
+        diagLog('probe role assignment failed:', e);
+        xAlert('Could not assign the probe role. Check the connection and try again.');
+        revert();
+    } finally {
+        sel.disabled = false;
+        setTrackedTimeout(owPollNow, 700);
+        setTrackedTimeout(owPollNow, 2500);
+    }
+}
+async function owScanRequest() {
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
+    const btn = document.getElementById('owScanBtn');
+    if (btn) btn.disabled = true;
+    try {
+        const r = await fetchWithTimeout(buildURL('/get?owScan=1'), {}, 8000);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        _owScanUntilMs = Date.now() + 2500;
+        const st = document.getElementById('owScanStatus');
+        if (st) st.textContent = 'Scanning the bus';
+    } catch (e) {
+        diagLog('probe scan request failed:', e);
+        xAlert('Could not start the probe scan. Check the connection and try again.');
+    } finally {
+        if (btn) btn.disabled = false;
+        setTrackedTimeout(owPollNow, 1500);
+        setTrackedTimeout(owPollNow, 4000);
+    }
+}
+// Deep-link to Setup > Temperature with the probe table open (used by the commissioning prerequisites gate).
+function goToTemperatureSetup() {
+    showMainTab('settings');
+    showSubTab('settings', 'temperature');
+    const sec = document.getElementById('tempSensorsSection');
+    if (!sec) return;
+    sec.open = true;
+    requestAnimationFrame(() => sec.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 // Initialize learning table flag BEFORE any event handlers
 if (typeof window.learningTableInitialized === 'undefined') {
@@ -14703,7 +15038,7 @@ function setCapMode(mode) {
 
 // Field-OFF reasons that are protective shut-downs (fault-class) rather than a normal rest —
 // mirrors the fault codes in fieldOffReasonText(). Used to colour a fault red vs a normal OFF gray.
-const FIELD_FAULT_REASONS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 16, 17]);
+const FIELD_FAULT_REASONS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 15, 16, 17, 24]);
 
 // Single OFF-state classifier shared by the minimized pill AND the expanded status word so the two
 // can never disagree. reason 10 while enabled = engine-on-but-not-charging (IDLE); faults = FAULT.
@@ -14866,6 +15201,7 @@ window.addEventListener("load", function () {
     startStalenessDetection(); // stalness detectioin detect stale values
 
     initPlotDataStructures();
+    owPollStart();   // /tempSensors every 5 s while Setup > Temperature is on screen
     //give initial values that will cause graying until proven otherwise
     window.sensorAges = {
         heading: 999999,
@@ -14895,7 +15231,11 @@ window.addEventListener("load", function () {
         vmg: 999999,
         baroPressure: 999999,
         ambientTemp: 999999,
-        imu: 999999
+        imu: 999999,
+        battTempProbe: 999999,
+        extraTemp: 999999,
+        veBattTemp: 999999,
+        rvcBattTemp: 999999
     };
 
     document.getElementById("AlarmLatchEnabled_checkbox").checked = (document.getElementById("AlarmLatchEnabled").value === "1");
@@ -15623,7 +15963,8 @@ window.addEventListener("load", function () {
             battNaToNaN(data, BATT_NA_KEYS_CSV2);
             g_lastCsv2 = data;  // cache for the diagnostics snapshot in log exports
             noteStreamRx('csv2');
-            renderBattTempDerate();   // live board temp + applied derate scale arrive on CSV2
+            renderBattTempDerate();   // live battery temp + applied derate scale arrive on CSV2
+            renderBattTempReadouts(data);
             renderLoopBlame(data);    // worst field-on pass attribution line
             renderImuInstallWarning(data.imuInstallCode);
             // Active RPM row highlight in the cap/learning table — currentRPMTableIndex
@@ -15894,7 +16235,8 @@ window.addEventListener("load", function () {
                     // Temperature fields (raw integer °F from firmware — convert to display unit)
                     else if (["MaxAlternatorTemperatureF", "temperatureThermistor", "MaxTemperatureThermistor",
                         "ambientTemp", "MaxAlternatorTemperatureF_AllTime", "MaxTemperatureThermistor_AllTime",
-                        "wmIgn_altTempF_hi", "wmIgn_altTempF_lo", "wmIgn_ambient_hi", "wmIgn_ambient_lo"].includes(key)) {
+                        "wmIgn_altTempF_hi", "wmIgn_altTempF_lo", "wmIgn_ambient_hi", "wmIgn_ambient_lo",
+                        "wmIgn_battTempF_hi", "wmIgn_battTempF_lo", "wmIgn_extraTempF_hi", "wmIgn_extraTempF_lo"].includes(key)) {
                         newTextContent = Math.round(toDisplayTemp(value));
                     }
                     // Temperature PID input/setpoint scaled ×100 — convert to display unit
@@ -16562,6 +16904,8 @@ window.addEventListener("load", function () {
                 ["imu_vertical_accel_g_ID_hi",   "wmIgn_vacc_hi"],     ["imu_vertical_accel_g_ID_lo",   "wmIgn_vacc_lo"],
                 ["baroPressureID_hi",            "wmIgn_baro_hi"],     ["baroPressureID_lo",            "wmIgn_baro_lo"],
                 ["ambientTempID_hi",             "wmIgn_ambient_hi"],  ["ambientTempID_lo",             "wmIgn_ambient_lo"],
+                ["battTempProbe_ID_hi",          "wmIgn_battTempF_hi"], ["battTempProbe_ID_lo",         "wmIgn_battTempF_lo"],
+                ["extraTemp_ID_hi",              "wmIgn_extraTempF_hi"], ["extraTemp_ID_lo",            "wmIgn_extraTempF_lo"],
 
                 // Victron VE.Direct solar/MPPT live (CS/MPPT/ERR codes decoded separately below).
                 // Solar power/voltage/derived-current readouts moved to the CSVData4 / NavStream handler.
@@ -17537,7 +17881,11 @@ window.addEventListener("load", function () {
                 n2kBatt: data.ts_N2kBatt,
                 n2kSoc: data.ts_N2kSoc,
                 dvcc: data.ts_Dvcc,
-                n183: data.ts_N183
+                n183: data.ts_N183,
+                battTempProbe: data.ts_BattTempProbe,
+                extraTemp: data.ts_ExtraTemp,
+                veBattTemp: data.ts_VeBattTemp,
+                rvcBattTemp: data.ts_RvcBattTemp
             };
 
             updateWeatherForecastAge(data.ts_WeatherFetch);
@@ -17608,6 +17956,7 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("n2kBattCfgEnable_checkbox").checked = (document.getElementById("n2kBattCfgEnable").value === "1");
     document.getElementById("n2kAltEnable_checkbox").checked = (document.getElementById("n2kAltEnable").value === "1");
     document.getElementById("n2kAltTempEnable_checkbox").checked = (document.getElementById("n2kAltTempEnable").value === "1");
+    document.getElementById("n2kExtraTempEnable_checkbox").checked = (document.getElementById("n2kExtraTempEnable").value === "1");
     document.getElementById("n2kChgrEnable_checkbox").checked = (document.getElementById("n2kChgrEnable").value === "1");
     document.getElementById("n2kChgrCfgEnable_checkbox").checked = (document.getElementById("n2kChgrCfgEnable").value === "1");
     document.getElementById("n2kEngRpmEnable_checkbox").checked = (document.getElementById("n2kEngRpmEnable").value === "1");
@@ -17618,6 +17967,12 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("rvcDcEnable_checkbox").checked = (document.getElementById("rvcDcEnable").value === "1");
     document.getElementById("rvcFaultEnable_checkbox").checked = (document.getElementById("rvcFaultEnable").value === "1");
     document.getElementById("dvccEn_checkbox").checked = (document.getElementById("dvccEn").value === "1");
+    document.getElementById("battTempProbeEnable_checkbox").checked = (document.getElementById("battTempProbeEnable").value === "1");
+    document.getElementById("extraTempProbeEnable_checkbox").checked = (document.getElementById("extraTempProbeEnable").value === "1");
+    document.getElementById("battTempProxyEnable_checkbox").checked = (document.getElementById("battTempProxyEnable").value === "1");
+    document.getElementById("hotChargeLockoutEnable_checkbox").checked = (document.getElementById("hotChargeLockoutEnable").value === "1");
+    document.getElementById("extraTempAlarmHiEnable_checkbox").checked = (document.getElementById("extraTempAlarmHiEnable").value === "1");
+    document.getElementById("extraTempAlarmLoEnable_checkbox").checked = (document.getElementById("extraTempAlarmLoEnable").value === "1");
     document.getElementById("IgnoreTemperature_checkbox").checked = (document.getElementById("IgnoreTemperature").value === "1");
     document.getElementById("IgnoreRPM_checkbox").checked = (document.getElementById("IgnoreRPM").value === "1");
     document.getElementById("bmsLogic_checkbox").checked = (document.getElementById("bmsLogic").value === "1");
@@ -17997,6 +18352,9 @@ function showSubTab(parentTab, subTabName, evt = null) {
         if (typeof windTrendRender === 'function') setTimeout(() => { try { windTrendRender(); } catch (e) { } }, 60);
         if (typeof solarLedgerTabOpened === 'function') setTimeout(() => { try { solarLedgerTabOpened(); } catch (e) { } }, 60);
     }
+
+    // Probe registry polls only while its sub-tab is on screen — fetch once on entry.
+    if (parentTab === 'settings' && subTabName === 'temperature' && typeof owPollNow === 'function') owPollNow();
 
     // Resume the Fast Alt-Current scope only if its Waveforms section is expanded and on-screen
     if (parentTab === 'livedata' && subTabName === 'diag') {
@@ -19124,9 +19482,9 @@ function svTargetV() {
 }
 function svTempSensor() {
     const s = getEchoText('TempSource_echo');
-    if (s === 'Digital') return 'digital one-wire probe (DS18B20) per Temp Source on Setup ▸ Alternator';
-    if (s === 'Thermistor') return 'thermistor per Temp Source on Setup ▸ Alternator';
-    return 'digital probe or thermistor, per Temp Source on Setup ▸ Alternator';
+    if (s === 'Digital') return 'digital one-wire probe (DS18B20) per Temp Source on Setup ▸ Temperature';
+    if (s === 'Thermistor') return 'thermistor per Temp Source on Setup ▸ Temperature';
+    return 'digital probe or thermistor, per Temp Source on Setup ▸ Temperature';
 }
 
 // shared source descriptions
@@ -24578,6 +24936,7 @@ function cxCutCauseText(code) {
         case 21: return 'the BMS on/off signal withholding permission to charge';
         case 22:
         case 23: return 'sustained over-voltage protection (timed cut)';
+        case 24: return 'the hot-charge lockout';
         default: return '';
     }
 }
@@ -24589,7 +24948,7 @@ const CX_CUT_NAME_TO_CODE = {
     'LOCKOUT': 9, 'DISABLED': 10, 'MANUAL': 11, 'INA228 hardware overvoltage': 12,
     'HARD_OVERCURRENT': 13, 'RPM_TOO_LOW': 14, 'CURRENT_STALE': 15, 'FAST_OVERVOLTAGE': 16,
     'Battery too cold to charge': 17, 'TACH_IMPLAUSIBLE': 19, 'SOLAR_PAUSE': 20, 'BMS_OFF': 21,
-    'OV_TIER_LOW': 22, 'OV_TIER_MID': 23
+    'OV_TIER_LOW': 22, 'OV_TIER_MID': 23, 'Battery too hot to charge': 24
 };
 function cxCutIsOv(code) { return code === 7 || code === 12 || code === 16 || code === 22 || code === 23; }
 
@@ -25371,7 +25730,7 @@ function cvLoopOmega() { return 2 * (CV_ALPHA || 0.08) * (CV_PI_ZERO || 0.5); }
 function cxCVRemedyPanel(r) {
     const rpmTxt = r.rpmAtFit > 0 ? ('a higher RPM than the ~' + r.rpmAtFit + ' RPM you just tested at') : 'a higher RPM';
     const keepWarn = '<p style="font-size:13px;color:#ddd;line-height:1.45;margin-top:8px;">Keep this result and it\'s usable, but the voltage-loop gains may be slightly off. If you later see poor voltage holding while the charger is maintaining a set voltage — the <strong>Absorption</strong> stage, or <strong>Float</strong> if you use it — you\'ll need to tune those gains by hand.</p>';
-    const liNote = '<p style="font-size:13px;color:#bbb;line-height:1.45;margin-top:8px;"><em>If your bank is lithium:</em> many lithium setups don\'t hold Absorption or Float at all, so precise voltage-loop tuning may not matter for your system. That\'s a judgment call — if you\'re unsure, contact XEngineering to talk it through.</p>';
+    const liNote = '<p style="font-size:13px;color:#bbb;line-height:1.45;margin-top:8px;"><em>If your bank is lithium:</em> many lithium setups don\'t hold Absorption or Float at all, so precise voltage-loop tuning may not matter for your system. That\'s a judgment call — if you\'re unsure, contact X Engineering to talk it through.</p>';
     let html = '<div style="margin:12px 0;padding:10px 12px;background:#2a2618;border:1px solid #a80;border-radius:6px;">';
     if (r.rippleLimited) {
         html += '<p style="font-size:15px;line-height:1.5;"><strong>The measurement itself came out consistent</strong> — the test step moved the battery its full ~' + r.targetMv + ' mV probe amplitude. What triggered this caution is electrical ripple under the reading at this RPM: signal-to-ripple came out ~' + r.snr + ', below the 12 we like to see.</p>' +

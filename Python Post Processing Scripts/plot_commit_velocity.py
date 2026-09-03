@@ -65,7 +65,7 @@ bar_colors = ["#2ecc71" if n >= 0 else "#e74c3c" for n in net]
 # ── Plot ──────────────────────────────────────────────────────────────────────
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 8), sharex=True,
                                 gridspec_kw={"height_ratios": [2, 1]})
-fig.suptitle("Code Growth — Regulator2026-public", fontsize=14, fontweight="bold", y=0.98)
+fig.suptitle("Code Growth — Xregulator-public", fontsize=14, fontweight="bold", y=0.98)
 
 # Top: per-commit insertions as bars
 ax1.bar(dates, insertions, color=bar_colors, width=0.6, alpha=0.85, label="Lines inserted")

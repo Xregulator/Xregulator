@@ -1,4 +1,4 @@
-// X Engineering Alternator Regulator
+// Xregulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -14,6 +14,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+// Battery-temperature source chain helpers (defined in 6_functions.ino next to computeCvTempScale)
+bool tempProbeFresh(uint8_t idx);
+const char *battTempSrcName(uint8_t src);
 
 void SystemTime(const tN2kMsg &N2kMsg) {
   unsigned char SID;
@@ -361,7 +364,8 @@ void BatteryStatus(const tN2kMsg &N2kMsg) {
     return;
   }
   // Ingest V/A/T from the selected battery bank — a shunt or BMS "virtual shunt" bridged
-  // onto N2K (display/telemetry only, never control). Missing fields stay NAN, never fabricated.
+  // onto N2K. V/A are display/telemetry only; T is a batteryTempF() candidate (source 2) for the
+  // charge lockouts and the CV derate. Missing fields stay NAN, never fabricated.
   if (BatteryInstance == n2kRxBattInstance) {
     if (N2kIsNA(BatteryVoltage) && N2kIsNA(BatteryCurrent) && N2kIsNA(BatteryTemperature)) return;
     n2kRxBattV = N2kIsNA(BatteryVoltage) ? NAN : (float)BatteryVoltage;
@@ -855,9 +859,10 @@ static bool dvccDecodeVreg351(const unsigned char *p, int len, float &cvl, float
 }
 
 // One Victron VREG register frame (either carrier), payload p = the bytes after the vreg id.
-// Register identities and scalings CONFIRMED against Victron's official docs (spec §13):
-// 0x2001 VE_REG_LINK_VSET un16 0.01 V/bit, 0x2016 VE_REG_LINK_CHARGE_VOLTAGE_SETPOINT (second
-// official vset register — decoded identically until a capture shows which one Venus sends),
+// 0x2001 VE_REG_LINK_VSET un16 0.01 V/bit, 0xFFFF = not available: confirmed directly by Victron
+// L3 support 2026-08-31 as THE register a GX broadcasts for DVCC voltage control (spec §17).
+// 0x2016 VE_REG_LINK_CHARGE_VOLTAGE_SETPOINT is the other official vset register, decoded
+// identically — not what a GX sends, kept because another Victron node may use it.
 // 0x2015 VE_REG_LINK_CHARGE_CURRENT_LIMIT un16 0.1 A/bit (0xFFFF = limit not available/removed).
 // 0x2108 VE_REG_BMS_IO field layout is from Victron's open Lynx Smart BMS decoder (spec §14);
 // the register id itself and the 0x351 BMS-Can-mirror guess are still capture-pending.
@@ -871,12 +876,15 @@ static bool dvccVicHandleReg(uint16_t vreg, const unsigned char *p, int len, uin
     if (!dvccVicAcceptSender(src)) return true;
     dvccVicCvl = cvl;
     dvccVicCcl = ccl;
-  } else if (vreg == 0x2001 || vreg == 0x2016) {  // target voltage → CVL (either official vset register)
+  } else if (vreg == 0x2001 || vreg == 0x2016) {  // target voltage → CVL (0x2001 is the one a GX broadcasts)
     if (len < 2) return false;
     uint16_t raw = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-    if (raw == 0xFFFF) return false;
     if (!dvccVicAcceptSender(src)) return true;
-    dvccVicCvl = raw * 0.01f;
+    // 0xFFFF = not available. It is a WITHDRAWAL, not a value: the GX publishes this register only
+    // while DVCC is on with a smart battery or a manual CVL override, so the limit really can go
+    // away while frames keep flowing. Clearing re-ingests NAN and dvccTick drops to WAITING within
+    // 1 s; treating it as an unrecognized frame instead held the last clamp until the silence timeout.
+    dvccVicCvl = (raw == 0xFFFF) ? NAN : raw * 0.01f;
   } else if (vreg == 0x2015) {  // current limit → CCL (un16; 0xFFFF clears the held limit, it is NOT a value)
     if (len < 2) return false;
     uint16_t raw = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -966,6 +974,21 @@ void dvccRawFrameTap(unsigned long id, unsigned char len, const unsigned char *b
       if (buf[2] == 1) ccl = 0.0f;  // desired charge state 1 = do not charge (stop immediately) — same obey-zero semantics as a literal CCL=0
       if (isnan(cvl) && isnan(ccl)) return;
       dvccIngest(cvl, ccl, src, prio, buf[2]);
+    }
+    // DC_SOURCE_STATUS_2 (1FFFCh): source temperature of the same instance -> batteryTempF() source 4.
+    // Bytes 2-3 LE u16, 0.03125 degC/bit with a -273 degC offset, 0xFFFF = not available.
+    if (pgn == 0x1FFFCUL && len >= 4) {
+      uint8_t inst = buf[0];
+      if (dvccInst != 0 && inst != (uint8_t)dvccInst) return;
+      if (!dvccRvcAcceptSender(src, buf[1])) return;
+      uint16_t raw = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+      if (raw != 0xFFFF) {
+        float tC = raw * 0.03125f - 273.0f;
+        if (tC >= -40.0f && tC <= 100.0f) {  // same plausibility window as the VE.Direct T field
+          rvcRxBattTempF = tC * 1.8f + 32.0f;
+          MARK_FRESH(IDX_RVC_BATT_TEMP);
+        }
+      }
     }
   } else {
     // Victron VREG on the 0xEF00 proprietary single-frame carrier: vreg id at bytes 2-3 (LE),
@@ -1253,6 +1276,8 @@ static bool rvcActiveFault(uint8_t &msb, uint8_t &lsb, uint8_t &fmi, bool &red) 
         msb = 1; lsb = 1; fmi = 9; return true;  // DC current not updating at proper rate
       case REASON_BATTERY_TOO_COLD:
         msb = 1; lsb = 2; fmi = 1; return true;  // battery temperature below normal range
+      case REASON_BATTERY_TOO_HOT:
+        msb = 1; lsb = 2; fmi = 0; return true;  // battery temperature above normal range
       case REASON_TEMP_CRITICAL:
       case REASON_TEMP_WARNING:
       case REASON_TEMP_SUSTAINED:
@@ -1298,6 +1323,7 @@ void nmea2kTransmitTick() {
                    SLOT_ALT,
                    SLOT_ALT_DC,
                    SLOT_TEMP,
+                   SLOT_TEMP_EXTRA,
                    SLOT_CHGR,
                    SLOT_CHGRCFG,
                    SLOT_ENG_RAPID,
@@ -1314,13 +1340,13 @@ void nmea2kTransmitTick() {
                    SLOT_N };
   // ms. N2K slots use the NMEA-recommended rates; RV-C slots use its "normal broadcast gap"
   // (spec 6.20.8a/6.20.9a/6.20.10a/6.5.2a-6.5.4a). DM_RV re-arms to 1000 ms while faulted.
-  static const uint32_t ivl[SLOT_N] = { 1500, 1500, 1500, 1500, 2000, 1500, 1500, 100, 500, 15000,
+  static const uint32_t ivl[SLOT_N] = { 1500, 1500, 1500, 1500, 2000, 2000, 1500, 1500, 100, 500, 15000,
                                         5000, 500, 500, 5000, 500, 500, 500, 5000 };
   static uint32_t nextDue[SLOT_N];
   static bool seeded = false;
   // Per-stream SIDs: each 127508+127506 pair shares one (ties the pair to the same sample set)
   // and each stream bumps its own, so disabling one stream can't freeze another's SID.
-  static uint8_t sidBatt = 0, sidAlt = 0, sidTemp = 0;
+  static uint8_t sidBatt = 0, sidAlt = 0, sidTemp = 0, sidTempExtra = 0;
   static uint8_t rr = 0;
   static tN2kChargeState lastChgState = N2kCS_Unavailable;
   static uint8_t lastRvcState = 0xFF;
@@ -1353,9 +1379,11 @@ void nmea2kTransmitTick() {
       case SLOT_BATT:
         if (n2kBattEnable == 1) {
           sidBatt = (uint8_t)((sidBatt + 1) % 253);
+          // Battery temperature: the BATT probe only — never the board stand-in, never a re-broadcast network value
+          bool battProbeOk = battTempProbeEnable == 1 && tempProbeFresh(IDX_BATT_TEMP_PROBE) && isfinite(BatteryTempProbeF);
           SetN2kDCBatStatus(N2kMsg, (unsigned char)n2kBattInstance, getBatteryVoltage(),
                             HAS_BATT_SHUNT ? (double)Bcur : N2kDoubleNA,
-                            N2kDoubleNA,  // no battery temperature source today
+                            battProbeOk ? FToKelvin(BatteryTempProbeF) : N2kDoubleNA,
                             sidBatt);
           composed = true;
         }
@@ -1391,6 +1419,16 @@ void nmea2kTransmitTick() {
             sidTemp = (uint8_t)((sidTemp + 1) % 253);
             SetN2kTemperature(N2kMsg, sidTemp, (unsigned char)n2kTempInstance, (tN2kTempSource)n2kTempSource,
                               FToKelvin(tF), N2kDoubleNA);
+            composed = true;
+          }
+        }
+        break;
+      case SLOT_TEMP_EXTRA:
+        if (n2kExtraTempEnable == 1) {
+          if (tempProbeFresh(IDX_EXTRA_TEMP) && isfinite(ExtraTempF)) {  // skipped entirely while the probe is dead, as SLOT_TEMP
+            sidTempExtra = (uint8_t)((sidTempExtra + 1) % 253);
+            SetN2kTemperature(N2kMsg, sidTempExtra, (unsigned char)n2kExtraTempInstance, (tN2kTempSource)n2kExtraTempSource,
+                              FToKelvin(ExtraTempF), N2kDoubleNA);
             composed = true;
           }
         }
@@ -1677,6 +1715,14 @@ void ReadVEData() {
       if (strcmp(myve.veName[i], "H21") == 0)  { VictronMaxPowerToday_W    = atof(myve.veValue[i]);          dataReceived = true; }
       if (strcmp(myve.veName[i], "H22") == 0)  { VictronYieldYesterday_kWh = atof(myve.veValue[i]) / 100.0f; dataReceived = true; }  // 0.01 kWh units
       if (strcmp(myve.veName[i], "H23") == 0)  { VictronMaxPowerYesterday_W = atof(myve.veValue[i]);         dataReceived = true; }
+      // Battery temperature (degC), present only on a BMV / SmartShunt with a temperature sensor -> batteryTempF() source 3
+      if (strcmp(myve.veName[i], "T") == 0) {
+        float tC = atof(myve.veValue[i]);
+        if (tC >= -40.0f && tC <= 100.0f) {
+          VictronBattTempF = tC * 1.8f + 32.0f;
+          MARK_FRESH(IDX_VE_BATT_TEMP);
+        }
+      }
     }
   }
 
@@ -3036,18 +3082,62 @@ void CheckAlarms() {
       lastTempLowAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
     }
 
-    // Cold-charge lockout alarm — fail-open on stale/NaN board sensor, matching buildTickSnapshot().
+    // Cold-charge lockout alarm — fail-open when no battery temperature source qualifies, matching buildTickSnapshot().
     static unsigned long lastColdChargeAlarmMsgMs = 0;
-    if (coldChargeLockoutEnable && !IS_STALE(IDX_AMBIENT_TEMP) && isfinite(ambientTemp) && ambientTemp < MinChargeTempF) {
+    if (coldChargeLockoutEnable && isfinite(battTempActiveF) && battTempActiveF < MinChargeTempF) {
       currentAlarmCondition = true;
       alarmReason = "Battery too cold to charge";
       if (millis() - lastColdChargeAlarmMsgMs >= 30000) {
         lastColdChargeAlarmMsgMs = millis();
-        queueConsoleMessageF("Cold-charge lockout: board temp %.1f%s below %.0f%s floor — charging disabled",
-                             dispTempF(ambientTemp), dispTempUnit(), dispTempF(MinChargeTempF), dispTempUnit());
+        queueConsoleMessageF("Cold-charge lockout: battery temperature %.1f%s (%s) below %.0f%s floor — charging disabled",
+                             dispTempF(battTempActiveF), dispTempUnit(), battTempSrcName(battTempActiveSrc),
+                             dispTempF(MinChargeTempF), dispTempUnit());
       }
     } else {
       lastColdChargeAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
+    }
+
+    // Hot-charge lockout alarm — measured battery source (1..4) only, matching buildTickSnapshot().
+    static unsigned long lastHotChargeAlarmMsgMs = 0;
+    if (hotChargeLockoutEnable == 1 && battTempActiveSrc >= 1 && battTempActiveSrc <= 4
+        && isfinite(battTempActiveF) && battTempActiveF > MaxChargeTempF) {
+      currentAlarmCondition = true;
+      alarmReason = "Battery too hot to charge";
+      if (millis() - lastHotChargeAlarmMsgMs >= 30000) {
+        lastHotChargeAlarmMsgMs = millis();
+        queueConsoleMessageF("Hot-charge lockout: battery temperature %.1f%s (%s) above %.0f%s ceiling — charging disabled",
+                             dispTempF(battTempActiveF), dispTempUnit(), battTempSrcName(battTempActiveSrc),
+                             dispTempF(MaxChargeTempF), dispTempUnit());
+      }
+    } else {
+      lastHotChargeAlarmMsgMs = 0;
+    }
+
+    // Extra-probe high / low alarms — advisory only, never a field action.
+    bool extraTempOk = tempProbeFresh(IDX_EXTRA_TEMP) && isfinite(ExtraTempF);
+    static unsigned long lastExtraHiAlarmMsgMs = 0;
+    if (extraTempAlarmHiEnable == 1 && extraTempOk && ExtraTempF > extraTempAlarmHiF) {
+      currentAlarmCondition = true;
+      alarmReason = "Extra temperature high";
+      if (millis() - lastExtraHiAlarmMsgMs >= 30000) {
+        lastExtraHiAlarmMsgMs = millis();
+        queueConsoleMessageF("Extra temperature high: %.1f%s (limit: %.0f%s)",
+                             dispTempF(ExtraTempF), dispTempUnit(), dispTempF(extraTempAlarmHiF), dispTempUnit());
+      }
+    } else {
+      lastExtraHiAlarmMsgMs = 0;
+    }
+    static unsigned long lastExtraLoAlarmMsgMs = 0;
+    if (extraTempAlarmLoEnable == 1 && extraTempOk && ExtraTempF < extraTempAlarmLoF) {
+      currentAlarmCondition = true;
+      alarmReason = "Extra temperature low";
+      if (millis() - lastExtraLoAlarmMsgMs >= 30000) {
+        lastExtraLoAlarmMsgMs = millis();
+        queueConsoleMessageF("Extra temperature low: %.1f%s (limit: %.0f%s)",
+                             dispTempF(ExtraTempF), dispTempUnit(), dispTempF(extraTempAlarmLoF), dispTempUnit());
+      }
+    } else {
+      lastExtraLoAlarmMsgMs = 0;
     }
 
     // (Alternator-health is advisory-only — no audible alarm.)
@@ -4468,9 +4558,11 @@ void _ReadAnalogInputs_inner() {
                          if (isfinite(newTemp) && newTemp > -40.0f && newTemp < 85.0f) {  // BMP388 rated range in °C
                            ambientTemp = newTemp * 1.8f + 32.0f;  // convert °C to °F for storage
                            MARK_FRESH(IDX_AMBIENT_TEMP);
-                           // Board temp drifted → refresh the battery-temp gain derate. Gated to a ≥5°F move
-                           // (~2.8°C ≈ 6% gain change at 0.024/°C — finer steps are noise vs the board-as-
-                           // battery-proxy's own error) and only when a commissioned reference exists.
+                           // Board temp drifted → refresh the battery-temp gain derate (the board is the
+                           // batteryTempF() stand-in when no battery measurement qualifies; buildTickSnapshot
+                           // carries the same trigger for whichever source is active). Gated to a ≥5°F move
+                           // (~2.8°C ≈ 6% gain change at 0.024/°C — finer steps are noise vs the board
+                           // stand-in's own error) and only when a commissioned reference exists.
                            // recomputeCvGains is already called cross-core from Core-0 web handlers; this
                            // task is also Core 0.
                            static float lastDerateTempF = NAN;

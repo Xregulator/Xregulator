@@ -1,5 +1,5 @@
 
-// X Engineering Alternator Regulator
+// Xregulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -1116,12 +1116,8 @@ if (!BMP388Disconnected) {
     queueConsoleMessage("ADS1115 Config readback failed - I2C error");
   }
   //onewire
-  sensors.begin();
-  sensors.setWaitForConversion(false);                   // don't block inside requestTemperaturesByAddress()
-  sensors.setCheckForConversion(true);                   // enable polling via isConversionComplete()
-  sensors.setAutoSaveScratchPad(false);                  // RAM-only config changes (no EEPROM writes)
-  sensors.getAddress(tempDeviceAddress, 0);              // fill the address FIRST — setResolution on the zeroed address is a no-op
-  sensors.setResolution(tempDeviceAddress, resolution);  // TempTask re-asserts this on its own enumeration; kept here for boot coverage
+  sensors.setAutoSaveScratchPad(false);                  // RAM-only config changes (no EEPROM writes); must precede every owEnumerate() setResolution — TempTask's first pass waits on bootHardwareInitDone
+  owEnumerate();                                         // sensors.begin() + bus search + role binding by stored ROM code (InitSystemSettings ran first); TempTask re-runs it once setup() sets bootHardwareInitDone
   if (sensors.getDeviceCount() == 0) {
     Serial.println("WARNING: No DS18B20 sensors found on the bus.");
     queueConsoleMessage("WARNING: No DS18B20 sensors found on the bus");
@@ -1585,6 +1581,21 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_n2kTempSrc, String(n2kTempSource).c_str());
   } else {
     n2kTempSource = settingRead(NK_n2kTempSrc).toInt();
+  }
+  if (!settingExists(NK_n2kExtraTempEnable)) {
+    settingWrite(NK_n2kExtraTempEnable, String(n2kExtraTempEnable).c_str());
+  } else {
+    n2kExtraTempEnable = settingRead(NK_n2kExtraTempEnable).toInt();
+  }
+  if (!settingExists(NK_n2kExtraTempInstance)) {
+    settingWrite(NK_n2kExtraTempInstance, String(n2kExtraTempInstance).c_str());
+  } else {
+    n2kExtraTempInstance = clampLoadedSetting("n2kExtraTempInstance", NK_n2kExtraTempInstance, settingRead(NK_n2kExtraTempInstance).toInt(), 0, 252);
+  }
+  if (!settingExists(NK_n2kExtraTempSource)) {
+    settingWrite(NK_n2kExtraTempSource, String(n2kExtraTempSource).c_str());
+  } else {
+    n2kExtraTempSource = clampLoadedSetting("n2kExtraTempSource", NK_n2kExtraTempSource, settingRead(NK_n2kExtraTempSource).toInt(), 0, 15);
   }
   if (!settingExists(NK_n2kChgrEn)) {
     settingWrite(NK_n2kChgrEn, String(n2kChgrEnable).c_str());
@@ -2553,6 +2564,12 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   if (settingExists(NK_CommissionTempF)) {
     CommissionTempF = settingRead(NK_CommissionTempF).toFloat();
   }
+  // CommissionTempSrc — battTempActiveSrc at that stamp; 0 = legacy/unknown = treated as the board class.
+  if (!settingExists(NK_CommissionTempSrc)) {
+    settingWrite(NK_CommissionTempSrc, String(CommissionTempSrc).c_str());
+  } else {
+    CommissionTempSrc = clampLoadedSetting("CommissionTempSrc", NK_CommissionTempSrc, settingRead(NK_CommissionTempSrc).toInt(), 0, 5);
+  }
   // Same rule for the re-commission nag state: absence = never commissioned = never nag.
   if (settingExists(NK_CommissionEpoch)) {
     CommissionEpoch = (time_t)strtoll(settingRead(NK_CommissionEpoch).c_str(), nullptr, 10);
@@ -2591,6 +2608,73 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_MinChargeTempF, String(MinChargeTempF).c_str());
   } else {
     MinChargeTempF = settingRead(NK_MinChargeTempF).toFloat();
+  }
+  // Battery + extra temperature probes, battery-temperature source chain, hot-charge lockout
+  // (BATTERY_TEMP_SENSORS_SPEC.md §6)
+  if (!settingExists(NK_battTempProbeEnable)) {
+    settingWrite(NK_battTempProbeEnable, String(battTempProbeEnable).c_str());
+  } else {
+    battTempProbeEnable = settingRead(NK_battTempProbeEnable).toInt() != 0 ? 1 : 0;
+  }
+  if (!settingExists(NK_extraTempProbeEnable)) {
+    settingWrite(NK_extraTempProbeEnable, String(extraTempProbeEnable).c_str());
+  } else {
+    extraTempProbeEnable = settingRead(NK_extraTempProbeEnable).toInt() != 0 ? 1 : 0;
+  }
+  if (!settingExists(NK_battTempSource)) {
+    settingWrite(NK_battTempSource, String(battTempSource).c_str());
+  } else {
+    battTempSource = clampLoadedSetting("battTempSource", NK_battTempSource, settingRead(NK_battTempSource).toInt(), 0, 6);
+  }
+  if (!settingExists(NK_battTempProxyEnable)) {
+    settingWrite(NK_battTempProxyEnable, String(battTempProxyEnable).c_str());
+  } else {
+    battTempProxyEnable = settingRead(NK_battTempProxyEnable).toInt() != 0 ? 1 : 0;
+  }
+  if (!settingExists(NK_hotChargeLockoutEnable)) {
+    settingWrite(NK_hotChargeLockoutEnable, String(hotChargeLockoutEnable).c_str());
+  } else {
+    hotChargeLockoutEnable = settingRead(NK_hotChargeLockoutEnable).toInt() != 0 ? 1 : 0;
+  }
+  // MaxChargeTempF — battery-temperature ceiling above which charging is locked out (°F, measured sources only)
+  if (!settingExists(NK_MaxChargeTempF)) {
+    settingWrite(NK_MaxChargeTempF, String(MaxChargeTempF).c_str());
+  } else {
+    MaxChargeTempF = settingRead(NK_MaxChargeTempF).toFloat();
+  }
+  if (!settingExists(NK_extraTempAlarmHiEnable)) {
+    settingWrite(NK_extraTempAlarmHiEnable, String(extraTempAlarmHiEnable).c_str());
+  } else {
+    extraTempAlarmHiEnable = settingRead(NK_extraTempAlarmHiEnable).toInt() != 0 ? 1 : 0;
+  }
+  if (!settingExists(NK_extraTempAlarmHiF)) {
+    settingWrite(NK_extraTempAlarmHiF, String(extraTempAlarmHiF).c_str());
+  } else {
+    extraTempAlarmHiF = settingRead(NK_extraTempAlarmHiF).toFloat();
+  }
+  if (!settingExists(NK_extraTempAlarmLoEnable)) {
+    settingWrite(NK_extraTempAlarmLoEnable, String(extraTempAlarmLoEnable).c_str());
+  } else {
+    extraTempAlarmLoEnable = settingRead(NK_extraTempAlarmLoEnable).toInt() != 0 ? 1 : 0;
+  }
+  if (!settingExists(NK_extraTempAlarmLoF)) {
+    settingWrite(NK_extraTempAlarmLoF, String(extraTempAlarmLoF).c_str());
+  } else {
+    extraTempAlarmLoF = settingRead(NK_extraTempAlarmLoF).toFloat();
+  }
+  // 1-Wire role addresses: 16-char lowercase hex ROM code per role, "" = unassigned. Loaded straight into
+  // tempRoleAddr[]; owEnumerate() (initializeHardware, later TempTask) binds the bus slots.
+  {
+    static const char *const owRoleKeys[TR_COUNT] = { NK_owAddrAlt, NK_owAddrBatt, NK_owAddrExtra };
+    for (int r = 0; r < TR_COUNT; r++) {
+      if (!settingExists(owRoleKeys[r])) {
+        settingWrite(owRoleKeys[r], "");
+        continue;
+      }
+      String hex = settingRead(owRoleKeys[r]);
+      if (!owHexToAddr(hex.c_str(), tempRoleAddr[r])) memset(tempRoleAddr[r], 0, sizeof(DeviceAddress));
+      tempRoleAssigned[r] = !owAddrIsZero(tempRoleAddr[r]);
+    }
   }
   if (!settingExists(NK_CvKdArmV)) {
     CvKdArmV *= seedVScale;
@@ -5500,7 +5584,7 @@ void otaRestoreNormalOperation(bool success) {
 
   // Recreate TempTask if deleted — params must match the xTaskCreatePinnedToCore in setup()
   if (tempTaskHandle == NULL) {
-    BaseType_t ok = xTaskCreatePinnedToCore(TempTask, "TempTask", 4096, NULL, 1, &tempTaskHandle, 0);
+    BaseType_t ok = xTaskCreatePinnedToCore(TempTask, "TempTask", 6144, NULL, 1, &tempTaskHandle, 0);
     if (ok == pdPASS) {
       Serial.println("✅ TempTask recreated on Core 0");
     } else {

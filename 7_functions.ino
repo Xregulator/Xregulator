@@ -1,5 +1,5 @@
 
-// X Engineering Alternator Regulator
+// Xregulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 

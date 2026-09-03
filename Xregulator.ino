@@ -1,4 +1,4 @@
-// X Engineering Alternator Regulator
+// Xregulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -1559,6 +1559,29 @@ float TemperatureLimitF = 175;       // measured at the case probe; internal/met
 bool  coldChargeLockoutEnable = true;    // master on/off for the cold-charge lockout (default ON)
 float MinChargeTempF = 40.0f;            // board-temp floor below which charging is locked out (°F)
 const float ColdChargeHysteresisF = 2.0f;// °F rise above MinChargeTempF before charging re-arms (anti-chatter)
+// Hot-charge lockout, mirror of the cold one. Acts only on a MEASURED battery temperature (source 1..4);
+// the board stand-in never drives it. Spec: Working Markdown Docs/BATTERY_TEMP_SENSORS_SPEC.md §5.
+int   hotChargeLockoutEnable = 0;        // master on/off for the hot-charge lockout (default OFF)
+float MaxChargeTempF = 122.0f;           // battery-temperature ceiling above which charging is locked out (°F)
+const float HotChargeHysteresisF = 2.0f; // °F fall below MaxChargeTempF before charging re-arms (anti-chatter)
+// Battery + extra temperature probes (multi-drop 1-Wire) and the battery-temperature source chain.
+// Spec: Working Markdown Docs/BATTERY_TEMP_SENSORS_SPEC.md. batteryTempF() (6_functions.ino) picks the
+// source; buildTickSnapshot mirrors its result into battTempActiveF/battTempActiveSrc once per tick.
+int   battTempProbeEnable = 0;      // 1 = the BATT-role DS18B20 feeds BatteryTempProbeF + IDX_BATT_TEMP_PROBE
+int   extraTempProbeEnable = 0;     // 1 = the EXTRA-role DS18B20 feeds ExtraTempF + IDX_EXTRA_TEMP
+int   battTempSource = 0;           // 0 Auto (probe, NMEA 2000, VE.Direct, RV-C, then board if proxy enabled), 1 Probe, 2 NMEA 2000, 3 VE.Direct, 4 RV-C, 5 Board, 6 None
+int   battTempProxyEnable = 1;      // Auto may fall back to the board temperature (BMP388 ambientTemp) when no battery measurement qualifies
+int   extraTempAlarmHiEnable = 0;   // EXTRA-probe high alarm on/off
+float extraTempAlarmHiF = 150.0f;   // EXTRA-probe high alarm threshold (°F)
+int   extraTempAlarmLoEnable = 0;   // EXTRA-probe low alarm on/off
+float extraTempAlarmLoF = 32.0f;    // EXTRA-probe low alarm threshold (°F)
+float BatteryTempProbeF = NAN;      // BATT-role probe (°F); written by TempTask only, NAN until the first good read
+float ExtraTempF = NAN;             // EXTRA-role probe (°F); written by TempTask only
+float battTempActiveF = NAN;        // batteryTempF() result of the current tick (°F); NAN = no source qualifies
+uint8_t battTempActiveSrc = 0;      // 0 none, 1 probe, 2 NMEA 2000 (127508), 3 VE.Direct (T), 4 RV-C (DC_SOURCE_STATUS_2), 5 board temperature
+float VictronBattTempF = NAN;       // VE.Direct "T" field (°F), BMV/SmartShunt with a temperature sensor
+float rvcRxBattTempF = NAN;         // RV-C DC_SOURCE_STATUS_2 source temperature (°F) at the dvccInst instance
+bool  cvTempDerateInert = false;    // battery-temp source class (measured vs board) differs from CommissionTempSrc's class; derate returns 1.0 until the CV fit is re-run
 int ManualFieldToggle = 0;           // 0 = Auto (PID) — fresh-flash default. Set to 1 for manual field control (debugging).
 int SwitchControlOverride = 1;       // set to 1 for web interface switches to override physical switch panel
 int MaintainMode = 0;                // Set to 1 to target 0 amps at battery
@@ -3815,7 +3838,8 @@ float   CvKdTd       = 0.85f;     // s — derivative time; Auto-mode Kd = Td·K
 // scale Kp AND Ki by the resistance ratio R(T_commission)/R(T_now), holding the loop bandwidth ω and
 // damping ρ put (NOT a λ/ω change). CommissionTempF is stamped when the CV plant fit is applied; NaN =
 // never commissioned → no derate. See recomputeCvGains()/computeCvTempScale() in 6_functions.ino.
-float   CommissionTempF      = NAN;   // board temp (°F) when K_dc was measured; reference for the derate
+float   CommissionTempF      = NAN;   // battery temp (°F, batteryTempF() source; board temp on legacy stamps) when K_dc was measured; reference for the derate
+int     CommissionTempSrc    = 0;     // battTempActiveSrc at the moment CommissionTempF was stamped; 0 = legacy/unknown = treat as board (5)
 bool    battTempDerateEnable = true;  // master on/off for the battery-temp gain derate
 float   battTempCoeff        = 0.024f; // fractional resistance change per °C BELOW 25°C (R rises as T falls); cvResistanceRatio()
                                        // halves it above 25°C. One value for every chemistry — LFP and lead-acid measure
@@ -4052,7 +4076,8 @@ enum FieldEventReason : uint8_t {
   REASON_SOLAR_PAUSE,              // weather mode is resting the alternator on a strong solar forecast — deliberate, not a fault
   REASON_BMS_DISABLED,             // the BMS on/off input is withholding permission — external command, not a fault
   REASON_OV_TIER_LOW,              // timed OV cut, LOW tier — filtered bus held above target + OvTierLoMarginV for OvTierLoDwellMs (AUTO/CV only)
-  REASON_OV_TIER_MID               // timed OV cut, MID tier — filtered bus held above target + OvTierMidMarginV for OvTierMidDwellMs (AUTO/CV only)
+  REASON_OV_TIER_MID,              // timed OV cut, MID tier — filtered bus held above target + OvTierMidMarginV for OvTierMidDwellMs (AUTO/CV only)
+  REASON_BATTERY_TOO_HOT           // 24 — measured battery temp (source 1..4, never the board stand-in) above MaxChargeTempF — hot-charge lockout (opt-in)
 };
 
 
@@ -4100,6 +4125,9 @@ struct TickSnapshot {
   bool inAbsorptionStage;
 
   bool batteryTooCold;   // cold-charge lockout active (board temp proxy < MinChargeTempF, with hysteresis)
+  bool batteryTooHot;    // hot-charge lockout active (measured battery temp > MaxChargeTempF, with hysteresis; never from the board stand-in)
+  float battTempF;       // batteryTempF() this tick (°F); NAN = no source qualifies
+  uint8_t battTempSrc;   // batteryTempF() source code (0 none, 1 probe, 2 NMEA 2000, 3 VE.Direct, 4 RV-C, 5 board)
   bool commissioningResting;  // commissioning session live + dialog alive + no test running → hold field at rest duty
 };
 
@@ -4928,7 +4956,7 @@ uint32_t galeStartMs = 0;
 // *_AllTime / *Max / *_min systems above — those persist across boots
 // via NVS; these reset every boot. Initialized to NAN so the first valid
 // sample seeds both ends (see wmIgnUpdate).
-// 16 pairs × 8 bytes = 128 bytes, internal RAM, plain globals.
+// 18 pairs × 8 bytes = 144 bytes, internal RAM, plain globals.
 struct IgnWatermark { float lo; float hi; };
 
 IgnWatermark wmIgn_amps     = { NAN, NAN };   // MeasuredAmps (A)
@@ -4947,6 +4975,8 @@ IgnWatermark wmIgn_baro     = { NAN, NAN };   // baroPressure (mbar)
 IgnWatermark wmIgn_ambient  = { NAN, NAN };   // ambientTemp (°F)
 IgnWatermark wmIgn_VMGman   = { NAN, NAN };   // VMGNMEA — VMG to manual bearing (knots)
 IgnWatermark wmIgn_VMGup    = { NAN, NAN };   // VMGUpwind — VMG to windward (knots)
+IgnWatermark wmIgn_battTempF  = { NAN, NAN }; // BatteryTempProbeF (°F)
+IgnWatermark wmIgn_extraTempF = { NAN, NAN }; // ExtraTempF (°F)
 
 // Watermark update/read helpers — defined in 7_functions.ino.
 inline void wmIgnUpdate(IgnWatermark &w, float v);
@@ -5003,8 +5033,12 @@ enum DataIndex {
   IDX_DVCC,                      // 40 - DVCC follow: received charge-limit (CVL/CCL) stream
   IDX_N183,                      // 41 - NMEA 0183 serial receive (any checksum-valid sentence)
   IDX_N183_HDG,                  // 42 - NMEA 0183 heading only: IDX_N183 stays fresh on a GPS-only talker
+  IDX_BATT_TEMP_PROBE,           // 43 - BATT-role DS18B20 (BatteryTempProbeF)
+  IDX_EXTRA_TEMP,                // 44 - EXTRA-role DS18B20 (ExtraTempF)
+  IDX_VE_BATT_TEMP,              // 45 - VE.Direct "T" battery temperature (VictronBattTempF)
+  IDX_RVC_BATT_TEMP,             // 46 - RV-C DC_SOURCE_STATUS_2 battery temperature (rvcRxBattTempF)
   // Keep this last and increment when new added
-  MAX_DATA_INDICES = 43
+  MAX_DATA_INDICES = 47
 };
 
 unsigned long dataTimestamps[MAX_DATA_INDICES];  // Uses the enum size automatically
@@ -5076,7 +5110,29 @@ const char *OTA_PUBLIC_KEY =
 #define ONE_WIRE_BUS 13
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
-DeviceAddress tempDeviceAddress;
+DeviceAddress tempDeviceAddress;  // mirror of tempRoleAddr[TR_ALT] — the alternator read path in TempTask is unchanged by the registry below
+// Multi-drop 1-Wire probe registry + role binding — spec: Working Markdown Docs/BATTERY_TEMP_SENSORS_SPEC.md §2.
+// Bus search order is by ROM serial, not position, so roles bind by stored ROM code (owAddr* NVS keys),
+// never by index. Written by TempTask (Core 0); /tempSensors copies it under owMux.
+enum TempRole : uint8_t { TR_ALT = 0, TR_BATT = 1, TR_EXTRA = 2, TR_COUNT = 3 };
+#define OW_MAX_PROBES 6
+struct OwProbe {
+  DeviceAddress addr;     // 8 bytes, family 0x28, ROM CRC valid
+  float    lastF;         // NAN until first good read
+  uint32_t lastGoodMs;    // millis() of last good read, 0 = never
+  uint16_t okCount;
+  uint16_t failCount;
+  bool     present;       // seen on the last enumeration
+};
+OwProbe  owProbes[OW_MAX_PROBES];
+uint8_t  owProbeCount = 0;
+DeviceAddress tempRoleAddr[TR_COUNT];   // all-zero = unassigned
+bool     tempRoleAssigned[TR_COUNT];
+int8_t   tempRoleSlot[TR_COUNT] = { -1, -1, -1 };  // index into owProbes, -1 = not on bus
+volatile bool owScanRequested = false;  // set by /get?owScan=1 and by the /get owAssign* handlers; TempTask re-enumerates and clears it
+volatile bool owRolePersistPending[TR_COUNT];  // TempTask auto-bound a role; owRoleService() in loop() persists it (TempTask never writes NVS)
+portMUX_TYPE owMux = portMUX_INITIALIZER_UNLOCKED;  // guards registry copies for /tempSensors
+volatile bool bootHardwareInitDone = false;  // set by setup() once initializeHardware() has had its turn; TempTask's first bus search waits on it
 //TEMPTASK DEBUG
 volatile uint32_t tempReadSuccessCount = 0;
 volatile uint32_t tempReadFailCount = 0;
@@ -5217,6 +5273,9 @@ int n2kAltInstance = 1;
 int n2kAltTempEnable = 1;   // 130312 alternator temperature — suppressed entirely while the sensor reads NAN (MFD "data lost" alarms cover the failed-sensor case)
 int n2kTempInstance = 4;
 int n2kTempSource = 3;      // tN2kTempSource; 3 = Engine Room (no Alternator source exists in the standard set)
+int n2kExtraTempEnable = 0;   // 130312 for the EXTRA-role probe (SLOT_TEMP_EXTRA) — skipped entirely while ExtraTempF is not fresh, same rule as the alternator slot
+int n2kExtraTempInstance = 5;
+int n2kExtraTempSource = 3;   // tN2kTempSource for the EXTRA probe
 int n2kChgrEnable = 1;      // 127507 charger status
 int n2kChgrInstance = 0;
 int n2kChgrCfgEnable = 1;   // 127510 charger configuration — the only place field drive % reaches the bus (its ChargeCurrentLimit field)
@@ -5890,7 +5949,7 @@ void setup() {
   Serial.println(httpsQueue ? "HTTPS queue created" : "ERROR: Queue creation failed");
 
   // Both stay on Core 0, but priority > 0
-  xTaskCreatePinnedToCore(TempTask, "TempTask", 4096, NULL, 1, &tempTaskHandle, 0);
+  xTaskCreatePinnedToCore(TempTask, "TempTask", 6144, NULL, 1, &tempTaskHandle, 0);  // 6144: multi-drop registry pass (BATTERY_TEMP_SENSORS_SPEC.md §3); the OTA re-create in 4_functions must match
   Serial.println("Temp task created on Core 0");
 
   // With mbedTLS record buffers in PSRAM, only call frames sit on this stack
@@ -5930,6 +5989,7 @@ void setup() {
   if (hardwarePresent == 1) {
     initializeHardware();  // Initialize hardware systems
   };
+  bootHardwareInitDone = true;  // releases TempTask's first bus search (2_functions.ino); unconditional so a runtime hardwarePresent flip still enumerates
 
   // A WDT reset is safe for the bank: every GPIO resets to 0, so pin 4 drops the field before setup() reruns.
 
@@ -6798,6 +6858,7 @@ void loop() {
           cxLedgerDrainService();
           huntLedgerService();  // hunt-episode records queued in RAM by the control path → flash, here only
           huntMapService();     // damper pocket map — same rule: flash only here, never in the control path
+          owRoleService();      // 1-Wire role auto-binds queued by TempTask (Core 0 never writes NVS) → flash, here only
         }
       }
       TIMED_CALL(ft_ch1_compute_stats, ch1_compute_stats());

@@ -8,7 +8,7 @@
  * AI_OPTIMIZE: 
  * CRITICAL_INSTRUCTION_FOR_AI:: When adding new code, try to first use or modify existing code whenever possible, to avoid bloat. When impossible, always mimick my style and coding patterns. If you have a performance improvement idea, tell me. When giving me new code, I prefer complete copy and paste functions when they are short, or for you to give step by step instructions for me to edit if function is long, to conserve tokens. Always specify which option you chose.  Never re-write the entire file, this just wastes my tokens.
 
-// X Engineering Alternator Regulator
+// Xregulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -31,7 +31,7 @@
 
 <head>
   <meta charset="utf-8" />
-  <title>X Engineering Alternator Regulator</title>
+  <title>Xregulator</title>
   <link rel="stylesheet" href="styles.css">
   <meta name="viewport"
     content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
@@ -142,7 +142,7 @@
     <div class="bl-stars"></div>
     <div class="bl-sun"></div>
     <div class="bl-clouds"><span></span><span></span></div>
-    <div class="bl-brand"><span class="wm-X">X</span><span class="wm-rest">Engineering</span></div>
+    <div class="bl-brand"><span class="wm-X">X</span><span class="wm-rest">&nbsp;Engineering</span></div>
     <div class="bl-reflection"><img src="boat_loader.webp" alt="" onerror="this.parentNode.style.display='none'"></div>
     <div class="bl-boat"><img src="boat_loader.webp" alt="Sailboat" onerror="this.parentNode.style.display='none'"></div>
     <div class="bl-sea"><div class="bl-shine"></div></div>
@@ -213,7 +213,7 @@
     <div class="header-brand-row">
       <div class="header-wordmark">
         <span class="conn-dot" title="Regulator connection"></span>
-        <span class="wm-X">X</span><span class="wm-rest">Engineering</span>
+        <span class="wm-X">X</span><span class="wm-rest">&nbsp;Engineering</span>
       </div>
       <div class="reading-value header-field-cluster field-status-inactive">
         <div class="field-status-row">
@@ -254,14 +254,18 @@
           <span class="duo-unit req-batt-current">A</span>
         </div>
 
-        <!-- Alt + Board temps — same 3-column grid as the Amps chip; the °F/°C unit says "temp" -->
-        <div class="reading-duo">
+        <!-- Alt + Board temps — same 3-column grid as the Amps chip; the °F/°C unit says "temp".
+             Batt row appears only while a battery temperature exists (renderBattTempReadouts). -->
+        <div class="reading-duo" id="hdr-temp-duo">
           <span class="duo-lbl" id="lbl-alt-temp" data-t="Alt">Alt</span>
           <span class="duo-num"><span id="header-alt-temp">-</span></span>
           <span class="duo-unit"><span class="temp-unit-label">°F</span></span>
           <span class="duo-lbl" data-t="Board">Board</span>
           <span class="duo-num"><span id="header-board-temp">-</span></span>
           <span class="duo-unit"><span class="temp-unit-label">°F</span></span>
+          <span class="duo-lbl hdr-batt-temp" data-t="Batt">Batt</span>
+          <span class="duo-num hdr-batt-temp"><span id="header-batt-temp">-</span></span>
+          <span class="duo-unit hdr-batt-temp"><span class="temp-unit-label">°F</span></span>
         </div>
 
         <!-- RPM + Ignition -->
@@ -349,6 +353,7 @@
       <button class="sub-tab active" onclick="showSubTab('settings', 'alternator', event)">Alternator</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'engine', event)">Engine</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'battery', event)">Battery</button>
+      <button class="sub-tab" onclick="showSubTab('settings', 'temperature', event)">Temperature</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'boatperformance', event)">Boat</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'weathersolar', event)">Solar</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'alarms', event)">Alarms</button>
@@ -697,7 +702,7 @@
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>Mounting Location:</span>
                       <span class="tooltip">ℹ️
-                        <span class="tooltip-box">A battery's internal resistance rises as it cools, and that resistance <strong>is</strong> the quantity the voltage loop's gains were tuned against at commissioning. Mounted near the bank — or any space that tracks it — the regulator's board temperature follows the batteries closely enough to correct for this. Otherwise (example: regulator in engine room, batteries in bilge), it will incorrectly report a hot battery, and push the gains the wrong way.</span>
+                        <span class="tooltip-box">A battery's internal resistance rises as it cools, and that resistance <strong>is</strong> the quantity the voltage loop's gains were tuned against at commissioning. With a measured battery temperature (battery probe, NMEA 2000 battery monitor, VE.Direct monitor with a temperature sensor, or RV-C source) the regulator corrects for this directly and the mounting location does not matter. Without one, the regulator board temperature stands in: mounted near the bank — or any space that tracks it — the board follows the batteries closely enough to correct for this. Otherwise (example: regulator in engine room, batteries in bilge), the stand-in reports a hot battery and pushes the gains the wrong way.</span>
                       </span>
                     </div>
                     <div class="form-input">
@@ -712,8 +717,8 @@
                         </label>
                       </div>
                       <div class="seg-pill-caption">
-                        <span class="cap cap-0">Preferred — battery temperature can be approximated with regulator temperature</span>
-                        <span class="cap cap-1">Battery temperature is not approximately the same as regulator temperature</span>
+                        <span class="cap cap-0">Board temperature can stand in for battery temperature when no battery measurement is installed</span>
+                        <span class="cap cap-1">Board temperature cannot stand in for battery temperature — assign a battery probe or another source under Setup &rarr; Temperature</span>
                       </div>
                     </div>
                   </div>
@@ -1843,215 +1848,6 @@
                 </div>
 
               </details><!-- END Rate Limiting -->
-
-
-              <!-- Temperature Settings (open by default) -->
-              <details class="alt-nested-section">
-                <summary class="alt-summary-nested">Temperature Settings</summary>
-
-                <!-- Alternator Temp Limit -->
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Alternator Temp Limit (<span class="temp-unit-label">°F</span>) (<span id="TemperatureLimitF_echo">?</span>):</span>
-                    <span class="tooltip">
-                      ℹ️
-                      <span class="tooltip-box">Maximum safe temperature at the sensor location. The temperature
-                        PID begins reducing current as temperature approaches this value — intervention starts
-                        at (Limit − Temp PID Margin). Hard warning and critical shutdowns
-                        trigger above it. Sensors often read 20–30°F cooler than true winding temperature; account for
-                        this offset when setting this value.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TemperatureLimitF',false)">
-                      <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" data-tmin-f="0" data-tmax-f="350" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <!-- Cold-Charge Lockout (lithium protection) — master on/off -->
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Cold-Charge Lockout (<span id="coldChargeLockoutEnable_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️
-                      <span class="tooltip-box">Refuses to charge when the battery is too cold — protects
-                        lithium (LiFePO4/Li-ion) batteries, which are permanently damaged by charging below
-                        freezing. When ON, charging is locked out (field ramps to zero and cuts) whenever the
-                        regulator <strong>board temperature</strong> drops below the Min Charge Temp set below,
-                        and the alarm sounds if alarms are enabled.<br><br><strong>The board temperature is only
-                        a proxy for battery temperature, and it runs WARMER than the surrounding air</strong>
-                        (the regulator makes its own heat), so set Min Charge Temp with margin above the real
-                        battery cutoff. Leave this <strong>OFF for lead-acid/AGM</strong> batteries, which charge
-                        fine in the cold. Turning this toggle off is the override.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="coldChargeLockoutEnable_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('coldChargeLockoutEnable_checkbox', 'coldChargeLockoutEnable', 'coldChargeLockoutEnable')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">On</span>
-                      <input id="coldChargeLockoutEnable" name="coldChargeLockoutEnable" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <!-- Cold-Charge Lockout temperature floor (board temp, battery proxy) -->
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Min Charge Temp (<span class="temp-unit-label">°F</span>) (<span id="MinChargeTempF_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️
-                      <span class="tooltip-box">Board-temperature floor for the Cold-Charge Lockout above. Below
-                        this, charging is disabled. Because board temperature reads warmer than the battery, set
-                        this above the battery's true cutoff (lithium is conventionally 32°F / 0°C) — a value
-                        around 40°F is a conservative default. Re-arms after the board climbs ~2°F back above
-                        this floor (hysteresis prevents on/off chatter). Has no effect unless the lockout is ON.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'MinChargeTempF',false)">
-                      <input name="MinChargeTempF" type="number" step="1" min="-40" max="120" data-tmin-f="-40" data-tmax-f="120" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers a WARNING. Field output ramps to zero and a lockout starts. If temperature stays above the warning level for the Temp Sustained Timeout, it escalates to a sustained-temperature shutdown and the field is cut once the output settles. Compares the raw sensor temperature, not the projected value.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
-                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers an immediate field cut (no ramp, no settle wait). Compares the raw sensor temperature, not the projected value. Highest-priority thermal protection event.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
-                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to a sustained-temperature shutdown, which ramps field output to zero then cuts the field. Timer resets if temperature drops below the warning threshold. Enter in seconds.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="TempSustainedTimeout" type="number" step="1" min="0" max="999999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Source (<span id="TempSource_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Select
-                        the temperature sensor used for thermal protection. Digital uses an onboard digital sensor (e.g.
-                        DS18B20). Thermistor uses an analog NTC thermistor configured by R_fixed, Beta, and T0
-                        below.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <div class="cap-mode-toggle ab-seg" data-seg-for="TempSource_checkbox">
-                        <button type="button" class="cap-mode-btn" data-checked="0" onclick="abSegClick(this)">Digital</button>
-                        <button type="button" class="cap-mode-btn" data-checked="1" onclick="abSegClick(this)">Thermistor</button>
-                      </div>
-                      <input id="TempSource_checkbox" type="checkbox" style="display:none;"
-                        onchange="if(handleUserToggle('TempSource_checkbox', 'TempSource', 'TempSource')) { this.form.submit(); submitMessage(); }">
-                      <input id="TempSource" name="TempSource" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Internal Temp Offset (<span class="temp-unit-label">°F</span>) (<span id="WindingTempOffset_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">ONLY
-                        used for alternator component life physics models. How much hotter windings, bearings, brushes
-                        are than physically measured alternator case temperature. Typical: 40–60°F (22–33°C).</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'WindingTempOffset',true)">
-                      <input name="WindingTempOffset" type="number" step="0.1" min="0" max="100" data-tmin-f="0" data-tmax-f="100" data-tdelta="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermistor Series Resistor R_fixed (Ω) (<span id="R_fixed_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Value
-                        (Ω) of the fixed series resistor in the thermistor voltage divider circuit. Must match the
-                        resistor physically installed on the board.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="R_fixed" type="number" step="1" min="0" max="1000000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermistor Beta (<span id="Beta_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Beta
-                        coefficient from the thermistor datasheet — characterizes how its resistance changes with
-                        temperature. Typical NTC thermistors: 3000–4000. Find the exact value in your thermistor's
-                        datasheet.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="Beta" type="number" step="1" min="0" max="100000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermistor Reference Temp T0 (°C) (<span id="T0_C_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span
-                        class="tooltip-box">Reference temperature (°C) at which the thermistor's nominal resistance is
-                        specified. Almost always 25°C per datasheet.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="T0_C" type="number" step="0.1" min="0" max="300" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-              </details><!-- END Temperature Settings -->
 
               <!-- Current Sensing (closed) -->
               <details class="alt-nested-section">
@@ -4898,7 +4694,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between; font-size:0.92em; opacity:0.95; line-height:1.5;">
                     <span id="cvActiveGains">Active gains: &mdash;</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">The Kp/Ki the voltage loop is running <strong>right now</strong>, in 12V-equivalent units. It is the commissioning gain <strong>after the battery-temperature correction</strong> (Temperature compensation, below), so it drifts with board temperature even though you never re-tune. In <strong>Auto</strong> the base comes from Voltage Control Autotuning; in <strong>Manual</strong> it is your typed Kp/Ki — either way, temperature-corrected. This is the number that actually shapes the response.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">The Kp/Ki the voltage loop is running <strong>right now</strong>, in 12V-equivalent units. It is the commissioning gain <strong>after the battery-temperature correction</strong> (Temperature compensation, below), so it drifts with battery temperature even though you never re-tune. In <strong>Auto</strong> the base comes from Voltage Control Autotuning; in <strong>Manual</strong> it is your typed Kp/Ki — either way, temperature-corrected. This is the number that actually shapes the response.</span></span>
                   </div>
                 </div>
 
@@ -5224,7 +5020,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Battery-Temp Gain Derate (<span id="battTempDerateEnable_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Voltage Control Autotuning measures the battery's internal resistance (the plant gain K_dc) at <strong>one</strong> temperature — whatever the board was when you commissioned. A battery's resistance <strong>rises as it gets colder</strong>, which would make those gains run too aggressively in the cold (more overshoot, exactly when over-voltage matters most) and too sluggishly when warmer. With this <strong>On</strong>, the loop scales Kp <em>and</em> Ki by the estimated resistance ratio between the commissioning temperature and the present board temperature — keeping the loop's speed and damping roughly constant across temperature. This is a gain scale, <strong>not</strong> a change to the response-time target or Ki/Kp ratio. Board temperature is a <strong>proxy</strong> for battery temperature, but the derate uses only the <strong>change</strong> in board temp since commissioning — so a constant board-warmer-than-battery offset cancels out; it only needs that offset to stay roughly stable, which it does. The absolute over-voltage protections are independent and always live. Set the strength with the coefficient below. Off = use the commissioned gains unchanged at all temperatures.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Voltage Control Autotuning measures the battery's internal resistance (the plant gain K_dc) at <strong>one</strong> temperature — the battery temperature at commissioning. A battery's resistance <strong>rises as it gets colder</strong>, which would make those gains run too aggressively in the cold (more overshoot, exactly when over-voltage matters most) and too sluggishly when warmer. With this <strong>On</strong>, the loop scales Kp <em>and</em> Ki by the estimated resistance ratio between the commissioning temperature and the present battery temperature — keeping the loop's speed and damping roughly constant across temperature. This is a gain scale, <strong>not</strong> a change to the response-time target or Ki/Kp ratio. The battery temperature comes from the source selected under Setup &rarr; Temperature: a battery probe, NMEA 2000, VE.Direct or RV-C measurement, or the regulator board standing in when none is available. The derate uses only the <strong>change</strong> since commissioning, so a constant board-warmer-than-battery offset in the stand-in cancels out as long as it stays roughly stable. If the source changes class between a measurement and the stand-in after commissioning, the derate goes inert until Voltage Control Autotuning is re-run. The absolute over-voltage protections are independent and always live. Set the strength with the coefficient below. Off = use the commissioned gains unchanged at all temperatures.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5713,7 +5509,7 @@
                   </div>
                 </div>
 
-                <!-- Temp Warning/Critical Excess and Sustained Timeout live in Setup → Alternator → Temperature Settings -->
+                <!-- Temp Warning/Critical Excess and Sustained Timeout live in Setup → Temperature → Alternator Temperature -->
 
               </details> <!-- END Temperature Controller Parameters -->
 
@@ -5820,8 +5616,8 @@
                   climbing quickly, which checks overshoot during the approach to target. Anti-windup freezes upward integration whenever the current
                   ceiling — not voltage — is the binding constraint, so the integrator does not load up while unable to act.
                   The loop gains are set by the commissioning wizard's autotuning rather than tuned by hand (see below), and
-                  can be automatically re-scaled with board temperature to hold the loop's speed and damping constant as the
-                  battery's internal resistance changes with temperature.
+                  can be automatically re-scaled with battery temperature (measured, or the regulator board standing in) to hold
+                  the loop's speed and damping constant as the battery's internal resistance changes with temperature.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Three-Stage Charging:</strong> The regulator implements a constant-current / constant-voltage /
@@ -7602,6 +7398,445 @@
           </div><!-- closes #battery-panel-monitor -->
         </div>
 
+        <!-- ===== TEMPERATURE SUBTAB ===== -->
+        <div id="settings-temperature" class="sub-tab-content">
+          <div class="settings-card">
+
+            <!-- Card 1: probe registry from /tempSensors (owPollTick in script.js), role assignment, probe enables -->
+            <details class="integ-section" id="tempSensorsSection" open>
+              <summary class="integ-section-title">Temperature Sensors</summary>
+
+              <p class="integ-copy">Warm one probe by hand to identify it; its reading rises within a few seconds.</p>
+              <div class="ow-table-wrap">
+                <table class="usage-table ow-table" id="owProbeTable">
+                  <thead>
+                    <tr><th>Serial</th><th>Temp</th><th>Age</th><th>OK / Fail</th><th>Role</th></tr>
+                  </thead>
+                  <tbody id="owProbeTableBody">
+                    <tr><td colspan="5" class="ow-empty">No probe data yet</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div id="owRoleWarn" class="ow-role-warn" style="display:none;"></div>
+              <div class="form-row form-row-wide ow-scan-row">
+                <button type="button" id="owScanBtn" class="btn-secondary" onclick="owScanRequest()">Scan</button>
+                <span id="owScanStatus" class="ow-scan-status"></span>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Battery temperature probe (<span id="battTempProbeEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the probe assigned the Battery role supplies the battery temperature used by the cold-charge and hot-charge lockouts, the voltage-loop gain derate and the NMEA 2000 battery status message. Off: the Battery probe is still read for the table above but is not used as a battery temperature source.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="battTempProbeEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('battTempProbeEnable_checkbox', 'battTempProbeEnable', 'battTempProbeEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="battTempProbeEnable" name="battTempProbeEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Extra temperature probe (<span id="extraTempProbeEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the probe assigned the Extra role is shown as Extra Temperature on Live Data, can raise the high and low alarms in the Extra Temperature card, and can be transmitted on NMEA 2000. Off: the Extra probe is still read for the table above but is not reported anywhere else.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="extraTempProbeEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('extraTempProbeEnable_checkbox', 'extraTempProbeEnable', 'extraTempProbeEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="extraTempProbeEnable" name="extraTempProbeEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+            </details>
+
+            <!-- Card 2: the alternator thermal-protection group, moved from Setup > Alternator (rows unchanged) -->
+            <details class="integ-section" id="altTempSection" open>
+              <summary class="integ-section-title">Alternator Temperature</summary>
+
+                <!-- Alternator Temp Limit -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Alternator Temp Limit (<span class="temp-unit-label">°F</span>) (<span id="TemperatureLimitF_echo">?</span>):</span>
+                    <span class="tooltip">
+                      ℹ️
+                      <span class="tooltip-box">Maximum safe temperature at the sensor location. The temperature
+                        PID begins reducing current as temperature approaches this value — intervention starts
+                        at (Limit − Temp PID Margin). Hard warning and critical shutdowns
+                        trigger above it. Sensors often read 20–30°F cooler than true winding temperature; account for
+                        this offset when setting this value.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TemperatureLimitF',false)">
+                      <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" data-tmin-f="0" data-tmax-f="350" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers a WARNING. Field output ramps to zero and a lockout starts. If temperature stays above the warning level for the Temp Sustained Timeout, it escalates to a sustained-temperature shutdown and the field is cut once the output settles. Compares the raw sensor temperature, not the projected value.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
+                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers an immediate field cut (no ramp, no settle wait). Compares the raw sensor temperature, not the projected value. Highest-priority thermal protection event.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
+                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to a sustained-temperature shutdown, which ramps field output to zero then cuts the field. Timer resets if temperature drops below the warning threshold. Enter in seconds.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="TempSustainedTimeout" type="number" step="1" min="0" max="999999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Source (<span id="TempSource_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Select
+                        the temperature sensor used for thermal protection. Digital uses an onboard digital sensor (e.g.
+                        DS18B20). Thermistor uses an analog NTC thermistor configured by R_fixed, Beta, and T0
+                        below.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="cap-mode-toggle ab-seg" data-seg-for="TempSource_checkbox">
+                        <button type="button" class="cap-mode-btn" data-checked="0" onclick="abSegClick(this)">Digital</button>
+                        <button type="button" class="cap-mode-btn" data-checked="1" onclick="abSegClick(this)">Thermistor</button>
+                      </div>
+                      <input id="TempSource_checkbox" type="checkbox" style="display:none;"
+                        onchange="if(handleUserToggle('TempSource_checkbox', 'TempSource', 'TempSource')) { this.form.submit(); submitMessage(); }">
+                      <input id="TempSource" name="TempSource" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Internal Temp Offset (<span class="temp-unit-label">°F</span>) (<span id="WindingTempOffset_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">ONLY
+                        used for alternator component life physics models. How much hotter windings, bearings, brushes
+                        are than physically measured alternator case temperature. Typical: 40–60°F (22–33°C).</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'WindingTempOffset',true)">
+                      <input name="WindingTempOffset" type="number" step="0.1" min="0" max="100" data-tmin-f="0" data-tmax-f="100" data-tdelta="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermistor Series Resistor R_fixed (Ω) (<span id="R_fixed_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Value
+                        (Ω) of the fixed series resistor in the thermistor voltage divider circuit. Must match the
+                        resistor physically installed on the board.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="R_fixed" type="number" step="1" min="0" max="1000000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermistor Beta (<span id="Beta_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Beta
+                        coefficient from the thermistor datasheet — characterizes how its resistance changes with
+                        temperature. Typical NTC thermistors: 3000–4000. Find the exact value in your thermistor's
+                        datasheet.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="Beta" type="number" step="1" min="0" max="100000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermistor Reference Temp T0 (°C) (<span id="T0_C_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span
+                        class="tooltip-box">Reference temperature (°C) at which the thermistor's nominal resistance is
+                        specified. Almost always 25°C per datasheet.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="T0_C" type="number" step="0.1" min="0" max="300" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+            </details>
+
+            <!-- Card 3: battery temperature source chain + the two charge-temperature lockouts -->
+            <details class="integ-section" id="battTempSection" open>
+              <summary class="integ-section-title">Battery Temperature</summary>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Battery Temperature Source (<span id="battTempSource_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Which measurement stands for battery temperature. Automatic takes the first available in this order: battery probe, NMEA 2000 battery status (PGN 127508), VE.Direct battery monitor, RV-C source, then the regulator board temperature if the stand-in below is allowed. Any single source disables the fallback chain and reports no temperature while that source is missing or stale. None disables battery temperature entirely. The board temperature is a stand-in only: the board runs warmer than its surroundings, so the cold-charge lockout is a coarse guard when it is the only source, and the hot-charge lockout never acts on it.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <select name="battTempSource">
+                      <option value="0">Automatic</option>
+                      <option value="1">Battery probe</option>
+                      <option value="2">NMEA 2000</option>
+                      <option value="3">VE.Direct</option>
+                      <option value="4">RV-C</option>
+                      <option value="5">Board temperature</option>
+                      <option value="6">None</option>
+                    </select>
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Use board temperature when no battery measurement is available (<span id="battTempProxyEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: with the source set to Automatic, the regulator board temperature stands in for battery temperature whenever no probe, NMEA 2000, VE.Direct or RV-C measurement is available; the board runs warmer than its surroundings, so the stand-in is a coarse guard. Off: no stand-in, so the cold-charge lockout and the voltage-loop gain derate stay inactive until a measurement arrives (not recommended unless a battery temperature source is installed).</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="battTempProxyEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('battTempProxyEnable_checkbox', 'battTempProxyEnable', 'battTempProxyEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="battTempProxyEnable" name="battTempProxyEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row" id="battTempStatus_row">
+                <div class="form-label" style="font-size:0.9em; opacity:0.85; line-height:1.5;">
+                  <span id="battTempStatus_ID">No battery temperature available</span>
+                </div>
+              </div>
+
+              <hr />
+              <!-- Cold-Charge Lockout (lithium protection) — master on/off -->
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Cold-Charge Lockout (<span id="coldChargeLockoutEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;
+                    <span class="tooltip-box">On: charging stops (the field ramps to zero and cuts) while the battery temperature from the source selected above is below Min Charge Temp, the alarm sounds if alarms are enabled, and charging resumes once the temperature climbs about 2 &deg;F (1 &deg;C) back above the floor; with no battery temperature available the lockout stays inactive. Off: charging continues at any temperature (not recommended for lithium, which is permanently damaged by charging below freezing; lead-acid and AGM charge in the cold).</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="coldChargeLockoutEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('coldChargeLockoutEnable_checkbox', 'coldChargeLockoutEnable', 'coldChargeLockoutEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="coldChargeLockoutEnable" name="coldChargeLockoutEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <!-- Cold-Charge Lockout temperature floor (battery temperature, any source) -->
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Min Charge Temp (<span class="temp-unit-label">°F</span>) (<span id="MinChargeTempF_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;
+                    <span class="tooltip-box">Battery-temperature floor for the Cold-Charge Lockout: below it charging is disabled. With a measured battery temperature (probe, NMEA 2000, VE.Direct or RV-C) set it at the battery's own cutoff, conventionally 32 &deg;F (0 &deg;C) for lithium. When the regulator board is the stand-in, set it higher: the board runs warmer than the battery, so the stand-in reads above the true battery temperature. Re-arms after the temperature climbs about 2 &deg;F (1 &deg;C) back above this floor. Has no effect unless the lockout is On.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'MinChargeTempF',false)">
+                    <input name="MinChargeTempF" type="number" step="1" min="-40" max="120" data-tmin-f="-40" data-tmax-f="120" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <!-- Hot-Charge Lockout — mirror of the cold lockout; acts only on a measured battery temperature -->
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Hot-Charge Lockout (<span id="hotChargeLockoutEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;
+                    <span class="tooltip-box">On: charging stops (the field ramps to zero and cuts) while a measured battery temperature (probe, NMEA 2000, VE.Direct or RV-C) is above Max Charge Temp, the alarm sounds if alarms are enabled, and charging resumes once the temperature falls about 2 &deg;F (1 &deg;C) back below the ceiling; the board-temperature stand-in never triggers this lockout, so it stays inactive without a measurement. Off: charging continues regardless of battery temperature.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="hotChargeLockoutEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('hotChargeLockoutEnable_checkbox', 'hotChargeLockoutEnable', 'hotChargeLockoutEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="hotChargeLockoutEnable" name="hotChargeLockoutEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Max Charge Temp (<span class="temp-unit-label">°F</span>) (<span id="MaxChargeTempF_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;
+                    <span class="tooltip-box">Battery-temperature ceiling for the Hot-Charge Lockout: above it charging is disabled. Set it at the battery manufacturer's maximum charge temperature. Re-arms after the temperature falls about 2 &deg;F (1 &deg;C) back below this ceiling. Acts only on a measured battery temperature, never on the board stand-in. Has no effect unless the lockout is On.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'MaxChargeTempF',false)">
+                    <input name="MaxChargeTempF" type="number" step="1" min="32" max="200" data-tmin-f="32" data-tmax-f="200" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+            </details>
+
+            <!-- Card 4: the Extra probe — live reading and its two alarms -->
+            <details class="integ-section" id="extraTempSection" open>
+              <summary class="integ-section-title">Extra Temperature</summary>
+
+              <div class="form-row" id="extraTempStatus_row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Extra Temperature:</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Live reading from the probe assigned the Extra role in the Temperature Sensors card. Greyed when no reading has arrived for a while.</span></span>
+                </div>
+                <div class="form-input">
+                  <span class="integ-live"><span id="extraTempSetup_ID">&mdash;</span> <span class="temp-unit-label">°F</span></span>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>High Alarm (<span id="extraTempAlarmHiEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the alarm sounds whenever the Extra probe reads above the High Alarm threshold below, provided alarms are enabled. Off: no high-temperature alarm from the Extra probe.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="extraTempAlarmHiEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('extraTempAlarmHiEnable_checkbox', 'extraTempAlarmHiEnable', 'extraTempAlarmHiEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="extraTempAlarmHiEnable" name="extraTempAlarmHiEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>High Alarm Threshold (<span class="temp-unit-label">°F</span>) (<span id="extraTempAlarmHiF_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Extra-probe temperature above which the High Alarm sounds. Has no effect unless the High Alarm is On.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'extraTempAlarmHiF',false)">
+                    <input name="extraTempAlarmHiF" type="number" step="1" min="-40" max="300" data-tmin-f="-40" data-tmax-f="300" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Low Alarm (<span id="extraTempAlarmLoEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the alarm sounds whenever the Extra probe reads below the Low Alarm threshold below, provided alarms are enabled. Off: no low-temperature alarm from the Extra probe.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="extraTempAlarmLoEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('extraTempAlarmLoEnable_checkbox', 'extraTempAlarmLoEnable', 'extraTempAlarmLoEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="extraTempAlarmLoEnable" name="extraTempAlarmLoEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Low Alarm Threshold (<span class="temp-unit-label">°F</span>) (<span id="extraTempAlarmLoF_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Extra-probe temperature below which the Low Alarm sounds. Has no effect unless the Low Alarm is On.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'extraTempAlarmLoF',false)">
+                    <input name="extraTempAlarmLoF" type="number" step="1" min="-40" max="300" data-tmin-f="-40" data-tmax-f="300" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+            </details>
+
+          </div>
+        </div>
+
         <!-- Weather Mode Settings Section -->
         <div id="settings-weathersolar" class="sub-tab-content">
           <div class="settings-card">
@@ -8446,6 +8681,68 @@
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input name="n2kTempInstance" type="number" step="1" min="0" max="252" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Extra Temperature (130312) (<span id="n2kExtraTempEnable_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The Extra probe's temperature (assigned under Setup &rarr; Temperature) as a standard Temperature message (PGN 130312) under the network label and instance below. Transmission stops entirely while the probe reading is missing or stale, so an MFD data-lost alarm on this instance also catches a failed probe.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="n2kExtraTempEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('n2kExtraTempEnable_checkbox', 'n2kExtraTempEnable', 'n2kExtraTempEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="n2kExtraTempEnable" name="n2kExtraTempEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Network Label for Extra Temp (<span id="n2kExtraTempSource_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The standard location name displays file the Extra probe's reading under (its N2K temperature source). Pick the name that matches where the probe is mounted; an MFD temperature alarm is pointed at this name plus the instance below.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <select name="n2kExtraTempSource">
+                        <option value="0">Sea</option>
+                        <option value="1">Outside</option>
+                        <option value="2">Inside</option>
+                        <option value="3">Engine Room</option>
+                        <option value="4">Main Cabin</option>
+                        <option value="5">Live Well</option>
+                        <option value="6">Bait Well</option>
+                        <option value="7">Refrigeration</option>
+                        <option value="8">Heating System</option>
+                        <option value="9">Dew Point</option>
+                        <option value="10">Apparent Wind Chill</option>
+                        <option value="11">Theoretical Wind Chill</option>
+                        <option value="12">Heat Index</option>
+                        <option value="13">Freezer</option>
+                        <option value="14">Exhaust Gas</option>
+                        <option value="15">Shaft Seal</option>
+                    </select>
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Extra Temperature Instance (<span id="n2kExtraTempInstance_echo">?</span>):
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Instance number the Extra probe's temperature is sent under. Pick one no other temperature sensor on the network uses, including the alternator temperature instance above.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="n2kExtraTempInstance" type="number" step="1" min="0" max="252" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
@@ -10402,6 +10699,26 @@
             </div>
           </div>
 
+          <div class="card-group">
+            <p class="card-group-title"><span>Temperature</span>
+              <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The battery temperature the regulator is using and where it comes from: the battery probe, NMEA 2000 battery status, a VE.Direct monitor, an RV-C source, or the regulator board standing in when no measurement is available. The source is chosen under Setup &rarr; Temperature. Greyed when the active source has stopped reporting.</span></span>
+            </p>
+            <div class="metric-row">
+              <span class="metric-label">Battery Temperature</span>
+              <span class="with-wm">
+                <span class="metric-value"><span id="battTempActive_ID">&mdash;</span> <span class="temp-unit-label">°F</span></span>
+                <span class="wm-inline" id="battTempProbe_wm">
+                  <span><span class="arr">&uarr;</span><span id="battTempProbe_ID_hi">&mdash;</span></span>
+                  <span><span class="arr">&darr;</span><span id="battTempProbe_ID_lo">&mdash;</span></span>
+                </span>
+              </span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Source</span>
+              <span class="metric-value" style="font-size: 13px;"><span id="battTempActiveSrc_ID">none</span></span>
+            </div>
+          </div>
+
           <div class="card-group req-batt-current">
             <p class="card-group-title">Charge/Discharge Time</p>
             <div class="metric-row">
@@ -11985,6 +12302,20 @@
                 <span class="wm-inline">
                   <span><span class="arr">↑</span><span id="ambientTempID_hi">—</span></span>
                   <span><span class="arr">↓</span><span id="ambientTempID_lo">—</span></span>
+                </span>
+              </span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Extra Temperature
+                <span class="tooltip">&#8505;&#65039;
+                  <span class="tooltip-box">Reading from the probe assigned the Extra role under Setup &rarr; Temperature. Greyed when no reading has arrived for a while.</span>
+                </span>
+              </span>
+              <span class="metric-value with-wm" id="extraTemp-display">
+                <span><span id="extraTemp_ID">&mdash;</span> <span class="temp-unit-label">°F</span></span>
+                <span class="wm-inline">
+                  <span><span class="arr">&uarr;</span><span id="extraTemp_ID_hi">&mdash;</span></span>
+                  <span><span class="arr">&darr;</span><span id="extraTemp_ID_lo">&mdash;</span></span>
                 </span>
               </span>
             </div>
@@ -13693,7 +14024,7 @@
         <details class="esp32-sec" id="esp32SecAbout">
           <summary>About</summary>
           <div style="font-size:13px;line-height:1.6;max-width:560px;padding:4px 2px;">
-            <p style="margin:0 0 10px;"><strong>X Engineering Alternator Regulator</strong><br>
+            <p style="margin:0 0 10px;"><strong>Xregulator</strong><br>
               Copyright (C) 2026 X Engineering LLC<br>
               Contact: joe@xengineering.net</p>
             <p style="margin:0 0 10px;">This program is free software: you can redistribute it and/or modify it under

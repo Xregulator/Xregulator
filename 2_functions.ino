@@ -1,4 +1,4 @@
-// X Engineering Alternator Regulator
+// Xregulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -614,6 +614,25 @@ bool fsRemove(const char *path) {
 #define NK_dvccSettleS     "dvccSettleS"
 #define NK_dvccCvlMin      "dvccCvlMin"
 #define NK_dvccCvlMax      "dvccCvlMax"
+// Battery + extra temperature probes, battery-temperature source chain, hot-charge lockout
+// (BATTERY_TEMP_SENSORS_SPEC.md §6). owAddr* hold a 16-char lowercase hex ROM code, "" = unassigned.
+#define NK_battTempProbeEnable    "battTmpPrbEn"
+#define NK_extraTempProbeEnable   "extraTmpPrbEn"
+#define NK_battTempSource         "battTmpSrc"
+#define NK_battTempProxyEnable    "battTmpProxyEn"
+#define NK_hotChargeLockoutEnable "hotChrgLock"
+#define NK_MaxChargeTempF         "MaxChargeTempF"
+#define NK_extraTempAlarmHiEnable "xTmpAlmHiEn"
+#define NK_extraTempAlarmHiF      "xTmpAlmHiF"
+#define NK_extraTempAlarmLoEnable "xTmpAlmLoEn"
+#define NK_extraTempAlarmLoF      "xTmpAlmLoF"
+#define NK_n2kExtraTempEnable     "n2kXTmpEn"
+#define NK_n2kExtraTempInstance   "n2kXTmpInst"
+#define NK_n2kExtraTempSource     "n2kXTmpSrc"
+#define NK_CommissionTempSrc      "CommissionTmpS"
+#define NK_owAddrAlt              "owAddrAlt"
+#define NK_owAddrBatt             "owAddrBatt"
+#define NK_owAddrExtra            "owAddrExtra"
 // Plausible-CVL window bounds, absolute volts and deliberately class-agnostic so one pair covers
 // 12/24/36/48 V. Same numbers the /settings handlers in 3_functions.ino constrain to. The window
 // must also stay ordered, low < high: an inverted or
@@ -1405,10 +1424,219 @@ void performDeepFactoryReset() {
   ESP.restart();
 }
 
+// ==== Multi-drop 1-Wire probe registry (BATTERY_TEMP_SENSORS_SPEC.md §2) ====
+// Roles bind by stored ROM code (owAddr* NVS keys), never by bus index: the search order is by serial.
+
+void owAddrToHex(const uint8_t *addr, char *out) {  // out: 17 bytes, lowercase, no separators
+  static const char hx[] = "0123456789abcdef";
+  for (int i = 0; i < 8; i++) {
+    out[i * 2] = hx[addr[i] >> 4];
+    out[i * 2 + 1] = hx[addr[i] & 0x0F];
+  }
+  out[16] = '\0';
+}
+
+bool owHexToAddr(const char *hex, uint8_t *addr) {  // exactly 16 hex chars, either case; false leaves addr untouched
+  if (!hex || strlen(hex) != 16) return false;
+  uint8_t tmp[8] = { 0 };
+  for (int i = 0; i < 16; i++) {
+    char c = hex[i];
+    uint8_t v;
+    if (c >= '0' && c <= '9') v = c - '0';
+    else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+    else return false;
+    tmp[i >> 1] |= (i & 1) ? v : (v << 4);
+  }
+  memcpy(addr, tmp, 8);
+  return true;
+}
+
+bool owAddrIsZero(const uint8_t *a) {
+  for (int i = 0; i < 8; i++) if (a[i]) return false;
+  return true;
+}
+
+const char *owRoleName(int r) {
+  return r == TR_ALT ? "alternator" : (r == TR_BATT ? "battery" : "extra");
+}
+
+// Present probes with no role — CSV2 owUnassignedCount and /tempSensors "unassigned". Counted under owMux
+// because the CSV2 builder runs on Core 1 while owEnumerate() (Core 0) rewrites the registry.
+uint8_t owUnassignedCount() {
+  uint8_t n = 0;
+  portENTER_CRITICAL(&owMux);
+  for (uint8_t i = 0; i < owProbeCount; i++) {
+    if (!owProbes[i].present) continue;
+    bool bound = false;
+    for (int r = 0; r < TR_COUNT; r++) if (tempRoleSlot[r] == (int8_t)i) { bound = true; break; }
+    if (!bound) n++;
+  }
+  portEXIT_CRITICAL(&owMux);
+  return n;
+}
+
+// Bus search, registry merge and role binding. Called from initializeHardware() at boot and from
+// TempTask (Core 0) afterwards; it owns the bus for the search, so never from loop(). Auto-binds the
+// alternator role only in the one-probe / both-extra-enables-off case (fielded single-probe devices and
+// a replaced alternator probe) and queues the persist for owRoleService() — no NVS write here.
+void owEnumerate() {
+  static bool unassignedNoticeSent = false;  // one console line per boot
+  sensors.begin();
+  sensors.setWaitForConversion(false);  // re-apply after begin() in case it resets state
+  sensors.setCheckForConversion(true);
+  DeviceAddress found[OW_MAX_PROBES];
+  uint8_t nFound = 0;
+  uint8_t nDev = sensors.getDeviceCount();
+  for (uint8_t i = 0; i < nDev && nFound < OW_MAX_PROBES; i++) {
+    DeviceAddress a;
+    if (!sensors.getAddress(a, i)) continue;
+    if (a[0] != 0x28 || !sensors.validAddress(a)) continue;  // DS18B20 family with a valid ROM CRC only
+    sensors.setResolution(a, resolution);
+    memcpy(found[nFound++], a, sizeof(DeviceAddress));
+  }
+
+  OwProbe next[OW_MAX_PROBES];
+  uint8_t nNext = 0;
+  bool autoBound = false;
+  portENTER_CRITICAL(&owMux);
+  for (uint8_t f = 0; f < nFound; f++) {
+    OwProbe &p = next[nNext++];
+    memset(&p, 0, sizeof(p));
+    memcpy(p.addr, found[f], sizeof(DeviceAddress));
+    p.lastF = NAN;
+    p.present = true;
+    for (uint8_t i = 0; i < owProbeCount; i++) {  // keep the stats of an id already known
+      if (memcmp(owProbes[i].addr, found[f], sizeof(DeviceAddress)) != 0) continue;
+      p.lastF = owProbes[i].lastF;
+      p.lastGoodMs = owProbes[i].lastGoodMs;
+      p.okCount = owProbes[i].okCount;
+      p.failCount = owProbes[i].failCount;
+      break;
+    }
+  }
+  // An id that dropped off the bus stays listed (present=0) only while a role still points at it.
+  for (uint8_t i = 0; i < owProbeCount && nNext < OW_MAX_PROBES; i++) {
+    bool inFound = false;
+    for (uint8_t f = 0; f < nFound; f++) if (memcmp(owProbes[i].addr, found[f], sizeof(DeviceAddress)) == 0) { inFound = true; break; }
+    if (inFound) continue;
+    bool roleBound = false;
+    for (int r = 0; r < TR_COUNT; r++) if (memcmp(owProbes[i].addr, tempRoleAddr[r], sizeof(DeviceAddress)) == 0) { roleBound = true; break; }
+    if (!roleBound) continue;
+    next[nNext] = owProbes[i];
+    next[nNext].present = false;
+    nNext++;
+  }
+  memcpy(owProbes, next, sizeof(OwProbe) * nNext);
+  owProbeCount = nNext;
+
+  for (int r = 0; r < TR_COUNT; r++) {
+    tempRoleAssigned[r] = !owAddrIsZero(tempRoleAddr[r]);
+    tempRoleSlot[r] = -1;
+    if (!tempRoleAssigned[r]) continue;
+    for (uint8_t i = 0; i < owProbeCount; i++) {
+      if (owProbes[i].present && memcmp(owProbes[i].addr, tempRoleAddr[r], sizeof(DeviceAddress)) == 0) { tempRoleSlot[r] = (int8_t)i; break; }
+    }
+  }
+  if (tempRoleSlot[TR_ALT] < 0 && nFound == 1 && battTempProbeEnable == 0 && extraTempProbeEnable == 0) {
+    int8_t only = -1;
+    for (uint8_t i = 0; i < owProbeCount; i++) if (owProbes[i].present) { only = (int8_t)i; break; }
+    if (only >= 0 && tempRoleSlot[TR_BATT] != only && tempRoleSlot[TR_EXTRA] != only) {
+      memcpy(tempRoleAddr[TR_ALT], owProbes[only].addr, sizeof(DeviceAddress));
+      tempRoleAssigned[TR_ALT] = true;
+      tempRoleSlot[TR_ALT] = only;
+      owRolePersistPending[TR_ALT] = true;
+      autoBound = true;
+    }
+  }
+  // The auto-bind may have moved ALT off an absent id the merge above kept; drop absent entries no role
+  // points at any more. Absent entries sit at the tail, so present slots keep their indices.
+  {
+    uint8_t w = 0;
+    for (uint8_t i = 0; i < owProbeCount; i++) {
+      bool keep = owProbes[i].present;
+      if (!keep) for (int r = 0; r < TR_COUNT; r++) if (memcmp(owProbes[i].addr, tempRoleAddr[r], sizeof(DeviceAddress)) == 0) { keep = true; break; }
+      if (!keep) continue;
+      if (w != i) owProbes[w] = owProbes[i];
+      w++;
+    }
+    owProbeCount = w;
+  }
+  // tempDeviceAddress is the ALT read path's address: the bound probe, else the stored-but-absent id (its
+  // isConnected pre-check then misses exactly as an unplugged single probe did), else zero.
+  if (tempRoleSlot[TR_ALT] >= 0) memcpy(tempDeviceAddress, owProbes[tempRoleSlot[TR_ALT]].addr, sizeof(DeviceAddress));
+  else if (tempRoleAssigned[TR_ALT]) memcpy(tempDeviceAddress, tempRoleAddr[TR_ALT], sizeof(DeviceAddress));
+  else memset(tempDeviceAddress, 0, sizeof(DeviceAddress));
+  portEXIT_CRITICAL(&owMux);
+
+  if (autoBound) {
+    char hex[17];
+    owAddrToHex(tempRoleAddr[TR_ALT], hex);
+    queueConsoleMessageF("Temperature probe %s bound to the alternator role", hex);
+  }
+  if (nFound >= 2 && !unassignedNoticeSent && owUnassignedCount() > 0) {
+    unassignedNoticeSent = true;
+    queueConsoleMessageF("Temperature probes: %u found, roles unassigned — assign them under Setup > Temperature", (unsigned)nFound);
+  }
+}
+
+// loop() only (the field-off flash block): persists the role auto-binds TempTask queued. TempTask never
+// calls settingWrite — a flash write on Core 0 stalls Core 1 while the cache is off.
+void owRoleService() {
+  static const char *const keys[TR_COUNT] = { NK_owAddrAlt, NK_owAddrBatt, NK_owAddrExtra };
+  for (int r = 0; r < TR_COUNT; r++) {
+    if (!owRolePersistPending[r]) continue;
+    DeviceAddress a;
+    portENTER_CRITICAL(&owMux);
+    owRolePersistPending[r] = false;
+    memcpy(a, tempRoleAddr[r], sizeof(DeviceAddress));
+    portEXIT_CRITICAL(&owMux);
+    char hex[17];
+    owAddrToHex(a, hex);
+    settingWrite(keys[r], hex);
+    // The /get owAssign handler (Core 0) rewrites tempRoleAddr[] and NVS on its own; if it landed during the
+    // write above its NVS value may now be under ours, so re-persist whatever the role holds now.
+    DeviceAddress b;
+    portENTER_CRITICAL(&owMux);
+    memcpy(b, tempRoleAddr[r], sizeof(DeviceAddress));
+    portEXIT_CRITICAL(&owMux);
+    if (memcmp(a, b, sizeof(DeviceAddress)) != 0) {
+      owAddrToHex(b, hex);
+      settingWrite(keys[r], owAddrIsZero(b) ? "" : hex);
+    }
+  }
+}
+
+// The ALT read path keeps its own globals/counters; this copies each cycle's outcome into the alternator
+// probe's registry row so /tempSensors lists it live like the other probes.
+static void owMirrorAltResult(bool good, float tempF) {
+  portENTER_CRITICAL(&owMux);
+  const int8_t s = tempRoleSlot[TR_ALT];
+  if (s >= 0 && s < (int8_t)owProbeCount) {
+    if (good) {
+      owProbes[s].lastF = tempF;
+      owProbes[s].lastGoodMs = millis();
+      owProbes[s].okCount++;
+    } else {
+      owProbes[s].failCount++;
+    }
+  }
+  portEXIT_CRITICAL(&owMux);
+}
+
 // DS18B20 reader, 5 s cadence. Rejects CRC fails, all-0xFF and the power-on 85C/185F signature, holds
 // the last good value on any fault (freshness tracked separately), re-enumerates after a disconnect and
 // re-applies 12-bit resolution if an EEPROM or sensor reset changed it. tempTaskHealthy is owned by
 // checkTempTaskHealth(); this task only ever sets it true.
+// Multi-drop (BATTERY_TEMP_SENSORS_SPEC.md §3): one Skip ROM convert covers every probe on the bus, then
+// the scratchpads are read in turn — the alternator (ALT role, tempDeviceAddress) first with the checks
+// above (its outcome mirrored into its own owProbes[] row by owMirrorAltResult), then every other present
+// probe into owProbes[] whether bound or not; a BATT/EXTRA-bound probe
+// also updates its role global when that role's enable is 1. Only the ALT result drives lastReadWasSuccess
+// (the 1 s retry); a BATT/EXTRA miss only feeds its own 3-cycle re-enumeration streak. An engine start
+// (RPM crossing 200) forces one immediate cycle. This task NEVER calls settingWrite — a flash write on
+// Core 0 stalls Core 1 while the cache is off — so role auto-binds wait in owRolePersistPending[] for
+// owRoleService() in loop().
 // Reads core0Busy as a courtesy but must NEVER set it — TempTask runs during active charging, and
 // core0Busy gates AdjustFieldLearnMode, so setting it would freeze both control loops ~190-750 ms every 5 s.
 void TempTask(void *parameter) {
@@ -1420,6 +1648,8 @@ void TempTask(void *parameter) {
   static float lastValidTemp = -99;  // Track last valid reading (-99 = uninitialized)
   static bool sensorEnumerated = false;
   static uint8_t connFailStreak = 0;  // consecutive isConnected() misses before forcing re-enumeration
+  static uint8_t roleMissStreak[TR_COUNT] = { 0, 0, 0 };  // BATT/EXTRA only: consecutive cycles a bound role gave no good read; 3 forces re-enumeration
+  static bool engineWasRunning = false;
 
 // Config byte derived from global resolution (9..12 bit -> 0x1F/0x3F/0x5F/0x7F); target is 12-bit (0x7F)
 #define DS18B20_CFG_BYTE (0x1F | ((resolution - 9) << 5))
@@ -1439,20 +1669,32 @@ void TempTask(void *parameter) {
       continue;
     }
 
+    if (!bootHardwareInitDone) {  // initializeHardware() (Core 1) owns the boot bus search; two cores searching at once corrupt both
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    if (owScanRequested) {  // /get?owScan=1 or a role assignment: re-search the bus and rebind
+      owScanRequested = false;
+      sensorEnumerated = false;
+    }
+
     if (!sensorEnumerated) {
-      sensors.begin();
-      sensors.setWaitForConversion(false);  // re-apply after begin() in case it resets state
-      sensors.setCheckForConversion(true);
-      if (sensors.getAddress(tempDeviceAddress, 0)) {
-        sensors.setResolution(tempDeviceAddress, resolution);
+      owEnumerate();
+      if (tempRoleSlot[TR_ALT] >= 0) {
         sensorEnumerated = true;
       } else {
         tempEnumerateFailCount++;
-        // While charging (RPM>=200) the 20s control-staleness gate is armed, so a failed enumerate must
-        // retry fast — stacked 5s delays here are what cut the field on a brief bus glitch. Engine-off
-        // keeps the slow retry to save standby power (field is already off, staleness can't cut it).
-        vTaskDelay(pdMS_TO_TICKS(RPM >= 200 ? 1000 : 5000));
-        continue;
+        uint8_t presentNow = 0;
+        for (uint8_t i = 0; i < owProbeCount; i++) if (owProbes[i].present) presentNow++;
+        if (presentNow == 0) {
+          // While charging (RPM>=200) the 20s control-staleness gate is armed, so a failed enumerate must
+          // retry fast — stacked 5s delays here are what cut the field on a brief bus glitch. Engine-off
+          // keeps the slow retry to save standby power (field is already off, staleness can't cut it).
+          vTaskDelay(pdMS_TO_TICKS(RPM >= 200 ? 1000 : 5000));
+          continue;
+        }
+        sensorEnumerated = true;  // no alternator probe but others answer: read them; the ALT miss streak keeps re-searching
       }
     }
 
@@ -1460,6 +1702,12 @@ void TempTask(void *parameter) {
       tempCoreBusySkipCount++;
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
+    }
+
+    {  // engine start forces an immediate cycle so the first control ticks see a fresh alternator temperature
+      bool engineRunning = (RPM >= 200);
+      if (engineRunning && !engineWasRunning) lastTempRead = 0;
+      engineWasRunning = engineRunning;
     }
 
     uint32_t pollInterval = lastReadWasSuccess ? 5000 : 1000;
@@ -1477,6 +1725,12 @@ void TempTask(void *parameter) {
     bool writeMaxTempAllTime = false;
     float pendingMaxTemp = 0.0f;
     float pendingMaxTempAllTime = 0.0f;
+    bool roleGood[TR_COUNT] = { false, false, false };  // BATT/EXTRA: a good read landed this cycle (feeds roleMissStreak)
+    bool altOk = tempRoleAssigned[TR_ALT];              // false = no ALT scratchpad read this cycle
+    uint8_t otherPresent = 0;                           // present probes other than ALT
+    for (uint8_t i = 0; i < owProbeCount; i++) {
+      if (owProbes[i].present && tempRoleSlot[TR_ALT] != (int8_t)i) otherPresent++;
+    }
 
     // A single isConnected() false-negative is usually OneWire noise (field-PWM coupling), not a real
     // disconnect — at a user-set 19kHz every 1-Wire bit slot spans switching edges (~5 CRC fails/min,
@@ -1487,7 +1741,7 @@ void TempTask(void *parameter) {
     // slow re-enumerate path and its retry delays, which can stack past the 20s control-staleness gate
     // and needlessly cut the field. Only re-enumerate after 3 consecutive counted misses; otherwise
     // fast-retry (1s, post-failure) and keep the enumerated address so a good read clears staleness.
-    if (!sensors.isConnected(tempDeviceAddress)) {
+    if (altOk && !sensors.isConnected(tempDeviceAddress)) {
       vTaskDelay(pdMS_TO_TICKS(5));
       if (!sensors.isConnected(tempDeviceAddress)) {
         tempConnectedFailCount++;
@@ -1496,23 +1750,22 @@ void TempTask(void *parameter) {
           sensorEnumerated = false;
           connFailStreak = 0;
         }
-        goto cleanup;
+        owMirrorAltResult(false, 0.0f);
+        altOk = false;
       }
     }
-    connFailStreak = 0;
+    if (altOk) connFailStreak = 0;
+    if (!altOk && otherPresent == 0) goto cleanup;  // nothing to convert for: same exit as a lone unplugged probe
 
-    // Same in-place re-roll: a repeated CONVERT command is harmless to the sensor.
-    if (!sensors.requestTemperaturesByAddress(tempDeviceAddress)) {
-      vTaskDelay(pdMS_TO_TICKS(5));
-      if (!sensors.requestTemperaturesByAddress(tempDeviceAddress)) {
-        tempRequestFailCount++;
-        goto cleanup;
-      }
-    }
+    // One Skip ROM + Convert T for every probe on the bus. requestTemperatures() has no presence check and
+    // isConversionComplete() reads an empty pulled-up bus as done, so a probe lost after the isConnected
+    // pre-check surfaces at its readScratchPad (tempReadFailCount / CRC path), not as the timeout below.
+    sensors.requestTemperatures();
 
     {
       // Poll for conversion complete instead of a fixed 2000ms block.
-      // Timeout is resolution-based per library + small guard band.
+      // Timeout is resolution-based per library + small guard band. isConversionComplete() is wired-AND:
+      // it reads 0 until the slowest probe on the bus finishes.
       unsigned long convStart = millis();
       unsigned long convTimeout = sensors.millisToWaitForConversion(resolution) + 50;
 
@@ -1528,139 +1781,223 @@ void TempTask(void *parameter) {
       }
     }
 
-    if (sensors.readScratchPad(tempDeviceAddress, scratchPad)) {
+    // ALT (alternator) scratchpad: the original single-probe path, unchanged. Its failure exits go to
+    // altDone so the other probes are still read this cycle; an OTA start still leaves via cleanup.
+    if (altOk) {
+      if (sensors.readScratchPad(tempDeviceAddress, scratchPad)) {
 
-      // CHECK 1: CRC validation
-      uint8_t crc = OneWire::crc8(scratchPad, 8);
-      if (crc != scratchPad[8]) {
-        tempCrcFailCount++;
+        // CHECK 1: CRC validation
+        uint8_t crc = OneWire::crc8(scratchPad, 8);
+        if (crc != scratchPad[8]) {
+          tempCrcFailCount++;
 
-        // Immediate single retry
-        vTaskDelay(pdMS_TO_TICKS(2));
-        if (sensors.readScratchPad(tempDeviceAddress, scratchPad)) {
-          uint8_t crc2 = OneWire::crc8(scratchPad, 8);
-          if (crc2 != scratchPad[8]) {
-            goto cleanup;
+          // Immediate single retry
+          vTaskDelay(pdMS_TO_TICKS(2));
+          if (sensors.readScratchPad(tempDeviceAddress, scratchPad)) {
+            uint8_t crc2 = OneWire::crc8(scratchPad, 8);
+            if (crc2 != scratchPad[8]) {
+              goto altDone;
+            } else {
+              tempCrcRecoveredCount++;
+            }
           } else {
-            tempCrcRecoveredCount++;
+            tempReadFailCount++;
+            goto altDone;
+          }
+        }
+
+        // CHECK 2: Detect all-0xFF (disconnected sensor)
+        bool allFF = true;
+        for (int i = 0; i < 9; i++) {
+          if (scratchPad[i] != 0xFF) {
+            allFF = false;
+            break;
+          }
+        }
+        if (allFF) {
+          tempAllFFCount++;
+          lastValidTemp = -99;
+          sensorEnumerated = false;
+          goto altDone;
+        }
+
+        int16_t raw = (scratchPad[1] << 8) | scratchPad[0];
+        float tempC = raw / 16.0f;
+        float tempF = tempC * 1.8f + 32.0f;
+
+        // CHECK 3: Power-on signature (0x0550 = 85°C = 185°F)
+        if (raw == 0x0550) {
+          tempPowerOn85Count++;
+          goto altDone;
+        }
+
+        // CHECK 4: Verify resolution; auto-correct if EEPROM or reset changed it
+        if (scratchPad[4] != DS18B20_CFG_BYTE) {
+          tempResolutionFixCount++;
+          sensors.setResolution(tempDeviceAddress, resolution);
+          if (!sensors.requestTemperaturesByAddress(tempDeviceAddress)) {
+            tempRequestFailCount++;
+            goto altDone;
+          }
+
+          {
+            // Poll for conversion complete after resolution fix; same approach as primary wait.
+            unsigned long convStart2 = millis();
+            unsigned long convTimeout2 = sensors.millisToWaitForConversion(resolution) + 50;
+
+            while (!sensors.isConversionComplete()) {
+              vTaskDelay(pdMS_TO_TICKS(10));
+              lastTempTaskHeartbeat = millis();
+              if (otaInProgress) goto cleanup;
+
+              if (millis() - convStart2 > convTimeout2) {
+                tempRequestFailCount++;
+                goto altDone;
+              }
+            }
+          }
+
+          if (!sensors.readScratchPad(tempDeviceAddress, scratchPad)) {
+            tempRereadFailCount++;
+            goto altDone;
+          }
+          if (OneWire::crc8(scratchPad, 8) != scratchPad[8]) {
+            tempResolutionFixCrcFailCount++;
+            goto altDone;
+          }
+          // Recalculate from corrected scratchpad
+          raw = (scratchPad[1] << 8) | scratchPad[0];
+          tempC = raw / 16.0f;
+          tempF = tempC * 1.8f + 32.0f;
+        }
+
+        // CHECK 5: Sanity range
+        if (tempF > -50 && tempF < 300) {
+          unsigned long ageBeforeThisGoodRead = millis() - tempLastSuccessMillis;
+          tempReadSuccessCount++;
+          tempLastGoodF = tempF;
+          tempLastSuccessMillis = millis();
+          // Snapshot failure counters at this good read so a later staleness trip can report deltas.
+          tempFailSnapConn = tempConnectedFailCount;
+          tempFailSnapEnum = tempEnumerateFailCount;
+          tempFailSnapCrc = tempCrcFailCount;
+          tempFailSnapReq = tempRequestFailCount;
+          tempFailSnapRead = tempReadFailCount;
+          tempFailSnapAllFF = tempAllFFCount;
+
+          AlternatorTemperatureF = tempF;
+          lastValidTemp = tempF;
+          tempTaskHealthy = true;
+          thisReadSucceeded = true;
+          MARK_FRESH(IDX_ALTERNATOR_TEMP);
+          wmIgnUpdate(wmIgn_altTempF, AlternatorTemperatureF);  // ignition-cycle watermark
+
+          if (AlternatorTemperatureF > MaxAlternatorTemperatureF) {
+            pendingMaxTemp = AlternatorTemperatureF;
+            writeMaxTemp = true;
+          }
+          if (AlternatorTemperatureF > MaxAlternatorTemperatureF_AllTime) {
+            pendingMaxTempAllTime = AlternatorTemperatureF;
+            writeMaxTempAllTime = true;
           }
         } else {
-          tempReadFailCount++;
-          goto cleanup;
+          tempOutOfRangeCount++;
         }
+      } else {
+        tempReadFailCount++;
       }
+    }
 
-      // CHECK 2: Detect all-0xFF (disconnected sensor)
-      bool allFF = true;
-      for (int i = 0; i < 9; i++) {
-        if (scratchPad[i] != 0xFF) {
-          allFF = false;
-          break;
-        }
-      }
-      if (allFF) {
-        tempAllFFCount++;
-        lastValidTemp = -99;
-        sensorEnumerated = false;
-        goto cleanup;
-      }
-
-      int16_t raw = (scratchPad[1] << 8) | scratchPad[0];
-      float tempC = raw / 16.0f;
-      float tempF = tempC * 1.8f + 32.0f;
-
-      // CHECK 3: Power-on signature (0x0550 = 85°C = 185°F)
-      if (raw == 0x0550) {
-        tempPowerOn85Count++;
-        goto cleanup;
-      }
-
-      // CHECK 4: Verify resolution; auto-correct if EEPROM or reset changed it
-      if (scratchPad[4] != DS18B20_CFG_BYTE) {
-        tempResolutionFixCount++;
-        sensors.setResolution(tempDeviceAddress, resolution);
-        if (!sensors.requestTemperaturesByAddress(tempDeviceAddress)) {
-          tempRequestFailCount++;
-          goto cleanup;
-        }
-
-        {
-          // Poll for conversion complete after resolution fix; same approach as primary wait.
-          unsigned long convStart2 = millis();
-          unsigned long convTimeout2 = sensors.millisToWaitForConversion(resolution) + 50;
-
-          while (!sensors.isConversionComplete()) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            lastTempTaskHeartbeat = millis();
-            if (otaInProgress) goto cleanup;
-
-            if (millis() - convStart2 > convTimeout2) {
-              tempRequestFailCount++;
-              goto cleanup;
+altDone:
+    if (altOk) owMirrorAltResult(thisReadSucceeded, AlternatorTemperatureF);  // every ALT exit above lands here except the OTA goto cleanup
+    // Every other PRESENT probe in the registry, bound or not, so the assignment card shows live values.
+    // A role whose enable setting is 0 is read into the registry but does not touch its role global or
+    // freshness stamp. The ALT slot was handled above and never re-read here.
+    {
+      const int8_t altSlot = tempRoleSlot[TR_ALT];
+      for (uint8_t i = 0; i < owProbeCount; i++) {
+        if (!owProbes[i].present || altSlot == (int8_t)i) continue;
+        lastTempTaskHeartbeat = millis();
+        bool good = false;
+        bool absent = false;
+        float tempF = 0.0f;
+        if (sensors.readScratchPad(owProbes[i].addr, scratchPad)) {
+          bool allFF = true;
+          for (int b = 0; b < 9; b++) {
+            if (scratchPad[b] != 0xFF) { allFF = false; break; }
+          }
+          bool crcOk = !allFF && (OneWire::crc8(scratchPad, 8) == scratchPad[8]);
+          if (!allFF && !crcOk) {  // one in-place re-roll, same rationale as the ALT CRC retry
+            vTaskDelay(pdMS_TO_TICKS(2));
+            crcOk = sensors.readScratchPad(owProbes[i].addr, scratchPad) && (OneWire::crc8(scratchPad, 8) == scratchPad[8]);
+          }
+          if (allFF) {
+            absent = true;  // nothing answered this ROM: gone from the bus (all-0xFF never passes CRC, so it is tested first)
+          } else if (crcOk) {
+            int16_t raw = (scratchPad[1] << 8) | scratchPad[0];
+            if (raw != 0x0550) {  // 0x0550 = power-on 85C signature: skip this cycle
+              if (scratchPad[4] != DS18B20_CFG_BYTE) sensors.setResolution(owProbes[i].addr, resolution);  // this device only, no re-convert; the next cycle reads at 12-bit
+              tempF = (raw / 16.0f) * 1.8f + 32.0f;
+              good = (tempF > -50 && tempF < 300);
             }
           }
         }
-
-        if (!sensors.readScratchPad(tempDeviceAddress, scratchPad)) {
-          tempRereadFailCount++;
-          goto cleanup;
+        portENTER_CRITICAL(&owMux);
+        if (good) {
+          owProbes[i].lastF = tempF;
+          owProbes[i].lastGoodMs = millis();
+          owProbes[i].okCount++;
+        } else {
+          owProbes[i].failCount++;
+          if (absent) owProbes[i].present = false;
         }
-        if (OneWire::crc8(scratchPad, 8) != scratchPad[8]) {
-          tempResolutionFixCrcFailCount++;
-          goto cleanup;
+        portEXIT_CRITICAL(&owMux);
+        if (absent) sensorEnumerated = false;  // re-search next cycle, as the ALT all-0xFF path does; a noise glitch costs one cycle, not three
+        if (!good) continue;
+        if (tempRoleSlot[TR_BATT] == (int8_t)i) {
+          roleGood[TR_BATT] = true;
+          if (battTempProbeEnable == 1) {
+            BatteryTempProbeF = tempF;
+            MARK_FRESH(IDX_BATT_TEMP_PROBE);
+            wmIgnUpdate(wmIgn_battTempF, tempF);
+          }
         }
-        // Recalculate from corrected scratchpad
-        raw = (scratchPad[1] << 8) | scratchPad[0];
-        tempC = raw / 16.0f;
-        tempF = tempC * 1.8f + 32.0f;
+        if (tempRoleSlot[TR_EXTRA] == (int8_t)i) {
+          roleGood[TR_EXTRA] = true;
+          if (extraTempProbeEnable == 1) {
+            ExtraTempF = tempF;
+            MARK_FRESH(IDX_EXTRA_TEMP);
+            wmIgnUpdate(wmIgn_extraTempF, tempF);
+          }
+        }
       }
-
-      // CHECK 5: Sanity range
-      if (tempF > -50 && tempF < 300) {
-        unsigned long ageBeforeThisGoodRead = millis() - tempLastSuccessMillis;
-        tempReadSuccessCount++;
-        tempLastGoodF = tempF;
-        tempLastSuccessMillis = millis();
-        // Snapshot failure counters at this good read so a later staleness trip can report deltas.
-        tempFailSnapConn = tempConnectedFailCount;
-        tempFailSnapEnum = tempEnumerateFailCount;
-        tempFailSnapCrc = tempCrcFailCount;
-        tempFailSnapReq = tempRequestFailCount;
-        tempFailSnapRead = tempReadFailCount;
-        tempFailSnapAllFF = tempAllFFCount;
-
-        AlternatorTemperatureF = tempF;
-        lastValidTemp = tempF;
-        tempTaskHealthy = true;
-        thisReadSucceeded = true;
-        MARK_FRESH(IDX_ALTERNATOR_TEMP);
-        wmIgnUpdate(wmIgn_altTempF, AlternatorTemperatureF);  // ignition-cycle watermark
-
-        if (AlternatorTemperatureF > MaxAlternatorTemperatureF) {
-          pendingMaxTemp = AlternatorTemperatureF;
-          writeMaxTemp = true;
-        }
-        if (AlternatorTemperatureF > MaxAlternatorTemperatureF_AllTime) {
-          pendingMaxTempAllTime = AlternatorTemperatureF;
-          writeMaxTempAllTime = true;
-        }
-      } else {
-        tempOutOfRangeCount++;
-      }
-    } else {
-      tempReadFailCount++;
     }
 
 cleanup:
-    lastReadWasSuccess = thisReadSucceeded;
+    // No alternator role bound (multi-probe bus awaiting assignment, or a thermistor alternator with 1-Wire
+    // battery/extra probes only): nothing on this bus is expected to feed the alternator path, so the cycle
+    // keeps the normal 5 s cadence and the consecutive-failure alert stays quiet.
+    const bool altExpected = tempRoleAssigned[TR_ALT];
+    lastReadWasSuccess = thisReadSucceeded || !altExpected;
     lastTempRead = millis();
     lastTempTaskHeartbeat = millis();
+
+    // BATT/EXTRA re-enumeration streaks (ALT's is connFailStreak): a bound role with no good read for 3
+    // consecutive cycles forces a bus re-search. Never touches the cadence or the other roles.
+    for (int r = TR_BATT; r < TR_COUNT; r++) {
+      if (!tempRoleAssigned[r] || roleGood[r]) {
+        roleMissStreak[r] = 0;
+      } else if (++roleMissStreak[r] >= 3) {
+        roleMissStreak[r] = 0;
+        sensorEnumerated = false;
+      }
+    }
 
     // Alert on persistent sensor failure — 5 consecutive non-success reads
     {
       static uint8_t tempConsecFail = 0;
       static unsigned long lastTempFailAlert = 0;
-      if (thisReadSucceeded) {
+      if (thisReadSucceeded || !altExpected) {
         tempConsecFail = 0;
       } else {
         tempConsecFail++;

@@ -1,4 +1,4 @@
-// X Engineering Alternator Regulator
+// Xregulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -29,6 +29,10 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms);
 // Mode selection (pure functions)
 FieldControlMode selectFieldControlMode(const TickSnapshot &tick);
 FieldEventReason selectFieldEventReason(const TickSnapshot &tick);
+// Battery-temperature source chain (defined next to computeCvTempScale below)
+float batteryTempF(uint8_t *srcOut);
+bool tempProbeFresh(uint8_t idx);
+const char *battTempSrcName(uint8_t src);
 void updateProtectionCounters(FieldEventReason reason);
 // Sustained timer functions
 bool isTempSustainedWarning(uint32_t nowMs, float tempToUseF, float tempLimitF,
@@ -109,12 +113,16 @@ float clamp_f(float x, float lo, float hi) {
 // retired — see 2_functions.ino); the fit confidence record lives in the cvfit.csv download.
 
 // computeCvTempScale — battery-temperature gain derate factor (see the globals block in Xregulator.ino).
-// Board temp (ambientTemp, °F) is a proxy for battery temp; the battery's internal resistance — which IS
+// battTempActiveF (°F, the batteryTempF() source of this tick: probe / NMEA 2000 / VE.Direct / RV-C, else
+// the board temperature as a stand-in) is the battery temp; the battery's internal resistance — which IS
 // the CV plant gain K_dc — rises as it cools, so gains set at the commissioning temperature run too hot
 // when colder. Returns R(T_commission)/R(T_now): both ends go through cvResistanceRatio(), so the
 // saturation there — not a clamp on the ratio — is what bounds the result. That makes the bite point an
-// absolute temperature instead of a function of whatever the board happened to read when the fit was
-// applied. Returns 1.0 when disabled, never commissioned, or the proxy is stale — never amplifies blindly.
+// absolute temperature instead of a function of whatever the source happened to read when the fit was
+// applied. Returns 1.0 when disabled, never commissioned, or no source qualifies — never amplifies blindly.
+// Source CLASS rule: a measured source (1..4) and the board stand-in (5) read different temperatures for
+// the same pack, so the anchor only holds inside the class it was stamped in (CommissionTempSrc, 0 =
+// legacy stamp = board). A class change makes the derate inert (1.0, cvTempDerateInert) until the fit is re-run.
 // This is a Kp+Ki scale, NOT a λ/ω change — ω and ρ are held fixed.
 static const float CVTS_T_MIN_C = -40.0f, CVTS_T_MAX_C = 70.0f;   // BMP388 rated span; also the charging envelope
 static const float CVTS_WARM_RATIO = 0.5f;
@@ -133,19 +141,79 @@ static float cvResistanceRatio(float tC) {
   return clamp_f(expf(-c * (tC - 25.0f)), CVTS_R_HOT, CVTS_R_COLD);
 }
 
+// tempProbeFresh — idle-aware age gate for the battery / extra temperature feeds, the same shape as the
+// tempDataVeryStale rule in buildTickSnapshot: 20 s once the engine has been >= 200 RPM for 15 s, 90 s
+// otherwise (TempTask stretches its poll to 60 s with the engine off). A false result never cuts the
+// field — every consumer fails open or to neutral.
+bool tempProbeFresh(uint8_t idx) {
+  static uint32_t lastBelowRunRpmMs = 0;
+  uint32_t now = millis();
+  if (RPM < 200) lastBelowRunRpmMs = now;
+  bool running = (RPM >= 200) && ((uint32_t)(now - lastBelowRunRpmMs) >= 15000UL);
+  uint32_t ts = dataTimestamps[idx];
+  if (ts == 0) return false;
+  uint32_t age = (ts > now) ? 0 : (now - ts);   // a Core-0 stamp can lead this Core-1 clock read by a few ms
+  return age <= (running ? 20000UL : 90000UL);
+}
+
+// Source codes shared with CSV2 battTempActiveSrc and the UI:
+// 0 none, 1 probe, 2 NMEA 2000 (127508), 3 VE.Direct (T field), 4 RV-C (DC_SOURCE_STATUS_2), 5 board temperature
+float batteryTempF(uint8_t *srcOut) {
+  // Every gate is evaluated each call so tempProbeFresh's idle tracker keeps running whatever the selection.
+  bool okProbe = tempProbeFresh(IDX_BATT_TEMP_PROBE) && battTempProbeEnable == 1 && isfinite(BatteryTempProbeF);
+  bool okVe    = tempProbeFresh(IDX_VE_BATT_TEMP) && isfinite(VictronBattTempF);
+  bool okRvc   = tempProbeFresh(IDX_RVC_BATT_TEMP) && isfinite(rvcRxBattTempF);
+  bool okN2k   = !IS_STALE(IDX_N2K_BATT) && isfinite(n2kRxBattTempF);
+  bool okBoard = !IS_STALE(IDX_AMBIENT_TEMP) && isfinite(ambientTemp);
+  uint8_t src = 0;
+  float t = NAN;
+  switch (battTempSource) {
+    case 0:  // Auto: first qualifying measurement, the board only as an opt-in stand-in
+      if (okProbe)      { src = 1; t = BatteryTempProbeF; }
+      else if (okN2k)   { src = 2; t = n2kRxBattTempF; }
+      else if (okVe)    { src = 3; t = VictronBattTempF; }
+      else if (okRvc)   { src = 4; t = rvcRxBattTempF; }
+      else if (okBoard && battTempProxyEnable == 1) { src = 5; t = ambientTemp; }
+      break;
+    case 1: if (okProbe) { src = 1; t = BatteryTempProbeF; } break;
+    case 2: if (okN2k)   { src = 2; t = n2kRxBattTempF; }   break;
+    case 3: if (okVe)    { src = 3; t = VictronBattTempF; } break;
+    case 4: if (okRvc)   { src = 4; t = rvcRxBattTempF; }   break;
+    case 5: if (okBoard) { src = 5; t = ambientTemp; }      break;
+    default: break;  // 6 = none
+  }
+  if (srcOut) *srcOut = src;
+  return t;
+}
+
+const char *battTempSrcName(uint8_t src) {
+  switch (src) {
+    case 1: return "probe";
+    case 2: return "NMEA 2000";
+    case 3: return "VE.Direct";
+    case 4: return "RV-C";
+    case 5: return "board temperature";
+    default: return "none";
+  }
+}
+
 float computeCvTempScale() {
+  cvTempDerateInert = false;
   if (!battTempDerateEnable) return 1.0f;
   if (isnan(CommissionTempF)) return 1.0f;
-  if (IS_STALE(IDX_AMBIENT_TEMP) || !isfinite(ambientTemp)) return 1.0f;
-  float tCommC = clamp_f((CommissionTempF - 32.0f) / 1.8f, CVTS_T_MIN_C, CVTS_T_MAX_C);
-  float tNowC  = clamp_f((ambientTemp     - 32.0f) / 1.8f, CVTS_T_MIN_C, CVTS_T_MAX_C);
+  if (battTempActiveSrc == 0 || !isfinite(battTempActiveF)) return 1.0f;
+  bool nowMeasured  = (battTempActiveSrc >= 1 && battTempActiveSrc <= 4);
+  bool commMeasured = (CommissionTempSrc >= 1 && CommissionTempSrc <= 4);
+  if (nowMeasured != commMeasured) { cvTempDerateInert = true; return 1.0f; }
+  float tCommC = clamp_f((CommissionTempF  - 32.0f) / 1.8f, CVTS_T_MIN_C, CVTS_T_MAX_C);
+  float tNowC  = clamp_f((battTempActiveF - 32.0f) / 1.8f, CVTS_T_MIN_C, CVTS_T_MAX_C);
   // Asymmetric: a boost raises loop gain, and an over-large coefficient inflates it further, so the boost
   // is capped tighter than the cut. It only bites below ~0°C commissioning.
   return clamp_f(cvResistanceRatio(tCommC) / cvResistanceRatio(tNowC), CVTS_SCALE_MIN, CVTS_SCALE_MAX);
 }
 
 // recomputeCvGains — derive VoltageKp_active/VoltageKi_active from the gain mode + measured stiffness.
-// Call after any related setting change, on board-temp drift, and at boot. Computed in 12V-equivalent
+// Call after any related setting change, on battery-temp drift (board or measured source), and at boot. Computed in 12V-equivalent
 // space (same numbers on 12/24/36/48 V), then ×vNorm bakes back to pack space; the battery-temp derate is
 // the final multiplier in BOTH modes (the plant shifts with temperature however the gains were chosen).
 void recomputeCvGains() {
@@ -6221,6 +6289,7 @@ const char *reasonToString(FieldEventReason r) {
     case REASON_RPM_TOO_LOW: return "RPM_TOO_LOW";
     case REASON_CURRENT_STALE: return "CURRENT_STALE";
     case REASON_BATTERY_TOO_COLD: return "Battery too cold to charge";
+    case REASON_BATTERY_TOO_HOT: return "Battery too hot to charge";
     case REASON_COMMISSION_REST: return "Commissioning idle (field resting)";
     case REASON_TACH_IMPLAUSIBLE: return "TACH_IMPLAUSIBLE";
     case REASON_SOLAR_PAUSE: return "SOLAR_PAUSE";
@@ -6279,11 +6348,18 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
     return MODE_CRITICAL_RAMP;
   }
 
-  // PRIORITY 3.5: COLD-CHARGE LOCKOUT (opt-in lithium protection — board temp proxy below floor).
+  // PRIORITY 3.5: COLD-CHARGE LOCKOUT (opt-in lithium protection — battery temperature below floor).
   // Graceful ramp-to-zero + lockout (not an instantaneous emergency, so no hard chop); the field
   // settle-cut path finishes the disconnect. Below MANUAL (manual stays unrestricted), so it only
   // applies in AUTO — mirrors selectFieldEventReason. Hysteresis lives in buildTickSnapshot.
   if (tick.batteryTooCold) {
+    return MODE_WARNING_RAMP_AND_LOCKOUT;
+  }
+
+  // PRIORITY 3.6: HOT-CHARGE LOCKOUT (opt-in — a MEASURED battery temperature above MaxChargeTempF; the
+  // board stand-in never drives it). Same graceful ramp + lockout as the cold check, below MANUAL for the
+  // same reason — mirrors selectFieldEventReason. Hysteresis and the source gate live in buildTickSnapshot.
+  if (tick.batteryTooHot) {
     return MODE_WARNING_RAMP_AND_LOCKOUT;
   }
 
@@ -6365,6 +6441,9 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
 
   // Priority 3.5: Cold-charge lockout (opt-in lithium protection). Mirrors selectFieldControlMode.
   if (tick.batteryTooCold) return REASON_BATTERY_TOO_COLD;
+
+  // Priority 3.6: Hot-charge lockout (opt-in, measured battery source only). Mirrors selectFieldControlMode.
+  if (tick.batteryTooHot) return REASON_BATTERY_TOO_HOT;
 
   // Priority 4: Critical (auto mode only)
   if (tick.tempDataVeryStale && !tick.ignoreTemperature) return REASON_TEMP_STALE;
@@ -6578,6 +6657,7 @@ bool shouldCutGPIO4AfterSettle(FieldEventReason reason, uint32_t nowMs, float ap
     case REASON_HARD_OVERCURRENT:
     case REASON_RPM_TOO_LOW:
     case REASON_BATTERY_TOO_COLD:   // cold-charge lockout: ramp to zero, then cut once settled
+    case REASON_BATTERY_TOO_HOT:    // hot-charge lockout: same path
       return true;
 
     // Temperature sustained: cut after 2-minute timeout
@@ -6745,20 +6825,61 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // Mirror to global for legacy displays
   TempToUse = tick.tempToUseF;
 
+  // Battery temperature: one batteryTempF() call per tick. The globals mirror it for CSV2, the alarm
+  // block, the CV derate and the DCIR record.
+  tick.battTempF = batteryTempF(&tick.battTempSrc);
+  battTempActiveF = tick.battTempF;
+  battTempActiveSrc = tick.battTempSrc;
+
   // Cold-charge lockout: latched with ColdChargeHysteresisF to stop chatter at the threshold.
-  // Fail-open on a stale/NaN board sensor so a dead BMP388 can't brick charging.
+  // Fail-open when no battery temperature source qualifies (NAN) so a dead sensor can't brick charging.
   {
     static bool coldLatched = false;
-    if (coldChargeLockoutEnable && !IS_STALE(IDX_AMBIENT_TEMP) && isfinite(ambientTemp)) {
-      if (ambientTemp < MinChargeTempF) {
+    if (coldChargeLockoutEnable && isfinite(tick.battTempF)) {
+      if (tick.battTempF < MinChargeTempF) {
         coldLatched = true;
-      } else if (ambientTemp >= MinChargeTempF + ColdChargeHysteresisF) {
+      } else if (tick.battTempF >= MinChargeTempF + ColdChargeHysteresisF) {
         coldLatched = false;
       }
     } else {
       coldLatched = false;
     }
     tick.batteryTooCold = coldLatched;
+  }
+
+  // Hot-charge lockout: mirror of the cold latch. Only a measured battery source (1..4) may drive it —
+  // the board stand-in runs warmer than the pack and would lock charging out on a warm day.
+  {
+    static bool hotLatched = false;
+    if (hotChargeLockoutEnable == 1 && tick.battTempSrc >= 1 && tick.battTempSrc <= 4 && isfinite(tick.battTempF)) {
+      if (tick.battTempF > MaxChargeTempF) {
+        hotLatched = true;
+      } else if (tick.battTempF <= MaxChargeTempF - HotChargeHysteresisF) {
+        hotLatched = false;
+      }
+    } else {
+      hotLatched = false;
+    }
+    tick.batteryTooHot = hotLatched;
+  }
+
+  // Battery temperature moved >= 5 F, or its source class (measured / board / none) changed -> refresh the
+  // CV gain derate, at most once per 30 s. Mirrors the BMP388 drift trigger in 5_functions.ino;
+  // recomputeCvGains is arithmetic only, so it is safe on the control core.
+  {
+    static float    lastDerateTempF = NAN;
+    static uint8_t  lastDerateClass = 0;
+    static uint32_t lastDerateMs = 0;
+    uint8_t cls = (tick.battTempSrc >= 1 && tick.battTempSrc <= 4) ? 1 : ((tick.battTempSrc == 5) ? 2 : 0);
+    bool moved = isfinite(tick.battTempF)
+                 && (isnan(lastDerateTempF) || fabsf(tick.battTempF - lastDerateTempF) >= 5.0f);
+    if (battTempDerateEnable && !isnan(CommissionTempF) && (moved || cls != lastDerateClass)
+        && (lastDerateMs == 0 || (uint32_t)(currentMillis - lastDerateMs) >= 30000UL)) {  // 0 = never ran: the first trigger is immediate
+      lastDerateTempF = tick.battTempF;
+      lastDerateClass = cls;
+      lastDerateMs = currentMillis;
+      recomputeCvGains();
+    }
   }
 
   // Commissioning idle-rest: session IN_PROGRESS + the wizard dialog still pinging + no commissioning

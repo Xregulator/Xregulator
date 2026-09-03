@@ -64,3 +64,13 @@ derived image asset is likewise made available under CC BY-SA 3.0.
   copied. (Note: that repository's PATENTS.md reserves patent rights over its *cloud
   connectivity / dual-alternator / multi-source coordination* features — none of which this
   decode uses.)
+
+### RV-C producer (transmit)
+
+- Every DGN composer is written from the published RV-C application layer (RVIA, Full
+  Application Layer revision of 31 July 2025). **Al Thomason**'s `RV-C` library
+  (<https://github.com/thomasonw/RV-C>) is GPL-3.0 and was read as *documentation only*, for two
+  conventions it proposed ahead of ratification: the charger-type nibble in the upper 4 bits of
+  the charger instance byte (3 = engine alternator, which is what a WS500 follows), and the
+  CHARGER_STATUS_2 extension that the 2025 revision has since ratified as DGN 1FEA3h. No code
+  copied — the licenses are incompatible, and the byte layouts come from the specification.

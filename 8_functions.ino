@@ -757,6 +757,16 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "cvTestSlewMode", NK_cvTestSlewMode, 1 },
   { "coldChargeLockoutEnable", NK_coldChargeLockoutEnable, 1 },
   { "MinChargeTempF", NK_MinChargeTempF, 1 },
+  { "battTempProbeEnable", NK_battTempProbeEnable, 1 },
+  { "extraTempProbeEnable", NK_extraTempProbeEnable, 1 },
+  { "battTempSource", NK_battTempSource, 1 },
+  { "battTempProxyEnable", NK_battTempProxyEnable, 1 },
+  { "hotChargeLockoutEnable", NK_hotChargeLockoutEnable, 1 },
+  { "MaxChargeTempF", NK_MaxChargeTempF, 1 },
+  { "extraTempAlarmHiEnable", NK_extraTempAlarmHiEnable, 1 },
+  { "extraTempAlarmHiF", NK_extraTempAlarmHiF, 1 },
+  { "extraTempAlarmLoEnable", NK_extraTempAlarmLoEnable, 1 },
+  { "extraTempAlarmLoF", NK_extraTempAlarmLoF, 1 },
   { "battTempDerateEnable", NK_battTempDerateEn, 1 },
   { "battTempCoeff", NK_battTempCoeff, 1 },
   { "VoltageKd", NK_VoltageKd, 1 },
@@ -918,6 +928,9 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "n2kAltTempEnable", NK_n2kAltTempEn, 1 },
   { "n2kTempInstance", NK_n2kTempInst, 1 },
   { "n2kTempSource", NK_n2kTempSrc, 1 },
+  { "n2kExtraTempEnable", NK_n2kExtraTempEnable, 1 },
+  { "n2kExtraTempInstance", NK_n2kExtraTempInstance, 1 },
+  { "n2kExtraTempSource", NK_n2kExtraTempSource, 1 },
   { "n2kChgrEnable", NK_n2kChgrEn, 1 },
   { "n2kChgrInstance", NK_n2kChgrInst, 1 },
   { "n2kChgrCfgEnable", NK_n2kChgrCfgEn, 1 },
@@ -1004,6 +1017,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "cvPlantKa", NK_cvPlantKa, 1 },
   { "cvPlantKb", NK_cvPlantKb, 1 },
   { "CommissionTempF", NK_CommissionTempF, 1 },
+  { "CommissionTempSrc", NK_CommissionTempSrc, 3 },
   { "CommissionEpoch", NK_CommissionEpoch, 3 },
   { "systemIDPlantTauMs", NK_sysidPlantTau, 1 },
   { "fieldDecayTauMs", NK_fieldDecayTau, 1 },
@@ -1079,6 +1093,12 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "faCalOffA", NK_faCalOffA, 3 },
   { "altbaseSec", NK_altbaseSec, 3 },
   { "altRefSrc", NK_altRefSrc, 3 },
+  // 1-Wire role bindings (ROM codes as 16-char hex): this board's own probes, never another boat's.
+  // Written by the owAssignAlt/Batt/Extra /get actions (a role loop, invisible to config_drift_check.py's
+  // literal hasParam scan), so these names are listed in its MANIFEST_NON_PARAM.
+  { "owAddrAlt", NK_owAddrAlt, 3 },
+  { "owAddrBatt", NK_owAddrBatt, 3 },
+  { "owAddrExtra", NK_owAddrExtra, 3 },
 };
 static const size_t CONFIG_MANIFEST_COUNT = sizeof(CONFIG_MANIFEST)/sizeof(CONFIG_MANIFEST[0]);
 
@@ -1718,7 +1738,7 @@ void bhComputeDcir() {
   r.epoch      = timeIsSynced ? (timeBase + (millis() - timeBaseMillis) / 1000) : 0;
   r.dcir_mOhm  = Rsum / Rn;
   r.soh_pct    = (bhCapCount > 0) ? bhCapRing[(bhCapHead - 1 + bhCapCap) % bhCapCap].capPct : NAN;
-  r.boardTempF = ambientTemp;                          // board-temp proxy (°F)
+  r.boardTempF = isfinite(battTempActiveF) ? battTempActiveF : ambientTemp;  // battery temperature when a source qualifies, else the board (°F); field name unchanged
   r.soc_pct    = SOC_percent / 100.0f;
   r.battV      = IBV;
   r.stepLowA   = bhStepLowA;
