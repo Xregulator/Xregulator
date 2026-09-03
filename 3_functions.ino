@@ -66,11 +66,12 @@ enum Csv1Index {
   CSV1_huntDerate,       // hunt-governor live Ki derate (×100; 100 = full gain)
   CSV1_huntFreqHz,       // hunt-governor last confirmed wobble frequency (Hz ×100; 0 = none seen this session). Rides CSV1 rather than CSV4 so the Diag live row can never show a fresh derate beside a stale frequency
   CSV1_huntState,        // hunt-governor state: 0 watching (gain follows the pocket map), 1 testing a current-loop gain (Ki) cut, 3 cooldown after a failed test, 4 testing with the voltage damper (D-term) paused (2 unused since v2)
+  CSV1_rpmCeilingAmps,   // RPM-table current ceiling this tick (A ×100) — the header Limit panel's "current limit at this RPM"
 
   CSV1_sessionId,        // boot identity — same value in every channel this boot; proves a cached block is from this run
   CSV1_sendMs,           // millis() when this payload was built; a consumer ages every other channel against this one
 
-  CSV1_FIELD_COUNT  // = 51
+  CSV1_FIELD_COUNT  // = 52
 };
 
 enum Csv2Index {
@@ -9708,7 +9709,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason; +4: cvPTerm, cvIterm, cvKdTrim, cvKdFiltV; +1: huntDerate; +2: huntFreqHz, huntState
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // +2: mExcessEmaPeak, iExcessThreshMin; +1: fieldEventReason; +4: cvPTerm, cvIterm, cvKdTrim, cvKdFiltV; +1: huntDerate; +2: huntFreqHz, huntState; +1: rpmCeilingAmps
                                "%u,%u",  // +2: sessionId, sendMs
 
                                CSV1_FIELD_COUNT,
@@ -9762,6 +9763,7 @@ void SendWifiData() {
                                SafeInt(g_huntDerate, 100),     // CSV1_huntDerate — hunt-governor live Ki derate (×100)
                                SafeInt(g_huntFreqHz, 100),     // CSV1_huntFreqHz — last confirmed wobble frequency (Hz ×100)
                                (int)g_huntState,               // CSV1_huntState — 0 watching, 1 testing a current-loop gain (Ki) cut, 3 cooldown, 4 testing with the voltage damper (D-term) paused (2 unused since v2)
+                               SafeInt(g_I_cap, 100),          // CSV1_rpmCeilingAmps — RPM-table current ceiling this tick (A ×100)
                                (unsigned)g_sessionId,          // CSV1_sessionId
                                (unsigned)millis()              // CSV1_sendMs — the reference clock every other channel is aged against
     );

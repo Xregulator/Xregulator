@@ -459,6 +459,7 @@ const CSV1_FIELDS = [
     "huntDerate",        // hunt-governor live Ki derate (×100; 100 = full gain)
     "huntFreqHz",        // hunt-governor last confirmed wobble frequency (Hz ×100; 0 = none this session)
     "huntState",         // 0 watching, 1 testing a Ki cut, 3 cooldown, 4 testing with the D term paused (2 unused since v2)
+    "rpmCeilingAmps",    // RPM-table current ceiling this tick (A ×100) — header Limit panel
     "sessionId",         // device boot identity, same in every channel this boot
     "sendMs",            // device millis() when this payload was built — the reference clock the other channels are aged against
 ];
@@ -1087,7 +1088,7 @@ const FT_BLAME_NAMES = [
     "CH1 Stats", "WiFi Send", "WiFi Check", "Time Sync",
     "Sensor History", "Upload Buffered", "Config Payload",
     "LT Ring Flush", "Ripple Flush", "Fast Alt Drain", "Fault Detector",
-    "Zero-Drift Log", "Batt Health Save", "Keep-Alive Save", "N2K TX", "DVCC Brain",
+    "Zero-Drift Log", "Batt Health Save", "Keep-Alive Save", "N2K TX", "DVCC Brain", "Solar Ledger",
     "N2K RX", "NMEA 0183",
 ];
 
@@ -1099,8 +1100,9 @@ function renderLoopBlame(data) {
     const parts = [];
     for (const [ix, us] of [[data.blameIdx1, data.blameUs1], [data.blameIdx2, data.blameUs2], [data.blameIdx3, data.blameUs3]]) {
         const i = Number(ix);
-        if (!Number.isFinite(i) || i < 0 || i >= FT_BLAME_NAMES.length) continue;
-        parts.push(FT_BLAME_NAMES[i] + ' ' + (Number(us) / 1000).toFixed(1));
+        if (!Number.isFinite(i) || i < 0) continue;
+        const name = (i < FT_BLAME_NAMES.length) ? FT_BLAME_NAMES[i] : ('ft#' + i);
+        parts.push(name + ' ' + (Number(us) / 1000).toFixed(1));
     }
     el.textContent = parts.length ? parts.join(', ') + ' ms' : 'n/a';
 }
@@ -8285,6 +8287,7 @@ function updateAllEchosOptimized(data) {
 
     // Re-render any open "s" signal-info boxes so their embedded live values track the fresh echoes
     sinfoRefreshOpen();
+    try { whyPanelRefreshOpen(); } catch (e) { }   // Limit panel reads the limit settings from these echoes
 
     return updatesCount;
 };
@@ -14253,9 +14256,13 @@ function updateTogglesFromData(data) {
         updateCheckbox("InvertAltAmps_checkbox", data.InvertAltAmps, "InvertAltAmps");
         updateCheckbox("InvertBattAmps_checkbox", data.InvertBattAmps, "InvertBattAmps");
         updateCheckbox("BatteryShuntPresent_checkbox", data.BatteryShuntPresent, "BatteryShuntPresent");
-        // Single point that drives the whole no-shunt UI hide: body.no-batt-current gates every
-        // .req-batt-current container (styles.css). Only touch it when the echo is actually present.
+        // Single point that drives the whole no-shunt UI: body.no-batt-current greys every
+        // .gate-batt-current setting and hides every .req-batt-current readout (styles.css).
+        // Only touch it when the echo is actually present.
         if ('BatteryShuntPresent' in data) document.body.classList.toggle('no-batt-current', String(data.BatteryShuntPresent) === '0' || (parseFloat(data.ShuntResistanceMicroOhm) || 0) <= 0);  // mirror firmware HAS_BATT_SHUNT
+        // Same shape for the Extra probe: its alarms live in Setup > Alarms and grey out there
+        // while the probe is off, instead of only existing when it is on.
+        if ('extraTempProbeEnable' in data) document.body.classList.toggle('no-extra-temp', String(data.extraTempProbeEnable) === '0');
         updateCheckbox("IgnitionOverride_checkbox", data.IgnitionOverride, "IgnitionOverride");  // unchecked = Auto (0/2), checked = Force On (1)
         updateCheckbox("TempSource_checkbox", data.TempSource, "TempSource");
         updateCheckbox("AlarmLatchEnabled_checkbox", data.AlarmLatchEnabled, "AlarmLatchEnabled");
@@ -14317,8 +14324,6 @@ function updateTogglesFromData(data) {
             if (!(af && /^tuningWaveform_btn/.test(af.id || ''))) syncTuningWaveformUI(data.tuningWaveform);
         }
         // WiFi Napping only applies in Client mode (a SoftAP can't sleep) — hide the row in AP mode.
-        const napRow = document.getElementById("wifiNapEnabled_row");
-        if (napRow) napRow.style.display = (window._lastKnownMode === 1) ? "none" : "";  // 1 = MODE_AP
         updateCloudStatus();
         if (data.CloudFeatures !== undefined) {
             updateCloudFeaturesTabVisibility(data.CloudFeatures === 1);
@@ -14498,16 +14503,16 @@ function updateCvGainModeUI(data) {
     syncCvDependentVis();
 }
 
-// Show/hide the fields that only matter when their master toggle is On, so the panel never
-// shows an inert knob. The derate coefficient + status are meaningless unless
-// battTempDerateEnable (computeCvTempScale returns 1.0 when off). Driven off the live
-// checkbox state (set by updateCheckbox / handleUserToggle just before this runs).
+// Grey the fields that only matter when their master toggle is On, so the panel never offers a
+// live but inert knob — and never hides one either. The derate coefficient + status are
+// meaningless unless battTempDerateEnable (computeCvTempScale returns 1.0 when off). Driven off
+// the live checkbox state (set by updateCheckbox / handleUserToggle just before this runs).
 // (The CV D-term knobs live on the CV tuning tab and stay visible; the D term itself
 // is gated by cvHelpersEnabled in firmware.)
 function syncCvDependentVis() {
     const derate = document.getElementById('battTempDerateEnable_checkbox');
     const dd = document.getElementById('cvDerateDetailBlock');
-    if (dd && derate) dd.style.display = derate.checked ? '' : 'none';
+    if (dd && derate) dd.classList.toggle('is-gated', !derate.checked);
 }
 
 // Live "what Set will apply" preview under the Aggressiveness (α) box — typed α if editing, else the
@@ -14631,11 +14636,15 @@ let _owSig = null;         // id:role:present signature of the rendered rows; nu
 let _owBusy = false;       // a /tempSensors fetch is in flight
 let _owScanUntilMs = 0;    // "Scanning" shown until this time after a scan or assignment request
 
+// Two consumers now: the identification table in Setup > Temperature and the per-probe
+// ok/fail tallies in Live Data > ESP32. Poll while either is on screen.
 function owTabVisible() {
-    const tab = document.getElementById('settings-temperature');
-    const main = document.getElementById('settings');
-    return !!(tab && main && tab.classList.contains('active') && main.classList.contains('active')
-        && document.visibilityState !== 'hidden');
+    if (document.visibilityState === 'hidden') return false;
+    const on = (tabId, mainId) => {
+        const t = document.getElementById(tabId), m = document.getElementById(mainId);
+        return !!(t && m && t.classList.contains('active') && m.classList.contains('active'));
+    };
+    return on('settings-temperature', 'settings') || on('livedata-esp32', 'livedata');
 }
 function owPollStart() {
     setTrackedInterval(() => { if (owTabVisible()) owPollNow(); }, 5000);
@@ -14661,7 +14670,30 @@ function owFmtAge(s) {
     if (n < 7200) return Math.round(n / 60) + ' min';
     return (n / 3600).toFixed(1) + ' h';
 }
+// Per-probe read tallies, shown in Live Data > ESP32 beside the bus-wide DS18B20 counters.
+// Rebuilt whole on every poll: it is at most a handful of rows and holds no open controls.
+let _owHealthSig = null;
+function owRenderHealth(j) {
+    const body = document.getElementById('owHealthTableBody');
+    if (!body || !j) return;
+    const probes = Array.isArray(j.probes) ? j.probes : [];
+    const html = !probes.length
+        ? '<tr><td colspan="4" class="ow-empty">No temperature probes found on the bus.</td></tr>'
+        : probes.map(p => {
+            const id = String(p.id || '').toLowerCase();
+            const role = Number(p.role);
+            const roleTxt = (role >= 0 && role < OW_ROLE_NAMES.length) ? OW_ROLE_NAMES[role] : 'Unassigned';
+            return '<tr' + (p.present ? '' : ' class="ow-absent"') + '>'
+                + '<td title="' + _cfgEsc(id) + '"><span class="ow-serial">' + _cfgEsc(id.slice(-6).toUpperCase()) + '</span>'
+                + (p.present ? '' : '<span class="ow-absent-tag">not on bus</span>') + '</td>'
+                + '<td>' + roleTxt + '</td>'
+                + '<td>' + (p.ok | 0) + '</td><td>' + (p.fail | 0) + '</td></tr>';
+        }).join('');
+    if (html !== _owHealthSig) { _owHealthSig = html; body.innerHTML = html; }
+}
+
 function owRender(j) {
+    owRenderHealth(j);
     const body = document.getElementById('owProbeTableBody');
     if (!body || !j) return;
     const probes = Array.isArray(j.probes) ? j.probes : [];
@@ -14670,7 +14702,7 @@ function owRender(j) {
     if (sig !== _owSig) {
         _owSig = sig;
         if (!probes.length) {
-            body.innerHTML = '<tr><td colspan="5" class="ow-empty">No temperature probes found on the bus. Check the probe wiring, then press Scan.</td></tr>';
+            body.innerHTML = '<tr><td colspan="4" class="ow-empty">No temperature probes found on the bus. Check the probe wiring, then press Scan.</td></tr>';
         } else {
             body.innerHTML = probes.map(p => {
                 const id = String(p.id || '').toLowerCase();
@@ -14680,7 +14712,7 @@ function owRender(j) {
                 return '<tr data-ow-id="' + _cfgEsc(id) + '"' + (p.present ? '' : ' class="ow-absent"') + '>'
                     + '<td title="' + _cfgEsc(id) + '"><span class="ow-serial">' + _cfgEsc(id.slice(-6).toUpperCase()) + '</span>'
                     + (p.present ? '' : '<span class="ow-absent-tag">not on bus</span>') + '</td>'
-                    + '<td class="ow-temp"></td><td class="ow-age"></td><td class="ow-okfail"></td>'
+                    + '<td class="ow-temp"></td><td class="ow-age"></td>'
                     + '<td><select class="ow-role-sel" onchange="owAssignRole(this)">' + opts + '</select></td></tr>';
             }).join('');
         }
@@ -14694,7 +14726,6 @@ function owRender(j) {
         const tF = (p.tempF === null || p.tempF === undefined) ? NaN : Number(p.tempF);
         setCell('ow-temp', Number.isFinite(tF) ? toDisplayTemp(tF).toFixed(1) + ' ' + lbl : '—');
         setCell('ow-age', owFmtAge(p.ageS));
-        setCell('ow-okfail', (p.ok | 0) + ' / ' + (p.fail | 0));
     }
     const warn = document.getElementById('owRoleWarn');
     if (warn) {
@@ -15617,6 +15648,9 @@ window.addEventListener("load", function () {
             // Wind dial + trend plot: cache the fast (CSV1) wind series, drive the dial.
             try { windLiveOnCsv1(data); } catch (e) { }
 
+            // Header Limit panel: stamp CSV1 freshness, re-render while open.
+            try { whyPanelOnCsv1(data); } catch (e) { }
+
             // CV plant-fit (commissioning stage 6): capture {t, battery voltage, measured amps} while a fit runs.
             try { cvFitOnCsv1(data); } catch (e) { }
 
@@ -15677,19 +15711,13 @@ window.addEventListener("load", function () {
                 updateCloudStatus();
                 // Client-mode-only rows (STA signal/disconnects, cloud upload age, Upload Now)
                 // are meaningless when the regulator IS the access point — hide them there.
-                if (window._apRowsAppliedMode !== data.currentMode) {
-                    window._apRowsAppliedMode = data.currentMode;
-                    const ap = (Number(data.currentMode) === 1);  // 1 = MODE_AP
-                    document.querySelectorAll('.ap-hide-row').forEach(el => { el.style.display = ap ? 'none' : ''; });
-                    document.querySelectorAll('.ap-hide-inline').forEach(el => { el.style.display = ap ? 'none' : 'inline'; });
-                    // .ap-only-row is the inverse — shown ONLY in AP mode. Setup > Solar uses both:
-                    // the forecast block cannot be fetched without internet and hides, its offline
-                    // note takes that slot, and the manual position entry, the "Use automatic GPS"
-                    // clear button and the array settings stay reachable (a stale manual position
-                    // has no other UI escape). A pause left over from the last fetch releases itself
-                    // in firmware once the forecast goes stale (analyzeWeatherMode).
-                    document.querySelectorAll('.ap-only-row').forEach(el => { el.style.display = ap ? '' : 'none'; });
-                }
+                // body.ap-mode drives every internet-dependent control: .gate-ap greys them and
+                // .gate-note-ap prints the reason (styles.css). .ap-only-row is the inverse — the
+                // Solar offline note, shown ONLY here. Nothing is hidden: the manual position entry,
+                // the "Use automatic GPS" clear button and the array settings all stay reachable
+                // (a stale manual position has no other UI escape). A pause left over from the last
+                // fetch releases itself in firmware once the forecast goes stale (analyzeWeatherMode).
+                document.body.classList.toggle('ap-mode', Number(data.currentMode) === 1);
             }
             window._debugData = data;
 
@@ -15897,22 +15925,6 @@ window.addEventListener("load", function () {
             }
 
             // One-time check to hide tabs in AP mode
-            if (typeof window.tabsProcessed === 'undefined') {
-                window.tabsProcessed = false;
-            }
-
-            if (!window.tabsProcessed && data.currentMode !== undefined) {
-                window.tabsProcessed = true;
-
-                // MODE_AP = 1, hide internet-dependent features
-                if (data.currentMode === 1) {
-                    const softwareTab = document.querySelector('.sub-tab[onclick*="softwareupdate"]');
-                    if (softwareTab) {
-                        softwareTab.style.display = 'none';
-                    }
-                }
-            }
-
             if (!settingsUnlocked) {
                 document.getElementById('settings-section').classList.add("locked");
             }
@@ -15965,6 +15977,7 @@ window.addEventListener("load", function () {
             noteStreamRx('csv2');
             renderBattTempDerate();   // live battery temp + applied derate scale arrive on CSV2
             renderBattTempReadouts(data);
+            try { whyPanelRefreshOpen(); } catch (e) { }   // Limit panel: BMS state/limits + thermal derate ride CSV2
             renderLoopBlame(data);    // worst field-on pass attribution line
             renderImuInstallWarning(data.imuInstallCode);
             // Active RPM row highlight in the cap/learning table — currentRPMTableIndex
@@ -17049,7 +17062,7 @@ window.addEventListener("load", function () {
                 if (card) card.style.opacity = op;
                 // Reset control is only meaningful while the untrusted latch is set
                 const rst = document.getElementById('dvccReset_row');
-                if (rst) { const d = (st === 5) ? '' : 'none'; if (rst.style.display !== d) rst.style.display = d; }
+                if (rst) rst.classList.toggle('is-gated', st !== 5);
 
                 // Per-dialect cards (Victron CAN / RV-C). Only the selected dialect is decoded at
                 // all, so its card carries the reception evidence and the other says plainly that
@@ -17315,6 +17328,7 @@ window.addEventListener("load", function () {
                 window._ctrlLimiter = Number(data.ctrlLimiter);
                 window._ctrlLimiterAtMs = performance.now();
                 if (window.sensorAges) updateHeaderLimiterColors(window.sensorAges);
+                try { whyPanelRefreshOpen(); } catch (e) { }   // Limit panel headline follows the limiter code
             }
 
             // Sole gLastChargeStage source — CSV2's copy is a stale pre-built snapshot that could
@@ -19104,36 +19118,25 @@ function updateCloudStatus() {
     set('perf-cloud-status', (typeof perfLive !== 'undefined') ? perfLive.syncAgoS : null);
 }
 
+// Cloud off used to HIDE this tab, which read as "my regulator doesn't have that feature".
+// It now stays visible and greyed; body.cloud-off swaps its panels for the .gate-note-cloud
+// explanation (styles.css), so landing on it is informative instead of a wall of failing iframes.
 function updateCloudFeaturesTabVisibility(enabled) {
+    document.body.classList.toggle('cloud-off', !enabled);
     const cloudTab = document.querySelector('.main-tab[onclick*="cloudfeatures"]');
-    if (cloudTab) {
-        cloudTab.style.display = enabled ? '' : 'none';
-
-        // If hiding and currently on Cloud Features tab, switch to gauges
-        if (!enabled) {
-            const cloudTabContent = document.getElementById('cloudfeatures');
-            if (cloudTabContent && cloudTabContent.classList.contains('active')) {
-                showMainTab('livedata');  // no id="gauges" tab exists — that name threw mid-switch and left NO tab active (blank page)
-            }
-        }
-    }
+    if (cloudTab) cloudTab.classList.toggle('gate-cloud', !enabled);
 }
 function updateCloudFeaturesToggleState(currentMode) {
     const checkbox = document.getElementById("CloudFeatures_checkbox");
-    const formRow = checkbox?.closest('.form-row');
     const isAPMode = (currentMode === 1); // 1 = Access Point mode
 
     if (checkbox) {
+        // The row's greying comes from body.ap-mode + .gate-ap; only the disabled state and the
+        // forced-off value belong here.
+        checkbox.disabled = isAPMode;
         if (isAPMode) {
-            checkbox.disabled = true;
             checkbox.checked = false;
-            if (formRow) formRow.style.opacity = '0.5';
-
             updateCloudFeaturesTabVisibility(false);
-        } else {
-            // Enable in Configuration or Client mode
-            checkbox.disabled = false;
-            if (formRow) formRow.style.opacity = '1';
         }
     }
 
@@ -22057,7 +22060,9 @@ function updateFloatVisibility(pendingVal) {
     const sel = document.querySelector('select[name="UseFloat"]');
     const v = parseInt(pendingVal != null ? pendingVal : (sel ? sel.value : NaN), 10);
     const el = document.getElementById('float-gated-fields');
-    if (el) el.style.display = (v === 1) ? '' : 'none';   // Float Voltage / Float Duration only apply to Voltage Float
+    // Greyed, not hidden: Float Voltage / Float Duration only apply to Voltage Float, but an owner
+    // comparing modes needs to see that the regulator has them.
+    if (el) el.classList.toggle('is-gated', v !== 1);
     const d = document.getElementById('floatModeDesc');
     if (d) d.textContent =
         v === 2 ? 'Alternator carries the house loads; battery rests at 0 A. Rebulk criteria stay armed.' :
@@ -28131,8 +28136,8 @@ function cxShowHelpfulHints() {
 // connection to the cloud — a pass proves internet AND answers "already registered?" in one trip.
 // It is fired when the Helpful Hints page paints so the ~1-3 s round-trip hides behind reading time.
 // The cheap disqualifiers are checked first, before any network cost:
-//   AP (hotspot) mode   — no internet path exists, and updateCloudFeaturesToggleState hides the tab
-//   Cloud Features off  — updateCloudFeaturesTabVisibility hides the tab, so there is nowhere to land
+//   AP (hotspot) mode   — no internet path exists, and body.ap-mode greys the tab
+//   Cloud Features off  — body.cloud-off greys the tab and swaps its panels for a note
 //   already registered  — session flag; the probe re-confirms it anyway
 let _cxCloudProbe = null;
 function cxCloudProbeStart() {
@@ -31659,7 +31664,6 @@ function ssBuildIndex() {
     const names = ssBuildPanelNames();
     const list = [];
     document.querySelectorAll('#settings .form-row').forEach(row => {
-        if (row.closest('[data-ap-hidden]')) return;  // pane with no reachable tab button (AP mode)
         const labEl = row.querySelector('.form-label');
         if (!labEl) return;
         const clone = labEl.cloneNode(true);
@@ -32382,3 +32386,166 @@ function solarLedgerClearConfirm() {
             .catch(err => diagError('Solar ledger clear failed:', err));
     });
 }
+
+// ==================== LIMIT PANEL (header "What is limiting charging") ====================
+// Names the one thing holding charging back (CSV4 ctrlLimiter), the number it is held against, and
+// where that number is set. Read-only; every value comes from the CSV1/CSV2/CSV4 caches and the
+// settings echoes, so it re-renders on each arriving frame while open. Every block is always laid
+// out (visibility, never display) — the box is one fixed size and a limit change moves nothing.
+let _whyOpen = false;
+let _whyOpener = null;
+let _whyCsv1AtMs = 0;
+
+function whyPanelOnCsv1(data) {
+    _whyCsv1AtMs = performance.now();
+    if (_whyOpen) whyPanelRender();
+}
+function whyPanelRefreshOpen() { if (_whyOpen) whyPanelRender(); }
+
+function whyPanelOpen(opener) {
+    const ov = document.getElementById('why-overlay');
+    if (!ov) return;
+    _whyOpener = opener || null;
+    _whyOpen = true;
+    whyPanelRender();
+    ov.style.display = 'block';
+    document.addEventListener('keydown', _whyKeydown);
+    const p = document.getElementById('why-panel');
+    if (p) p.focus({ preventScroll: true });
+}
+function whyPanelClose() {
+    const ov = document.getElementById('why-overlay');
+    if (ov) ov.style.display = 'none';
+    _whyOpen = false;
+    document.removeEventListener('keydown', _whyKeydown);
+    if (_whyOpener && typeof _whyOpener.focus === 'function') _whyOpener.focus({ preventScroll: true });
+    _whyOpener = null;
+}
+function _whyKeydown(e) { if (e.key === 'Escape') { e.preventDefault(); whyPanelClose(); } }
+
+// Own stage voltage (the un-clamped target) — a BMS voltage limit is measured against this.
+function _whyOwnVoltageSetting() {
+    const id = { 1: 'BulkVoltage_echo', 2: 'AbsorptionVoltage_echo', 3: 'FloatVoltage_echo', 6: 'TargetVoltageSetpoint_echo' }[Number(gLastChargeStage)];
+    if (!id) return NaN;
+    return parseFloat(getEchoText(id, ''));
+}
+
+function whyPanelRender() {
+    const set = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+    const hide = (id, h) => { const el = document.getElementById(id); if (el) el.classList.toggle('why-hidden', !!h); };
+    const NA = '—';
+    const num = (v, d) => Number.isFinite(v) ? v.toFixed(d) : NA;
+    const amps = v => Number.isFinite(v) ? String(Math.round(v)) : NA;
+    const rpmTxt = v => Number.isFinite(v) ? Math.round(v).toLocaleString('en-US') : NA;
+    const tUnit = tempUnitLabel();
+    const tempTxt = f => Number.isFinite(f) ? Math.round(toDisplayTemp(f)) + ' ' + tUnit : NA;
+
+    const now = performance.now();
+    const c1 = (now - _whyCsv1AtMs < 5000 && g_lastCsv1) ? g_lastCsv1 : null;
+    const c2 = g_lastCsv2 || {};
+    const f = (o, k, s) => { if (!o || o[k] === undefined) return NaN; const v = Number(o[k]); return Number.isFinite(v) ? v / s : NaN; };
+
+    // Block A — right now
+    const rpm  = f(c1, 'RPM', 1), alt = f(c1, 'MeasuredAmps', 100), ask = f(c1, 'uTargetAmps', 100), duty = f(c1, 'dutyCycle', 100);
+    const ibv  = f(c1, 'IBV', 100), vt = f(c1, 'voltageTarget', 100), altT = f(c1, 'AlternatorTemperatureF', 100);
+    const cap  = f(c1, 'rpmCeilingAmps', 100), bcur = f(c1, 'Bcur', 100);
+    set('why-rpm', rpmTxt(rpm)); set('why-alt', amps(alt)); set('why-ask', amps(ask)); set('why-duty', amps(duty));
+
+    // Block B/C — headline and where it is set
+    const limFresh = (now - (window._ctrlLimiterAtMs || 0)) < 5000;   // same gate as updateHeaderLimiterColors
+    const lim = limFresh ? Number(window._ctrlLimiter) : NaN;
+    const fs = c1 ? Number(c1.fieldActiveStatus) : NaN;
+    const running = fs === 1 || fs === 2 || fs === 3;
+    let head = '', where = '';
+    if (!c1 || !limFresh) {
+        head = 'Waiting for data';
+    } else if (!running) {
+        const r = fs === 4 ? 'waiting for cloud' : fieldOffReasonText(Number(c1.fieldEventReason));
+        head = r ? 'Not charging — ' + r : 'Not charging';
+    } else {
+        const tLim = Number.isFinite(window._lastAltTempLimitF) ? window._lastAltTempLimitF : parseFloat(getEchoText('TemperatureLimitF_echo', '')) ;
+        const tLimF = Number.isFinite(window._lastAltTempLimitF) ? window._lastAltTempLimitF : NaN;
+        const battLim = parseFloat(getEchoText('BattCurrentLimitA_echo', ''));
+        const cvl = f(c2, 'dvccRxCvl', 100), ccl = f(c2, 'dvccRxCcl', 10);
+        const cvlOk = Number.isFinite(cvl) && cvl > -1000000, cclOk = Number.isFinite(ccl) && ccl > -1000000;
+        const rate = (typeof currentChargeRateMode === 'string' && currentChargeRateMode === 'low') ? 'Low' : 'High';
+        switch (lim) {
+            case 0:
+                head = 'Nothing limiting charging';
+                break;
+            case 1:
+                head = 'Current limit at ' + rpmTxt(rpm) + ' RPM — ' + amps(cap) + ' A, output ' + amps(alt) + ' A';
+                where = 'The Limit (A) table under Setup ▸ Alternator ▸ RPM Table. Charge Rate is set to ' + rate + '.';
+                break;
+            case 2:
+                head = 'Alternator temperature ' + tempTxt(altT) + ' — limit ' + (Number.isFinite(tLimF) ? tempTxt(tLimF) : (Number.isFinite(tLim) ? Math.round(tLim) + ' ' + tUnit : NA));
+                where = 'Alternator Temp Limit, under Setup ▸ Alternator ▸ Basic ▸ Temperature Settings.';
+                break;
+            case 3:
+                head = 'Battery at charge voltage — ' + num(vt, 2) + ' V, now ' + num(ibv, 2) + ' V';
+                where = 'Charge Settings, under Setup ▸ Battery.';
+                break;
+            case 4:
+                head = 'Battery charge current limit — ' + amps(battLim) + ' A, battery ' + amps(bcur) + ' A';
+                where = 'Battery Charge Current Limit, under Setup ▸ Alternator ▸ Protections.';
+                break;
+            case 5:
+                head = 'Field at maximum — ' + amps(alt) + ' A at ' + rpmTxt(rpm) + ' RPM. More engine speed would give more output.';
+                where = 'Not a setting — the alternator is at full field.';
+                break;
+            case 6:
+                head = 'Protection active — charging reduced. Output returns on its own.';
+                where = 'Protections, under Setup ▸ Alternator.';
+                break;
+            case 7:
+                head = 'Battery above charge voltage — ' + num(vt, 2) + ' V, now ' + num(ibv, 2) + ' V';
+                where = 'Another charge source is holding the bank up, or the battery is still resting high.';
+                break;
+            case 8:
+                head = 'BMS current limit — ' + (cclOk ? amps(ccl) : NA) + ' A, ' + (Number.isFinite(bcur) ? 'battery ' + amps(bcur) : 'output ' + amps(alt)) + ' A';
+                where = 'Sent by your battery’s BMS, not set here.';
+                break;
+            case 9:
+                head = 'BMS voltage limit — ' + (cvlOk ? num(cvl, 2) : num(vt, 2)) + ' V, now ' + num(ibv, 2) + ' V';
+                where = 'Sent by your battery’s BMS, not set here.';
+                break;
+            default:
+                head = 'Waiting for data';
+        }
+    }
+    set('why-headline', head);
+    set('why-where', where);
+
+    // Block D — BMS, only while a BMS is in charge (DVCC following = 3)
+    // The block keeps its shape while hidden (placeholders, never empty spans) so the box never resizes.
+    const bmsOn = !!c1 && running && Number(c2.dvccState) === 3;
+    hide('why-bms', !bmsOn); hide('why-bms-hr', !bmsOn);
+    if (bmsOn) {
+        const cvl = f(c2, 'dvccRxCvl', 100), ccl = f(c2, 'dvccRxCcl', 10);
+        const cvlOk = Number.isFinite(cvl) && cvl > -1000000, cclOk = Number.isFinite(ccl) && ccl > -1000000;
+        const ownV = _whyOwnVoltageSetting();
+        const ownA = parseFloat(getEchoText('BattCurrentLimitA_echo', ''));
+        const ownAon = getEchoText('BattLimitEnable_echo', '') !== 'OFF' && Number.isFinite(ownA) && ownA > 0;
+        set('why-bms-v', cvlOk ? num(cvl, 2) : NA);
+        set('why-bms-a', cclOk ? amps(ccl) : NA);
+        set('why-bms-v-own', Number.isFinite(ownV) ? 'your setting: ' + ownV.toFixed(2) + ' V' : 'your setting: \u2014');
+        set('why-bms-a-own', ownAon ? 'your setting: ' + amps(ownA) + ' A' : 'your setting: none');
+    } else {
+        set('why-bms-v', NA); set('why-bms-a', NA);
+        set('why-bms-v-own', '\u00a0'); set('why-bms-a-own', '\u00a0');
+    }
+}
+
+// Header tap targets: the four readout labels, the field percentage, and the limiter words. Plain
+// spans, so they get button semantics + keyboard activation here.
+document.addEventListener('DOMContentLoaded', function () {
+    const ov = document.getElementById('why-overlay');
+    if (ov) ov.addEventListener('click', e => { if (e.target === ov) whyPanelClose(); });
+    document.querySelectorAll('.why-tap').forEach(el => {
+        el.setAttribute('role', 'button');
+        el.setAttribute('tabindex', '0');
+        if (!el.title) el.title = 'What is limiting charging';
+        el.addEventListener('click', e => { e.stopPropagation(); whyPanelOpen(el); });
+        el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); whyPanelOpen(el); } });
+    });
+});

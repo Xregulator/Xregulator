@@ -4622,7 +4622,6 @@ static void imuRecordI2CError() {
 void drainIMUFifo() {
   if (!imuEnabled || (millis() - lastIMUPoll < IMU_POLL_INTERVAL)) return;
   lastIMUPoll = millis();
-  MARK_FRESH(IDX_IMU);
 
   TIMED_CALL(ft_rai_imu, ([&]() {
                uint16_t fifo_samples = 0;
@@ -4659,6 +4658,7 @@ void drainIMUFifo() {
                  imuRecordI2CError();
                  return;
                }
+               MARK_FRESH(IDX_IMU);   // stamped HERE, not at poll entry: the age must mean "a sample landed", not "we tried"
                uint32_t imuFetchDt = micros() - imuFetchT0;   // time in JUST the FIFO Wire read
                if (imuFetchDt > imuFifoFetchWorstUs) {
                  imuFifoFetchWorstUs = imuFetchDt;
@@ -5461,11 +5461,15 @@ void ensurePreferredBootPartition() {
 
   if (running == ota0_partition) {
     // The bootloader only lands here by a trusted path (verified install, gated promotion, USB flash).
-    // Self-record when the record is missing (USB-flashed unit, deep factory reset) so a later factory
-    // boot can bring this image back after an abandoned update.
-    uint8_t rec[32];
-    if (!readOta0Record(rec)) {
-      Serial.println("Boot: running ota_0 without a verified-install record - recording this image");
+    // Self-record when the record is missing (USB-flashed unit, deep factory reset) or does not match this
+    // image (USB reflash of ota_0 over an older record), so a later factory boot can bring this image back
+    // after an abandoned update. Appended digest only: the bootloader already validated the running image.
+    uint8_t rec[32], cur[32];
+    bool haveRec = readOta0Record(rec);
+    bool matches = haveRec && appImageAppendedDigest(ota0_partition, cur) && memcmp(rec, cur, 32) == 0;
+    if (!matches) {
+      Serial.println(haveRec ? "Boot: running ota_0 but the verified-install record is for another image - re-recording"
+                             : "Boot: running ota_0 without a verified-install record - recording this image");
       recordOta0AsVerified();
     }
     return;

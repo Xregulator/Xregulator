@@ -77,8 +77,9 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include "esp_image_format.h"            // esp_image_verify: whole-image digest for the ota_0 verified-install record
 #include "esp_heap_caps.h"
 #include <time.h>            // Supabase
+#include "esp_sntp.h"        // sntp_get_sync_status — proof a real NTP packet landed, see syncTimeFromNTP
 #include "esp_psram.h"       // for ESP32 health calculations
-#include "LSM6DSOXSensor.h"      //accelerometer
+#include "LSM6DSOXSensor_xeng.h"  //accelerometer — my fork: the I2C transport reports bus failures (stock always returned OK, so every LSM6DSOX_OK test below was vacuous)
 #include "esp_adc/adc_continuous.h"   // fast alternator-current channel (GPIO3/ADC1_CH2) — hardware-timed DMA sampling
 #include "esp_adc/adc_cali.h"         // eFuse factory gain correction for the fast channel (nominal scaling, NOT user calibration)
 #include "esp_adc/adc_cali_scheme.h"
@@ -390,6 +391,7 @@ constexpr uint16_t ACCEL_RING_SIZE = (sizeof(IMUSample) == 10) ? 2000 : 1666;  /
 constexpr uint16_t GYRO_RING_SIZE = (sizeof(IMUSample) == 10) ? 666 : 555;     // ~8 KB
 
 volatile bool otaInProgress = false;
+volatile uint32_t otaInProgressSinceMs = 0;  // stamped with otaInProgress; checkOtaWedge() retires a flag older than OTA_WEDGE_LIMIT_MS
 volatile bool settingsDirty = false;  // set by /get handler; triggers immediate CSV3 send
 unsigned long lastEventSourceSend = 0;
 
@@ -1982,9 +1984,13 @@ struct SensorWindow {
   int64_t ambTemp_area_v_us = 0;
   uint64_t ambTemp_valid_us = 0;
 
-  int32_t rpm_min = 999900;
+  // RPM is the one window field held in RAW units, not x100 like its neighbours: the engine-RPM
+  // axis carries an unknown per-install gain (hand-typed RPMScalingFactor), so sub-RPM resolution
+  // is meaningless. Cloud sensor_history.rpm_* are INTEGER and update-sensor-history gates the
+  // leaderboards on rpm_avg > 50 REAL rpm - scaling here would break both.
+  int32_t rpm_min = 999999;
   int32_t rpm_max = 0;
-  int64_t rpm_area_v_us = 0;
+  int64_t rpm_area_v_us = 0;   // raw rpm * us
   uint64_t rpm_valid_us = 0;
 
   // WiFi strength
@@ -5950,7 +5956,7 @@ void setup() {
   Serial.println(httpsQueue ? "HTTPS queue created" : "ERROR: Queue creation failed");
 
   // Both stay on Core 0, but priority > 0
-  xTaskCreatePinnedToCore(TempTask, "TempTask", 6144, NULL, 1, &tempTaskHandle, 0);  // 6144: multi-drop registry pass (BATTERY_TEMP_SENSORS_SPEC.md §3); the OTA re-create in 4_functions must match
+  xTaskCreatePinnedToCore(TempTask, "TempTask", 6144, NULL, 1, &tempTaskHandle, 0);  // 6144: multi-drop registry pass (BATTERY_TEMP_SENSORS_SPEC.md §3); ensureCore0Tasks() in 4_functions re-creates with these params and must match
   Serial.println("Temp task created on Core 0");
 
   // With mbedTLS record buffers in PSRAM, only call frames sit on this stack
@@ -6093,6 +6099,9 @@ void loop() {
   g_blackBox.magic = BLACKBOX_MAGIC;
 
   gHeavyRanThisPass = false;  // reset the one-heavy-per-pass scheduler gate for this loop pass
+
+  checkOtaWedge();     // retire a stuck otaInProgress before anything below honors it
+  ensureCore0Tasks();  // bring TempTask / httpsTask back after an OTA attempt; retry + alarm if they can't
 
   // Deferred reboot from /get?RebootRegulator — wait 2s so the HTTP 200 reaches the caller
   if (rebootRequested && millis() - rebootRequestedAt > 2000) {

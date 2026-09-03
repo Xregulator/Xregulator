@@ -1478,8 +1478,9 @@ uint8_t owUnassignedCount() {
 
 // Bus search, registry merge and role binding. Called from initializeHardware() at boot and from
 // TempTask (Core 0) afterwards; it owns the bus for the search, so never from loop(). Auto-binds the
-// alternator role only in the one-probe / both-extra-enables-off case (fielded single-probe devices and
-// a replaced alternator probe) and queues the persist for owRoleService() — no NVS write here.
+// alternator role only in the one-probe / digital-alternator-sensor (TempSource 0) / both-extra-enables-off
+// case (fielded single-probe devices and a replaced alternator probe) — on a thermistor install a lone probe
+// is a battery or extra probe awaiting its role — and queues the persist for owRoleService(); no NVS write here.
 void owEnumerate() {
   static bool unassignedNoticeSent = false;  // one console line per boot
   sensors.begin();
@@ -1538,7 +1539,7 @@ void owEnumerate() {
       if (owProbes[i].present && memcmp(owProbes[i].addr, tempRoleAddr[r], sizeof(DeviceAddress)) == 0) { tempRoleSlot[r] = (int8_t)i; break; }
     }
   }
-  if (tempRoleSlot[TR_ALT] < 0 && nFound == 1 && battTempProbeEnable == 0 && extraTempProbeEnable == 0) {
+  if (tempRoleSlot[TR_ALT] < 0 && nFound == 1 && TempSource == 0 && battTempProbeEnable == 0 && extraTempProbeEnable == 0) {
     int8_t only = -1;
     for (uint8_t i = 0; i < owProbeCount; i++) if (owProbes[i].present) { only = (int8_t)i; break; }
     if (only >= 0 && tempRoleSlot[TR_BATT] != only && tempRoleSlot[TR_EXTRA] != only) {
@@ -2045,6 +2046,14 @@ void httpsTask(void *param) {
   const int MAX_CONSECUTIVE_FAILURES = 5;
   static unsigned long uploadsSuspendedUntil = 0;
   for (;;) {
+    if (otaInProgress) {
+      // Leave between ops, never mid-op: prepareForOTA() waits for this handle to clear instead of
+      // vTaskDelete()-ing a task that may be inside a DNS lookup or TLS read with lwIP/mbedTLS holding
+      // pointers into this stack. Unsubscribe first or the task WDT keeps expecting our feed.
+      esp_task_wdt_delete(NULL);
+      httpsTaskHandle = NULL;
+      vTaskDelete(NULL);
+    }
     if (uploadsSuspendedUntil && (int32_t)(millis() - uploadsSuspendedUntil) < 0) {  // rollover-safe "now < deadline"
       vTaskDelay(pdMS_TO_TICKS(500));
       esp_task_wdt_reset();
@@ -2258,7 +2267,7 @@ void resetSensorWindow() {
   currentWindow->ambTemp_area_v_us = 0;
   currentWindow->ambTemp_valid_us = 0;
 
-  currentWindow->rpm_min = 999900;
+  currentWindow->rpm_min = 999999;
   currentWindow->rpm_max = 0;
   currentWindow->rpm_area_v_us = 0;
   currentWindow->rpm_valid_us = 0;
@@ -2740,10 +2749,11 @@ static const char *ltJsonNum(char *buf, size_t n, double v, bool valid) {
 // lifetime/session accumulators moved to the 24h config snapshot upload.
 size_t buildSnapshotJson(const SensorSnapshot &snap) {
 // Per-window avg = time-weighted area / valid microseconds, then un-scale.
-// Two scale factors in play: SensorWindow uses ×100 for most fields;
+// Three scale factors in play: SensorWindow uses ×100 for most fields but RAW for rpm;
 // ImuWindow uses ×100 for heel/pitch but ×1000 for vertical/total accel.
 #define SAFE_AVG_100(area, valid)  ((valid) > 0 ? ((double)(area) / (double)(valid)) / 100.0  : 0.0)
 #define SAFE_AVG_1000(area, valid) ((valid) > 0 ? ((double)(area) / (double)(valid)) / 1000.0 : 0.0)
+#define SAFE_AVG_RAW(area, valid)  ((valid) > 0 ? ((double)(area) / (double)(valid))          : 0.0)
   time_t finalTs = reconstructTimestamp((time_t)snap.collectionTime);
   const char *timestampStr = formatTimestamp(finalTs);
   // Battery current + SoC upload as null when the window never saw a shunt (BatteryShuntPresent=0
@@ -2844,7 +2854,7 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     ltJsonNum(socMaxS, sizeof(socMaxS), snap.window.soc_max / 100.0, socOk),
     ltJsonNum(socAvgS, sizeof(socAvgS), SAFE_AVG_100(snap.window.soc_area_v_us, snap.window.soc_valid_us), socOk),
     snap.window.rpm_min, snap.window.rpm_max,
-    (int)SAFE_AVG_100(snap.window.rpm_area_v_us, snap.window.rpm_valid_us),
+    (int)SAFE_AVG_RAW(snap.window.rpm_area_v_us, snap.window.rpm_valid_us),
     snap.window.altTemp_min / 100.0, snap.window.altTemp_max / 100.0,
     SAFE_AVG_100(snap.window.altTemp_area_v_us, snap.window.altTemp_valid_us),
     snap.window.tempTherm_min / 100.0, snap.window.tempTherm_max / 100.0,
@@ -3808,7 +3818,7 @@ bool buildConfigPayload() {
     "\"soc_avg_lifetime\":%.4f,\"soc_sample_time\":%lu,"
     "\"speed_avg_lifetime\":%.4f,\"speed_sample_time\":%lu,"
     "\"eng_hrs\":%lu,\"alt_hrs\":%lu,\"eng_cycles\":%lu,"
-    "\"eng_fuel\":%.3f,\"alt_fuel\":%.3f,\"charge_cycles\":%u,"
+    "\"eng_fuel\":%.3f,\"alt_fuel\":%.3f,\"charge_cycles\":%.2f,"
     "\"solar_kwh_alltime\":%.3f,\"charged_energy_alltime\":%.3f,"
     "\"discharged_energy_alltime\":%.3f,\"alt_charged_energy_alltime\":%.3f,"
     "\"total_dist_alltime\":%.3f,\"sailing_days_alltime\":%.3f,\"sailing_ratio\":%.3f,"
@@ -4895,19 +4905,37 @@ void syncTimeFromNTP() {
 
   Serial.println("Starting NTP sync...");
   // Hold core0Busy so RunAlternator will not enable the field while we block
-  // on getLocalTime(). Cleared on all exit paths below.
+  // on the SNTP wait. Cleared on all exit paths below.
   core0Busy = true;
   esp_task_wdt_reset();
 
+  // Sync status is reset BEFORE configTime() on purpose: sntp_init() fires a request immediately,
+  // and resetting afterwards could wipe a COMPLETED that had already landed.
+  //
+  // Why not getLocalTime(): it only tests tm_year > 2016, so any plausible-looking libc clock
+  // satisfies it instantly. restoreSoftClock() puts exactly such a clock up on a cold boot — an
+  // NVS epoch as old as the last field-off — so the old code returned "synced" before a single
+  // packet arrived, adopted the stale epoch as timeBase, stamped it TIME_NTP, and took the full
+  // 12h throttle. Two harms: uploads carried days-old timestamps, and the source left
+  // TIME_ESTIMATED, which is the one value syncTimeFromPhone() lets bypass its 24h skew guard —
+  // so the phone could no longer correct the very clock that was wrong.
+  sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
 
-  // Single-shot — no retry loop, no delay(). checkTimeSync() retries on its
+  // Single-shot — no retry loop, no delay(500). checkTimeSync() retries on its
   // normal TIME_SYNC_INTERVAL cadence. A retry loop with delay(500) would
   // block Core 1 for up to 10.5s (3×3000ms timeout + 3×500ms) if NTP is down.
-  struct tm timeinfo;
+  // Same 3s Core-1 budget the getLocalTime(&timeinfo, 3000) call used to have.
+  // sntp_get_sync_status() self-clears on the read that returns COMPLETED, so read it once.
+  bool sntpAnswered = false;
+  uint32_t sntpWaitStart = millis();
+  while (millis() - sntpWaitStart < 3000) {
+    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) { sntpAnswered = true; break; }
+    delay(10);
+  }
   esp_task_wdt_reset();
 
-  if (getLocalTime(&timeinfo, 3000)) {
+  if (sntpAnswered) {
     timeBase = time(nullptr);
     timeBaseMillis = millis();
     timeIsSynced = true;

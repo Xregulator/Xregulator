@@ -24,12 +24,118 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.   */
 
-/* No-battery-shunt mode: body.no-batt-current is set from the BatteryShuntPresent echo (script.js).
-   Every control/readout/plot that is meaningless without a battery-current sensor is tagged
-   .req-batt-current and hidden here — one selector is the whole hide policy. */
+/* ===========================================================================
+   FEATURE GATES — two tags, one policy each. Read this before adding either.
+
+   .gate-*  a SETTING whose feature is switched off. It stays visible, greyed
+            and inert. Hiding a setting is what makes an owner conclude the
+            regulator cannot do the thing at all, so settings are never hidden.
+            The nearest enclosing card carries a .gate-note-* saying why and
+            naming the switch that turns it back on.
+
+   .req-*   a live READOUT that would only ever show a dash — header chips,
+            Live Data cards, plot legend entries, diag panels. Those ARE hidden,
+            and the panel they lived in carries one .gate-note-* instead of
+            twenty dead rows.
+
+   Triggers are body classes set from the echoes in script.js:
+     no-batt-current   BatteryShuntPresent = 0 (mirrors firmware HAS_BATT_SHUNT)
+     no-extra-temp     extraTempProbeEnable = 0
+     ap-mode           currentMode = 1 (regulator IS the access point)
+     cloud-off         CloudFeatures = 0
+   =========================================================================== */
 body.no-batt-current .req-batt-current { display: none !important; }
 /* Only the Alternator diag panel survives no-shunt, so drop its now-single-tab switcher. */
 body.no-batt-current #livedata-diag .diag-panel-tabs { display: none !important; }
+
+/* Dimming is applied to the CHILDREN, never the gated element itself: opacity on a parent
+   composites its whole subtree, which would fade the .gate-note explanation along with the
+   controls it is explaining. The note is a direct child and is excluded here. */
+body.no-batt-current .gate-batt-current > *:not(.gate-note),
+body.no-extra-temp   .gate-extra-temp   > *:not(.gate-note),
+body.ap-mode         .gate-ap           > *:not(.gate-note),
+body.cloud-off       .gate-cloud        > *:not(.gate-note) {
+  opacity: 0.45;
+}
+/* Inert, but only the form controls: filter chips and <summary> stay clickable so a greyed
+   card can still be opened and read. */
+body.no-batt-current .gate-batt-current input,
+body.no-batt-current .gate-batt-current select,
+body.no-batt-current .gate-batt-current label.switch,
+body.no-batt-current .gate-batt-current .btn-primary,
+body.no-batt-current .gate-batt-current .btn-secondary,
+body.no-extra-temp   .gate-extra-temp input,
+body.no-extra-temp   .gate-extra-temp select,
+body.no-extra-temp   .gate-extra-temp label.switch,
+body.no-extra-temp   .gate-extra-temp .btn-primary,
+body.no-extra-temp   .gate-extra-temp .btn-secondary,
+body.ap-mode         .gate-ap input,
+body.ap-mode         .gate-ap select,
+body.ap-mode         .gate-ap label.switch,
+body.ap-mode         .gate-ap .btn-primary,
+body.ap-mode         .gate-ap .btn-secondary,
+body.cloud-off       .gate-cloud input,
+body.cloud-off       .gate-cloud select,
+body.cloud-off       .gate-cloud label.switch,
+body.cloud-off       .gate-cloud .btn-primary,
+body.cloud-off       .gate-cloud .btn-secondary {
+  pointer-events: none;
+}
+
+/* JS-driven gate, for a control whose trigger is not one of the body classes above (a sibling
+   toggle, a live latch state). Same look; script.js flips .is-gated on the container and the
+   .gate-note authored inside it appears with it. */
+.is-gated > *:not(.gate-note) { opacity: 0.45; }
+.is-gated input,
+.is-gated select,
+.is-gated label.switch,
+.is-gated .btn-primary,
+.is-gated .btn-secondary { pointer-events: none; }
+.is-gated > .gate-note { display: block; opacity: 1; }
+
+/* The explanation. Authored once per card, hidden until its gate is active. */
+.gate-note {
+  display: none;
+  margin: 8px 0 12px;
+  padding: 8px 11px;
+  border-left: 3px solid var(--accent);
+  background: rgba(0, 161, 154, 0.09);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+body.dark-mode .gate-note {
+  color: #9aa7a7;
+  background: rgba(0, 161, 154, 0.14);
+}
+/* The inverse of a gate: content that exists ONLY while the gate is active (the Solar
+   offline note, which replaces a forecast that cannot be fetched). */
+.ap-only-row { display: none; }
+body.ap-mode .ap-only-row { display: block; }
+
+body.no-batt-current .gate-note-shunt,
+body.no-extra-temp   .gate-note-extra,
+body.ap-mode         .gate-note-ap,
+body.cloud-off       .gate-note-cloud {
+  display: block;
+}
+/* AP mode forces Cloud Features off, so both notes would qualify at once. AP is the more
+   specific reason and the only actionable one, so it wins. */
+body.ap-mode .gate-note-cloud { display: none; }
+/* That card holds nothing but the two notes, so it only exists while one of them applies. */
+#cloudGateCard { display: none; }
+body.cloud-off #cloudGateCard,
+body.ap-mode   #cloudGateCard { display: block; }
+
+/* Cloud Features off or AP mode: the tab is reachable and greyed, but its panels would only
+   load failing iframes — so the tab shows its note and nothing else. */
+body.cloud-off #cloudfeatures .sub-tabs,
+body.cloud-off #cloudfeatures .sub-tab-content,
+body.ap-mode   #cloudfeatures .sub-tabs,
+body.ap-mode   #cloudfeatures .sub-tab-content {
+  display: none !important;
+}
 
 :root {
   --primary: #333333;
@@ -2169,9 +2275,11 @@ a.btn-secondary {
   width: 100%;
 }
 
-/* Narrow screens: collapse to 2×2 — triggered only when 4 columns
-   would overflow (roughly below a small phone width) */
-@media (max-width: 420px) {
+/* Narrow screens: collapse to 2×2 — triggered only when 4 columns would overflow. Four
+   max-content chips measure ~465px (Alt/Board/Batt temp rows, 3.5em value columns) and the
+   header card pads 16px a side, so 4-across needs ~500px; below that the row ran past the
+   card edge and the Capacitor webview zoomed out to fit it (measured 2026-09-03 at 430-460). */
+@media (max-width: 499px) {
   .sensor-readings-tier {
     grid-template-columns: max-content max-content;
     justify-content: space-evenly;
@@ -2658,10 +2766,6 @@ a.btn-secondary {
   display: block;
 }
 
-/* used to hide/gray tabs that require internet connectivity, if in AP mode */
-.tab-hidden {
-  display: none !important;
-}
 
 h2 {
   color: var(--text-dark);
@@ -6270,4 +6374,85 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
 @media (max-width: 480px) {
   .ow-table th, .ow-table td { padding: 5px 5px; font-size: 12px; }
   .ow-role-sel { min-width: 6.5em; }
+}
+
+/* ── Limit panel (header "What is limiting charging") ──────────────────────────────────
+   One fixed-size box: fixed top anchor (never vertically centred — centring moves the box when
+   its height changes), fixed width, every block always laid out. Hidden content uses visibility
+   so its space is held; the two sentence blocks are two lines tall in every state. Tinted +
+   blurred rather than opaque so the header readouts stay visible behind it. */
+.why-tap { cursor: pointer; }
+.why-tap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.why-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9100;
+  background: rgba(0, 0, 0, 0.18);
+}
+.why-panel {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(430px, calc(100vw - 24px));
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 24px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  background: rgba(24, 24, 24, 0.9);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  color: #ddd;
+  border: 1px solid #444;
+  border-radius: 8px;
+  box-shadow: 0 6px 32px rgba(0, 0, 0, 0.8);
+  font-size: 13.5px;
+  line-height: 1.3;
+}
+.why-panel:focus { outline: none; }
+.why-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px 9px;
+  border-bottom: 1px solid #333;
+  background: rgba(37, 37, 37, 0.6);
+  border-radius: 8px 8px 0 0;
+}
+.why-title { font-weight: 600; font-size: 13px; color: #aaa; letter-spacing: 0.03em; }
+.why-close { background: none; border: none; color: #888; font-size: 18px; line-height: 1; padding: 0 2px; cursor: pointer; }
+.why-close:hover { color: #ddd; }
+.why-body { padding: 14px 16px 16px; }
+.why-panel hr { border: none; border-top: 1px solid #333; margin: 12px 0; }
+.why-now,
+.why-bms-grid {
+  display: grid;
+  grid-template-columns: 11.5em 6.5ch 3.2ch;
+  column-gap: 8px;
+  row-gap: 4px;
+  align-items: baseline;
+}
+.why-bms-grid { grid-template-columns: 11.5em 6.5ch 3.2ch minmax(0, 1fr); }
+.why-k { color: #999; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.why-v { font-variant-numeric: tabular-nums; text-align: right; font-weight: 700; color: #fff; white-space: nowrap; }
+.why-u { color: #bbb; white-space: nowrap; }
+.why-own { color: #999; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; min-height: 1.25em; }
+.why-line { display: flex; align-items: center; min-height: 2.7em; font-variant-numeric: tabular-nums; }
+.why-headline { color: #fff; font-weight: 600; }
+.why-where { color: #bbb; }
+.why-bms-note { color: #999; font-size: 12.5px; margin-top: 8px; min-height: 2.6em; }
+.why-hidden { visibility: hidden; }
+/* Below 440px the panel is narrower than label + value + unit + "your setting: 14.40 V", so the
+   own-setting text drops to its own line under each BMS row instead of truncating. */
+@media (max-width: 439px) {
+  .why-bms-grid { grid-template-columns: 11.5em 6.5ch 3.2ch; }
+  .why-own { grid-column: 1 / -1; margin-top: -3px; line-height: 1.25; }
+}
+@media (max-width: 380px) {
+  .why-panel { font-size: 12.5px; }
+  .why-now,
+  .why-bms-grid { grid-template-columns: 10em 6.5ch 3.2ch; }
+}
+/* 320px screens: the two-sentence headlines (field maxed, protection) need this to stay on two lines. */
+@media (max-width: 340px) {
+  .why-line { font-size: 11.5px; }
 }

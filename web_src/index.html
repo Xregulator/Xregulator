@@ -218,12 +218,12 @@
       <div class="reading-value header-field-cluster field-status-inactive">
         <div class="field-status-row">
           <span id="field-status">?</span>
-          <span id="duty-pill-wrap"><span id="dutyCycleID3" style="display:none;"></span><span id="dutyCyclePercentSign" style="display:none;">%</span></span>
+          <span id="duty-pill-wrap" class="why-tap"><span id="dutyCycleID3" style="display:none;"></span><span id="dutyCyclePercentSign" style="display:none;">%</span></span>
         </div>
         <div class="stage-row">
-          <span id="prot-note" class="prot-word" style="display:none;"><span class="pw-full">PROTECTION</span><span class="pw-short">P</span></span>
-          <span id="battgt-note" class="battgt-word" style="display:none;"><span class="pw-full">BATT &gt; TARGET</span><span class="pw-short">B&gt;T</span></span>
-          <span id="bms-note" class="battgt-word" style="display:none;"><span class="pw-full">BMS LIMIT</span><span class="pw-short">BMS</span></span>
+          <span id="prot-note" class="prot-word why-tap" style="display:none;"><span class="pw-full">PROTECTION</span><span class="pw-short">P</span></span>
+          <span id="battgt-note" class="battgt-word why-tap" style="display:none;"><span class="pw-full">BATT &gt; TARGET</span><span class="pw-short">B&gt;T</span></span>
+          <span id="bms-note" class="battgt-word why-tap" style="display:none;"><span class="pw-full">BMS LIMIT</span><span class="pw-short">BMS</span></span>
           <span id="charge-stage" class="charge-stage charge-stage-unknown">—</span>
         </div>
         <span id="field-off-reason" class="field-off-reason"></span>
@@ -236,7 +236,7 @@
       <div class="sensor-readings-tier">
         <!-- Battery + SOC -->
         <div class="reading-duo">
-          <span class="duo-lbl" id="lbl-voltage" data-t="Batt">Batt</span>
+          <span class="duo-lbl why-tap" id="lbl-voltage" data-t="Batt">Batt</span>
           <span class="duo-num"><span id="header-voltage">-</span></span>
           <span class="duo-unit">V</span>
           <span class="duo-lbl req-batt-current" data-t="SOC" onclick="socSeedOpen()" style="cursor:pointer;">SOC</span>
@@ -246,10 +246,10 @@
 
         <!-- Alt + Batt currents — 3-column grid keeps A's vertically aligned -->
         <div class="reading-duo">
-          <span class="duo-lbl" id="lbl-alt-current" data-t="Alt">Alt</span>
+          <span class="duo-lbl why-tap" id="lbl-alt-current" data-t="Alt">Alt</span>
           <span class="duo-num"><span id="header-alt-current">-</span></span>
           <span class="duo-unit">A</span>
-          <span class="duo-lbl req-batt-current" id="lbl-batt-current" data-t="Batt">Batt</span>
+          <span class="duo-lbl req-batt-current why-tap" id="lbl-batt-current" data-t="Batt">Batt</span>
           <span class="duo-num req-batt-current"><span id="header-batt-current">-</span></span>
           <span class="duo-unit req-batt-current">A</span>
         </div>
@@ -257,7 +257,7 @@
         <!-- Alt + Board temps — same 3-column grid as the Amps chip; the °F/°C unit says "temp".
              Batt row appears only while a battery temperature exists (renderBattTempReadouts). -->
         <div class="reading-duo" id="hdr-temp-duo">
-          <span class="duo-lbl" id="lbl-alt-temp" data-t="Alt">Alt</span>
+          <span class="duo-lbl why-tap" id="lbl-alt-temp" data-t="Alt">Alt</span>
           <span class="duo-num"><span id="header-alt-temp">-</span></span>
           <span class="duo-unit"><span class="temp-unit-label">°F</span></span>
           <span class="duo-lbl" data-t="Board">Board</span>
@@ -718,7 +718,7 @@
                       </div>
                       <div class="seg-pill-caption">
                         <span class="cap cap-0">Board temperature can stand in for battery temperature when no battery measurement is installed</span>
-                        <span class="cap cap-1">Board temperature cannot stand in for battery temperature — assign a battery probe or another source under Setup &rarr; Temperature</span>
+                        <span class="cap cap-1">Board temperature cannot stand in for battery temperature — choose one under Setup &rarr; Battery &rarr; Battery Temperature (a probe is assigned under Setup &rarr; Temperature)</span>
                       </div>
                     </div>
                   </div>
@@ -1849,6 +1849,165 @@
 
               </details><!-- END Rate Limiting -->
 
+
+              <!-- Temperature Settings (closed). Alternator thermal protection plus the analog
+                   thermistor front-end constants. Battery temperature and the charge-temperature
+                   lockouts are in Setup > Battery > Battery Temperature; probe identification and
+                   the probe enables are in Setup > Temperature. -->
+              <details class="alt-nested-section">
+                <summary class="alt-summary-nested">Temperature Settings</summary>
+
+                <!-- Alternator Temp Limit -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Alternator Temp Limit (<span class="temp-unit-label">°F</span>) (<span id="TemperatureLimitF_echo">?</span>):</span>
+                    <span class="tooltip">
+                      ℹ️
+                      <span class="tooltip-box">Maximum safe temperature at the sensor location. The temperature
+                        PID begins reducing current as temperature approaches this value — intervention starts
+                        at (Limit − Temp PID Margin). Hard warning and critical shutdowns
+                        trigger above it. Sensors often read 20–30°F cooler than true winding temperature; account for
+                        this offset when setting this value.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TemperatureLimitF',false)">
+                      <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" data-tmin-f="0" data-tmax-f="350" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers a WARNING. Field output ramps to zero and a lockout starts. If temperature stays above the warning level for the Temp Sustained Timeout, it escalates to a sustained-temperature shutdown and the field is cut once the output settles. Compares the raw sensor temperature, not the projected value.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
+                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers an immediate field cut (no ramp, no settle wait). Compares the raw sensor temperature, not the projected value. Highest-priority thermal protection event.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
+                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to a sustained-temperature shutdown, which ramps field output to zero then cuts the field. Timer resets if temperature drops below the warning threshold. Enter in seconds.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="TempSustainedTimeout" type="number" step="1" min="0" max="999999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Source (<span id="TempSource_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Select
+                        the temperature sensor used for thermal protection. Digital uses an onboard digital sensor (e.g.
+                        DS18B20). Thermistor uses an analog NTC thermistor configured by R_fixed, Beta, and T0
+                        below.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <div class="cap-mode-toggle ab-seg" data-seg-for="TempSource_checkbox">
+                        <button type="button" class="cap-mode-btn" data-checked="0" onclick="abSegClick(this)">Digital</button>
+                        <button type="button" class="cap-mode-btn" data-checked="1" onclick="abSegClick(this)">Thermistor</button>
+                      </div>
+                      <input id="TempSource_checkbox" type="checkbox" style="display:none;"
+                        onchange="if(handleUserToggle('TempSource_checkbox', 'TempSource', 'TempSource')) { this.form.submit(); submitMessage(); }">
+                      <input id="TempSource" name="TempSource" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Internal Temp Offset (<span class="temp-unit-label">°F</span>) (<span id="WindingTempOffset_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">ONLY
+                        used for alternator component life physics models. How much hotter windings, bearings, brushes
+                        are than physically measured alternator case temperature. Typical: 40–60°F (22–33°C).</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'WindingTempOffset',true)">
+                      <input name="WindingTempOffset" type="number" step="0.1" min="0" max="100" data-tmin-f="0" data-tmax-f="100" data-tdelta="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermistor Series Resistor R_fixed (Ω) (<span id="R_fixed_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Value
+                        (Ω) of the fixed series resistor in the thermistor voltage divider circuit. Must match the
+                        resistor physically installed on the board.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="R_fixed" type="number" step="1" min="0" max="1000000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermistor Beta (<span id="Beta_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Beta
+                        coefficient from the thermistor datasheet — characterizes how its resistance changes with
+                        temperature. Typical NTC thermistors: 3000–4000. Find the exact value in your thermistor's
+                        datasheet.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="Beta" type="number" step="1" min="0" max="100000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermistor Reference Temp T0 (°C) (<span id="T0_C_echo">?</span>):</span>
+                    <span class="tooltip">ℹ️<span
+                        class="tooltip-box">Reference temperature (°C) at which the thermistor's nominal resistance is
+                        specified. Almost always 25°C per datasheet.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input name="T0_C" type="number" step="0.1" min="0" max="300" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+              </details><!-- END Temperature Settings -->
               <!-- Current Sensing (closed) -->
               <details class="alt-nested-section">
                 <summary class="alt-summary-nested">Current Sensing</summary>
@@ -2119,15 +2278,20 @@
                   <span class="group-label">Group 3</span>
                   <span class="nick-label">Alternator iExcess</span>
                 </button>
-                <button type="button" class="req-batt-current" data-filter="g4">
+                <button type="button" class="gate-batt-current" data-filter="g4">
                   <span class="group-label">Group 4</span>
                   <span class="nick-label">Battery Limit</span>
                 </button>
-                <button type="button" class="req-batt-current" data-filter="g5">
+                <button type="button" class="gate-batt-current" data-filter="g5">
                   <span class="group-label">Group 5</span>
                   <span class="nick-label">Load Dump</span>
                 </button>
               </div>
+
+              <p class="gate-note gate-note-shunt">Group 4 (Battery Limit) and Group 5 (Load Dump)
+                 both act on measured battery current, and no battery shunt is installed &mdash; so
+                 their pills and parameters are greyed. They arm themselves the moment a shunt is
+                 fitted under Setup &rarr; Battery &rarr; Measurement Sources.</p>
 
               <!-- ============ ENABLE ============ -->
               <section class="protections-phase" data-phase="enable">
@@ -2215,7 +2379,7 @@
                     </form>
                   </article>
 
-                  <article class="protections-param req-batt-current" data-groups="g4">
+                  <article class="protections-param gate-batt-current" data-groups="g4">
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
                       Group 4 Enable (<span id="BattLimitEnable_echo">?</span>)
@@ -2235,7 +2399,7 @@
                     </form>
                   </article>
 
-                  <article class="protections-param req-batt-current" data-groups="g5">
+                  <article class="protections-param gate-batt-current" data-groups="g5">
                     <div class="protections-name">
                       <span class="protections-tag g5">G5</span>
                       Group 5 Enable (<span id="LoadDumpEnable_echo">?</span>)
@@ -2662,7 +2826,7 @@
                     </form>
                   </article>
 
-                  <article class="protections-param req-batt-current" data-groups="g4">
+                  <article class="protections-param gate-batt-current" data-groups="g4">
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
                       Battery Charge Current Limit (A) (<span id="BattCurrentLimitA_echo">?</span>)
@@ -2678,7 +2842,7 @@
                     </form>
                   </article>
 
-                  <article class="protections-param req-batt-current" data-groups="g5">
+                  <article class="protections-param gate-batt-current" data-groups="g5">
                     <div class="protections-name">
                       <span class="protections-tag g5">G5</span>
                       Tier 1 — Single-Sample Threshold (A/s) (<span id="LoadDumpDtThresh1_echo">?</span>)
@@ -2707,7 +2871,7 @@
                     </form>
                   </article>
 
-                  <article class="protections-param req-batt-current" data-groups="g5">
+                  <article class="protections-param gate-batt-current" data-groups="g5">
                     <div class="protections-name">
                       <span class="protections-tag g5">G5</span>
                       Tier 2 — Two-Consecutive Threshold (A/s) (<span id="LoadDumpDtThresh_echo">?</span>)
@@ -2736,7 +2900,7 @@
                     </form>
                   </article>
 
-                  <article class="protections-param req-batt-current" data-groups="g5">
+                  <article class="protections-param gate-batt-current" data-groups="g5">
                     <div class="protections-name">
                       <span class="protections-tag g5">G5</span>
                       Tier 3 — Three-Consecutive Threshold (A/s) (<span id="LoadDumpDtThresh3_echo">?</span>)
@@ -5020,7 +5184,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Battery-Temp Gain Derate (<span id="battTempDerateEnable_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Voltage Control Autotuning measures the battery's internal resistance (the plant gain K_dc) at <strong>one</strong> temperature — the battery temperature at commissioning. A battery's resistance <strong>rises as it gets colder</strong>, which would make those gains run too aggressively in the cold (more overshoot, exactly when over-voltage matters most) and too sluggishly when warmer. With this <strong>On</strong>, the loop scales Kp <em>and</em> Ki by the estimated resistance ratio between the commissioning temperature and the present battery temperature — keeping the loop's speed and damping roughly constant across temperature. This is a gain scale, <strong>not</strong> a change to the response-time target or Ki/Kp ratio. The battery temperature comes from the source selected under Setup &rarr; Temperature: a battery probe, NMEA 2000, VE.Direct or RV-C measurement, or the regulator board standing in when none is available. The derate uses only the <strong>change</strong> since commissioning, so a constant board-warmer-than-battery offset in the stand-in cancels out as long as it stays roughly stable. If the source changes class between a measurement and the stand-in after commissioning, the derate goes inert until Voltage Control Autotuning is re-run. The absolute over-voltage protections are independent and always live. Set the strength with the coefficient below. Off = use the commissioned gains unchanged at all temperatures.</span></span>
+                    <span class="tooltip">ℹ️<span class="tooltip-box">Voltage Control Autotuning measures the battery's internal resistance (the plant gain K_dc) at <strong>one</strong> temperature — the battery temperature at commissioning. A battery's resistance <strong>rises as it gets colder</strong>, which would make those gains run too aggressively in the cold (more overshoot, exactly when over-voltage matters most) and too sluggishly when warmer. With this <strong>On</strong>, the loop scales Kp <em>and</em> Ki by the estimated resistance ratio between the commissioning temperature and the present battery temperature — keeping the loop's speed and damping roughly constant across temperature. This is a gain scale, <strong>not</strong> a change to the response-time target or Ki/Kp ratio. The battery temperature comes from the source selected under Setup &rarr; Battery &rarr; Battery Temperature: a battery probe, NMEA 2000, VE.Direct or RV-C measurement, or the regulator board standing in when none is available. The derate uses only the <strong>change</strong> since commissioning, so a constant board-warmer-than-battery offset in the stand-in cancels out as long as it stays roughly stable. If the source changes class between a measurement and the stand-in after commissioning, the derate goes inert until Voltage Control Autotuning is re-run. The absolute over-voltage protections are independent and always live. Set the strength with the coefficient below. Off = use the commissioned gains unchanged at all temperatures.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5036,8 +5200,12 @@
                   </div>
                 </div>
 
-                <!-- Derate detail (status + coefficient) — shown only when the derate is On -->
+                <!-- Derate detail (status + coefficient) — greyed when the derate is Off
+                     (.is-gated, syncCvDependentVis in script.js) -->
                 <div id="cvDerateDetailBlock">
+                <p class="gate-note">The battery-temperature gain derate is Off, so the commissioned
+                   gains run unchanged at every temperature and the coefficient below has no effect.
+                   Turn the derate on above to use it.</p>
                 <div class="form-row">
                   <div class="form-label" style="font-size:0.9em; opacity:0.85; line-height:1.5;">
                     <span id="battTempDerate_status">Not yet commissioned — run the Voltage Control Autotuning step.</span>
@@ -5509,7 +5677,7 @@
                   </div>
                 </div>
 
-                <!-- Temp Warning/Critical Excess and Sustained Timeout live in Setup → Temperature → Alternator Temperature -->
+                <!-- Temp Warning/Critical Excess and Sustained Timeout live in Setup → Alternator → Temperature Settings -->
 
               </details> <!-- END Temperature Controller Parameters -->
 
@@ -6555,6 +6723,7 @@
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Phase Definitions
               </summary>
+              <p class="gate-note gate-note-shunt">No battery shunt is installed, so every setting that reads battery current is greyed below: Tail Current, the whole Float Phase, Force &quot;Maintain Mode&quot; and the Rebulk Current Threshold. Absorption ends on time alone until a shunt is fitted under Setup &rarr; Battery &rarr; Measurement Sources.</p>
               <div style="padding-left: 12px; border-left: 2px solid var(--border); margin-top: 10px;">
 
             <!-- Bulk Phase -->
@@ -6630,8 +6799,8 @@
                 </div>
               </div>
 
-              <hr class="req-batt-current" />
-              <div class="form-row req-batt-current">
+              <hr />
+              <div class="form-row gate-batt-current">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Tail Current (A) (<span id="TailCurrent_A_echo">?</span>):</span>
                   <span class="tooltip">
@@ -6702,7 +6871,7 @@
             </details>
 
             <!-- Float Phase -->
-            <details class="req-batt-current" style="margin-top: 16px;">
+            <details class="gate-batt-current" style="margin-top: 16px;">
               <summary
                 style="cursor: pointer; font-weight: 600; font-size: 14px; padding: 6px 0; border-bottom: 1px solid var(--border); margin-bottom: 8px;">
                 Float Phase
@@ -6730,8 +6899,12 @@
                 </div>
               </div>
 
-              <!-- Float-only fields -->
+              <!-- Float-only fields. Greyed rather than hidden when another float mode is
+                   selected (.is-gated, updateFloatVisibility in script.js). -->
               <div id="float-gated-fields">
+                <p class="gate-note">Float Voltage and Float Duration only apply to the
+                   <strong>Voltage Float</strong> mode selected above. Pick Voltage Float to set
+                   them.</p>
 
                 <hr />
                 <div class="form-row">
@@ -6787,8 +6960,8 @@
                 </div>
               </div>
 
-              <hr class="req-batt-current" />
-              <div class="form-row req-batt-current">
+              <hr />
+              <div class="form-row gate-batt-current">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Force "Maintain Mode" (<span id="MaintainMode_echo">?</span>):</span>
                   <span class="tooltip">
@@ -6839,8 +7012,8 @@
                 </div>
               </div>
 
-              <hr class="req-batt-current" />
-              <div class="form-row req-batt-current">
+              <hr />
+              <div class="form-row gate-batt-current">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Rebulk Current Threshold (A) (<span id="RebulkCurrent_A_echo">?</span>):</span>
                   <span class="tooltip">
@@ -6974,654 +7147,14 @@
             </details>
 
 
-            <!-- SoC Integration Section -->
-            <details class="req-batt-current" open style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                SoC Integration
-              </summary>
 
-              <div style="padding: 15px 0; border-bottom: 2px solid var(--border); margin-bottom: 20px;">
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; gap: 8px;">
-                    <span>SoC Info Available? (<span id="socInfoAvailable_echo">?</span>)</span>
-                    <span class="tooltip">
-                      ℹ️
-                      <span class="tooltip-box">If the regulator is hooked up to a battery shunt per the installation
-                        directions and you select Yes, SoC is used to reduce unnecessary rebulk cycles near full. If
-                        OFF, charger ignores SoC.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <span class="toggle-label">No</span>
-                      <label class="switch">
-                        <input id="socInfoAvailable_checkbox" type="checkbox"
-                          onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'socInfoAvailable').then(ok => { if (ok && handleUserToggle('socInfoAvailable_checkbox', 'socInfoAvailable', 'socInfoAvailable')) { cb.form.submit(); submitMessage(); } });" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">Yes</span>
-                      <input id="socInfoAvailable" name="socInfoAvailable" type="number" value=""
-                        style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-              </div>
-
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>SoC Block Rebulk Above (%) (<span id="SOC_BlockRebulk_percent_echo">?</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box">Suggest 90%. If SoC is at or above this value, rebulk is blocked even if
-                      voltage or current drop below the rebulk trigger thresholds. Prevents nuisance stage resets when
-                      the battery is already near full. Set this near the top of your acceptable charge band — 90% is a
-                      good starting point. Must be meaningfully higher than SoC Allow Rebulk to create a stable
-                      hysteresis gap.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form"
-                    onsubmit="return validateAndSubmitBatteryNumber(this, 'SOC_BlockRebulk_percent')">
-                    <input name="SOC_BlockRebulk_percent" type="number" step="0.1" min="0" max="100" />
-                    <input type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>SoC Allow Rebulk Below (%) (<span id="SOC_AllowRebulk_percent_echo">?</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box">Suggest 75%. If SoC falls below this value, rebulk is forced regardless of
-                      the block threshold or float timer. Use this as a safety floor — when the battery has genuinely
-                      depleted, a full bulk charge should always run. Should be at least 10–15% below SoC Block Rebulk
-                      to prevent hunting between stages. Setting this too close to the block threshold causes rapid
-                      oscillation between bulk and float.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form"
-                    onsubmit="return validateAndSubmitBatteryNumber(this, 'SOC_AllowRebulk_percent')">
-                    <input name="SOC_AllowRebulk_percent" type="number" step="0.1" min="0" max="100" />
-                    <input type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-
-            </details>
-
-            <!-- Measurement Sources Section -->
+            <!-- Battery Temperature Section. Source chain + the two charge-temperature lockouts.
+                 The probe itself is identified and enabled in Setup > Temperature. -->
             <details open style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Measurement Sources
+                Battery Temperature
               </summary>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Battery Shunt Present (<span id="BatteryShuntPresent_echo">?</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box">Turn off if this device has no battery shunt (battery-current sensor). Battery current, State of Charge, battery health, the battery charge-current limit, load-dump detection and float charging all become unavailable and are hidden — the alternator current limit is then the only thing bounding charge current.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <span class="toggle-label">No</span>
-                    <label class="switch">
-                      <input id="BatteryShuntPresent_checkbox" type="checkbox"
-                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'BatteryShuntPresent').then(ok => { if (ok && handleUserToggle('BatteryShuntPresent_checkbox', 'BatteryShuntPresent', 'BatteryShuntPresent')) { cb.form.submit(); submitMessage(); } });" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">Yes</span>
-                    <input id="BatteryShuntPresent" name="BatteryShuntPresent" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr class="req-batt-current" />
-              <div class="form-row req-batt-current">
-                <div class="form-label">Invert Battery Amps (<span id="InvertBattAmps_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <span class="toggle-label">No</span>
-                    <label class="switch">
-                      <input id="InvertBattAmps_checkbox" type="checkbox"
-                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'InvertBattAmps').then(ok => { if (ok && handleUserToggle('InvertBattAmps_checkbox', 'InvertBattAmps', 'InvertBattAmps')) { cb.form.submit(); submitMessage(); } });" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">Yes</span>
-                    <input id="InvertBattAmps" name="InvertBattAmps" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr class="req-batt-current" />
-              <div class="form-row req-batt-current">
-                <div class="form-label">Battery Current Offset (A) (<span id="BatteryCOffset_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form"
-                    onsubmit="return validateAndSubmitBatteryNumber(this, 'BatteryCOffset')">
-                    <input name="BatteryCOffset" type="number" step="0.01" min="-10000" max="10000" />
-                    <input type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr class="req-batt-current" />
-              <div class="form-row req-batt-current">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Shunt Resistance uOhms (micro)(<span id="ShuntResistanceMicroOhm_echo">?</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box" style="max-width:min(360px, calc(100vw - 36px)); max-height:60vh; overflow:auto;">Resistance of your current shunt in micro-ohms (µΩ). The current sensor converts the shunt's measured voltage drop to amps using this value — a wrong value scales all current and SoC readings proportionally. Shunts are rated by a full-scale millivolt drop at a rated current, and the resistance follows: µΩ = mV ÷ amps × 1000. Victron SmartShunt / BMV are the 50&nbsp;mV family (500&nbsp;A = 100&nbsp;µΩ, 1000&nbsp;A = 50&nbsp;µΩ, 2000&nbsp;A = 25&nbsp;µΩ). Check your shunt's datasheet for the exact rating.
-                      <table style="width:100%; margin-top:6px; border-collapse:collapse; font-size:11px; text-align:right;">
-                        <tr style="color:#bcd;"><th style="text-align:left;">Rated</th><th>µΩ</th><th>mΩ</th></tr>
-                        <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">50 mV — Victron / marine</td></tr>
-                        <tr><td style="text-align:left;">100 A</td><td>500</td><td>0.5</td></tr>
-                        <tr><td style="text-align:left;">200 A</td><td>250</td><td>0.25</td></tr>
-                        <tr><td style="text-align:left;">300 A</td><td>167</td><td>0.167</td></tr>
-                        <tr><td style="text-align:left;">400 A</td><td>125</td><td>0.125</td></tr>
-                        <tr style="font-weight:700; color:#fff;"><td style="text-align:left;">500 A — BMV-712</td><td>100</td><td>0.1</td></tr>
-                        <tr><td style="text-align:left;">1000 A</td><td>50</td><td>0.05</td></tr>
-                        <tr><td style="text-align:left;">2000 A</td><td>25</td><td>0.025</td></tr>
-                        <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">75 mV — industrial / analog meter</td></tr>
-                        <tr><td style="text-align:left;">50 A</td><td>1500</td><td>1.5</td></tr>
-                        <tr><td style="text-align:left;">100 A</td><td>750</td><td>0.75</td></tr>
-                        <tr><td style="text-align:left;">150 A</td><td>500</td><td>0.5</td></tr>
-                        <tr><td style="text-align:left;">200 A</td><td>375</td><td>0.375</td></tr>
-                        <tr><td style="text-align:left;">300 A</td><td>250</td><td>0.25</td></tr>
-                        <tr><td style="text-align:left;">400 A</td><td>188</td><td>0.188</td></tr>
-                        <tr><td style="text-align:left;">500 A</td><td>150</td><td>0.15</td></tr>
-                        <tr><td style="text-align:left;">600 A</td><td>125</td><td>0.125</td></tr>
-                        <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">100 mV</td></tr>
-                        <tr><td style="text-align:left;">100 A</td><td>1000</td><td>1.0</td></tr>
-                        <tr><td style="text-align:left;">200 A</td><td>500</td><td>0.5</td></tr>
-                        <tr><td style="text-align:left;">300 A</td><td>333</td><td>0.333</td></tr>
-                        <tr><td style="text-align:left;">500 A</td><td>200</td><td>0.2</td></tr>
-                        <tr><td style="text-align:left;">1000 A</td><td>100</td><td>0.1</td></tr>
-                      </table></span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="ShuntResistanceMicroOhm" type="number" step="1" min="1" max="5000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-            </details>
-
-            <!-- How It Works -->
-            <details open style="margin-top: 30px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                How It Works
-              </summary>
-
-              <div
-                style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0; line-height: 1.5; color: #666;">
-                <p style="margin: 0;">
-                  <strong>Rebulk:</strong> The system always begins in Bulk when charging is enabled. It returns to
-                  Bulk from Float or Idle if battery voltage drops below <strong>Rebulk Voltage</strong> or net
-                  discharge current exceeds <strong>Rebulk Current Threshold</strong> — continuously for
-                  <strong>Rebulk Debounce Time</strong>. The timer resets if the condition clears before the
-                  debounce expires. If SoC data is available, it suppresses rebulk when the battery is at or above
-                  the block threshold and permits it again when SoC drops to the allow threshold — but SoC alone
-                  cannot trigger rebulk; voltage, current, or (in float) timeout criteria must also be met.
-                </p>
-                <p style="margin: 10px 0 0 0;">
-                  <strong>Bulk:</strong> The system pushes the maximum thermally- (and otherwise-) allowed current
-                  from the RPM Cap Table. Bulk ends once battery voltage has remained continuously at or above
-                  <strong>Bulk Voltage</strong> for <strong>Bulk Voltage Debounce Time</strong>.
-                </p>
-                <p style="margin: 10px 0 0 0;">
-                  <strong>Absorption:</strong> The voltage loop holds the battery at <strong>Absorption
-                    Voltage</strong>. Current is no longer commanded — the battery dictates how much it accepts and
-                  it tapers naturally as the battery fills. Absorption ends when current drops to or below
-                  <strong>Tail Current</strong> continuously for <strong>Absorption Completion Time</strong>. If
-                  the system is thermally constrained (the thermal penalty is meaningfully active and current is
-                  already near the tail threshold), tail detection is suspended until thermal headroom recovers —
-                  this prevents a false "battery full" exit triggered by the thermal loop pulling current down. If
-                  tail current is never reached, a safety exit to float or idle occurs after
-                  <strong>Absorption Timeout</strong>.
-                </p>
-                <p style="margin: 10px 0 0 0;">
-                  <strong>Float (if enabled):</strong> The system holds the battery gently at <strong>Float
-                    Voltage</strong>. After <strong>Minimum Float Time</strong> has elapsed, rebulk criteria are
-                  evaluated. Float also has a hard ceiling — if <strong>Float Duration</strong> elapses while in
-                  float, the system returns to Bulk regardless of voltage or current. (Idle has no equivalent
-                  timeout; only the rebulk conditions can leave it.) If <strong>Use Float is OFF</strong>, charging
-                  stops after Absorption and the system idles until rebulk criteria are met — better for lithium
-                  longevity in cycling applications.
-                </p>
-              </div>
-            </details>
-
-          </div><!-- closes .settings-card for Battery -->
-          </div><!-- closes #battery-panel-charge -->
-          <div id="battery-panel-monitor" class="diag-panel">
-          <div class="settings-card">
-
-
-
-            <!-- Full Charge Detection Section -->
-            <details class="req-batt-current" open style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Full Charge Detection</summary>
-
-
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Battery Capacity (Amp hr) (<span id="BatteryCapacity_Ah_echo">?</span>):</span>
-                  <span class="tooltip">ℹ️<span class="tooltip-box">Total usable capacity of your battery bank in amp-hours. Used by the coulomb counter to calculate State of Charge. Set to your battery's rated AH at the 20-hour rate. This does not affect alternator output — it only affects the SoC display and rebulk logic.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="BatteryCapacity_Ah" type="number" step="1" min="1" max="10000" />
-                    <input onclick="submitMessage.call(this)" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Max Charge Detection Voltage (<span id="ChargedVoltage_echo">?</span>):</span>
-                  <span class="tooltip">ℹ️<span class="tooltip-box">Battery voltage must be at or above this level for full-charge detection to trigger. Set slightly below your Absorption voltage. If voltage never reaches this threshold during charging, SoC will never be reset to 100%.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="ChargedVoltage" type="number" step="0.01" min="5" max="70" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Max Charge Detection Tail Current (%) (<span id="TailCurrent_echo">0</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box">A percentage of battery capacity (A*hr), ex: 3% for 100A*hr bank = 3
-                      amps</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="TailCurrent" type="number" step="0.1" min="0.1" max="100" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Max Charge Detection Time (s) (<span id="ChargedDetectionTime_echo">?</span>):</span>
-                  <span class="tooltip">ℹ️<span class="tooltip-box">Seconds the battery must simultaneously hold at or above Charged Voltage AND at or below the Tail Current before full charge is declared and SoC is reset to 100%. Longer values reduce false-positive full-charge detections.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="ChargedDetectionTime" type="number" step="1" min="1" max="10000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-            </details>
-
-            <!-- Efficiency Parameters Section -->
-            <details class="req-batt-current" open style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Efficiency Parameters</summary>
-
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Peukert Exponent (<span id="PeukertExponent_echo">?</span>):</span>
-                  <span class="tooltip">ℹ️<span class="tooltip-box">Corrects for capacity reduction at high discharge rates. Lead acid: 1.15–1.35. AGM: 1.05–1.15. Lithium: 1.0–1.05. A value of 1.0 disables the correction. Higher values mean more capacity is lost at high current draws.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="PeukertExponent" type="number" step="0.01" min="0.5" max="2.0" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Charge Efficiency (%) (<span id="ChargeEfficiency_echo">?</span>):</span>
-                  <span class="tooltip">ℹ️<span class="tooltip-box">Accounts for energy lost as heat during charging — not all current put in gets stored. Lead acid: 85–90%. AGM: 92–95%. Lithium: 97–99%. Setting too high overstates SoC; too low understates it.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="ChargeEfficiency" type="number" step="0.1" min="30" max="150" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-            </details>
-
-            <!-- SOC Correction Section -->
-            <details class="req-batt-current" open style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                SOC Correction</summary>
-
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>SOC Auto-Correction (<span id="AutoShuntGainCorrection_echo">0</span>):</span>
-                  <span class="tooltip">
-                    ℹ️
-                    <span class="tooltip-box">Automatically corrects battery current readings when full charge is
-                      detected. Requires INA228 battery shunt to be installed.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="AutoShuntGainCorrection_checkbox" type="checkbox"
-                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'AutoShuntGainCorrection').then(ok => { if (ok && handleUserToggle('AutoShuntGainCorrection_checkbox', 'AutoShuntGainCorrection', 'AutoShuntGainCorrection')) { cb.form.submit(); submitMessage(); } });" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="AutoShuntGainCorrection" name="AutoShuntGainCorrection" type="number" value=""
-                      style="display:none;" />
-                    <input type="hidden" name="ResetDynamicShuntGain" id="ResetDynamicShuntGain" value="0" />
-                    <button type="button" class="btn-secondary" onclick="resetParameter('ResetDynamicShuntGain')"
-                      id="ResetDynamicShuntGain_button">Reset Factor</button>
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>SOC Gain Factor (Current Value):</span>
-                  <span class="tooltip">ℹ️<span class="tooltip-box">Live read-only multiplier applied to the shunt current measurement. Adjusted automatically by SOC Auto-Correction each time a full charge is detected. Above 1.0 means the shunt was reading low; below 1.0 means it was reading high. Use Reset Factor to return to 1.0.</span></span>
-                </div>
-                <div class="form-input">
-                  <span id="DynamicShuntGainFactor_display"
-                    style="font-weight: bold; color: var(--accent); font-size: 14px;">?</span>
-                </div>
-              </div>
-            </details>
-
-            <!-- Other Settings -->
-            <details style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Other Settings</summary>
-
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Set SoC (%) Manually (<span id="ManualSOCPoint_echo">?</span>):</span>
-                  <span class="tooltip">ℹ️<span class="tooltip-box">Force the State of Charge to a specific value. Use this to seed the SoC after a known full or partial charge, or to correct a badly drifted reading. The coulomb counter resumes from this point immediately.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input name="ManualSOCPoint" type="number" step="any" min="0" max="100" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr class="req-batt-current" />
-              <div class="form-row req-batt-current">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Battery Current Source (<span id="BatteryCurrentSource_echo">?</span>):</span>
-                  <span class="tooltip">ℹ️<span class="tooltip-box"><strong>This setting only chooses the source for the battery-monitor SoC and current readouts.</strong> It does NOT change which sensor drives any safety or control loop. The onboard INA228 shunt is always required for this controller — Load Dump Protection, fast over-voltage, tail-current detection, rebulk-by-current, and MaintainMode all read the INA228 directly regardless of this setting.<br><br>INA228 Shunt = onboard high-precision sensor (most accurate, recommended; also makes the battery-monitor numbers consistent with the safety logic). Victron VE.Direct = use serial data from a Victron BMV or smart shunt for the SoC display only. Note that Victron data lags the actual current by ~1–2 s, so short transients (e.g. windlass pulls) will be smeared in the SoC readout.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <div class="cap-mode-toggle ab-seg-select" data-seg-name="BatteryCurrentSource">
-                      <button type="button" class="cap-mode-btn" data-val="0" onclick="abSegSelectClick(this)">INA228 Shunt</button>
-                      <button type="button" class="cap-mode-btn" data-val="3" onclick="abSegSelectClick(this)">Victron</button>
-                    </div>
-                    <input id="BatteryCurrentSource_val" name="BatteryCurrentSource" type="hidden" value="0" />
-                  </form>
-                </div>
-              </div>
-            </details>
-
-          </div>
-          </div><!-- closes #battery-panel-monitor -->
-        </div>
-
-        <!-- ===== TEMPERATURE SUBTAB ===== -->
-        <div id="settings-temperature" class="sub-tab-content">
-          <div class="settings-card">
-
-            <!-- Card 1: probe registry from /tempSensors (owPollTick in script.js), role assignment, probe enables -->
-            <details class="integ-section" id="tempSensorsSection" open>
-              <summary class="integ-section-title">Temperature Sensors</summary>
-
-              <p class="integ-copy">Warm one probe by hand to identify it; its reading rises within a few seconds.</p>
-              <div class="ow-table-wrap">
-                <table class="usage-table ow-table" id="owProbeTable">
-                  <thead>
-                    <tr><th>Serial</th><th>Temp</th><th>Age</th><th>OK / Fail</th><th>Role</th></tr>
-                  </thead>
-                  <tbody id="owProbeTableBody">
-                    <tr><td colspan="5" class="ow-empty">No probe data yet</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <div id="owRoleWarn" class="ow-role-warn" style="display:none;"></div>
-              <div class="form-row form-row-wide ow-scan-row">
-                <button type="button" id="owScanBtn" class="btn-secondary" onclick="owScanRequest()">Scan</button>
-                <span id="owScanStatus" class="ow-scan-status"></span>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Battery temperature probe (<span id="battTempProbeEnable_echo">?</span>):</span>
-                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the probe assigned the Battery role supplies the battery temperature used by the cold-charge and hot-charge lockouts, the voltage-loop gain derate and the NMEA 2000 battery status message. Off: the Battery probe is still read for the table above but is not used as a battery temperature source.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="battTempProbeEnable_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('battTempProbeEnable_checkbox', 'battTempProbeEnable', 'battTempProbeEnable')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="battTempProbeEnable" name="battTempProbeEnable" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Extra temperature probe (<span id="extraTempProbeEnable_echo">?</span>):</span>
-                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the probe assigned the Extra role is shown as Extra Temperature on Live Data, can raise the high and low alarms in the Extra Temperature card, and can be transmitted on NMEA 2000. Off: the Extra probe is still read for the table above but is not reported anywhere else.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="extraTempProbeEnable_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('extraTempProbeEnable_checkbox', 'extraTempProbeEnable', 'extraTempProbeEnable')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="extraTempProbeEnable" name="extraTempProbeEnable" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-            </details>
-
-            <!-- Card 2: the alternator thermal-protection group, moved from Setup > Alternator (rows unchanged) -->
-            <details class="integ-section" id="altTempSection" open>
-              <summary class="integ-section-title">Alternator Temperature</summary>
-
-                <!-- Alternator Temp Limit -->
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Alternator Temp Limit (<span class="temp-unit-label">°F</span>) (<span id="TemperatureLimitF_echo">?</span>):</span>
-                    <span class="tooltip">
-                      ℹ️
-                      <span class="tooltip-box">Maximum safe temperature at the sensor location. The temperature
-                        PID begins reducing current as temperature approaches this value — intervention starts
-                        at (Limit − Temp PID Margin). Hard warning and critical shutdowns
-                        trigger above it. Sensors often read 20–30°F cooler than true winding temperature; account for
-                        this offset when setting this value.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TemperatureLimitF',false)">
-                      <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" data-tmin-f="0" data-tmax-f="350" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers a WARNING. Field output ramps to zero and a lockout starts. If temperature stays above the warning level for the Temp Sustained Timeout, it escalates to a sustained-temperature shutdown and the field is cut once the output settles. Compares the raw sensor temperature, not the projected value.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
-                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Degrees above the alternator temperature limit (entered in your display unit) that triggers an immediate field cut (no ramp, no settle wait). Compares the raw sensor temperature, not the projected value. Highest-priority thermal protection event.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
-                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" data-tmin-f="0" data-tmax-f="9999" data-tdelta="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to a sustained-temperature shutdown, which ramps field output to zero then cuts the field. Timer resets if temperature drops below the warning threshold. Enter in seconds.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="TempSustainedTimeout" type="number" step="1" min="0" max="999999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Source (<span id="TempSource_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Select
-                        the temperature sensor used for thermal protection. Digital uses an onboard digital sensor (e.g.
-                        DS18B20). Thermistor uses an analog NTC thermistor configured by R_fixed, Beta, and T0
-                        below.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <div class="cap-mode-toggle ab-seg" data-seg-for="TempSource_checkbox">
-                        <button type="button" class="cap-mode-btn" data-checked="0" onclick="abSegClick(this)">Digital</button>
-                        <button type="button" class="cap-mode-btn" data-checked="1" onclick="abSegClick(this)">Thermistor</button>
-                      </div>
-                      <input id="TempSource_checkbox" type="checkbox" style="display:none;"
-                        onchange="if(handleUserToggle('TempSource_checkbox', 'TempSource', 'TempSource')) { this.form.submit(); submitMessage(); }">
-                      <input id="TempSource" name="TempSource" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Internal Temp Offset (<span class="temp-unit-label">°F</span>) (<span id="WindingTempOffset_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">ONLY
-                        used for alternator component life physics models. How much hotter windings, bearings, brushes
-                        are than physically measured alternator case temperature. Typical: 40–60°F (22–33°C).</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'WindingTempOffset',true)">
-                      <input name="WindingTempOffset" type="number" step="0.1" min="0" max="100" data-tmin-f="0" data-tmax-f="100" data-tdelta="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermistor Series Resistor R_fixed (Ω) (<span id="R_fixed_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Value
-                        (Ω) of the fixed series resistor in the thermistor voltage divider circuit. Must match the
-                        resistor physically installed on the board.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="R_fixed" type="number" step="1" min="0" max="1000000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermistor Beta (<span id="Beta_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span class="tooltip-box">Beta
-                        coefficient from the thermistor datasheet — characterizes how its resistance changes with
-                        temperature. Typical NTC thermistors: 3000–4000. Find the exact value in your thermistor's
-                        datasheet.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="Beta" type="number" step="1" min="0" max="100000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermistor Reference Temp T0 (°C) (<span id="T0_C_echo">?</span>):</span>
-                    <span class="tooltip">ℹ️<span
-                        class="tooltip-box">Reference temperature (°C) at which the thermistor's nominal resistance is
-                        specified. Almost always 25°C per datasheet.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input name="T0_C" type="number" step="0.1" min="0" max="300" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-            </details>
-
-            <!-- Card 3: battery temperature source chain + the two charge-temperature lockouts -->
-            <details class="integ-section" id="battTempSection" open>
-              <summary class="integ-section-title">Battery Temperature</summary>
 
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -7749,9 +7282,511 @@
                   </form>
                 </div>
               </div>
+
             </details>
 
-            <!-- Card 4: the Extra probe — live reading and its two alarms -->
+            <!-- SoC Integration Section -->
+            <details class="gate-batt-current" open style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                SoC Integration
+              </summary>
+              <p class="gate-note gate-note-shunt">State of charge is counted from battery current, and no battery shunt is installed &mdash; so this whole card is greyed and no state of charge is reported. Fit a shunt and turn it on under Measurement Sources below.</p>
+
+              <div style="padding: 15px 0; border-bottom: 2px solid var(--border); margin-bottom: 20px;">
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; gap: 8px;">
+                    <span>SoC Info Available? (<span id="socInfoAvailable_echo">?</span>)</span>
+                    <span class="tooltip">
+                      ℹ️
+                      <span class="tooltip-box">If the regulator is hooked up to a battery shunt per the installation
+                        directions and you select Yes, SoC is used to reduce unnecessary rebulk cycles near full. If
+                        OFF, charger ignores SoC.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <span class="toggle-label">No</span>
+                      <label class="switch">
+                        <input id="socInfoAvailable_checkbox" type="checkbox"
+                          onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'socInfoAvailable').then(ok => { if (ok && handleUserToggle('socInfoAvailable_checkbox', 'socInfoAvailable', 'socInfoAvailable')) { cb.form.submit(); submitMessage(); } });" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">Yes</span>
+                      <input id="socInfoAvailable" name="socInfoAvailable" type="number" value=""
+                        style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>SoC Block Rebulk Above (%) (<span id="SOC_BlockRebulk_percent_echo">?</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">Suggest 90%. If SoC is at or above this value, rebulk is blocked even if
+                      voltage or current drop below the rebulk trigger thresholds. Prevents nuisance stage resets when
+                      the battery is already near full. Set this near the top of your acceptable charge band — 90% is a
+                      good starting point. Must be meaningfully higher than SoC Allow Rebulk to create a stable
+                      hysteresis gap.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="return validateAndSubmitBatteryNumber(this, 'SOC_BlockRebulk_percent')">
+                    <input name="SOC_BlockRebulk_percent" type="number" step="0.1" min="0" max="100" />
+                    <input type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>SoC Allow Rebulk Below (%) (<span id="SOC_AllowRebulk_percent_echo">?</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">Suggest 75%. If SoC falls below this value, rebulk is forced regardless of
+                      the block threshold or float timer. Use this as a safety floor — when the battery has genuinely
+                      depleted, a full bulk charge should always run. Should be at least 10–15% below SoC Block Rebulk
+                      to prevent hunting between stages. Setting this too close to the block threshold causes rapid
+                      oscillation between bulk and float.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="return validateAndSubmitBatteryNumber(this, 'SOC_AllowRebulk_percent')">
+                    <input name="SOC_AllowRebulk_percent" type="number" step="0.1" min="0" max="100" />
+                    <input type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+
+            </details>
+
+            <!-- Measurement Sources Section -->
+            <details open style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Measurement Sources
+              </summary>
+              <p class="gate-note gate-note-shunt">Battery Shunt Present is Off, so the three rows that calibrate the shunt &mdash; Invert Battery Amps, Battery Current Offset and Shunt Resistance &mdash; are greyed. Switch it to Yes to set them up.</p>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Battery Shunt Present (<span id="BatteryShuntPresent_echo">?</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">Turn off if this device has no battery shunt (battery-current sensor). Battery current, State of Charge, battery health, the battery charge-current limit, load-dump detection and float charging all become unavailable — the alternator current limit is then the only thing bounding charge current. Their settings stay on their pages, greyed, and each card says why; only the live readouts that would sit at a dash are hidden.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">No</span>
+                    <label class="switch">
+                      <input id="BatteryShuntPresent_checkbox" type="checkbox"
+                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'BatteryShuntPresent').then(ok => { if (ok && handleUserToggle('BatteryShuntPresent_checkbox', 'BatteryShuntPresent', 'BatteryShuntPresent')) { cb.form.submit(); submitMessage(); } });" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">Yes</span>
+                    <input id="BatteryShuntPresent" name="BatteryShuntPresent" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row gate-batt-current">
+                <div class="form-label">Invert Battery Amps (<span id="InvertBattAmps_echo">?</span>):</div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">No</span>
+                    <label class="switch">
+                      <input id="InvertBattAmps_checkbox" type="checkbox"
+                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'InvertBattAmps').then(ok => { if (ok && handleUserToggle('InvertBattAmps_checkbox', 'InvertBattAmps', 'InvertBattAmps')) { cb.form.submit(); submitMessage(); } });" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">Yes</span>
+                    <input id="InvertBattAmps" name="InvertBattAmps" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row gate-batt-current">
+                <div class="form-label">Battery Current Offset (A) (<span id="BatteryCOffset_echo">?</span>):</div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="return validateAndSubmitBatteryNumber(this, 'BatteryCOffset')">
+                    <input name="BatteryCOffset" type="number" step="0.01" min="-10000" max="10000" />
+                    <input type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row gate-batt-current">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Shunt Resistance uOhms (micro)(<span id="ShuntResistanceMicroOhm_echo">?</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box" style="max-width:min(360px, calc(100vw - 36px)); max-height:60vh; overflow:auto;">Resistance of your current shunt in micro-ohms (µΩ). The current sensor converts the shunt's measured voltage drop to amps using this value — a wrong value scales all current and SoC readings proportionally. Shunts are rated by a full-scale millivolt drop at a rated current, and the resistance follows: µΩ = mV ÷ amps × 1000. Victron SmartShunt / BMV are the 50&nbsp;mV family (500&nbsp;A = 100&nbsp;µΩ, 1000&nbsp;A = 50&nbsp;µΩ, 2000&nbsp;A = 25&nbsp;µΩ). Check your shunt's datasheet for the exact rating.
+                      <table style="width:100%; margin-top:6px; border-collapse:collapse; font-size:11px; text-align:right;">
+                        <tr style="color:#bcd;"><th style="text-align:left;">Rated</th><th>µΩ</th><th>mΩ</th></tr>
+                        <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">50 mV — Victron / marine</td></tr>
+                        <tr><td style="text-align:left;">100 A</td><td>500</td><td>0.5</td></tr>
+                        <tr><td style="text-align:left;">200 A</td><td>250</td><td>0.25</td></tr>
+                        <tr><td style="text-align:left;">300 A</td><td>167</td><td>0.167</td></tr>
+                        <tr><td style="text-align:left;">400 A</td><td>125</td><td>0.125</td></tr>
+                        <tr style="font-weight:700; color:#fff;"><td style="text-align:left;">500 A — BMV-712</td><td>100</td><td>0.1</td></tr>
+                        <tr><td style="text-align:left;">1000 A</td><td>50</td><td>0.05</td></tr>
+                        <tr><td style="text-align:left;">2000 A</td><td>25</td><td>0.025</td></tr>
+                        <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">75 mV — industrial / analog meter</td></tr>
+                        <tr><td style="text-align:left;">50 A</td><td>1500</td><td>1.5</td></tr>
+                        <tr><td style="text-align:left;">100 A</td><td>750</td><td>0.75</td></tr>
+                        <tr><td style="text-align:left;">150 A</td><td>500</td><td>0.5</td></tr>
+                        <tr><td style="text-align:left;">200 A</td><td>375</td><td>0.375</td></tr>
+                        <tr><td style="text-align:left;">300 A</td><td>250</td><td>0.25</td></tr>
+                        <tr><td style="text-align:left;">400 A</td><td>188</td><td>0.188</td></tr>
+                        <tr><td style="text-align:left;">500 A</td><td>150</td><td>0.15</td></tr>
+                        <tr><td style="text-align:left;">600 A</td><td>125</td><td>0.125</td></tr>
+                        <tr><td colspan="3" style="text-align:left; padding-top:5px; color:#9cc;">100 mV</td></tr>
+                        <tr><td style="text-align:left;">100 A</td><td>1000</td><td>1.0</td></tr>
+                        <tr><td style="text-align:left;">200 A</td><td>500</td><td>0.5</td></tr>
+                        <tr><td style="text-align:left;">300 A</td><td>333</td><td>0.333</td></tr>
+                        <tr><td style="text-align:left;">500 A</td><td>200</td><td>0.2</td></tr>
+                        <tr><td style="text-align:left;">1000 A</td><td>100</td><td>0.1</td></tr>
+                      </table></span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="ShuntResistanceMicroOhm" type="number" step="1" min="1" max="5000" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+            </details>
+
+            <!-- How It Works -->
+            <details open style="margin-top: 30px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                How It Works
+              </summary>
+
+              <div
+                style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0; line-height: 1.5; color: #666;">
+                <p style="margin: 0;">
+                  <strong>Rebulk:</strong> The system always begins in Bulk when charging is enabled. It returns to
+                  Bulk from Float or Idle if battery voltage drops below <strong>Rebulk Voltage</strong> or net
+                  discharge current exceeds <strong>Rebulk Current Threshold</strong> — continuously for
+                  <strong>Rebulk Debounce Time</strong>. The timer resets if the condition clears before the
+                  debounce expires. If SoC data is available, it suppresses rebulk when the battery is at or above
+                  the block threshold and permits it again when SoC drops to the allow threshold — but SoC alone
+                  cannot trigger rebulk; voltage, current, or (in float) timeout criteria must also be met.
+                </p>
+                <p style="margin: 10px 0 0 0;">
+                  <strong>Bulk:</strong> The system pushes the maximum thermally- (and otherwise-) allowed current
+                  from the RPM Cap Table. Bulk ends once battery voltage has remained continuously at or above
+                  <strong>Bulk Voltage</strong> for <strong>Bulk Voltage Debounce Time</strong>.
+                </p>
+                <p style="margin: 10px 0 0 0;">
+                  <strong>Absorption:</strong> The voltage loop holds the battery at <strong>Absorption
+                    Voltage</strong>. Current is no longer commanded — the battery dictates how much it accepts and
+                  it tapers naturally as the battery fills. Absorption ends when current drops to or below
+                  <strong>Tail Current</strong> continuously for <strong>Absorption Completion Time</strong>. If
+                  the system is thermally constrained (the thermal penalty is meaningfully active and current is
+                  already near the tail threshold), tail detection is suspended until thermal headroom recovers —
+                  this prevents a false "battery full" exit triggered by the thermal loop pulling current down. If
+                  tail current is never reached, a safety exit to float or idle occurs after
+                  <strong>Absorption Timeout</strong>.
+                </p>
+                <p style="margin: 10px 0 0 0;">
+                  <strong>Float (if enabled):</strong> The system holds the battery gently at <strong>Float
+                    Voltage</strong>. After <strong>Minimum Float Time</strong> has elapsed, rebulk criteria are
+                  evaluated. Float also has a hard ceiling — if <strong>Float Duration</strong> elapses while in
+                  float, the system returns to Bulk regardless of voltage or current. (Idle has no equivalent
+                  timeout; only the rebulk conditions can leave it.) If <strong>Use Float is OFF</strong>, charging
+                  stops after Absorption and the system idles until rebulk criteria are met — better for lithium
+                  longevity in cycling applications.
+                </p>
+              </div>
+            </details>
+
+          </div><!-- closes .settings-card for Battery -->
+          </div><!-- closes #battery-panel-charge -->
+          <div id="battery-panel-monitor" class="diag-panel">
+          <div class="settings-card">
+
+
+
+            <!-- Full Charge Detection Section -->
+            <details class="gate-batt-current" open style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Full Charge Detection</summary>
+              <p class="gate-note gate-note-shunt">Full-charge detection watches battery current fall off, and no battery shunt is installed &mdash; so this card is greyed and full charge is never declared. Setup &rarr; Battery &rarr; Measurement Sources &rarr; Battery Shunt Present.</p>
+
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Battery Capacity (Amp hr) (<span id="BatteryCapacity_Ah_echo">?</span>):</span>
+                  <span class="tooltip">ℹ️<span class="tooltip-box">Total usable capacity of your battery bank in amp-hours. Used by the coulomb counter to calculate State of Charge. Set to your battery's rated AH at the 20-hour rate. This does not affect alternator output — it only affects the SoC display and rebulk logic.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="BatteryCapacity_Ah" type="number" step="1" min="1" max="10000" />
+                    <input onclick="submitMessage.call(this)" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Max Charge Detection Voltage (<span id="ChargedVoltage_echo">?</span>):</span>
+                  <span class="tooltip">ℹ️<span class="tooltip-box">Battery voltage must be at or above this level for full-charge detection to trigger. Set slightly below your Absorption voltage. If voltage never reaches this threshold during charging, SoC will never be reset to 100%.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="ChargedVoltage" type="number" step="0.01" min="5" max="70" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Max Charge Detection Tail Current (%) (<span id="TailCurrent_echo">0</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">A percentage of battery capacity (A*hr), ex: 3% for 100A*hr bank = 3
+                      amps</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="TailCurrent" type="number" step="0.1" min="0.1" max="100" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Max Charge Detection Time (s) (<span id="ChargedDetectionTime_echo">?</span>):</span>
+                  <span class="tooltip">ℹ️<span class="tooltip-box">Seconds the battery must simultaneously hold at or above Charged Voltage AND at or below the Tail Current before full charge is declared and SoC is reset to 100%. Longer values reduce false-positive full-charge detections.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="ChargedDetectionTime" type="number" step="1" min="1" max="10000" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+            </details>
+
+            <!-- Efficiency Parameters Section -->
+            <details class="gate-batt-current" open style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Efficiency Parameters</summary>
+              <p class="gate-note gate-note-shunt">These correct the coulomb count, which needs measured battery current. No battery shunt is installed, so the card is greyed. Setup &rarr; Battery &rarr; Measurement Sources &rarr; Battery Shunt Present.</p>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Peukert Exponent (<span id="PeukertExponent_echo">?</span>):</span>
+                  <span class="tooltip">ℹ️<span class="tooltip-box">Corrects for capacity reduction at high discharge rates. Lead acid: 1.15–1.35. AGM: 1.05–1.15. Lithium: 1.0–1.05. A value of 1.0 disables the correction. Higher values mean more capacity is lost at high current draws.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="PeukertExponent" type="number" step="0.01" min="0.5" max="2.0" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Charge Efficiency (%) (<span id="ChargeEfficiency_echo">?</span>):</span>
+                  <span class="tooltip">ℹ️<span class="tooltip-box">Accounts for energy lost as heat during charging — not all current put in gets stored. Lead acid: 85–90%. AGM: 92–95%. Lithium: 97–99%. Setting too high overstates SoC; too low understates it.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="ChargeEfficiency" type="number" step="0.1" min="30" max="150" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+            </details>
+
+            <!-- SOC Correction Section -->
+            <details class="gate-batt-current" open style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                SOC Correction</summary>
+              <p class="gate-note gate-note-shunt">State-of-charge correction has nothing to correct without a coulomb count, and that needs a battery shunt. None is installed, so the card is greyed. Setup &rarr; Battery &rarr; Measurement Sources &rarr; Battery Shunt Present.</p>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>SOC Auto-Correction (<span id="AutoShuntGainCorrection_echo">0</span>):</span>
+                  <span class="tooltip">
+                    ℹ️
+                    <span class="tooltip-box">Automatically corrects battery current readings when full charge is
+                      detected. Requires INA228 battery shunt to be installed.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="AutoShuntGainCorrection_checkbox" type="checkbox"
+                        onchange="const cb=this; validateAndSubmitBatteryToggle(cb, 'AutoShuntGainCorrection').then(ok => { if (ok && handleUserToggle('AutoShuntGainCorrection_checkbox', 'AutoShuntGainCorrection', 'AutoShuntGainCorrection')) { cb.form.submit(); submitMessage(); } });" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="AutoShuntGainCorrection" name="AutoShuntGainCorrection" type="number" value=""
+                      style="display:none;" />
+                    <input type="hidden" name="ResetDynamicShuntGain" id="ResetDynamicShuntGain" value="0" />
+                    <button type="button" class="btn-secondary" onclick="resetParameter('ResetDynamicShuntGain')"
+                      id="ResetDynamicShuntGain_button">Reset Factor</button>
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>SOC Gain Factor (Current Value):</span>
+                  <span class="tooltip">ℹ️<span class="tooltip-box">Live read-only multiplier applied to the shunt current measurement. Adjusted automatically by SOC Auto-Correction each time a full charge is detected. Above 1.0 means the shunt was reading low; below 1.0 means it was reading high. Use Reset Factor to return to 1.0.</span></span>
+                </div>
+                <div class="form-input">
+                  <span id="DynamicShuntGainFactor_display"
+                    style="font-weight: bold; color: var(--accent); font-size: 14px;">?</span>
+                </div>
+              </div>
+            </details>
+
+            <!-- Other Settings -->
+            <details style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Other Settings</summary>
+              <p class="gate-note gate-note-shunt">Battery Current Source below is greyed: no battery shunt is installed, so there is no battery-current measurement to choose a source for. Setup &rarr; Battery &rarr; Measurement Sources &rarr; Battery Shunt Present.</p>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Set SoC (%) Manually (<span id="ManualSOCPoint_echo">?</span>):</span>
+                  <span class="tooltip">ℹ️<span class="tooltip-box">Force the State of Charge to a specific value. Use this to seed the SoC after a known full or partial charge, or to correct a badly drifted reading. The coulomb counter resumes from this point immediately.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input name="ManualSOCPoint" type="number" step="any" min="0" max="100" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row gate-batt-current">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Battery Current Source (<span id="BatteryCurrentSource_echo">?</span>):</span>
+                  <span class="tooltip">ℹ️<span class="tooltip-box"><strong>This setting only chooses the source for the battery-monitor SoC and current readouts.</strong> It does NOT change which sensor drives any safety or control loop. The onboard INA228 shunt is always required for this controller — Load Dump Protection, fast over-voltage, tail-current detection, rebulk-by-current, and MaintainMode all read the INA228 directly regardless of this setting.<br><br>INA228 Shunt = onboard high-precision sensor (most accurate, recommended; also makes the battery-monitor numbers consistent with the safety logic). Victron VE.Direct = use serial data from a Victron BMV or smart shunt for the SoC display only. Note that Victron data lags the actual current by ~1–2 s, so short transients (e.g. windlass pulls) will be smeared in the SoC readout.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <div class="cap-mode-toggle ab-seg-select" data-seg-name="BatteryCurrentSource">
+                      <button type="button" class="cap-mode-btn" data-val="0" onclick="abSegSelectClick(this)">INA228 Shunt</button>
+                      <button type="button" class="cap-mode-btn" data-val="3" onclick="abSegSelectClick(this)">Victron</button>
+                    </div>
+                    <input id="BatteryCurrentSource_val" name="BatteryCurrentSource" type="hidden" value="0" />
+                  </form>
+                </div>
+              </div>
+            </details>
+
+          </div>
+          </div><!-- closes #battery-panel-monitor -->
+        </div>
+
+        <!-- ===== TEMPERATURE SUBTAB ===== -->
+        <div id="settings-temperature" class="sub-tab-content">
+          <div class="settings-card">
+
+            <!-- Identification, role assignment and the probe enables only. Everything a probe
+                 FEEDS lives with its subject: alternator thermal limits in Setup > Alternator >
+                 Temperature Settings, battery temperature in Setup > Battery > Battery
+                 Temperature, the Extra probe alarms in Setup > Alarms, and the per-probe
+                 ok/fail counters in Live Data > ESP32 with the rest of the 1-Wire diagnostics. -->
+            <details class="integ-section" id="tempSensorsSection" open>
+              <summary class="integ-section-title">Temperature Sensors</summary>
+
+              <p class="integ-copy">Warm one probe by hand to identify it; its reading rises within a few seconds.</p>
+              <div class="ow-table-wrap">
+                <table class="usage-table ow-table" id="owProbeTable">
+                  <thead>
+                    <tr><th>Serial</th><th>Temp</th><th>Age</th><th>Role</th></tr>
+                  </thead>
+                  <tbody id="owProbeTableBody">
+                    <tr><td colspan="4" class="ow-empty">No probe data yet</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div id="owRoleWarn" class="ow-role-warn" style="display:none;"></div>
+              <div class="form-row form-row-wide ow-scan-row">
+                <button type="button" id="owScanBtn" class="btn-secondary" onclick="owScanRequest()">Scan</button>
+                <span id="owScanStatus" class="ow-scan-status"></span>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Battery temperature probe (<span id="battTempProbeEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the probe assigned the Battery role supplies the battery temperature used by the cold-charge and hot-charge lockouts, the voltage-loop gain derate and the NMEA 2000 battery status message. Off: the Battery probe is still read for the table above but is not used as a battery temperature source.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="battTempProbeEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('battTempProbeEnable_checkbox', 'battTempProbeEnable', 'battTempProbeEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="battTempProbeEnable" name="battTempProbeEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Extra temperature probe (<span id="extraTempProbeEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the probe assigned the Extra role is shown as Extra Temperature on Live Data, can raise the high and low alarms under Setup &rarr; Alarms &rarr; Temperature Alarms, and can be transmitted on NMEA 2000. Off: the Extra probe is still read for the table above but is not reported anywhere else.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="extraTempProbeEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('extraTempProbeEnable_checkbox', 'extraTempProbeEnable', 'extraTempProbeEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="extraTempProbeEnable" name="extraTempProbeEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+            </details>
+
+            <!-- The Extra probe: live reading only. Its high and low alarms are in Setup > Alarms
+                 > Temperature Alarms, greyed there while the Extra probe is off. -->
             <details class="integ-section" id="extraTempSection" open>
               <summary class="integ-section-title">Extra Temperature</summary>
 
@@ -7762,74 +7797,6 @@
                 </div>
                 <div class="form-input">
                   <span class="integ-live"><span id="extraTempSetup_ID">&mdash;</span> <span class="temp-unit-label">°F</span></span>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>High Alarm (<span id="extraTempAlarmHiEnable_echo">?</span>):</span>
-                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the alarm sounds whenever the Extra probe reads above the High Alarm threshold below, provided alarms are enabled. Off: no high-temperature alarm from the Extra probe.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="extraTempAlarmHiEnable_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('extraTempAlarmHiEnable_checkbox', 'extraTempAlarmHiEnable', 'extraTempAlarmHiEnable')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="extraTempAlarmHiEnable" name="extraTempAlarmHiEnable" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>High Alarm Threshold (<span class="temp-unit-label">°F</span>) (<span id="extraTempAlarmHiF_echo">?</span>):</span>
-                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Extra-probe temperature above which the High Alarm sounds. Has no effect unless the High Alarm is On.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'extraTempAlarmHiF',false)">
-                    <input name="extraTempAlarmHiF" type="number" step="1" min="-40" max="300" data-tmin-f="-40" data-tmax-f="300" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Low Alarm (<span id="extraTempAlarmLoEnable_echo">?</span>):</span>
-                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the alarm sounds whenever the Extra probe reads below the Low Alarm threshold below, provided alarms are enabled. Off: no low-temperature alarm from the Extra probe.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="extraTempAlarmLoEnable_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('extraTempAlarmLoEnable_checkbox', 'extraTempAlarmLoEnable', 'extraTempAlarmLoEnable')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="extraTempAlarmLoEnable" name="extraTempAlarmLoEnable" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Low Alarm Threshold (<span class="temp-unit-label">°F</span>) (<span id="extraTempAlarmLoF_echo">?</span>):</span>
-                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Extra-probe temperature below which the Low Alarm sounds. Has no effect unless the Low Alarm is On.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'extraTempAlarmLoF',false)">
-                    <input name="extraTempAlarmLoF" type="number" step="1" min="-40" max="300" data-tmin-f="-40" data-tmax-f="300" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
                 </div>
               </div>
             </details>
@@ -7945,15 +7912,15 @@
                  part of this tab that needs the internet. Everything else here works offline and
                  stays reachable — the manual position, its clear button, and the array settings. -->
             <div id="solar-forecast-offline-note" class="ap-only-row"
-              style="display: none; padding: 12px 15px; border-radius: var(--radius); margin: 20px 0; border-left: 4px solid var(--accent); background: var(--card-light); color: var(--text-dark); font-size: 14px; line-height: 1.5;">
+              style="padding: 12px 15px; border-radius: var(--radius); margin: 20px 0; border-left: 4px solid var(--accent); background: var(--card-light); color: var(--text-dark); font-size: 14px; line-height: 1.5;">
               <strong>The solar forecast needs an internet connection.</strong><br>
               The regulator is running its own WiFi network (Access Point mode), so it cannot download
               one. The position and array settings on this page still save, and the forecast picks up
               again on its own once the regulator is back on a WiFi network with internet.
             </div>
 
-            <!-- Solar Forecast Section — hidden in AP mode (.ap-hide-row), replaced by the note above -->
-            <div id="solar-forecast-block" class="ap-hide-row">
+            <!-- Solar Forecast Section — greyed in AP mode (.gate-ap); the note above says why -->
+            <div id="solar-forecast-block" class="gate-ap">
             <div
               style="font-weight: bold; font-size: 18px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin: 20px 0 15px 0;">
               Solar Forecast
@@ -8292,6 +8259,8 @@
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Temperature Alarms</summary>
 
+
+              <div class="param-subhead">Alternator</div>
               <div class="form-row">
                 <div class="form-label">High Temp Alarm (<span class="temp-unit-label">°F</span>) (<span id="TempAlarm_echo">0</span>):</div>
                 <div class="form-input">
@@ -8312,6 +8281,78 @@
                   </form>
                 </div>
               </div>
+
+              <hr />
+              <div class="param-subhead">Extra temperature probe</div>
+              <p class="gate-note gate-note-extra">The Extra temperature probe is off, so these
+                 alarms cannot fire. Turn it on under Setup &rarr; Temperature &rarr; Temperature
+                 Sensors, and assign a probe the Extra role.</p>
+              <div class="form-row gate-extra-temp">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>High Alarm (<span id="extraTempAlarmHiEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the alarm sounds whenever the Extra probe reads above the High Alarm threshold below, provided alarms are enabled. Off: no high-temperature alarm from the Extra probe.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="extraTempAlarmHiEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('extraTempAlarmHiEnable_checkbox', 'extraTempAlarmHiEnable', 'extraTempAlarmHiEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="extraTempAlarmHiEnable" name="extraTempAlarmHiEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row gate-extra-temp">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>High Alarm Threshold (<span class="temp-unit-label">°F</span>) (<span id="extraTempAlarmHiF_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Extra-probe temperature above which the High Alarm sounds. Has no effect unless the High Alarm is On.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'extraTempAlarmHiF',false)">
+                    <input name="extraTempAlarmHiF" type="number" step="1" min="-40" max="300" data-tmin-f="-40" data-tmax-f="300" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row gate-extra-temp">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Low Alarm (<span id="extraTempAlarmLoEnable_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">On: the alarm sounds whenever the Extra probe reads below the Low Alarm threshold below, provided alarms are enabled. Off: no low-temperature alarm from the Extra probe.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="extraTempAlarmLoEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('extraTempAlarmLoEnable_checkbox', 'extraTempAlarmLoEnable', 'extraTempAlarmLoEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="extraTempAlarmLoEnable" name="extraTempAlarmLoEnable" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row gate-extra-temp">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Low Alarm Threshold (<span class="temp-unit-label">°F</span>) (<span id="extraTempAlarmLoF_echo">?</span>):</span>
+                  <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Extra-probe temperature below which the Low Alarm sounds. Has no effect unless the Low Alarm is On.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'extraTempAlarmLoF',false)">
+                    <input name="extraTempAlarmLoF" type="number" step="1" min="-40" max="300" data-tmin-f="-40" data-tmax-f="300" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
             </details>
 
             <!-- Voltage Alarms Section -->
@@ -8319,6 +8360,7 @@
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Voltage &amp; Charge Alarms</summary>
+              <p class="gate-note gate-note-shunt">The Low State of Charge Alarm is greyed: state of charge needs a battery shunt and none is installed. The voltage alarms are unaffected. Setup &rarr; Battery &rarr; Measurement Sources &rarr; Battery Shunt Present.</p>
 
               <div class="form-row">
                 <div class="form-label">High Voltage Alarm (<span id="VoltageAlarmHigh_echo">0</span>):</div>
@@ -8341,8 +8383,8 @@
                 </div>
               </div>
 
-              <hr class="req-batt-current" />
-              <div class="form-row req-batt-current">
+              <hr />
+              <div class="form-row gate-batt-current">
                 <div class="form-label">Low State of Charge Alarm (%) (<span id="SocAlarmLow_echo">0</span>):
                   <span class="tooltip">ℹ️<span class="tooltip-box">Sounds the alarm when the battery's state of charge falls below this percentage. Only active when the battery monitor's state of charge information is available. 0 disables.</span></span>
                 </div>
@@ -8360,6 +8402,7 @@
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Current Alarms</summary>
+              <p class="gate-note gate-note-shunt">The High Current Alarm (Battery) is greyed: no battery shunt is installed, so battery current is not measured. The alternator current alarm is unaffected. Setup &rarr; Battery &rarr; Measurement Sources &rarr; Battery Shunt Present.</p>
 
               <div class="form-row">
                 <div class="form-label">High Current Alarm (Alternator) (A) (<span id="CurrentAlarmHigh_echo">0</span>):
@@ -8372,8 +8415,8 @@
                 </div>
               </div>
 
-              <hr class="req-batt-current" />
-              <div class="form-row req-batt-current">
+              <hr />
+              <div class="form-row gate-batt-current">
                 <div class="form-label">High Current Alarm (Battery) (A) (<span
                     id="MaximumAllowedBatteryAmps_echo">0</span>):
                   <span class="tooltip">ℹ️<span class="tooltip-box">Alarm only — never reduces the field. Fires when battery current magnitude exceeds this value in either direction, so it catches heavy discharge as well as over-charge. Separate from the Group 4 Battery Charge Current Limit (which actively caps the command); set this alarm above that limit so a correctly limited charge doesn't alarm. 0 disables.</span></span>
@@ -9215,8 +9258,12 @@
                 </div>
               </div>
 
-              <div id="dvccReset_row" style="display:none;">
+              <!-- Greyed unless the untrusted latch is actually set (.is-gated, script.js) -->
+              <div id="dvccReset_row">
                 <hr />
+                <p class="gate-note">The trust latch is not set, so there is nothing to reset. This
+                   button becomes live if the charge authority sends implausible values and the
+                   regulator stops following it.</p>
                 <div class="form-row">
                   <div class="form-label">Reset Trust Latch:
                     <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">Clears the untrusted latch after you have investigated why the authority sent implausible values — something is wrong in the system when this trips, so find the cause first. The authority must settle again before being followed. Turning the follow switch off and on, or rebooting, also clears the latch.</span></span>
@@ -9411,7 +9458,10 @@
               </div>
 
               <hr />
-              <div class="form-row">
+              <p class="gate-note gate-note-ap">Cloud Features needs an internet connection, and the
+                 regulator is running as its own access point. The switch below is greyed until it is
+                 joined to a WiFi network with internet.</p>
+              <div class="form-row gate-ap">
                 <div class="form-label">Cloud Features (<span id="CloudFeatures_echo">?</span>):</div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
@@ -9428,9 +9478,12 @@
               </div>
 
 
-              <!-- WiFi Napping: Client-mode only; row hidden in AP mode by script.js -->
-              <div id="wifiNapEnabled_row">
+              <!-- WiFi Napping: Client-mode only; greyed in AP mode by the .gate-ap CSS gate -->
+              <div id="wifiNapEnabled_row" class="gate-ap">
                 <hr />
+                <p class="gate-note gate-note-ap">WiFi Standby keeps the regulator reachable on your
+                   boat&rsquo;s router between engine runs. In access-point mode there is no router to
+                   stay joined to, so it is greyed. Join a WiFi network above to use it.</p>
                 <div class="form-row">
                   <div class="form-label">WiFi Standby (Keep Reachable) (<span id="wifiNapEnabled_echo">?</span>):
                     <span class="tooltip">ℹ️<span class="tooltip-box">When the engine is off, the regulator normally shuts WiFi off completely to save power, and you must press the wake button (or switch the ignition on) to reach it. Turn this On and it instead keeps WiFi connected to your boat's router in a low-power napping state, so you can open the dashboard any time with no button press. It uses only about a milliamp more than full-off, so it can stay reachable indefinitely while the regulator is on your router.</span></span>
@@ -10637,6 +10690,10 @@
     <!-- Battery Live Data Sub-tab -->
     <div id="livedata-battery" class="sub-tab-content">
       <div class="settings-card">
+        <p class="gate-note gate-note-shunt">No battery shunt is installed, so battery current,
+           state of charge, time-to-full and the coulomb count cannot be measured and are not shown.
+           The voltage readings below are unaffected. Setup &rarr; Battery &rarr; Measurement
+           Sources &rarr; Battery Shunt Present.</p>
         <div class="grid">
 
           <div class="card req-batt-current">
@@ -10701,7 +10758,7 @@
 
           <div class="card-group">
             <p class="card-group-title"><span>Temperature</span>
-              <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The battery temperature the regulator is using and where it comes from: the battery probe, NMEA 2000 battery status, a VE.Direct monitor, an RV-C source, or the regulator board standing in when no measurement is available. The source is chosen under Setup &rarr; Temperature. Greyed when the active source has stopped reporting.</span></span>
+              <span class="tooltip">&#8505;&#65039;<span class="tooltip-box">The battery temperature the regulator is using and where it comes from: the battery probe, NMEA 2000 battery status, a VE.Direct monitor, an RV-C source, or the regulator board standing in when no measurement is available. The source is chosen under Setup &rarr; Battery &rarr; Battery Temperature. Greyed when the active source has stopped reporting.</span></span>
             </p>
             <div class="metric-row">
               <span class="metric-label">Battery Temperature</span>
@@ -12356,6 +12413,8 @@
           <!-- CONNECTIVITY & CLOUD -->
           <div class="card-group">
             <p class="card-group-title">Connectivity &amp; Cloud</p>
+            <p class="gate-note gate-note-ap">Signal strength, client disconnects, last cloud upload
+               and Upload Now are greyed: The regulator is running as its own access point, so it has no internet connection and no router to report on. Join it to a WiFi network under Setup &rarr; System &rarr; WiFi to bring these back.</p>
             <div class="metric-row">
               <span class="metric-label">Network (SSID)
                 <span class="tooltip">ℹ️
@@ -12374,7 +12433,7 @@
               </span>
               <span class="metric-value" style="font-family:monospace;font-size:13px;"><span id="netIpID">?</span></span>
             </div>
-            <div class="metric-row ap-hide-row">
+            <div class="metric-row gate-ap">
               <span class="metric-label">Strength (dBm)
                 <span class="tooltip">ℹ️
                   <span class="tooltip-box">Above -67dBm good. Below -75dBm unstable</span>
@@ -12382,7 +12441,7 @@
               </span>
               <span class="metric-value"><span id="WifiStrengthID">0</span></span>
             </div>
-            <div class="metric-row ap-hide-row">
+            <div class="metric-row gate-ap">
               <span class="metric-label">Client Disconnects (count)
                 <span class="tooltip">ℹ️
                   <span class="tooltip-box">WiFi connection losses detected by ESP32 (router drops, signal loss,
@@ -12400,7 +12459,7 @@
               </span>
               <span class="metric-value"><span id="WifiHeartBeatID">0</span></span>
             </div>
-            <div class="metric-row ap-hide-row">
+            <div class="metric-row gate-ap">
               <span class="metric-label">Last Cloud Upload
                 <span class="tooltip">ℹ️
                   <span class="tooltip-box">Time since the last confirmed telemetry upload to the cloud. Uploads run
@@ -12420,7 +12479,7 @@
               <span class="metric-value" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
                 <span><span id="BufferedRecordCountID">0</span>/<span id="BufferedRecordCapID">?</span></span>
                 <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
-                  <form class="ap-hide-inline" action="/get" method="GET" target="hidden-form" style="display:inline;">
+                  <form class="gate-ap" action="/get" method="GET" target="hidden-form" style="display:inline;">
                     <input type="hidden" name="forceCloudFlush" value="1">
                     <input type="submit" value="Upload Now" class="btn-primary" id="cloudUploadNowBtn"
                       title="Force-upload buffered records to the cloud immediately. RECOMMENDED with field OFF. If field is ON: control loop is held for up to 10s during each upload, banner will show WAITING CLOUD. Hardware over-voltage protection stays armed, but a load transient mid-upload could trigger a hard cut. Avoid during dynamic events (RPM ramps, sudden load changes). Bypasses the 70s field-off settle and 13s interval throttle." />
@@ -12812,8 +12871,25 @@
           </div>
           <!-- DS18B20 Sensor Health -->
           <div class="card-group span-all">
-            <p class="card-group-title">Alternator Temperature Sensor Health (DS18B20)</p>
+            <p class="card-group-title">Temperature Sensor Health (DS18B20)</p>
             <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Counts since boot. One read failure on startup is normal. Persistent failures need attention; occasional CRC recoveries are fine.</p>
+
+            <!-- Per-probe good/bad read tallies. Filled by owRenderHealth() from the same
+                 /tempSensors poll that drives the Setup > Temperature identification table;
+                 the poll runs while EITHER tab is on screen (owTabVisible in script.js). -->
+            <p class="card-group-subtitle" style="font-size:12.5px;font-weight:600;margin:4px 0 6px;">Per probe</p>
+            <div class="ow-table-wrap">
+              <table class="usage-table ow-table" id="owHealthTable">
+                <thead>
+                  <tr><th>Serial</th><th>Role</th><th>OK</th><th>Fail</th></tr>
+                </thead>
+                <tbody id="owHealthTableBody">
+                  <tr><td colspan="4" class="ow-empty">No probe data yet</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p class="card-group-subtitle" style="font-size:12.5px;font-weight:600;margin:14px 0 6px;">Bus totals</p>
             <div class="sensor-health-grid">
             <div class="metric-row telemetry-row">
               <span class="metric-label telemetry-label">Read Failures</span>
@@ -14214,6 +14290,11 @@
   
     <div id="livedata-diag" class="sub-tab-content">
 
+      <p class="gate-note gate-note-shunt">No battery shunt is installed, so the battery
+         diagnostics panel has no signal to report and is not shown &mdash; only the alternator
+         panel below. Setup &rarr; Battery &rarr; Measurement Sources &rarr; Battery Shunt
+         Present.</p>
+
       <div class="diag-panel-tabs">
         <button class="diag-panel-tab active" onclick="showDiagPanel('alternator', event)">Alternator</button>
         <button class="diag-panel-tab req-batt-current" onclick="showDiagPanel('battery', event)">Battery</button>
@@ -15412,6 +15493,17 @@
   <!-- Cloud Features Tab -->
   <div id="cloudfeatures" class="tab-content">
 
+    <!-- Shown INSTEAD of the sub-tabs when cloud is unreachable (gate CSS in styles.css): every
+         panel below is a cloud iframe, so landing on one with cloud off just renders failures. -->
+    <div class="settings-card" id="cloudGateCard">
+      <p class="gate-note gate-note-cloud">Cloud Features is switched off, so registration,
+         leaderboards, fleet stats, config sharing and software update are unavailable. Turn it on
+         under Setup &rarr; System &rarr; Cloud Features.</p>
+      <p class="gate-note gate-note-ap">The regulator is running as its own access point, so it has
+         no internet connection. Registration, leaderboards, fleet stats, config sharing and software
+         update need one. Join the regulator to a WiFi network under Setup &rarr; System to use them.</p>
+    </div>
+
     <!-- Cloud Features Sub-tabs -->
     <div class="sub-tabs">
       <button class="sub-tab active" onclick="showSubTab('cloudfeatures', 'myprofile', event)">Registration</button>
@@ -16250,6 +16342,40 @@
       </div>
     </div>
   </div><!-- END rpmalign-modal-overlay -->
+
+  <!-- Limit panel — names the one thing holding charging back, the number it is held against, and
+       where that number is set. Opened from the header readout labels, the field percentage and the
+       PROTECTION / BATT > TARGET / BMS LIMIT words (every .why-tap); rendered by whyPanelRender() from
+       the CSV1/CSV2/CSV4 caches plus settings echoes. Every block is always laid out (visibility, never
+       display) so the box is one fixed size and a limit change while open moves nothing. -->
+  <div id="why-overlay" class="why-overlay" style="display:none;">
+    <div id="why-panel" class="why-panel" role="dialog" aria-modal="true" aria-labelledby="why-title" tabindex="-1">
+      <div class="why-head">
+        <span id="why-title" class="why-title">What is limiting charging</span>
+        <button type="button" class="why-close" onclick="whyPanelClose()" aria-label="Close">&#x2715;</button>
+      </div>
+      <div class="why-body">
+        <div class="why-now">
+          <span class="why-k">Engine speed</span><span class="why-v" id="why-rpm">&mdash;</span><span class="why-u">RPM</span>
+          <span class="why-k">Alternator output</span><span class="why-v" id="why-alt">&mdash;</span><span class="why-u">A</span>
+          <span class="why-k">Asking for</span><span class="why-v" id="why-ask">&mdash;</span><span class="why-u">A</span>
+          <span class="why-k">Field drive</span><span class="why-v" id="why-duty">&mdash;</span><span class="why-u">%</span>
+        </div>
+        <hr>
+        <div class="why-line why-headline" id="why-headline">Waiting for data</div>
+        <hr>
+        <div class="why-line why-where" id="why-where"></div>
+        <hr class="why-bms-hr" id="why-bms-hr">
+        <div class="why-bms" id="why-bms">
+          <div class="why-bms-grid">
+            <span class="why-k">Charge voltage</span><span class="why-v" id="why-bms-v">&mdash;</span><span class="why-u">V</span><span class="why-own" id="why-bms-v-own"></span>
+            <span class="why-k">Charge current</span><span class="why-v" id="why-bms-a">&mdash;</span><span class="why-u">A</span><span class="why-own" id="why-bms-a-own"></span>
+          </div>
+          <div class="why-bms-note">If the BMS stops responding, your own settings apply.</div>
+        </div>
+      </div>
+    </div>
+  </div><!-- END why-overlay -->
 
   <!-- First-boot SoC seed popup — auto-opens once after the boot-time voltage seed (ack persisted
        in NVS via SocSeedAck), reopens any time from the header SOC readout. Body rendered by socSeedRender(). -->

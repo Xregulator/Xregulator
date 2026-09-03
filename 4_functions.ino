@@ -4325,8 +4325,31 @@ static void otaSetWdtWindow(uint32_t ms) {
   esp_task_wdt_reset();  // start the new window fresh; harmless error on the non-subscribed web-handler task
 }
 
-void prepareForOTA() {
+// Signature fetch budget: 12 s per phase, what every other small cloud fetch uses (executeUpdateFirmwareVersion
+// and friends). Connect, handshake, read, and body-stall are deliberately the SAME value: the connect timeout
+// is also the socket poll period the core runs inside the TLS handshake, so a handshake cap only binds when
+// it is no larger than the connect cap. Left unset, the handshake inherited the core's 120 s default, which
+// with the old 60 s connect let a server that accepts TCP but never answers TLS hold the update path for
+// 3 min — on the factory path that is the web-handler task, i.e. the whole dashboard. testInternetSpeed()
+// has just proved the link; the patient client is the 2.7 MB download that follows, not this sub-1 KB fetch.
+static const uint32_t OTA_SIG_TIMEOUT_MS = 12000;
+static const int OTA_SIG_MAX_LEN = 1024;  // RSA-4096 sig is 512 B = 684 chars base64; anything bigger is not a signature
+
+// How long prepareForOTA() waits for TempTask and httpsTask to retire themselves. The longest single cloud op
+// is three 12 s phases plus the 3 s post-failure delay; TempTask's longest sleep is 5 s.
+static const uint32_t OTA_TASK_EXIT_WAIT_MS = 60000;
+
+// otaInProgress cannot legitimately stay up past this: every call on the update path is bounded (task exit
+// wait 60 s, signature fetch a few 12 s phases, download 60 s connect + 120 s handshake + 60 s header + the
+// 30 min OTA_MAX_DOWNLOAD_MS cap with its 120 s stall guard). Past it the path is wedged in something with
+// no timeout, and checkOtaWedge() retires the flag.
+static const uint32_t OTA_WEDGE_LIMIT_MS = 2400000;  // 40 min
+
+// Retire both Core 0 tasks for the attempt. Returns false — caller aborts the update — if httpsTask is still
+// alive at the end of the wait.
+bool prepareForOTA() {
   otaInProgress = true;
+  otaInProgressSinceMs = millis();
   // Close EventSource FIRST (before any heap measurements)
   Serial.println("Closing EventSource connections...");
   events.close();
@@ -4335,16 +4358,29 @@ void prepareForOTA() {
   Serial.println("🧹 Preparing system for OTA - freeing memory...");
   Serial.printf("Heap BEFORE cleanup: %u bytes\n", ESP.getFreeHeap());
 
+  // Both tasks leave on their own once they see otaInProgress — TempTask at its loop top or conversion wait,
+  // httpsTask between cloud ops. Waiting for that instead of vTaskDelete() is the point: a hard delete of
+  // httpsTask mid-op leaves lwIP (DNS semaphore, socket) and mbedTLS pointing into a freed stack.
+  if (tempTaskSuspended && tempTaskHandle != NULL) vTaskResume(tempTaskHandle);  // a suspended task never reaches the flag check
+  uint32_t exitWaitStart = millis();
+  while ((tempTaskHandle != NULL || httpsTaskHandle != NULL) && millis() - exitWaitStart < OTA_TASK_EXIT_WAIT_MS) {
+    delay(100);
+    esp_task_wdt_reset();
+  }
   if (httpsTaskHandle != NULL) {
-    esp_task_wdt_delete(httpsTaskHandle);
-    vTaskDelete(httpsTaskHandle);
-    httpsTaskHandle = NULL;
+    // Wedged inside a network call. Abort rather than hard-delete: performOTAUpdateToVersion() restores the
+    // 16 s WDT window on return, and a cloud task that is truly stuck then panic-reboots the device — the
+    // designed recovery for a hung op — with the network stack intact until then.
+    Serial.printf("OTA ABORT: HTTPS task still busy after %lu s - not deleting it mid-op\n", (unsigned long)(OTA_TASK_EXIT_WAIT_MS / 1000));
+    return false;
   }
   if (tempTaskHandle != NULL) {
-    esp_task_wdt_delete(tempTaskHandle);
+    // Holds no network state: a hard delete risks one 1-Wire transaction, which the next enumerate repairs.
+    Serial.println("OTA: TempTask did not exit on its own - deleting it");
     vTaskDelete(tempTaskHandle);
     tempTaskHandle = NULL;
   }
+  core0Busy = true;  // a cloud op finishing during the wait cleared it; the OTA holds the field off from here
 
   delay(1000);
   esp_task_wdt_reset();
@@ -4354,6 +4390,7 @@ void prepareForOTA() {
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   Serial.println("Ready for OTA download!");
+  return true;
 }
 bool validateHeapIntegrity() {
   // Snapshot: use heap_caps_* for reliable internal vs PSRAM separation
@@ -4430,7 +4467,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   const unsigned long OTA_STALL_TIMEOUT_MS = 120000;
   // absolute cap on the whole download. 30 min carries the 2.7 MB package at ~12 kbps, i.e. any link
   // still passing traffic at all. Cost of the generosity: TempTask is deleted for this whole window,
-  // so alternator temperature is unmonitored until otaRestoreNormalOperation() rebuilds it.
+  // so alternator temperature is unmonitored until ensureCore0Tasks() rebuilds it after otaRestoreNormalOperation().
   const unsigned long OTA_MAX_DOWNLOAD_MS = 1800000;
   uint8_t inputBuffer[CHUNK_SIZE];
   int totalDownloaded = 0;
@@ -4777,18 +4814,21 @@ void performOTAUpdate(const UpdateInfo &updateInfo) {
     Serial.printf("RATE LIMIT: Waiting %lu ms before HTTPS\n", waitTime);
     delay(waitTime);
   }
-  prepareForOTA();
+  if (!prepareForOTA()) {
+    otaRestoreNormalOperation(false);
+    return;
+  }
   // Download signature first
   WiFiClientSecure client;
   client.setInsecure();  // ota.xengineering.net proxy (unpinned chain); payload integrity comes from RSA verify, not TLS pinning
   HTTPClient http;
   Serial.printf("📥 Downloading signature from: %s\n", updateInfo.signatureUrl.c_str());
   // No 40K heap gate — see notes at firmware-download http.begin above.
-  // Timeouts were the 5 s HTTPClient defaults. This tiny fetch gates the whole update and runs AFTER
-  // prepareForOTA() has already torn things down, so a slow-link failure here wastes the teardown.
-  http.setConnectTimeout(60000);
-  http.setTimeout(60000);
+  // Budget rationale at OTA_SIG_TIMEOUT_MS. The handshake cap takes SECONDS.
+  client.setHandshakeTimeout(OTA_SIG_TIMEOUT_MS / 1000);
+  http.setConnectTimeout(OTA_SIG_TIMEOUT_MS);
   http.begin(client, updateInfo.signatureUrl);
+  http.setTimeout(OTA_SIG_TIMEOUT_MS);  // header wait + reads; after begin() like the other cloud clients
   http.addHeader("Device-ID", getDeviceId());
   int httpCode = http.GET();
 
@@ -4800,7 +4840,49 @@ void performOTAUpdate(const UpdateInfo &updateInfo) {
     otaRestoreNormalOperation(false);
     return;
   }
-  String signatureBase64 = http.getString();
+  // The proxy always sends Content-Length (strlen of the fetched object), so a missing one is a broken reply.
+  int sigLen = http.getSize();
+  if (sigLen <= 0 || sigLen > OTA_SIG_MAX_LEN) {
+    Serial.printf("Signature reply size invalid: %d bytes\n", sigLen);
+    http.end();
+    otaRestoreNormalOperation(false);
+    return;
+  }
+  // Bounded read instead of http.getString(): HTTPClient::writeToStreamDataBlock() loops on connected() with
+  // no data deadline, and a half-open socket keeps connected() true until TCP keepalive gives up (~2 h). The
+  // tar loop below has a stall guard for exactly this; the signature body needs the same one.
+  String signatureBase64;
+  signatureBase64.reserve(sigLen);
+  {
+    WiFiClient *sigStream = http.getStreamPtr();
+    char sigChunk[128];
+    uint32_t lastSigData = millis();
+    bool sigStalled = false;
+    while ((int)signatureBase64.length() < sigLen) {
+      if (!client.connected()) break;
+      int avail = sigStream->available();
+      if (avail > 0) {
+        int toRead = min(avail, min((int)sizeof(sigChunk), sigLen - (int)signatureBase64.length()));
+        int n = sigStream->readBytes(sigChunk, toRead);
+        if (n > 0) {
+          signatureBase64.concat(sigChunk, n);
+          lastSigData = millis();
+        }
+      } else if (millis() - lastSigData > OTA_SIG_TIMEOUT_MS) {
+        sigStalled = true;
+        break;
+      } else {
+        delay(10);
+      }
+      esp_task_wdt_reset();
+    }
+    if ((int)signatureBase64.length() != sigLen) {
+      Serial.printf("Signature download %s: got %d of %d bytes\n", sigStalled ? "stalled" : "cut off", signatureBase64.length(), sigLen);
+      http.end();
+      otaRestoreNormalOperation(false);
+      return;
+    }
+  }
   http.end();
   signatureBase64.trim();
   Serial.printf("✅ Signature downloaded (%d chars)\n", signatureBase64.length());
@@ -5005,10 +5087,8 @@ void performOTAUpdateToVersion(const char *targetVersion) {
   }
 
   //Delting this- an OTA update takes priority, and we will bulldoze thru
-  // if (core0Busy) {
-  //   Serial.println("performOTAUpdateToVersion blocked by upload in progress");
-  //   return;
-  // }
+  // Priority still holds, but bulldozing no longer means vTaskDelete() on a mid-op cloud task:
+  // prepareForOTA() raises otaInProgress and waits for httpsTask to leave between ops.
   core0Busy = true;
 
   Serial.println("HEAP BEFORE version check:");
@@ -5704,32 +5784,85 @@ void otaRestoreNormalOperation(bool success) {
   Serial.printf("OTA restore: success=%d, restoring system state...\n", success ? 1 : 0);
 
   core0Busy = false;
+  // TempTask was dead for the whole attempt. Restart its 20 s window BEFORE releasing otaInProgress: on the
+  // factory path this runs on the web-handler task, and checkTempTaskHealth() (loop) could otherwise see the
+  // gap and raise the hung-task alarm before ensureCore0Tasks() has re-created the task.
+  lastTempTaskHeartbeat = millis();
   otaInProgress = false;
   lastHttpsOperationTime = millis();
+  // TempTask / httpsTask come back through ensureCore0Tasks() on the next loop pass — the one creator outside
+  // setup(), where a failed create is retried and alarmed instead of being a Serial line here.
+}
 
-  // Recreate TempTask if deleted — params must match the xTaskCreatePinnedToCore in setup()
-  if (tempTaskHandle == NULL) {
-    BaseType_t ok = xTaskCreatePinnedToCore(TempTask, "TempTask", 6144, NULL, 1, &tempTaskHandle, 0);
-    if (ok == pdPASS) {
-      Serial.println("✅ TempTask recreated on Core 0");
+// Core 0 task supervisor — the only place outside setup() that creates TempTask / httpsTask. An OTA attempt
+// retires both (prepareForOTA) and a failed attempt only clears the flags (otaRestoreNormalOperation), so
+// they return here. A create can fail when internal RAM is too fragmented for the stack; that used to be one
+// Serial line and a device that stayed blind — no TempTask means the 20 s temperature-stale gate cuts the
+// field — until a power cycle. Now: retry every 2 s, console after three misses, and request the maintenance
+// reboot that rebuilds everything. Params must match the xTaskCreatePinnedToCore calls in setup().
+void ensureCore0Tasks() {
+  if (otaInProgress) return;
+  static uint32_t lastAttemptMs = 0;
+  static uint8_t failStreak = 0;
+  static bool alarmed = false;
+  bool tempMissing = (tempTaskHandle == NULL);
+  bool httpsMissing = (httpsTaskHandle == NULL);
+  if (!tempMissing && !httpsMissing) {
+    failStreak = 0;
+    alarmed = false;
+    return;
+  }
+  uint32_t now = millis();
+  if (now - lastAttemptMs < 2000) return;
+  lastAttemptMs = now;
+
+  bool restarted = false, failed = false;
+  if (tempMissing) {
+    if (xTaskCreatePinnedToCore(TempTask, "TempTask", 6144, NULL, 1, &tempTaskHandle, 0) == pdPASS) {
+      tempTaskSuspended = false;    // a fresh task runs regardless of what the retired one was doing
+      lastTempTaskHeartbeat = now;  // restart the 20 s window before checkTempTaskHealth() sees the gap
+      restarted = true;
     } else {
-      Serial.println("❌ TempTask recreation FAILED");
+      failed = true;
     }
   }
-
-  // Recreate HTTPS task if deleted — params must match setup() (see setup() note)
-  if (httpsTaskHandle == NULL) {
-    BaseType_t ok = xTaskCreatePinnedToCore(httpsTask, "HTTPS", 12288, NULL, 1, &httpsTaskHandle, 0);
-    if (ok == pdPASS) {
-      Serial.println("✅ HTTPS task recreated on Core 0");
+  if (httpsMissing) {
+    if (xTaskCreatePinnedToCore(httpsTask, "HTTPS", 12288, NULL, 1, &httpsTaskHandle, 0) == pdPASS) {
+      restarted = true;
     } else {
-      Serial.println("❌ HTTPS task recreation FAILED");
+      failed = true;
     }
   }
+  if (restarted) {
+    Serial.println("TASKS: Core 0 task(s) restarted");
+    queueConsoleMessage("Background tasks restarted after update attempt");
+  }
+  if (!failed) return;
 
-  vTaskDelay(pdMS_TO_TICKS(100));  // let tasks initialize cleanly
+  size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+  if (failStreak < 255) failStreak++;
+  Serial.printf("TASKS: create failed (streak %u), internal largest=%u\n", failStreak, (unsigned)largest);
+  if (failStreak >= 3 && !alarmed) {
+    alarmed = true;
+    queueConsoleMessageF("CRITICAL: %s task cannot restart (largest free RAM %u B) - maintenance reboot at next quiet window",
+                         (tempTaskHandle == NULL) ? "temperature" : "cloud", (unsigned)largest);
+    maintRebootHealthReq = true;
+  }
+}
 
-  Serial.println("System restoration complete");
+// Expiry for otaInProgress. Every call on the update path is bounded (see OTA_WEDGE_LIMIT_MS), so a flag older
+// than that means the path is wedged in something with no timeout — and the flag was silencing every recovery
+// at once: the console, the TempTask health alarm, and the maintenance reboot ladder. Runs on the Core 1 loop,
+// which covers the factory-partition path where the update runs on the web-handler task (not WDT-subscribed);
+// the staged path runs on loop() itself and is covered by the 300 s WDT window instead.
+void checkOtaWedge() {
+  if (!otaInProgress) return;
+  if (millis() - otaInProgressSinceMs < OTA_WEDGE_LIMIT_MS) return;
+  otaInProgress = false;  // console, health alarm, ladder, and ensureCore0Tasks() all resume
+  core0Busy = false;      // set by the wedged path; the ladder's cloudIdle and the field gate need it clear
+  Serial.println("OTA WEDGED: update path silent past OTA_WEDGE_LIMIT_MS - flags released, reboot requested");
+  queueConsoleMessage("CRITICAL: firmware update stalled with no timeout - background tasks restarting, maintenance reboot at next quiet window");
+  maintRebootHealthReq = true;
 }
 static void otaHeapMark(const char *tag) {
   Serial.printf("HEAP %s: internal_free=%u largest=%u total_free=%u\n",

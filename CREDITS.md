@@ -46,6 +46,19 @@ derived image asset is likewise made available under CC BY-SA 3.0.
   (`SetRawRxHook`) surfaces every received frame to the sketch for the RV-C / proprietary
   decodes the core library's dispatch cannot deliver.
 
+### LSM6DSOX IMU driver — `LSM6DSOX_xeng`
+
+- **Origin:** STM32duino LSM6DSOX 2.3.4 by SRA / STMicroelectronics
+- **Source:** <https://github.com/stm32duino/LSM6DSOX>
+- **License:** BSD 3-Clause (Copyright (c) 2019 STMicroelectronics) — full notice kept at the
+  top of the library source.
+- **Modifications:** the I2C branches of `IO_Read` / `IO_Write` now return the real transfer
+  result. Upstream returned 0 (OK) on that path regardless of what the bus did — it discarded
+  `endTransmission()` and never checked how many bytes `requestFrom()` delivered — so every
+  `LSM6DSOX_OK` test in a caller was vacuous over I2C, and a failed read silently left the
+  caller's buffer holding the previous contents. Also bounds the receive loop to the requested
+  length. SPI path, class name and API untouched.
+
 ## Design prior art (patterns, not code)
 
 ### DVCC-style charge-limit follow (CVL/CCL) — trust state machine and arbitration
