@@ -9603,11 +9603,13 @@ void checkWiFiConnection() {
   if (now - wifiRecon.lastScanKickoff >= WIFI_SCAN_CADENCE_MS) {
     wifiRecon.lastScanKickoff = now;
     // iPhone hotspots pick a fresh channel per session — sweep all channels every Nth scan
-    // (and whenever no channel is cached); otherwise it's 120 ms of passive RX on one channel.
+    // (and whenever no channel is cached); otherwise it's 120 ms on one channel.
     bool fullSweep = (wifiRecon.channel == 0) || (++wifiRecon.scansSinceSweep >= WIFI_FULL_SWEEP_EVERY);
     if (fullSweep) wifiRecon.scansSinceSweep = 0;
     lastScanWasFullSweep = fullSweep;
-    WiFi.scanNetworks(true, false, true, 120, fullSweep ? 0 : (uint8_t)wifiRecon.channel, cached_wifi_ssid);
+    // Active + show_hidden: a hidden AP beacons with a blank SSID, so a passive scan can never
+    // match cached_wifi_ssid. Only a directed probe makes it answer with its real name.
+    WiFi.scanNetworks(true, true, false, 120, fullSweep ? 0 : (uint8_t)wifiRecon.channel, cached_wifi_ssid);
     wifiRecon.state = WIFI_RECON_SEEKING;
   }
 }

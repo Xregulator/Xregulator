@@ -717,7 +717,7 @@
                         </label>
                       </div>
                       <div class="seg-pill-caption">
-                        <span class="cap cap-0">Board temperature can stand in for battery temperature when no battery measurement is installed</span>
+                        <span class="cap cap-0">Board temperature can optionally stand in for battery temperature when no battery measurement is installed</span>
                         <span class="cap cap-1">Board temperature cannot stand in for battery temperature — choose one under Setup &rarr; Battery &rarr; Battery Temperature (a probe is assigned under Setup &rarr; Temperature)</span>
                       </div>
                     </div>
@@ -16199,7 +16199,7 @@
   </div><!-- END nextstep-modal-overlay -->
 
   <!-- Maintenance-restart acknowledgement: first Vessel Info save only, after the SoC popup and
-       before the Commissioning Prerequisites screen. Static body; maintAckClose() resolves the
+       before the Charge Rate Limits handoff. Static body; maintAckClose() resolves the
        save-chain promise. -->
   <div id="maint-ack-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9200; align-items:flex-start; justify-content:flex-start; overflow:auto; padding:20px; box-sizing:border-box;">
     <div style="position:relative; margin:auto 0; background:#1e1e1e; color:#ddd; width:470px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); display:flex; flex-direction:column;">
@@ -16288,9 +16288,30 @@
     </div>
   </div><!-- END maint-ack-overlay -->
 
-  <!-- Commissioning Prerequisites: after the battery-defaults popup on a first Vessel Info save,
-       collects the sensor/current settings commissioning depends on before the wizard measures them.
-       Body rendered by commPrepRender() from /exportConfig; only edited fields are written (one /get). -->
+  <!-- Before You Start — one screen ahead of the Commissioning Prerequisites, on every route into the
+       wizard. Holds the two things that are about how you run the process rather than what the regulator
+       is set to; ✕ leaves the flow exactly as the prerequisites ✕ does. -->
+  <div id="commprep-intro-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9200; align-items:center; justify-content:center; overflow:auto; padding:20px; box-sizing:border-box;">
+    <div style="position:relative; background:#1e1e1e; color:#ddd; width:480px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Before You Start</span>
+        <button onclick="commPrepIntroClose(false)" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">&#10005;</button>
+      </div>
+      <div style="padding:14px 16px;">
+        <p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;"><strong style="color:#e0e0e0;">Use a laptop or tablet if you can.</strong> Setup and Commissioning works on a phone, but it's a worse UX on a small screen.</p>
+        <p style="font-size:13px; line-height:1.5; color:#bbb; margin:0;">During the wizard, keep house loads steady &mdash; avoid switching large loads on or off mid-run.</p>
+      </div>
+      <div style="padding:12px 16px; border-top:1px solid #333; display:flex; justify-content:flex-end;">
+        <button onclick="commPrepIntroClose(true)" style="border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em; background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; border:none;">Continue</button>
+      </div>
+    </div>
+  </div><!-- END commprep-intro-overlay -->
+
+  <!-- Commissioning Prerequisites: collects the sensor/current settings commissioning depends on before
+       the wizard measures them. On a first Vessel Info save it comes BEFORE the battery-defaults popup, so
+       the proposal is derived from the hardware described here (the Charge Rate Limits handoff is then
+       made by the save chain, after the SoC and restart-ack screens). Body rendered by commPrepRender()
+       from /exportConfig; only edited fields are written (one /get). -->
   <div id="commprep-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9200; align-items:flex-start; justify-content:flex-start; overflow:auto; padding:20px; box-sizing:border-box;">
     <div style="position:relative; margin:auto 0; background:#1e1e1e; color:#ddd; width:560px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100dvh - 40px); display:flex; flex-direction:column;">
       <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">

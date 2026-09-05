@@ -4058,7 +4058,7 @@ function setApJoinStatus(elId, msg) {
 async function joinRegulatorHotspot(statusElId) {
     const plugin = wifiJoinPlugin();
     if (!plugin) {
-        setApJoinStatus(statusElId, 'Joining a network from inside the app needs the iOS app.');
+        setApJoinStatus(statusElId, 'Joining a network from inside the app needs the phone app.');
         return;
     }
     const creds = getRegulatorApCreds();
@@ -4066,7 +4066,7 @@ async function joinRegulatorHotspot(statusElId) {
         setApJoinStatus(statusElId, 'Enter the regulator hotspot name first.');
         return;
     }
-    setApJoinStatus(statusElId, 'Asking iOS to join ' + creds.ssid + '…');
+    setApJoinStatus(statusElId, 'Asking this phone to join ' + creds.ssid + '…');
     try {
         await plugin.connect({ ssid: creds.ssid, password: creds.password });
     } catch (e) {
@@ -4574,6 +4574,7 @@ function phoneSpeedNativePlugin() {
 }
 let phoneSpeedNativeActive = false;
 let phoneSpeedNativeStopTried = false;   // false until this session has issued one unconditional bs.stop()
+let speedNotifPermTried = false;         // one notification prompt per session, not one per CSV3 echo
 
 // Tear down the JS fallback GNSS watch. Idempotent and safe with nothing running; the
 // 'pending' case leaves null behind so the in-flight starter cancels its own orphan.
@@ -4636,12 +4637,26 @@ async function phoneSpeedBgDisclosed() {
     return bgSpeedDisclosurePending;
 }
 
+// Android 13+ posts nothing for a foreground service unless POST_NOTIFICATIONS is held: the
+// speed stream still runs and GNSS still reads, but the shade stays empty, so the owner cannot
+// see that their location is in use or stop it from there. Asked at the first native start
+// rather than at launch, for the same reason the location prompt is. iOS has no equivalent
+// permission and the plugin resolves granted, so this is a no-op there.
+async function ensureSpeedNotificationPermission() {
+    if (speedNotifPermTried) return false;
+    speedNotifPermTried = true;
+    const P = phoneSpeedNativePlugin();
+    if (!P || !P.requestNotifications) return false;
+    try { const r = await P.requestNotifications(); return !!(r && r.granted); } catch (e) { return false; }
+}
+
 async function updatePhoneSpeedPoster(mode) {
     const wantFast = Number(mode) === 1;
     const bs = phoneSpeedNativePlugin();
     if (wantFast && bs && await phoneSpeedBgDisclosed()) {
         // Re-called on every CSV3 echo; the plugin treats a repeat start as a config
         // refresh, so a changed device IP is picked up within a minute.
+        if (!phoneSpeedNativeActive) await ensureSpeedNotificationPermission();
         try {
             await bs.start({ postUrl: buildURL('/set_phone_data') });
             phoneSpeedNativeActive = true;
@@ -8774,10 +8789,23 @@ async function handleVesselInfoSave(event) {
             // A ✕-dismiss from a pre-flash session lives in sessionStorage and would mute a
             // factory-fresh device's popup in a reused tab — a true first save re-arms it.
             if (result.firstSave === true) sessionStorage.removeItem('socSeedDismissed');
+            // First install only: true once Next is pressed on the Commissioning Prerequisites screen. ✕,
+            // "I'll do this later" and a failed config read leave it false — no wizard — but the rest of
+            // the chain still runs.
+            let _goWizard = false;
             (_orientChanged
                 ? xAlert('Because the mounting orientation changed, the saved level reference (Level offsets) no longer matches how the device sits, and heel/pitch will read wrong until it is recaptured.\n\nWith the boat sitting level, press Zero Now in the Vessel Info section to re-zero.', 'Re-do Level Offsets')
                 : Promise.resolve())
-                .then(() => maybeProposeBatteryDefaults(vesselData, _prevBatt, result.firstSave === true))  // async, never blocks the save result
+                // First install: describe the hardware BEFORE anything is recommended from it — Before You
+                // Start, then Commissioning Prerequisites (sensor roles, shunt). The battery-defaults proposal
+                // below reads battTempProbeEnable from its own /exportConfig, so it sees the Prerequisites
+                // writes (one awaited /get in commPrepFinish) with no extra plumbing. The screen's handoff to
+                // Charge Rate Limits is deferred to the tail of this chain. Guarded so a failure here never
+                // blocks the save result.
+                .then(() => { if (result.firstSave === true) return maybeShowCommPrereqs().then(go => { _goWizard = go === true; }).catch(() => { }); })
+                // async, never blocks the save result. On a first install the Prerequisites screen has just
+                // closed, so the wait box covers the populator's own /exportConfig read (~1-2 s of device time).
+                .then(() => { if (result.firstSave === true) vesselNextStepWait(true); return maybeProposeBatteryDefaults(vesselData, _prevBatt, result.firstSave === true); })
                 // Factory-fresh device: the firmware runs its deferred SoC seed on Core 1 some time
                 // after this save responds, so poll /socseed until the snapshot lands (a single
                 // fixed delay raced the Core-1 write and could miss the popup forever). Show it and
@@ -8785,13 +8813,7 @@ async function handleVesselInfoSave(event) {
                 // modal and socSeedMaybeAutoOpen suppresses itself over that modal, so a SoC popup
                 // deferred until after the wizard opened would never appear this session.
                 .then(async () => {
-                    // /exportConfig is ~1-2 s of device time (every manifest key read from NVS), and the
-                    // prerequisites screen can't render without it. Start it now so it overlaps the SoC
-                    // wait instead of stalling on a blank screen after it. Safe here: nothing between this
-                    // point and that modal writes a prerequisite field (battery defaults already applied
-                    // and bails for Other, the only chemistry whose field set overlaps; the SoC popup
-                    // writes SocSeedAck / ManualSOCPoint only).
-                    if (result.firstSave === true) { _commPrepPrefetch = commPrepFetchCfg(); vesselNextStepWait(true); }
+                    if (result.firstSave === true) vesselNextStepWait(true);
                     for (let i = 0; i < 6; i++) {
                         if (i) await new Promise(res => setTimeout(res, 1000));   // check before sleeping: a snapshot already on file costs nothing
                         _socSeedData = null;
@@ -8803,11 +8825,12 @@ async function handleVesselInfoSave(event) {
                         await new Promise(res => { _socSeedResolve = res; socSeedOpen(); });
                     }
                 })
-                // First save only: one-time heads-up that the device restarts itself for maintenance,
-                // then collect the sensor/current settings commissioning depends on and hand off to
-                // the wizard. Guarded so a failure here never blocks the save result.
+                // First save only: one-time heads-up that the device restarts itself for maintenance.
                 .then(() => { if (result.firstSave === true) return maintAckShow(); })
-                .then(() => { if (result.firstSave === true) return maybeShowCommPrereqs().catch(() => { }); })
+                // First save only, Next was pressed on Prerequisites: Charge Rate Limits → tach alignment →
+                // wizard, the same handoff commPrepFinish makes itself on a re-commission. ← Back reopens
+                // Prerequisites, whose Next then hands off immediately (the deferral was consumed above).
+                .then(() => { if (_goWizard) { vesselNextStepWait(true); openRpmCap(openRpmAlign, commPrepReopen); } })
                 // Tail of the chain, never stacked: firmware just set the change flag if voltage/capacity/
                 // chemistry moved. No-op on a first save (no finished pass to invalidate).
                 .then(() => checkRecommissionPrompt().catch(() => { }));
@@ -9176,7 +9199,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         }
         if (battProbe !== 1) {
             noticeHtml += battDefNotice('limit', 'Battery temperature source',
-                'Battery temperature is taken from the regulator board unless a battery probe, an NMEA 2000 battery monitor, a VE.Direct monitor with a temperature sensor, or an RV-C source provides it. The board runs warmer than its surroundings, so the cold-charge lockout is a coarse guard when it is the only source. Assign a probe under Setup > Temperature.');
+                'Battery temperature is taken from the regulator board unless a battery probe, an NMEA 2000 battery monitor, a VE.Direct monitor with a temperature sensor, or an RV-C source provides it. The board runs warmer than its surroundings, so the cold-charge lockout is a coarse guard when it is the only source. A battery probe fitted later is assigned under Setup > Temperature, where the hot-charge lockout and battery temperature limits also live.');
         }
         if (type === 'lifepo4' && battSrc !== 0) {
             noticeHtml += battDefNotice('info', 'Float changed to No Float',
@@ -9222,6 +9245,7 @@ async function maybeProposeBatteryDefaults(vessel, prevBatt, deviceFirstSave) {
         }
         document.getElementById('battdef-apply-btn').style.display = changed.length ? '' : 'none';
         battDefCbChanged();   // re-enable the button if a previous open left it disabled
+        vesselNextStepWait(false);   // first-install chain: armed after the Prerequisites screen closed
         document.getElementById('battdef-modal-overlay').style.display = 'flex';
         const apply = await new Promise(res => { _battDefResolve = res; });
         if (!apply || !changed.length) return;
@@ -9304,9 +9328,11 @@ function vesselNextStepWait(on) {
 }
 
 // ===== Commissioning Prerequisites screen =====
-// Shown once, after the battery-defaults popup, on a first Vessel Info save. Presents the
-// sensor/current settings commissioning depends on, pre-filled from /exportConfig, then hands off
-// to the commissioning wizard. Only user-edited fields are written, in one /get (battdef pattern).
+// On a first Vessel Info save it runs FIRST, ahead of the battery-defaults popup, so the proposal is
+// derived from the hardware described here; the Charge Rate Limits handoff is then made by the save
+// chain rather than by this screen (_commPrepDeferHandoff). Presents the sensor/current settings
+// commissioning depends on, pre-filled from /exportConfig. Only user-edited fields are written, in one
+// /get (battdef pattern).
 // Temperature inputs follow the app's display unit; every param is submitted in its native unit.
 let _commPrereqResolve = null;   // awaited by the vessel-save chain; resolved when the modal closes
 let _commPrepCfg = null;         // /exportConfig snapshot captured at open, for changed-detection
@@ -9317,8 +9343,13 @@ let _commPrepShuntInit = 1;      // BatteryShuntPresent at open (1 = INA228 fitt
 let _commPrepShuntPresent = 1;   // live shunt-present selection
 let _commPrepFloatInit = '';     // UseFloat at open (Other-only charge block); written only if the select changed
 let _commPrepRpmActive = false;  // deep-linked into the RPM editor from the wizard: suppress the live blue row highlight
-let _commPrepPrefetch = null;    // in-flight /exportConfig started during the SoC-seed wait, so the modal opens instantly
 let _commPrepFirstInstall = true; // false on a re-commission: different intro copy, and Next skips tach alignment
+let _commPrepDeferHandoff = false; // vessel-save chain: Next resolves the screen instead of opening Charge Rate Limits (the chain does, after battdef / SoC / restart ack)
+let _commPrepOwLast = null;      // last /tempSensors JSON, polled while this screen is open
+let _commPrepOwSig = null;       // id:role:present signature of the rendered probe rows (null forces the first build)
+let _commPrepOwBusy = false;     // a /tempSensors fetch is in flight
+let _commPrepOwScanUntilMs = 0;  // "Scanning" shown until this time after a scan or an assignment
+let _commPrepOwPolling = false;  // the 5 s probe poll is installed once per session
 
 const CP_BTN_GREEN = 'background:linear-gradient(180deg,#35d6c7,#23a99c); color:#06302d; font-weight:700; border:none;';
 
@@ -9331,38 +9362,197 @@ function commPrepPaintCta() {
     }
 }
 
-// Prerequisite gate: with more than one probe on the bus every role in use must be bound before
-// commissioning — an unbound Alternator role leaves the thermal protection without a temperature, and
-// an unbound Battery/Extra role with its enable on is a half-configured install. Runs after render and
-// injects a blocking line at the top of the body; Next stays disabled until the screen is reopened.
-async function commPrepOwGate(cfg) {
-    let j = null;
+// ----- Temperature probes on the prerequisites screen -----
+// Binding the probes is part of commissioning, not homework for afterwards: the wizard stamps the
+// battery-temperature source class it measured against, and an unbound Alternator role leaves the
+// over-temperature protection with no temperature at all. Assignments and the two enable toggles are
+// written immediately (like the Charge-Limit Follow button); the number fields stay staged until Next.
+function commPrepOwVisible() {
+    const ov = document.getElementById('commprep-modal-overlay');
+    return !!ov && ov.style.display !== 'none' && document.visibilityState !== 'hidden';
+}
+function commPrepOwPollStart() {
+    if (_commPrepOwPolling) return;
+    _commPrepOwPolling = true;
+    setTrackedInterval(() => { if (commPrepOwVisible()) commPrepOwPollNow(); }, 5000);
+}
+async function commPrepOwPollNow() {
+    if (_commPrepOwBusy) return;
+    _commPrepOwBusy = true;
     try {
         const r = await fetchWithTimeout(buildURL('/tempSensors'), { cache: 'no-cache' }, 6000);
-        if (r.ok) j = await r.json();
-    } catch (e) { diagLog('prerequisites tempSensors fetch failed:', e); }
-    if (!j || Number(j.count) <= 1) return;
-    const roles = j.roles || {}, en = j.enabled || {};
-    const num = k => (cfg && cfg[k] !== undefined && cfg[k] !== '') ? parseFloat(cfg[k]) : NaN;
-    const missing = [];
-    if (num('TempSource') !== 1 && !roles.alt) missing.push('Alternator');
-    if (Number(en.batt) === 1 && !roles.batt) missing.push('Battery');
-    if (Number(en.extra) === 1 && !roles.extra) missing.push('Extra');
-    if (!missing.length) return;
-    const body = document.getElementById('commprep-body');
-    const overlay = document.getElementById('commprep-modal-overlay');
-    if (!body || !overlay || overlay.style.display === 'none') return;
-    const box = document.createElement('div');
-    box.id = 'commprep-owgate';
-    box.style.cssText = 'margin:0 0 14px; padding:11px 12px; background:rgba(230,162,60,0.06); border:1px solid rgba(230,162,60,0.32); border-radius:6px; font-size:12px; line-height:1.5; color:#e6a23c;';
-    box.innerHTML = '<strong>Assign the temperature probes under Setup &gt; Temperature before commissioning.</strong> '
-        + Number(j.count) + ' probes are on the bus and the ' + missing.join(', ') + ' role' + (missing.length === 1 ? ' has' : 's have') + ' no probe. '
-        + '<a href="#" onclick="commPrepClose(); goToTemperatureSetup(); return false;" style="color:#e6a23c; text-decoration:underline;">Open Setup &gt; Temperature</a>';
-    body.insertBefore(box, body.firstChild);
-    const start = document.getElementById('commprep-start-btn');
-    if (start) { start.disabled = true; start.style.opacity = '0.45'; start.style.cursor = 'default'; start.title = 'Assign the temperature probes first'; }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        _commPrepOwLast = await r.json();
+        commPrepOwRender(_commPrepOwLast);
+    } catch (e) {
+        diagLog('prerequisites tempSensors fetch failed:', e);   // block stays hidden; Next is not gated on a read we could not make
+    } finally {
+        _commPrepOwBusy = false;
+    }
 }
-
+// Rows are rebuilt only when the id/role/present set changes, so an open role <select> is never torn
+// down mid-choice; the temperature cell updates in place. No age column: a sensor is on the bus or it is
+// not, and one that is listed but has stopped answering says so where its temperature would be.
+const CP_OW_ROLE_LABEL = ['Alternator', 'Battery', 'Other'];   // firmware roles 0..2 (2 is EXTRA)
+const CP_OW_STALE_S = 30;                                      // read cadence is 5 s; 30 s of silence is a fault, not jitter
+function commPrepOwRender(j) {
+    const box = document.getElementById('commprep-ow');
+    if (!box || !j) return;
+    const probes = Array.isArray(j.probes) ? j.probes : [];
+    const roles = j.roles || {};
+    // Thermistor alternator with nothing on the bus is the one install with nothing to say here.
+    box.style.display = (probes.length || _commPrepTempSrc === 0) ? '' : 'none';
+    const body = document.getElementById('commprep-ow-rows');
+    const head = document.getElementById('commprep-ow-head');
+    if (head) head.style.display = probes.length ? '' : 'none';   // column titles over an empty-state line read as a broken table
+    const sig = probes.map(p => p.id + ':' + p.role + ':' + (p.present ? 1 : 0)).join(',');
+    if (body && sig !== _commPrepOwSig) {
+        _commPrepOwSig = sig;
+        body.innerHTML = probes.length ? probes.map(p => {
+            const id = String(p.id || '').toLowerCase();
+            const role = Number(p.role);
+            const opts = [-1, 0, 1, 2].map(v => '<option value="' + v + '"' + (v === role ? ' selected' : '') + '>'
+                + (v < 0 ? 'Not used' : CP_OW_ROLE_LABEL[v]) + '</option>').join('');
+            return '<tr data-ow-id="' + _cfgEsc(id) + '"' + (p.present ? '' : ' style="opacity:0.55;"') + '>'
+                + '<td style="padding:3px 8px 3px 0; font-family:monospace; color:#ddd;" title="' + _cfgEsc(id) + '">'
+                + _cfgEsc(id.slice(-6).toUpperCase()) + '</td>'
+                + '<td class="cp-ow-temp" style="padding:3px 8px 3px 0; color:#ccc;"></td>'
+                + '<td style="padding:3px 0;"><select onchange="commPrepOwAssign(this)" style="background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:3px 6px; font-size:12px;">'
+                + opts + '</select></td></tr>';
+        }).join('') : '<tr><td colspan="3" style="padding:3px 0; color:#888;">No sensors found on the bus. Check the wiring, then press Rescan.</td></tr>';
+    }
+    const lbl = tempUnitLabel();
+    for (const p of probes) {
+        const id = String(p.id || '').toLowerCase();
+        if (!/^[0-9a-f]{16}$/.test(id) || !body) continue;
+        const tr = body.querySelector('tr[data-ow-id="' + id + '"]');
+        if (!tr) continue;
+        const td = tr.querySelector('.cp-ow-temp');
+        if (!td) continue;
+        const tF = (p.tempF === null || p.tempF === undefined) ? NaN : Number(p.tempF);
+        const age = Number(p.ageS);
+        let txt, warn = false;
+        if (!p.present) { txt = 'not found'; warn = true; }
+        else if (!Number.isFinite(tF) || !Number.isFinite(age) || age > CP_OW_STALE_S) { txt = 'not responding'; warn = true; }
+        else txt = toDisplayTemp(tF).toFixed(1) + ' ' + lbl;
+        if (td.textContent !== txt) td.textContent = txt;
+        const col = warn ? '#e6a23c' : '#ccc';
+        if (td.style.color !== col) td.style.color = col;
+    }
+    // Two things the table cannot say by itself: a bound sensor that has left the bus, and a Battery
+    // assignment that Setup > Battery has switched off at the source select.
+    const warn = document.getElementById('commprep-ow-warn');
+    if (warn) {
+        const present = new Set(probes.filter(p => p.present).map(p => String(p.id || '').toLowerCase()));
+        const lines = [];
+        const absent = (key, name, want) => {
+            if (!want) return;
+            const addr = String(roles[key] || '').toLowerCase();
+            if (addr && !present.has(addr)) lines.push('The ' + name + ' sensor (' + addr.slice(-6).toUpperCase() + ') is not on the bus.');
+        };
+        absent('alt', 'alternator', _commPrepTempSrc === 0);
+        absent('batt', 'battery', true);
+        absent('extra', 'other', true);
+        if (roles.batt && _commPrepCfg && Number(_commPrepCfg.battTempSource) === 6) {
+            lines.push('Battery Temperature Source is set to None under Setup > Battery, so the battery sensor is not read.');
+        }
+        if (!probes.length && _commPrepTempSrc === 0) lines.push('Commissioning will run with no alternator temperature, and the over-temperature protection cannot act.');
+        const txt = lines.join(' ');
+        if (warn.textContent !== txt) warn.textContent = txt;
+        warn.style.display = lines.length ? '' : 'none';
+    }
+    const st = document.getElementById('commprep-ow-status');
+    if (st) {
+        const n = probes.filter(p => p.present).length;
+        const txt = (Number(j.scanning) === 1 || Date.now() < _commPrepOwScanUntilMs) ? 'Scanning the bus'
+            : (n + ' sensor' + (n === 1 ? '' : 's') + ' found');
+        if (st.textContent !== txt) st.textContent = txt;
+    }
+    commPrepOwGate(j);
+}
+// Blocking gate. Only the alternator blocks: commissioning drives the alternator hard and the
+// over-temperature protection has nothing to act on without it. A missing battery or other sensor is a
+// warning — battery temperature falls back through its own source chain, and Other feeds nothing the run
+// depends on. Re-evaluated on every poll, so assigning the sensor clears it without reopening the screen.
+// Uses the live Temperature Source selection, not the stored one: Digital chosen here is written by Next.
+const CP_OW_GATE_TITLE = 'Choose the alternator temperature sensor first';
+function commPrepOwGate(j) {
+    const body = document.getElementById('commprep-body');
+    const start = document.getElementById('commprep-start-btn');
+    if (!body) return;
+    const roles = (j && j.roles) || {};
+    const n = j ? (Number(j.count) || 0) : 0;
+    const missing = (n >= 1) && _commPrepTempSrc !== 1 && !roles.alt;
+    let box = document.getElementById('commprep-owgate');
+    if (!missing) {
+        if (box) box.remove();
+        if (start && start.disabled) commPrepPaintCta();
+        return;
+    }
+    if (!box) {
+        box = document.createElement('div');
+        box.id = 'commprep-owgate';
+        box.style.cssText = 'margin:0 0 14px; padding:11px 12px; background:rgba(230,162,60,0.06); border:1px solid rgba(230,162,60,0.32); border-radius:6px; font-size:12px; line-height:1.5; color:#e6a23c;';
+        body.insertBefore(box, body.firstChild);
+    }
+    const html = '<strong>Say which sensor is on the alternator.</strong> '
+        + n + ' sensor' + (n === 1 ? ' is' : 's are') + ' on the bus and none of them is set to Alternator. '
+        + (!settingsUnlocked ? 'Unlock settings to set it.' : 'Set it in the table below.');
+    if (box.innerHTML !== html) box.innerHTML = html;
+    // Locked settings refuse the assignment, so blocking Next would dead-end the screen — say it, don't block it.
+    if (start && settingsUnlocked) { start.disabled = true; start.style.opacity = '0.45'; start.style.cursor = 'default'; start.title = CP_OW_GATE_TITLE; }
+}
+async function commPrepOwAssign(sel) {
+    const tr = sel.closest('tr');
+    const id = tr ? String(tr.dataset.owId || '') : '';
+    const newRole = parseInt(sel.value, 10);
+    const cur = (_commPrepOwLast && Array.isArray(_commPrepOwLast.probes))
+        ? _commPrepOwLast.probes.find(p => String(p.id || '').toLowerCase() === id) : null;
+    const oldRole = cur ? Number(cur.role) : -1;
+    const revert = () => { sel.value = String(oldRole); };
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); revert(); return; }
+    if (!/^[0-9a-f]{16}$/.test(id) || !Number.isFinite(newRole)) { revert(); return; }
+    sel.disabled = true;
+    try {
+        await owWriteRole(id, oldRole, newRole);
+        // The assignment IS the enable: there is no separate Installed/None control on this screen to
+        // contradict it. Battery role on → the source chain may read it; role off → it may not.
+        if (newRole === 1 || oldRole === 1) await commPrepOwSetEnable('battTempProbeEnable', newRole === 1);
+        if (newRole === 2 || oldRole === 2) await commPrepOwSetEnable('extraTempProbeEnable', newRole === 2);
+        _commPrepOwScanUntilMs = Date.now() + 1500;
+    } catch (e) {
+        diagLog('prerequisites probe role assignment failed:', e);
+        xAlert('Could not assign the sensor. Check the connection and try again.');
+        revert();
+    } finally {
+        sel.disabled = false;
+        setTrackedTimeout(commPrepOwPollNow, 700);
+        setTrackedTimeout(commPrepOwPollNow, 2500);
+    }
+}
+async function commPrepOwSetEnable(param, on) {
+    const r = await fetchWithTimeout(buildURL('/get?' + param + '=' + (on ? 1 : 0)), {}, 8000);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+}
+async function commPrepOwScan() {
+    if (!settingsUnlocked) { xAlert('Please unlock settings first'); return; }
+    const btn = document.getElementById('commprep-ow-scan');
+    if (btn) btn.disabled = true;
+    try {
+        const r = await fetchWithTimeout(buildURL('/get?owScan=1'), {}, 8000);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        _commPrepOwScanUntilMs = Date.now() + 2500;
+        const st = document.getElementById('commprep-ow-status');
+        if (st) st.textContent = 'Scanning the bus';
+    } catch (e) {
+        diagLog('prerequisites probe scan request failed:', e);
+        xAlert('Could not start the probe scan. Check the connection and try again.');
+    } finally {
+        if (btn) btn.disabled = false;
+        setTrackedTimeout(commPrepOwPollNow, 1500);
+        setTrackedTimeout(commPrepOwPollNow, 4000);
+    }
+}
 function commPrepFetchCfg() {
     return fetchWithTimeout(buildURL('/exportConfig'), {}, 10000)
         .then(r => r.ok ? r.json() : null)
@@ -9370,7 +9560,7 @@ function commPrepFetchCfg() {
 }
 
 // Maintenance-restart acknowledgement — first Vessel Info save only, sequenced after the SoC
-// popup and before the Commissioning Prerequisites screen. Static body in index.html; any close
+// popup and before the Charge Rate Limits handoff. Static body in index.html; any close
 // path resolves the save-chain promise.
 let _maintAckResolve = null;
 function maintAckShow() {
@@ -9387,22 +9577,33 @@ function maintAckClose() {
 // Pre-flight for EVERY commissioning run, not only the first. A re-commission needs the same
 // Charge-Limit Follow check and the same sensor settings confirmed before the wizard re-measures
 // the system; the values are simply already filled in. firstInstall also decides what Next hands
-// off to — tach alignment is a first-install-only screen.
-async function openCommPrereqs(firstInstall) {
+// off to — tach alignment is a first-install-only screen. deferHandoff (the vessel-save chain):
+// Next resolves true instead of opening Charge Rate Limits — the chain opens it after the
+// battery-defaults, SoC and restart-ack screens; every other exit resolves false.
+async function openCommPrereqs(firstInstall, deferHandoff) {
     _commPrepFirstInstall = !!firstInstall;
+    _commPrepDeferHandoff = !!deferHandoff;
     try {
-        if (!settingsUnlocked) syncArmState();  // same stale-mirror case as the battery-defaults popup
-        const pre = _commPrepPrefetch; _commPrepPrefetch = null;
+        // A successful /saveVesselInfo proves the device is armed; this tab's mirror can be stale after a
+        // reload (same case as the battery-defaults popup). This screen now opens seconds after the save,
+        // and both the role selects and the Next write are gated on the mirror, so the resync is awaited
+        // alongside the config read (one small request — never the longer of the two) instead of racing
+        // the first assignment.
+        const armP = settingsUnlocked ? null : syncArmState();
+        // Start the config read while the Before You Start screen is up, so Continue lands on a
+        // rendered screen instead of a spinner. ✕ there leaves the flow, exactly as ✕ on the next screen does.
+        const cfgP = commPrepFetchCfg();
+        if (!await commPrepIntroShow()) return false;
         vesselNextStepWait(true);
-        const j = await (pre || commPrepFetchCfg());
+        const [j] = await Promise.all([cfgP, armP]);
         vesselNextStepWait(false);
         if (!j) {
             // First install the save chain simply carries on. A re-commission was a deliberate button
             // press, so dead-ending here reads as a broken control — say so and run the rest of the flow.
-            if (firstInstall) { _battDefSkipNote('Could not read the current device settings, so the commissioning prerequisites screen was skipped. Those settings are all available under Setup.'); return; }
+            if (firstInstall) { _battDefSkipNote('Could not read the current device settings, so the commissioning prerequisites screen was skipped. Those settings are all available under Setup.'); return false; }
             await xAlert('Could not read the current device settings, so the prerequisites screen was skipped. Check them under Setup if anything has changed since the last run.');
             openRpmCap(openCommissionModal, null);
-            return;
+            return false;
         }
         // Same response also carries the RPM cap tables the NEXT screen needs, so hand them over
         // rather than making openRpmCap re-fetch. The cap tables live in the "learning" namespace and
@@ -9411,15 +9612,33 @@ async function openCommPrereqs(firstInstall) {
         _commPrepCfg = j.config || {};
         commPrepRender(_commPrepCfg);
         document.getElementById('commprep-modal-overlay').style.display = 'flex';
-        commPrepOwGate(_commPrepCfg);   // async; blocks Next only when probes still need roles
-        await new Promise(res => { _commPrereqResolve = res; });
+        commPrepOwPollStart();          // installed once; renders the probe block and re-checks the Next gate every 5 s
+        commPrepOwPollNow();
+        return await new Promise(res => { _commPrereqResolve = res; });   // true only from Next
     } catch (e) {
         diagLog('commissioning prerequisites failed:', e);
+        return false;
     }
 }
 
-// First install — the vessel-save chain awaits this one.
-function maybeShowCommPrereqs() { return openCommPrereqs(true); }
+// Before You Start — how to run the process, separated from what the regulator is set to. Resolves true
+// on Continue, false on ✕ (which abandons the whole pre-flight, like ✕ on the prerequisites screen).
+let _commPrepIntroResolve = null;
+function commPrepIntroShow() {
+    return new Promise(res => {
+        _commPrepIntroResolve = res;
+        document.getElementById('commprep-intro-overlay').style.display = 'flex';
+    });
+}
+function commPrepIntroClose(cont) {
+    document.getElementById('commprep-intro-overlay').style.display = 'none';
+    const r = _commPrepIntroResolve; _commPrepIntroResolve = null;
+    if (r) r(!!cont);
+}
+
+// First install — the vessel-save chain awaits this one and makes the Charge Rate Limits handoff itself
+// once the battery-defaults, SoC and restart-ack screens are done; resolves true only if Next was pressed.
+function maybeShowCommPrereqs() { return openCommPrereqs(true, true); }
 
 function commPrepRender(cfg) {
     const numF = k => (cfg[k] !== undefined && cfg[k] !== '') ? parseFloat(cfg[k]) : NaN;
@@ -9433,12 +9652,11 @@ function commPrepRender(cfg) {
     const shuntPresent = (numF('BatteryShuntPresent') === 0) ? 0 : 1;   // default fitted
     _commPrepShuntInit = shuntPresent; _commPrepShuntPresent = shuntPresent;
 
-    // Chemistry decides which fields are relevant. Min Charge Temp only matters for lithium (cold-charge
-    // lockout defaults ON only for LiFePO4; lead-acid/AGM charge cold fine). The whole charge block
-    // (Bulk/Absorption/Float/current/protection) appears ONLY for Other — every other chemistry got
-    // these proposed by the battery-defaults populator, which bails for Other and leaves nothing set.
+    // The charge block (Bulk/Absorption/Float/current/protection) appears ONLY for Other — every other
+    // chemistry got these proposed by the battery-defaults populator, which bails for Other and leaves
+    // nothing set. Battery temperature limits are not here at all: they are non-critical for the run and
+    // the populator sets them from chemistry.
     const chem = (window.vesselInfo && String(window.vesselInfo.battery_type || '').toLowerCase()) || '';
-    const isLifepo4 = chem === 'lifepo4';
     const isOther = chem === 'other';
 
     const inputCss = 'width:100%; background:#161616; color:#ddd; border:1px solid #444; border-radius:5px; padding:7px 10px; font-size:14px; box-sizing:border-box;';
@@ -9457,17 +9675,23 @@ function commPrepRender(cfg) {
           '</div>'
         : '';
 
-    const intro = '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;"><strong style="color:#e0e0e0;">Use a laptop or tablet if you can.</strong> Setup and Commissioning works on a phone, but it\'s a worse UX on a small screen.</p>' +
-        '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">' + (_commPrepFirstInstall
-            ? 'A few things to set before commissioning measures your system. These affect how the regulator reads temperature and current. Anything you skip stays editable later under Setup.'
-            : 'These are the settings commissioning measures against, filled in from the regulator. Confirm they still describe the system before the wizard re-measures it — anything you change here is written when you press Next.') + '</p>' +
-        '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">During the wizard, keep house loads steady — avoid switching large loads on or off mid-run.</p>' + dvccNotice;
+    const capCss = 'font-size:11px; color:#888; margin-top:5px; line-height:1.4;';
+    const fieldCap = (label, id, val, step, min, max, cap) =>
+        '<div style="' + rowCss + '"><label style="' + lblCss + '">' + label + '</label>' +
+        '<input id="' + id + '" type="number" step="' + step + '" min="' + min + '" max="' + max + '" value="' + val + '" style="' + inputCss + '">' +
+        '<div style="' + capCss + '">' + cap + '</div></div>';
+    const grpHdr = t => '<div style="font-size:11px; color:#9cc; letter-spacing:0.04em; text-transform:uppercase; margin:2px 0 8px;">' + t + '</div>';
 
-    const seg = '<div style="' + rowCss + '"><label style="' + lblCss + '">Temperature Source</label>' +
+    // The laptop advice and the steady-loads reminder are their own screen ahead of this one.
+    const intro = '<p style="font-size:13px; line-height:1.5; color:#bbb; margin:0 0 14px;">' + (_commPrepFirstInstall
+            ? 'A few things to set before commissioning measures your system. These affect how the regulator reads temperature and current. Anything you skip stays editable later under Setup.'
+            : 'These are the settings commissioning measures against, filled in from the regulator. Confirm they still describe the system before the wizard re-measures it — anything you change here is written when you press Next.') + '</p>' + dvccNotice;
+
+    const seg = '<div style="' + rowCss + '"><label style="' + lblCss + '">Alternator Temperature Source</label>' +
         '<div class="cap-mode-toggle" style="background:rgba(255,255,255,0.07); border-color:#444;">' +
         '<button type="button" id="commprep-ts-0" class="cap-mode-btn' + (ts === 0 ? ' cap-mode-active' : '') + '" onclick="commPrepTempSrc(0)">Digital</button>' +
         '<button type="button" id="commprep-ts-1" class="cap-mode-btn' + (ts === 1 ? ' cap-mode-active' : '') + '" onclick="commPrepTempSrc(1)">Thermistor</button>' +
-        '</div></div>';
+        '</div><div style="' + capCss + '">Default is the digital sensor provided with the kit.</div></div>';
 
     const shuntSeg = '<div style="' + rowCss + '"><label style="' + lblCss + '">Battery shunt (INA228)</label>' +
         '<div class="cap-mode-toggle" style="background:rgba(255,255,255,0.07); border-color:#444;">' +
@@ -9485,9 +9709,23 @@ function commPrepRender(cfg) {
 
     const hr = '<hr style="border:none; border-top:1px solid #333; margin:2px 0 14px;">';
 
-    const minChgRow = isLifepo4
-        ? field('Min Charge Temp (' + tempLbl + ')', 'commprep-minchg', fToDisp(numF('MinChargeTempF')), '1', '-40', '120') + hr
-        : '';
+    // Shell only — commPrepOwRender fills the rows, the warnings and the Next gate from /tempSensors while
+    // the screen is open, and hides the whole block on a thermistor install with a bare 1-Wire bus. Assigning
+    // Battery or Other here is what turns their source on; there is no separate enable to contradict the table.
+    const owBlock = '<div id="commprep-ow" style="display:none;">' +
+        '<div style="' + rowCss + '">' + grpHdr('Digital Temperature Sensors') +
+        '<div style="' + capCss + ' margin-top:0; margin-bottom:7px;">Set what each sensor measures. Warm one by hand to identify it — its reading rises within a few seconds.</div>' +
+        '<table style="width:100%; border-collapse:collapse; font-size:12px;">' +
+        '<thead id="commprep-ow-head"><tr style="color:#9cc; text-align:left;">' +
+        '<th style="font-weight:600; padding:0 8px 4px 0;">Serial</th><th style="font-weight:600; padding:0 8px 4px 0;">Temperature</th>' +
+        '<th style="font-weight:600; padding:0 0 4px;">Measures</th></tr></thead>' +
+        '<tbody id="commprep-ow-rows"></tbody></table>' +
+        '<div id="commprep-ow-warn" style="display:none; font-size:11px; color:#e6a23c; margin-top:6px; line-height:1.4;"></div>' +
+        '<div style="display:flex; align-items:center; gap:10px; margin-top:8px;">' +
+        '<button type="button" id="commprep-ow-scan" onclick="commPrepOwScan()" style="background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:5px; padding:5px 12px; cursor:pointer; font-size:0.8em;">Rescan</button>' +
+        '<span id="commprep-ow-status" style="font-size:11px; color:#888;"></span></div>' +
+        '<div style="' + capCss + '">Alternator feeds the over-temperature protection. Battery supplies the battery temperature the charge lockouts and the voltage-loop gain derate use. Other is a spare reading, shown on Live Data with its own alarms.</div>' +
+        '</div>' + hr + '</div>';
 
     // FLOAT_DURATION is stored/exported in seconds; the input edits hours (firmware re-multiplies on write).
     const uf = (function () { const v = numF('UseFloat'); return (v === 1 || v === 2) ? v : 0; })();
@@ -9529,15 +9767,18 @@ function commPrepRender(cfg) {
         '</table></details>';
 
     document.getElementById('commprep-body').innerHTML =
-        intro + seg + thermistor + hr +
-        field('Alternator Temperature Limit (' + tempLbl + ')', 'commprep-templimit', fToDisp(numF('TemperatureLimitF')), '1', '0', '350') + hr +
-        minChgRow +
-        shuntSeg +
+        intro + owBlock +
+        grpHdr('Alternator') + seg + thermistor +
+        fieldCap('Alternator Temperature Limit (' + tempLbl + ')', 'commprep-templimit', fToDisp(numF('TemperatureLimitF')), '1', '0', '350',
+                 'A case temperature, not a winding temperature — the case runs 40–50 °F cooler than the windings inside.') + hr +
+        grpHdr('Battery') + shuntSeg +
         '<div id="commprep-shunt-row" style="display:' + (shuntPresent === 1 ? '' : 'none') + ';">' +
         field('Shunt Resistance (µΩ)', 'commprep-shunt', raw('ShuntResistanceMicroOhm'), '1', '1', '5000') + shuntHelp +
         '</div>' + hr +
         otherBlock;
     commPrepPaintCta();
+    _commPrepOwSig = null;                                    // rows were just wiped with the body
+    if (_commPrepOwLast) commPrepOwRender(_commPrepOwLast);   // repaint from the last poll instead of blanking until the next one
 
     // Only inputs the user actually edits get written — snapshot their initial strings after render.
     _commPrepInit = {};
@@ -9576,6 +9817,7 @@ function commPrepTempSrc(v) {
     if (b1) b1.classList.toggle('cap-mode-active', v === 1);
     const th = document.getElementById('commprep-thermistor');
     if (th) th.style.display = (v === 1) ? '' : 'none';
+    if (_commPrepOwLast) commPrepOwRender(_commPrepOwLast);   // Thermistor drops the Alternator-role requirement
 }
 
 // Shunt Resistance is inert without a battery shunt — reveal it only when one is installed.
@@ -9606,7 +9848,6 @@ function commPrepCollectChanges() {
         out.push({ param, value: native ? native(v) : v });
     };
     rec('TemperatureLimitF', 'commprep-templimit', toF);
-    rec('MinChargeTempF', 'commprep-minchg', toF);
     rec('ShuntResistanceMicroOhm', 'commprep-shunt', null);
     rec('BattCurrentLimitA', 'commprep-battlim', null);
     rec('R_fixed', 'commprep-rfixed', null);
@@ -9631,28 +9872,36 @@ function commPrepCollectChanges() {
     return out;
 }
 
-// Write any edited fields (one /get) then close. start=true hands off to the commissioning wizard.
+// Write any edited fields (one /get) then close. start=true hands off to the commissioning wizard —
+// immediately, or (vessel-save chain) by resolving true so the chain opens Charge Rate Limits later.
 async function commPrepFinish(start) {
     const changes = commPrepCollectChanges();
     _commPrepRpmActive = false;
     document.getElementById('commprep-modal-overlay').style.display = 'none';
-    if (start) vesselNextStepWait(true);   // the write below, then openRpmCap, run against a blank page
+    if (start) vesselNextStepWait(true);   // the write below, then openRpmCap (or the chain's battery-defaults read), run against a blank page
     if (changes.length && settingsUnlocked) {
         const url = '/get?' + changes.map(c => c.param + '=' + encodeURIComponent(c.value)).join('&');
         try { await fetchWithTimeout(buildURL(url), {}, 10000); } catch (e) { diagLog('prerequisites submit failed:', e); }
     }
-    const r = _commPrereqResolve; _commPrereqResolve = null; if (r) r();
+    const deferred = _commPrepDeferHandoff; _commPrepDeferHandoff = false;   // one-shot: a reopen via ← Back hands off immediately
+    if (!start) _rpmCapTablesPre = null;   // no next screen takes the handed-over tables
+    const r = _commPrereqResolve; _commPrereqResolve = null; if (r) r(!!start);
+    if (!start || deferred) return;
     // Both paths: Low/High charge-rate limits next, ← Back reopens this screen. Tach alignment is
     // first-install only — RPMScalingFactor/PulleyRatio persist and stay editable under Setup ▸ Engine.
-    if (start) openRpmCap(_commPrepFirstInstall ? openRpmAlign : openCommissionModal,
-                          () => { document.getElementById('commprep-modal-overlay').style.display = 'flex'; });
+    openRpmCap(_commPrepFirstInstall ? openRpmAlign : openCommissionModal, commPrepReopen);
 }
+
+// ← Back from Charge Rate Limits: the screen comes back as it was left, and its Next hands off directly.
+function commPrepReopen() { document.getElementById('commprep-modal-overlay').style.display = 'flex'; }
 
 // ✕ — dismiss without writing edits (mirrors the battdef Skip/✕).
 function commPrepClose() {
     _commPrepRpmActive = false;
     document.getElementById('commprep-modal-overlay').style.display = 'none';
-    const r = _commPrereqResolve; _commPrereqResolve = null; if (r) r();
+    _commPrepDeferHandoff = false;
+    _rpmCapTablesPre = null;
+    const r = _commPrereqResolve; _commPrereqResolve = null; if (r) r(false);
 }
 
 // ===== Charge Rate Limits screen (pre-commissioning) =====
@@ -9917,8 +10166,9 @@ async function checkRecommissionPrompt() {
 // ===== First-boot SoC seed popup =====
 // The firmware records a one-shot snapshot of the boot-time voltage seed (served at /socseed).
 // Auto-opens once per device (SocSeedAck flag in NVS) after the first CSV packet — or, on a
-// factory-fresh device, right after the first Vessel Info save (the firmware defers the seed
-// until real chemistry/capacity exist). Reopens any time from the header SOC readout.
+// factory-fresh device, as a step of the first Vessel Info save chain, after the Prerequisites and
+// battery-defaults screens (the firmware defers the seed until real chemistry/capacity exist).
+// Reopens any time from the header SOC readout.
 let _socSeedData = null;
 let _socSeedResolve = null;   // resolved when the SoC popup closes, so the vessel-save chain can wait for it before commissioning
 
@@ -9931,8 +10181,9 @@ async function socSeedFetch() {
 }
 
 async function socSeedMaybeAutoOpen() {
-    // Don't auto-pop over the first-run prerequisites or commissioning modal; still reachable from the header SOC readout.
-    const overModal = ['commprep-modal-overlay', 'commission-modal-overlay'].some(id => {
+    // Don't auto-pop over the first-run chain's screens or the commissioning modal (the chain shows this
+    // popup itself, in sequence); still reachable from the header SOC readout.
+    const overModal = ['commprep-intro-overlay', 'commprep-modal-overlay', 'battdef-modal-overlay', 'nextstep-modal-overlay', 'commission-modal-overlay'].some(id => {
         const el = document.getElementById(id);
         return el && (el.style.display === 'flex' || el.style.display === 'block');
     });
@@ -14034,9 +14285,9 @@ function armSettings() {
 
 // Keep the UI's lock state honest against the device: unlock after a reload into a
 // still-armed window, relock when the 30-min window expires or another client disarms.
-function syncArmState() {
-    if (DEMO_MODE) return;
-    fetch(buildURL('/armSettings'))
+function syncArmState() {   // returns the round trip so a caller that must see a fresh mirror can await it
+    if (DEMO_MODE) return Promise.resolve();
+    return fetch(buildURL('/armSettings'))
         .then(r => r.ok ? r.json() : null)
         .then(j => {
             if (!j) return;
@@ -14753,8 +15004,18 @@ function owRender(j) {
         if (st.textContent !== txt) st.textContent = txt;
     }
 }
-// Role change from a row's <select>. A probe holds one role, so moving it between roles clears the old
-// binding first — the /get handler refuses an id that is already bound elsewhere.
+// A probe holds one role, so moving it between roles clears the old binding first — the /get handler
+// refuses an id that is already bound elsewhere. Shared with the commissioning prerequisites block.
+async function owWriteRole(id, oldRole, newRole) {
+    const params = [];
+    if (oldRole >= 0 && oldRole !== newRole) params.push(OW_ASSIGN_PARAM[oldRole] + '=none');
+    if (newRole >= 0 && newRole !== oldRole) params.push(OW_ASSIGN_PARAM[newRole] + '=' + id);
+    for (const p of params) {   // sequential: the clear must land before the re-bind
+        const r = await fetchWithTimeout(buildURL('/get?' + p), {}, 8000);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+    }
+}
+// Role change from a row's <select>.
 async function owAssignRole(sel) {
     const tr = sel.closest('tr');
     const id = tr ? String(tr.dataset.owId || '') : '';
@@ -14764,16 +15025,10 @@ async function owAssignRole(sel) {
     const revert = () => { sel.value = String(oldRole); };
     if (!settingsUnlocked) { xAlert('Please unlock settings first'); revert(); return; }
     if (!/^[0-9a-f]{16}$/.test(id) || !Number.isFinite(newRole)) { revert(); return; }
-    const params = [];
-    if (oldRole >= 0 && oldRole !== newRole) params.push(OW_ASSIGN_PARAM[oldRole] + '=none');
-    if (newRole >= 0 && newRole !== oldRole) params.push(OW_ASSIGN_PARAM[newRole] + '=' + id);
-    if (!params.length) return;
+    if (oldRole === newRole) return;
     sel.disabled = true;
     try {
-        for (const p of params) {   // sequential: the clear must land before the re-bind
-            const r = await fetchWithTimeout(buildURL('/get?' + p), {}, 8000);
-            if (!r.ok) throw new Error('HTTP ' + r.status);
-        }
+        await owWriteRole(id, oldRole, newRole);
         _owScanUntilMs = Date.now() + 1500;
     } catch (e) {
         diagLog('probe role assignment failed:', e);
@@ -14803,15 +15058,6 @@ async function owScanRequest() {
         setTrackedTimeout(owPollNow, 1500);
         setTrackedTimeout(owPollNow, 4000);
     }
-}
-// Deep-link to Setup > Temperature with the probe table open (used by the commissioning prerequisites gate).
-function goToTemperatureSetup() {
-    showMainTab('settings');
-    showSubTab('settings', 'temperature');
-    const sec = document.getElementById('tempSensorsSection');
-    if (!sec) return;
-    sec.open = true;
-    requestAnimationFrame(() => sec.scrollIntoView({ behavior: 'smooth', block: 'start' }));
 }
 // Initialize learning table flag BEFORE any event handlers
 if (typeof window.learningTableInitialized === 'undefined') {
@@ -16049,7 +16295,7 @@ window.addEventListener("load", function () {
                     window.currentGpsSource = Number(data.currentGpsSource);
                     const gpsBadge = document.getElementById('gps-source-badge');
                     if (gpsBadge) {
-                        gpsBadge.textContent = ({ 0: 'no GPS', 1: 'NMEA 2000', 2: 'iOS app', 3: 'Manual' })[Number(data.currentGpsSource)] ?? '—';
+                        gpsBadge.textContent = ({ 0: 'no GPS', 1: 'NMEA 2000', 2: 'phone app', 3: 'Manual' })[Number(data.currentGpsSource)] ?? '—';
                     }
                 }
                 if (data.currentSpeedSource !== undefined) {
@@ -18716,7 +18962,7 @@ function showRecoveryOptions() {
     // textContent after insertion — it is user-editable text, never markup.
     const joinBlock = wifiJoinPlugin() ? `
       <button onclick="joinRegulatorHotspot('recoveryJoinStatus')" style="width:100%; margin-top:10px; background:#2b3f4a; border:1px solid #3f6070; color:#9fd8e8; border-radius:5px; padding:9px 16px; cursor:pointer; font-size:13px;">Join Regulator WiFi</button>
-      <p style="font-size:11px; color:#777; margin:6px 0 0;">Asks iOS to join <b id="recoveryJoinSsid"></b>, the hotspot the regulator broadcasts in access-point mode. Its name and password live under Setup &#9656; System.</p>
+      <p style="font-size:11px; color:#777; margin:6px 0 0;">Asks this phone to join <b id="recoveryJoinSsid"></b>, the hotspot the regulator broadcasts in access-point mode. Its name and password live under Setup &#9656; System.</p>
       <p id="recoveryJoinStatus" style="font-size:11px; color:#8fd9d3; margin:6px 0 0; min-height:13px;"></p>` : '';
 
     const recoveryDiv = document.createElement('div');
