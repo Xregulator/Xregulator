@@ -6211,3 +6211,151 @@ time_t reconstructTimestamp(time_t collectionTime) {
   return getCurrentTimestamp();
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Improv Serial responder (improv-wifi.com/serial) on the USB port
+// ══════════════════════════════════════════════════════════════════════════════
+// Lets the browser installer (docs.xengineering.net/software/firmware-reset/, ESP Web Tools)
+// read the running firmware name / version / serial BEFORE it flashes, and recognise the board
+// as the same firmware, so a reinstall is offered as "Update" instead of a "new installation"
+// with an erase prompt. IMPROV_FW_NAME must equal the manifest "name" written by
+// publish_webflash.sh or the installer will not treat it as the same firmware. The serial rides
+// in the device-name string so the installer page can identify a board it only looked at.
+// Wi-Fi settings sent from the installer take the same path as the /wifi setup page
+// (NK_ssid / NK_pass, restart) — a user click, so the flash write is allowed.
+// Packet: "IMPROV" ver=1 type len data checksum(sum of every prior byte & 0xFF) [\n].
+// Only loop() reads Serial; each reply is one Serial.write so prints from other tasks cannot
+// interleave inside a packet.
+static const char IMPROV_FW_NAME[] = "Alternator Regulator Firmware";
+enum : uint8_t { IMPROV_T_STATE = 1, IMPROV_T_ERROR = 2, IMPROV_T_RPC = 3, IMPROV_T_RESULT = 4 };
+enum : uint8_t { IMPROV_CMD_WIFI = 1, IMPROV_CMD_STATE = 2, IMPROV_CMD_INFO = 3, IMPROV_CMD_SCAN = 4 };
+enum : uint8_t { IMPROV_ST_READY = 2, IMPROV_ST_PROVISIONING = 3, IMPROV_ST_PROVISIONED = 4 };
+enum : uint8_t { IMPROV_ERR_INVALID = 1, IMPROV_ERR_UNKNOWN_CMD = 2, IMPROV_ERR_UNKNOWN = 0xFF };
+
+static void improvSend(uint8_t type, const uint8_t *data, uint8_t len) {
+  uint8_t pkt[9 + 255 + 2];
+  memcpy(pkt, "IMPROV", 6);
+  pkt[6] = 1;
+  pkt[7] = type;
+  pkt[8] = len;
+  if (len) memcpy(pkt + 9, data, len);
+  uint32_t sum = 0;
+  for (int i = 0; i < 9 + len; i++) sum += pkt[i];
+  pkt[9 + len] = (uint8_t)(sum & 0xFF);
+  pkt[10 + len] = '\n';
+  Serial.write(pkt, 11 + len);
+}
+
+static void improvSendState(uint8_t st) { improvSend(IMPROV_T_STATE, &st, 1); }
+static void improvSendError(uint8_t err) { improvSend(IMPROV_T_ERROR, &err, 1); }
+
+// RPC result payload: [cmd, total, (len, bytes)...]. An empty string list is a valid result.
+static void improvSendResult(uint8_t cmd, const char *const *strs, int n) {
+  uint8_t buf[255];
+  int pos = 2;
+  for (int i = 0; i < n; i++) {
+    int l = strlen(strs[i]);
+    if (pos + 1 + l > 255) l = 255 - pos - 1;
+    if (l < 0) l = 0;
+    buf[pos++] = (uint8_t)l;
+    memcpy(buf + pos, strs[i], l);
+    pos += l;
+  }
+  buf[0] = cmd;
+  buf[1] = (uint8_t)(pos - 2);
+  improvSend(IMPROV_T_RESULT, buf, (uint8_t)pos);
+}
+
+// "Visit device" target. Client mode without a link gives "" so the installer hides the button.
+static String improvDeviceUrl() {
+  if (currentMode == MODE_CLIENT) return WiFi.status() == WL_CONNECTED ? "http://" + WiFi.localIP().toString() : String("");
+  return "http://" + WiFi.softAPIP().toString();
+}
+
+static void improvHandleRpc(const uint8_t *d, uint8_t dlen) {
+  if (dlen < 2 || 2 + d[1] > dlen) { improvSendError(IMPROV_ERR_INVALID); return; }
+  uint8_t cmd = d[0], n = d[1];
+  const uint8_t *a = d + 2;
+  switch (cmd) {
+    case IMPROV_CMD_STATE: {
+      uint8_t st = cached_wifi_creds_valid ? IMPROV_ST_PROVISIONED : IMPROV_ST_READY;
+      improvSendState(st);
+      if (st == IMPROV_ST_PROVISIONED) {  // the client waits for this URL result only when provisioned
+        String url = improvDeviceUrl();
+        const char *s[1] = { url.c_str() };
+        improvSendResult(IMPROV_CMD_STATE, s, 1);
+      }
+      break;
+    }
+    case IMPROV_CMD_INFO: {
+      String name = String("Xregulator ") + device_id_hex;
+      const char *s[4] = { IMPROV_FW_NAME, FIRMWARE_VERSION, "ESP32-S3", name.c_str() };
+      improvSendResult(IMPROV_CMD_INFO, s, 4);
+      break;
+    }
+    case IMPROV_CMD_SCAN:
+      improvSendResult(IMPROV_CMD_SCAN, nullptr, 0);  // empty list ends the scan; the installer falls back to a typed SSID
+      break;
+    case IMPROV_CMD_WIFI: {
+      // [ssidLen, ssid..., passLen, pass...]
+      if (n < 2 || a[0] == 0 || a[0] > 32 || 1 + a[0] >= n) { improvSendError(IMPROV_ERR_INVALID); return; }
+      uint8_t sl = a[0], pl = a[1 + sl];
+      if (pl > 64 || 2 + sl + pl > n) { improvSendError(IMPROV_ERR_INVALID); return; }
+      char ssid[33], pass[65];
+      memcpy(ssid, a + 1, sl);
+      ssid[sl] = '\0';
+      memcpy(pass, a + 2 + sl, pl);
+      pass[pl] = '\0';
+      improvSendState(IMPROV_ST_PROVISIONING);
+      if (!settingWrite(NK_ssid, ssid) || !settingWrite(NK_pass, pass)) { improvSendError(IMPROV_ERR_UNKNOWN); return; }
+      strncpy(cached_wifi_ssid, ssid, sizeof(cached_wifi_ssid) - 1);
+      cached_wifi_ssid[sizeof(cached_wifi_ssid) - 1] = '\0';
+      strncpy(cached_wifi_pass, pass, sizeof(cached_wifi_pass) - 1);
+      cached_wifi_pass[sizeof(cached_wifi_pass) - 1] = '\0';
+      cached_wifi_creds_valid = true;
+      settingWrite(NK_first_config_done, "1");
+      improvSendState(IMPROV_ST_PROVISIONED);
+      const char *s[1] = { "http://alternator.local" };  // the mDNS name client mode registers; the DHCP address is unknown until after the restart
+      improvSendResult(IMPROV_CMD_WIFI, s, 1);
+      Serial.printf("=== IMPROV: ship WiFi '%s' saved, restarting ===\n", ssid);
+      rebootRequested = true;  // loop() restarts 2 s later, after these packets have left
+      rebootRequestedAt = millis();
+      break;
+    }
+    default:
+      improvSendError(IMPROV_ERR_UNKNOWN_CMD);
+  }
+}
+
+// Called every loop() pass; returns immediately when nothing is buffered. Debug output shares
+// the port, so bytes are scanned for the header rather than trusting alignment.
+void improvSerialPoll() {
+  static uint8_t buf[9 + 255 + 1];
+  static uint16_t n = 0, need = 0;
+  static const char HDR[6] = { 'I', 'M', 'P', 'R', 'O', 'V' };
+  int guard = 0;
+  while (Serial.available() > 0 && guard++ < 512) {
+    uint8_t c = (uint8_t)Serial.read();
+    if (n < 6) {
+      if (c == HDR[n]) {
+        buf[n++] = c;
+      } else {
+        n = (c == 'I') ? 1 : 0;
+        if (n) buf[0] = c;
+      }
+      continue;
+    }
+    buf[n++] = c;
+    if (n == 9) {
+      if (buf[6] != 1) { n = 0; continue; }  // unsupported protocol version
+      need = 9 + buf[8] + 1;
+    }
+    if (n >= 9 && n == need) {
+      uint32_t sum = 0;
+      for (uint16_t i = 0; i < need - 1; i++) sum += buf[i];
+      if ((uint8_t)(sum & 0xFF) != buf[need - 1]) improvSendError(IMPROV_ERR_INVALID);
+      else if (buf[7] == IMPROV_T_RPC) improvHandleRpc(buf + 9, buf[8]);
+      n = 0;
+    }
+  }
+}

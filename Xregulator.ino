@@ -6102,6 +6102,7 @@ void loop() {
 
   checkOtaWedge();     // retire a stuck otaInProgress before anything below honors it
   ensureCore0Tasks();  // bring TempTask / httpsTask back after an OTA attempt; retry + alarm if they can't
+  improvSerialPoll();  // USB installer handshake (4_functions.ino); returns at once when nothing is buffered
 
   // Deferred reboot from /get?RebootRegulator — wait 2s so the HTTP 200 reaches the caller
   if (rebootRequested && millis() - rebootRequestedAt > 2000) {
