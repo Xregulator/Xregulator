@@ -6288,8 +6288,13 @@ static void improvHandleRpc(const uint8_t *d, uint8_t dlen) {
       break;
     }
     case IMPROV_CMD_INFO: {
+      // Version carries the compile stamp: several builds share one FIRMWARE_VERSION string
+      // (FIRMWARE_0.0.4_PROVENANCE.md), so this is what tells them apart in the installer and
+      // in webflash_attempts.fw_version_before. It also never equals the manifest version, which
+      // keeps ESP Web Tools on its "Update" button instead of the erase-only same-version dashboard.
+      String ver = String(FIRMWARE_VERSION) + " (" __DATE__ " " __TIME__ ")";
       String name = String("Xregulator ") + device_id_hex;
-      const char *s[4] = { IMPROV_FW_NAME, FIRMWARE_VERSION, "ESP32-S3", name.c_str() };
+      const char *s[4] = { IMPROV_FW_NAME, ver.c_str(), "ESP32-S3", name.c_str() };
       improvSendResult(IMPROV_CMD_INFO, s, 4);
       break;
     }
