@@ -1,16 +1,16 @@
-# Xregulator (Public Mirror)
+# XREG-010 (Public Mirror)
 
 ### [www.xengineering.net](https://www.xengineering.net)
 
 **Product information, documentation, ordering, and support: [www.xengineering.net](https://www.xengineering.net)**
 
-Xregulator is the first product sold by X Engineering. This repository is the open source code it runs on. If you are looking for what the device does, how to install it, wiring diagrams, or how to buy one, start at [www.xengineering.net](https://www.xengineering.net).
+The XREG-010 is the first product sold by X Engineering. This repository is the open source code it runs on. If you are looking for what the device does, how to install it, wiring diagrams, or how to buy one, start at [www.xengineering.net](https://www.xengineering.net).
 
 ---
 
 ## Overview
 
-This repository is a public mirror of the Xregulator project.
+This repository is a public mirror of the XREG-010 project.
 
 It contains:
 - Core firmware that runs on ESP32 (`.ino` files)

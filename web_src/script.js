@@ -25,7 +25,7 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
  * CRITICAL_INSTRUCTION_FOR_AI:: When adding new code, try to first use or modify existing code whenever possible, to avoid bloat. When impossible, always mimick my style and coding patterns. If you have a performance improvement idea, tell me. When giving me new code, I prefer complete copy and paste functions when they are short, or for you to give step by step instructions for me to edit if function is long, to conserve tokens. Always specify which option you chose.  Never re-write the entire file, this just wastes my tokens.
  */
 
-// Xregulator
+// XREG-010
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -3828,7 +3828,7 @@ document.addEventListener('DOMContentLoaded', syncFormActionsToDevice);
 // Device discovery — Capacitor only (mDNS name → subnet probe)
 // =====================================================================
 // The regulator answers GET /identify passwordless with
-// {"device":"xregulator",...} — built for this probe. Browsers never run
+// {"device":"xreg-010",...} — built for this probe. Browsers never run
 // discovery (same-origin page) and can't subnet-scan anyway; the Connection
 // Lost dialog names that limitation instead of hiding it.
 
@@ -3850,7 +3850,7 @@ async function probeIdentify(base, timeoutMs) {
         const resp = await fetch(base + '/identify', { signal: ctrl.signal, cache: 'no-store' });
         if (!resp.ok) return null;
         const info = await resp.json();
-        if (!info || info.device !== 'xregulator') return null;
+        if (!info || info.device !== 'xreg-010') return null;
         return { base: base, fw: (typeof info.fw === 'string') ? info.fw : null };
     } catch (e) {
         return null;
@@ -4444,9 +4444,9 @@ async function requestPhoneLocationPermission(whyLine) {
         const p = await window.Capacitor.Plugins.Geolocation.checkPermissions();
         if (p && p.location === 'denied') {
             const where = (window.Capacitor.getPlatform && window.Capacitor.getPlatform() === 'android')
-                ? 'Android Settings > Apps > X Regulator > Permissions > Location, then choose Allow'
-                : 'iOS Settings > Privacy & Security > Location Services > X Regulator, then choose While Using the App';
-            await xAlert('Location is turned off for X Regulator. Turn it on in ' + where + '.', 'Location is off');
+                ? 'Android Settings > Apps > XREG-010 > Permissions > Location, then choose Allow'
+                : 'iOS Settings > Privacy & Security > Location Services > XREG-010, then choose While Using the App';
+            await xAlert('Location is turned off for XREG-010. Turn it on in ' + where + '.', 'Location is off');
             return false;
         }
     } catch (e) { /* services off system-wide — the request below will fail harmlessly */ }
@@ -4474,7 +4474,7 @@ async function weatherModeToggled(isOn) {
         return;
     }
     await requestPhoneLocationPermission(
-        'The solar forecast is looked up for your position. X Regulator can take it from this ' +
+        'The solar forecast is looked up for your position. XREG-010 can take it from this ' +
         'phone when the boat has no GPS of its own. It goes only to your regulator.');
 }
 
@@ -4490,7 +4490,7 @@ async function maybeAskLocationOnFirstConnect() {
     if (Number(window.gpsPositionSource) === 1) return;   // owner already chose NMEA 2000 only
     try { localStorage.setItem('locPermAsked', '1'); } catch (e) { }
     await requestPhoneLocationPermission(
-        'X Regulator can use this phone as a backup GPS for your boat, so distance run, ' +
+        'XREG-010 can use this phone as a backup GPS for your boat, so distance run, ' +
         'anchorages and the solar forecast still work when the boat has no GPS of its own. ' +
         'Position goes to your regulator on your local network. You can turn this off under ' +
         'Setup > Boat > Position Source.');
@@ -4508,9 +4508,9 @@ async function gpsPositionSourceChanged(sel) {
     if ((v === 0 || v === 2) && IS_CAPACITOR) {
         const ok = await requestPhoneLocationPermission(
             v === 2
-              ? 'X Regulator will use this phone as the boat\'s position source, ignoring NMEA 2000. ' +
+              ? 'XREG-010 will use this phone as the boat\'s position source, ignoring NMEA 2000. ' +
                 'Position goes to your regulator on your local network.'
-              : 'X Regulator will use this phone as a backup position source when the boat\'s own ' +
+              : 'XREG-010 will use this phone as a backup position source when the boat\'s own ' +
                 'GPS is unavailable, so distance run, anchorages and the solar forecast keep working. ' +
                 'Position goes to your regulator on your local network.');
         if (!ok) { sel.value = String(window.gpsPositionSource ?? 0); return; }
@@ -4597,7 +4597,7 @@ function stopPhoneSpeedJsWatch() {
 // sentence is fixed word-for-word by Google Play's prominent-disclosure rule — do not reword.
 function phoneSpeedModeDialogText() {
     const runLine = phoneSpeedNativePlugin()
-        ? '- X Regulator collects location data to enable speed and course logging even when the app is closed or not in use. ' +
+        ? '- XREG-010 collects location data to enable speed and course logging even when the app is closed or not in use. ' +
           'It keeps running for as long as the phone allows. Battery drain is substantial ' +
           'with GPS running full-time; keep the phone on a charger underway. The phone ' +
           'shows its location indicator while this is active.\n'
@@ -4726,7 +4726,7 @@ async function speedSourceModeChanged(sel) {
         // and the foreground-only bullet above already told the user the browser tradeoff).
         if (IS_CAPACITOR) {
             const granted = await requestPhoneLocationPermission(
-                'X Regulator needs this phone\'s location to use it as the vessel speed source. ' +
+                'XREG-010 needs this phone\'s location to use it as the vessel speed source. ' +
                 'Speed and course go to your regulator on your local network.');
             if (!granted) { sel.value = '0'; return; }
         }
@@ -14011,7 +14011,6 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("header-alt-current", sa.measuredAmps);
     applyStaleStyleByAge("header-batt-current", sa.bcur);
     applyStaleStyleByAge("header-alt-temp", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
-    applyStaleStyleByAge("header-board-temp", sa.ambientTemp, STALE_THRESHOLD_BOARD_MS);
     updateHeaderLimiterColors(sa);
     applyStaleStyleByAge("header-rpm", sa.rpm);
     applyStaleStyleByAge("dutyCycleID3", sa.dutyCycle);
@@ -15389,7 +15388,6 @@ function syncHeaderStrip() {
     copy('header-alt-current', 'hcs-alt');
     copy('header-batt-current', 'hcs-batt');
     copy('header-alt-temp', 'hcs-temp');
-    copy('header-board-temp', 'hcs-board');
     copy('header-rpm', 'hcs-rpm');
     copy('dutyCycleID3', 'hcs-duty');
 
@@ -16728,7 +16726,6 @@ window.addEventListener("load", function () {
                 ["SOC_percentID", "SOC_percent"],
                 ["header-soc", "SOC_percent"],
                 ["ambientTempID", "ambientTemp"],
-                ["header-board-temp", "ambientTemp"],
                 ["baroPressureID", "baroPressure"],
                 ["firmwareVersionIntID", "firmwareVersionInt"],
                 ["deviceIdUpperID", "deviceIdUpper"],

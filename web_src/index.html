@@ -8,7 +8,7 @@
  * AI_OPTIMIZE: 
  * CRITICAL_INSTRUCTION_FOR_AI:: When adding new code, try to first use or modify existing code whenever possible, to avoid bloat. When impossible, always mimick my style and coding patterns. If you have a performance improvement idea, tell me. When giving me new code, I prefer complete copy and paste functions when they are short, or for you to give step by step instructions for me to edit if function is long, to conserve tokens. Always specify which option you chose.  Never re-write the entire file, this just wastes my tokens.
 
-// Xregulator
+// XREG-010
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -31,7 +31,7 @@
 
 <head>
   <meta charset="utf-8" />
-  <title>Xregulator</title>
+  <title>XREG-010</title>
   <link rel="stylesheet" href="styles.css">
   <meta name="viewport"
     content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
@@ -110,7 +110,7 @@
   <!-- iOS-specific meta tags -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="X Regulator">
+  <meta name="apple-mobile-web-app-title" content="XREG-010">
   <meta name="format-detection" content="telephone=no">
 
   <link href="/uPlot.min.css" rel="stylesheet" />
@@ -195,9 +195,6 @@
       <span class="hcs-gsep hcs-eng"></span>
       <!-- Engine group -->
       <span class="hcs-m hcs-rpm"><span id="hcs-rpm">-</span><i>rpm</i></span>
-      <span class="hcs-gsep hcs-bsep"></span>
-      <!-- Regulator group -->
-      <span class="hcs-m hcs-board"><span id="hcs-board">-</span><i><span class="temp-unit-label">°F</span> board</i></span>
       <span class="hcs-grow"></span>
       <!-- State word sits RIGHT of the numbers so its width changes (BULK → ABSORPTION →
            PROTECT) grow into the flex spacer and never shift the readouts -->
@@ -254,14 +251,11 @@
           <span class="duo-unit req-batt-current">A</span>
         </div>
 
-        <!-- Alt + Board temps — same 3-column grid as the Amps chip; the °F/°C unit says "temp".
+        <!-- Alt + Batt temps — same 3-column grid as the Amps chip; the °F/°C unit says "temp".
              Batt row appears only while a battery temperature exists (renderBattTempReadouts). -->
         <div class="reading-duo" id="hdr-temp-duo">
           <span class="duo-lbl why-tap" id="lbl-alt-temp" data-t="Alt">Alt</span>
           <span class="duo-num"><span id="header-alt-temp">-</span></span>
-          <span class="duo-unit"><span class="temp-unit-label">°F</span></span>
-          <span class="duo-lbl" data-t="Board">Board</span>
-          <span class="duo-num"><span id="header-board-temp">-</span></span>
           <span class="duo-unit"><span class="temp-unit-label">°F</span></span>
           <span class="duo-lbl hdr-batt-temp" data-t="Batt">Batt</span>
           <span class="duo-num hdr-batt-temp"><span id="header-batt-temp">-</span></span>
@@ -14100,7 +14094,7 @@
         <details class="esp32-sec" id="esp32SecAbout">
           <summary>About</summary>
           <div style="font-size:13px;line-height:1.6;max-width:560px;padding:4px 2px;">
-            <p style="margin:0 0 10px;"><strong>Xregulator</strong><br>
+            <p style="margin:0 0 10px;"><strong>XREG-010</strong><br>
               Copyright (C) 2026 X Engineering LLC<br>
               Contact: joe@xengineering.net</p>
             <p style="margin:0 0 10px;">This program is free software: you can redistribute it and/or modify it under

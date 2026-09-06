@@ -1,4 +1,4 @@
-// Xregulator
+// XREG-010
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 

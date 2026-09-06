@@ -1,5 +1,5 @@
 
-// Xregulator
+// XREG-010
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -1024,7 +1024,7 @@ if (!BMP388Disconnected) {
     uint64_t mac = ESP.getEfuseMac();
     static char n2kSerial[9];
     snprintf(n2kSerial, sizeof(n2kSerial), "%08lX", (unsigned long)(mac & 0xFFFFFFFFUL));
-    NMEA2000.SetProductInformation(n2kSerial, 100, "Xregulator", FIRMWARE_VERSION, "V10",
+    NMEA2000.SetProductInformation(n2kSerial, 100, "XREG-010", FIRMWARE_VERSION, "V10",
                                    2);  // LEN 2 = 100 mA: isolated CAN side is backbone-powered (ISO1050 + MPM3610)
     NMEA2000.SetDeviceInformation((unsigned long)(mac & 0x1FFFFFUL),  // 21-bit unique number for address claim
                                   141,    // device function: DC Generator/Alternator
@@ -6293,7 +6293,7 @@ static void improvHandleRpc(const uint8_t *d, uint8_t dlen) {
       // in webflash_attempts.fw_version_before. It also never equals the manifest version, which
       // keeps ESP Web Tools on its "Update" button instead of the erase-only same-version dashboard.
       String ver = String(FIRMWARE_VERSION) + " (" __DATE__ " " __TIME__ ")";
-      String name = String("Xregulator ") + device_id_hex;
+      String name = String("XREG-010 ") + device_id_hex;
       const char *s[4] = { IMPROV_FW_NAME, ver.c_str(), "ESP32-S3", name.c_str() };
       improvSendResult(IMPROV_CMD_INFO, s, 4);
       break;

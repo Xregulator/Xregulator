@@ -8,7 +8,7 @@
  * AI_OPTIMIZE: When adding new styles, try to first use or modify existing styles whenever possible, to avoid bloat.
  */
 /* 
-// Xregulator
+// XREG-010
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -1856,7 +1856,7 @@ a.btn-secondary {
    decimals, units, and group separators never move. */
 #header-collapsed-strip .hcs-m > span { display: inline-block; text-align: right; }
 #hcs-volt, #hcs-soc, #hcs-alt, #hcs-batt, #hcs-temp, #hcs-duty { min-width: 5ch; }
-#hcs-rpm, #hcs-board { min-width: 4ch; }
+#hcs-rpm { min-width: 4ch; }
 
 #header-collapsed-strip .hcs-gsep { display: inline-block; width: 1px; height: 20px; background: rgba(0, 161, 154, .32); margin: 0 3px; }
 #header-collapsed-strip .hcs-divider { display: inline-block; width: 1px; height: 18px; background: rgba(0, 161, 154, .15); }
@@ -1898,9 +1898,7 @@ a.btn-secondary {
 #header-collapsed-strip .hcs-rpm,
 #header-collapsed-strip .hcs-batt,
 #header-collapsed-strip .hcs-duty,
-#header-collapsed-strip .hcs-board,
 #header-collapsed-strip .hcs-asep,
-#header-collapsed-strip .hcs-bsep,
 #header-collapsed-strip .hcs-eng { display: none; }
 /* Alt A budgets a SHORT state word (BULK/IDLE/OFF exact-fit at threshold, headless-Chrome
    measured); MANUAL/ABSORPTION ellipsize near it — the pill is the only shrinkable element, so
@@ -1914,9 +1912,6 @@ a.btn-secondary {
                                 #header-collapsed-strip:not(.hcs-locked) .hcs-eng  { display: inline-block; } }
 @container (min-width: 661px) { #header-collapsed-strip:not(.hcs-locked) .hcs-batt { display: inline-flex; } }
 @container (min-width: 760px) { #header-collapsed-strip:not(.hcs-locked) .hcs-duty { display: inline-flex; } }
-/* Board temp is a big-screen extra: it reveals only where even ABSORPTION fits whole. */
-@container (min-width: 895px) { #header-collapsed-strip:not(.hcs-locked) .hcs-board { display: inline-flex; }
-                                #header-collapsed-strip:not(.hcs-locked) .hcs-bsep  { display: inline-block; } }
 
 /* Locked (.hcs-locked, set by syncHeaderStrip): ladder shifted right for the unlock chip. Alt A
    reveals against the glyph-only chip of the ≤439 band, so a locked phone still shows amps;
@@ -1929,8 +1924,6 @@ a.btn-secondary {
                                 #header-collapsed-strip.hcs-locked .hcs-eng  { display: inline-block; } }
 @container (min-width: 821px) { #header-collapsed-strip.hcs-locked .hcs-batt { display: inline-flex; } }
 @container (min-width: 920px) { #header-collapsed-strip.hcs-locked .hcs-duty { display: inline-flex; } }
-@container (min-width: 1055px) { #header-collapsed-strip.hcs-locked .hcs-board { display: inline-flex; }
-                                 #header-collapsed-strip.hcs-locked .hcs-bsep  { display: inline-block; } }
 
 .dark-mode #header-collapsed-strip .hcs-gsep { background: rgba(120, 200, 196, .30); }
 .dark-mode #header-collapsed-strip .hcs-divider { background: rgba(120, 200, 196, .18); }

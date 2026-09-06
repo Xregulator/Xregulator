@@ -1,4 +1,4 @@
-// Xregulator
+// XREG-010
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -2749,7 +2749,7 @@ void setupServer() {
     if (dvccRxSrcAddr == 255) snprintf(authTxt, sizeof(authTxt), "none heard yet");
     else snprintf(authTxt, sizeof(authTxt), "addr %u", (unsigned)dvccRxSrcAddr);
     n += (size_t)snprintf(buf + n, cap - n,
-                          "# Xregulator DVCC capture - fw %s - uptime %lu ms - %u frames\n"
+                          "# XREG-010 DVCC capture - fw %s - uptime %lu ms - %u frames\n"
                           "# dialect %s - RV-C instance filter %d - follow state %u - authority %s\n"
                           "# nodes heard passively (PGN 60928 NAME / 126996 product info). Hearing nothing is\n"
                           "# normal with transmit off: neither PGN can be requested, so this is only what the\n"
@@ -8590,7 +8590,7 @@ void setupServer() {
   // reply. No password, no side effects; CORS header because the app's origin is not us.
   server.on("/identify", HTTP_GET, [](AsyncWebServerRequest *request) {
     char idBuf[128];
-    snprintf(idBuf, sizeof(idBuf), "{\"device\":\"xregulator\",\"uid\":\"%s\",\"fw\":\"%s\"}",
+    snprintf(idBuf, sizeof(idBuf), "{\"device\":\"xreg-010\",\"uid\":\"%s\",\"fw\":\"%s\"}",
              device_id_hex, FIRMWARE_VERSION);
     AsyncWebServerResponse *r = request->beginResponse(200, "application/json", idBuf);
     r->addHeader("Access-Control-Allow-Origin", "*");
